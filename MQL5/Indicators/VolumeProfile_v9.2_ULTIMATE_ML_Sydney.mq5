@@ -101,7 +101,7 @@ input bool   InpOneSignalPerSession = true;  // Limita a un solo segnale long e 
 
 //=== HULL MA DIRECTION FILTER ===
 input group "═══ 🌊 HULL MA DIRECTION FILTER ═══"
-input bool InpUseHullFilter = false;    // Se true, approva LONG solo se la Hull MA è in salita e SHORT solo se in discesa (embedded, no iCustom)
+input bool InpUseHullFilter = false;    // Se true, approva LONG solo se il prezzo del segnale è sopra la Hull MA e SHORT solo se è sotto (embedded, no iCustom)
 input int  InpHullPeriod    = 20;       // Periodo della Hull MA usata come filtro di direzione (minimo 2)
 input bool InpHullShowLine  = true;     // Disegna la linea Hull MA sul grafico (verde=salita, rosso=discesa)
 
@@ -620,9 +620,11 @@ bool IsEEST_DST(datetime t)
 //+------------------------------------------------------------------+
 //| HULL MOVING AVERAGE — embedded direttamente (NO iCustom).         |
 //| Stessa logica del Triple Hull MA fornito: HMA = WMA_sqrt(N)(       |
-//| 2*WMA_N/2(price) - WMA_N(price)). Usata come filtro di direzione: |
-//| pendenza positiva → solo LONG ammessi, pendenza negativa → solo   |
-//| SHORT ammessi (quando InpUseHullFilter=true).                     |
+//| 2*WMA_N/2(price) - WMA_N(price)). Usata come filtro di direzione   |
+//| POSIZIONALE (non di pendenza): quando scatta un segnale VP si      |
+//| guarda dove sta il prezzo rispetto alla Hull in quel preciso bar — |
+//| Hull sotto il prezzo → solo LONG ammessi, Hull sopra il prezzo →   |
+//| solo SHORT ammessi (quando InpUseHullFilter=true).                 |
 //+------------------------------------------------------------------+
 double HullWMA(const double &data[], int pos, int period)
 {
@@ -784,18 +786,18 @@ void CheckSignalEnsemble(int bar, const datetime &time[], const double &open[],
     double pip = g_Adaptive.pip_value * 10;
     double effective_distance = InpVADistance * g_Adaptive.distance_multiplier;
 
-    // Filtro di direzione Hull MA: pendenza su → solo LONG, pendenza giù → solo SHORT
+    // Filtro di direzione Hull MA (posizionale, valutato sul bar del segnale):
+    // Hull sotto il prezzo → solo LONG ammessi; Hull sopra il prezzo → solo SHORT ammessi.
     bool hull_ok_long = true;
     bool hull_ok_short = true;
     if(InpUseHullFilter) {
         int hsz = ArraySize(g_HullBuffer);
-        if(bar < 1 || bar >= hsz || g_HullBuffer[bar] == EMPTY_VALUE || g_HullBuffer[bar - 1] == EMPTY_VALUE) {
+        if(bar < 0 || bar >= hsz || g_HullBuffer[bar] == EMPTY_VALUE) {
             hull_ok_long = false;
             hull_ok_short = false;
         } else {
-            bool hull_rising = g_HullBuffer[bar] > g_HullBuffer[bar - 1];
-            hull_ok_long = hull_rising;
-            hull_ok_short = !hull_rising;
+            hull_ok_long = (price > g_HullBuffer[bar]);   // Hull sotto il prezzo -> BUY
+            hull_ok_short = (price < g_HullBuffer[bar]);  // Hull sopra il prezzo -> SELL
         }
     }
 
@@ -1399,8 +1401,9 @@ void DrawMLDashboard()
 
     string hull_dir = "N/A";
     int hsz = ArraySize(g_HullBuffer);
-    if(hsz > 1 && g_HullBuffer[hsz - 1] != EMPTY_VALUE && g_HullBuffer[hsz - 2] != EMPTY_VALUE) {
-        hull_dir = (g_HullBuffer[hsz - 1] > g_HullBuffer[hsz - 2]) ? "UP" : "DOWN";
+    if(hsz > 0 && g_HullBuffer[hsz - 1] != EMPTY_VALUE) {
+        double last_price = iClose(_Symbol, _Period, 0);
+        hull_dir = (last_price > g_HullBuffer[hsz - 1]) ? "PREZZO SOPRA→LONG" : "PREZZO SOTTO→SHORT";
     }
 
     CreateLabel(prefix + "title", "═══ ML ENSEMBLE v9.2 ═══", x, y + (line++ * line_h),
