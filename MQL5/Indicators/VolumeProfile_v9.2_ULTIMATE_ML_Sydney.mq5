@@ -23,21 +23,28 @@
 //|    medio dei profili invece di un divisore fisso da 1M, che su    |
 //|    forex/tick-volume teneva la feature quasi sempre a 0); dashboard|
 //|    mostra ora anche lo score migliore mai raggiunto vs soglia.    |
+//|    v9.2e: frecce colorate in base alla qualita' del segnale       |
+//|    (DRAW_COLOR_ARROW, 3 livelli: appena sopra soglia/buono/        |
+//|    eccellente) invece di un colore fisso per tutti i LONG/SHORT.  |
 //+------------------------------------------------------------------+
 #property copyright "Advanced Quant Systems - ULTIMATE v9.2"
-#property version   "9.23"
+#property version   "9.24"
 #property indicator_chart_window
-#property indicator_buffers 4
+#property indicator_buffers 6
 #property indicator_plots   3
 
+// Colore della freccia = qualità del segnale (indice 0/1/2, vedi GetQualityColorIndex):
+// 0=appena sopra soglia, 1=buono, 2=eccellente. Tutte le frecce disegnate hanno gia'
+// superato InpMLThreshold (altrimenti non vengono disegnate affatto), quindi il colore
+// indica QUANTO sopra soglia, non se il segnale e' valido o no.
 #property indicator_label1  "Long ML"
-#property indicator_type1   DRAW_ARROW
-#property indicator_color1  clrLime
+#property indicator_type1   DRAW_COLOR_ARROW
+#property indicator_color1  clrOliveDrab, clrLimeGreen, clrLime
 #property indicator_width1  4
 
 #property indicator_label2  "Short ML"
-#property indicator_type2   DRAW_ARROW
-#property indicator_color2  clrRed
+#property indicator_type2   DRAW_COLOR_ARROW
+#property indicator_color2  clrOrange, clrOrangeRed, clrRed
 #property indicator_width2  4
 
 #property indicator_label3  "Hull Direction"
@@ -158,7 +165,9 @@ input bool   InpDebugMode = false;     // Stampa log dettagliati nel tab Experts
 
 //--- Buffers
 double g_LongBuffer[];
+double g_LongColorBuffer[];
 double g_ShortBuffer[];
+double g_ShortColorBuffer[];
 double g_HullBuffer[];
 double g_HullColorBuffer[];
 
@@ -387,9 +396,11 @@ int OnInit()
     g_UniqueID = StringFormat("VP9_%s_%d_%d_", _Symbol, PeriodSeconds(_Period)/60, (int)InpProfileMode);
 
     SetIndexBuffer(0, g_LongBuffer, INDICATOR_DATA);
-    SetIndexBuffer(1, g_ShortBuffer, INDICATOR_DATA);
-    SetIndexBuffer(2, g_HullBuffer, INDICATOR_DATA);
-    SetIndexBuffer(3, g_HullColorBuffer, INDICATOR_COLOR_INDEX);
+    SetIndexBuffer(1, g_LongColorBuffer, INDICATOR_COLOR_INDEX);
+    SetIndexBuffer(2, g_ShortBuffer, INDICATOR_DATA);
+    SetIndexBuffer(3, g_ShortColorBuffer, INDICATOR_COLOR_INDEX);
+    SetIndexBuffer(4, g_HullBuffer, INDICATOR_DATA);
+    SetIndexBuffer(5, g_HullColorBuffer, INDICATOR_COLOR_INDEX);
 
     PlotIndexSetInteger(0, PLOT_ARROW, ARROW_LONG);
     PlotIndexSetInteger(1, PLOT_ARROW, ARROW_SHORT);
@@ -729,7 +740,9 @@ int OnCalculate(const int rates_total,
     int start = prev_calculated - 1;
     if(is_first_run) {
         ArrayInitialize(g_LongBuffer, 0);
+        ArrayInitialize(g_LongColorBuffer, 0);
         ArrayInitialize(g_ShortBuffer, 0);
+        ArrayInitialize(g_ShortColorBuffer, 0);
         ArrayInitialize(g_HullBuffer, EMPTY_VALUE);
         ArrayInitialize(g_HullColorBuffer, 0);
         start = MIN_BARS_REQUIRED;
@@ -744,7 +757,9 @@ int OnCalculate(const int rates_total,
     if(InpEnableSignals) {
         for(int i = start; i < rates_total; i++) {
             g_LongBuffer[i] = 0;
+            g_LongColorBuffer[i] = 0;
             g_ShortBuffer[i] = 0;
+            g_ShortColorBuffer[i] = 0;
             // Alert() solo sulla barra corrente/appena chiusa: evita flood di popup
             // storici quando l'indicatore viene caricato per la prima volta su un
             // grafico con anni di storico (i segnali vengono comunque registrati
@@ -776,6 +791,21 @@ int OnCalculate(const int rates_total,
     }
 
     return rates_total;
+}
+
+//+------------------------------------------------------------------+
+//| Colore freccia in base a QUANTO il segnale supera la soglia ML.   |
+//| Ogni freccia disegnata ha gia' superato InpMLThreshold (altrimenti|
+//| non verrebbe disegnata): l'indice non dice "valido/non valido",   |
+//| dice quanto margine di confidenza c'e' oltre il minimo richiesto. |
+//| 0=appena sopra soglia, 1=buono (+7), 2=eccellente (+15).          |
+//+------------------------------------------------------------------+
+int GetQualityColorIndex(double ensemble_prob)
+{
+    double margin = ensemble_prob - InpMLThreshold;
+    if(margin >= 15.0) return 2;
+    if(margin >= 7.0) return 1;
+    return 0;
 }
 
 //+------------------------------------------------------------------+
@@ -885,6 +915,7 @@ void CheckSignalEnsemble(int bar, const datetime &time[], const double &open[],
 
         if(can_fire) {
             g_LongBuffer[bar] = low[bar] - g_Adaptive.arrow_offset;
+            g_LongColorBuffer[bar] = GetQualityColorIndex(vote.ensemble_prob);
 
             if(InpShowAlerts && allow_alert) {
                 string alert_msg = StringFormat("🟢 LONG | %s | %.5f", _Symbol, price);
@@ -958,6 +989,7 @@ void CheckSignalEnsemble(int bar, const datetime &time[], const double &open[],
 
         if(can_fire) {
             g_ShortBuffer[bar] = high[bar] + g_Adaptive.arrow_offset;
+            g_ShortColorBuffer[bar] = GetQualityColorIndex(vote.ensemble_prob);
 
             if(InpShowAlerts && allow_alert) {
                 string alert_msg = StringFormat("🔴 SHORT | %s | %.5f", _Symbol, price);
@@ -1505,6 +1537,8 @@ void DrawMLDashboard()
     CreateLabel(prefix + "maxscore", StringFormat("Best Score: %.1f%% | Soglia: %.1f%%",
                g_MLStats.max_ensemble_score, InpMLThreshold),
                x, y + (line++ * line_h), InpMLDashboardFontSize, gap_color, corner);
+    CreateLabel(prefix + "legend", "Freccia: chiaro=soglia+, brillante=soglia+15",
+               x, y + (line++ * line_h), InpMLDashboardFontSize - 1, clrSilver, corner);
     line++;
 
     // Vote distribution
