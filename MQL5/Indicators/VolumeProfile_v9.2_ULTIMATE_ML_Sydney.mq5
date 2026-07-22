@@ -26,9 +26,16 @@
 //|    v9.2e: frecce colorate in base alla qualita' del segnale       |
 //|    (DRAW_COLOR_ARROW, 3 livelli: appena sopra soglia/buono/        |
 //|    eccellente) invece di un colore fisso per tutti i LONG/SHORT.  |
+//|    v9.2f: rimossi i caratteri speciali (═, →) dalle etichette a    |
+//|    schermo della dashboard — con font "Consolas" (non sempre       |
+//|    installato) potevano essere sostituiti da un font di fallback  |
+//|    diverso carattere per carattere, producendo testo misto/rotto  |
+//|    che sembrava scritto in un'altra lingua. Font cambiato in       |
+//|    "Courier New" (sempre presente su Windows) come ulteriore rete |
+//|    di sicurezza.                                                   |
 //+------------------------------------------------------------------+
 #property copyright "Advanced Quant Systems - ULTIMATE v9.2"
-#property version   "9.24"
+#property version   "9.25"
 #property indicator_chart_window
 #property indicator_buffers 6
 #property indicator_plots   3
@@ -1504,10 +1511,10 @@ void DrawMLDashboard()
     int hsz = ArraySize(g_HullBuffer);
     if(hsz > 0 && g_HullBuffer[hsz - 1] != EMPTY_VALUE) {
         double last_price = iClose(_Symbol, _Period, 0);
-        hull_dir = (last_price > g_HullBuffer[hsz - 1]) ? "PREZZO SOPRA→LONG" : "PREZZO SOTTO→SHORT";
+        hull_dir = (last_price > g_HullBuffer[hsz - 1]) ? "PREZZO SOPRA->LONG" : "PREZZO SOTTO->SHORT";
     }
 
-    CreateLabel(prefix + "title", "═══ ML ENSEMBLE v9.2 ═══", x, y + (line++ * line_h),
+    CreateLabel(prefix + "title", "=== ML ENSEMBLE v9.2 ===", x, y + (line++ * line_h),
                InpMLDashboardFontSize + 2, clrAqua, corner);
     line++;
 
@@ -1542,7 +1549,7 @@ void DrawMLDashboard()
     line++;
 
     // Vote distribution
-    CreateLabel(prefix + "votes", StringFormat("Votes → Una: %d | Maj: %d | Split: %d",
+    CreateLabel(prefix + "votes", StringFormat("Votes -> Una: %d | Maj: %d | Split: %d",
                g_MLStats.unanimous_votes, g_MLStats.majority_votes, g_MLStats.split_votes),
                x, y + (line++ * line_h), InpMLDashboardFontSize, clrYellow, corner);
     line++;
@@ -1597,7 +1604,7 @@ void CreateLabel(string name, string text, int x, int y, int font_size, color cl
     ObjectSetString(0, name, OBJPROP_TEXT, text);
     ObjectSetInteger(0, name, OBJPROP_FONTSIZE, font_size);
     ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-    ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
+    ObjectSetString(0, name, OBJPROP_FONT, "Courier New");
     ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
     ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
 }
