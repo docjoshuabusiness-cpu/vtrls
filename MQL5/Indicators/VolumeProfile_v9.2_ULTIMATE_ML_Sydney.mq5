@@ -19,9 +19,13 @@
 //|    il terminale, gli oggetti della sessione precedente restavano  |
 //|    orfani per sempre (ID diverso ad ogni init) e andavano tolti a |
 //|    mano.                                                          |
+//|    v9.2d: fix calibrazione volume_quality (si autoscala al volume |
+//|    medio dei profili invece di un divisore fisso da 1M, che su    |
+//|    forex/tick-volume teneva la feature quasi sempre a 0); dashboard|
+//|    mostra ora anche lo score migliore mai raggiunto vs soglia.    |
 //+------------------------------------------------------------------+
 #property copyright "Advanced Quant Systems - ULTIMATE v9.2"
-#property version   "9.22"
+#property version   "9.23"
 #property indicator_chart_window
 #property indicator_buffers 4
 #property indicator_plots   3
@@ -354,6 +358,7 @@ struct SMLStats {
     int majority_votes;
     int split_votes;
     double avg_ensemble_score;
+    double max_ensemble_score;  // score piu' alto mai raggiunto — quanto siamo vicini alla soglia
     int wins;
     int losses;
     double best_accuracy;
@@ -839,6 +844,7 @@ void CheckSignalEnsemble(int bar, const datetime &time[], const double &open[],
 
         g_MLStats.total_signals++;
         g_MLStats.avg_ensemble_score = (g_MLStats.avg_ensemble_score * (g_MLStats.total_signals - 1) + vote.ensemble_prob) / g_MLStats.total_signals;
+        g_MLStats.max_ensemble_score = MathMax(g_MLStats.max_ensemble_score, vote.ensemble_prob);
 
         // Track vote type
         if(vote.consensus == 3) g_MLStats.unanimous_votes++;
@@ -917,6 +923,7 @@ void CheckSignalEnsemble(int bar, const datetime &time[], const double &open[],
 
         g_MLStats.total_signals++;
         g_MLStats.avg_ensemble_score = (g_MLStats.avg_ensemble_score * (g_MLStats.total_signals - 1) + vote.ensemble_prob) / g_MLStats.total_signals;
+        g_MLStats.max_ensemble_score = MathMax(g_MLStats.max_ensemble_score, vote.ensemble_prob);
 
         // Track vote type
         if(vote.consensus == 3) g_MLStats.unanimous_votes++;
@@ -1063,6 +1070,38 @@ int CountTouches(int bar, const double &close[], double level, double threshold)
 }
 
 //+------------------------------------------------------------------+
+//| Volume quality — FIX calibrazione: la versione originale divideva |
+//| per una costante fissa (1.000.000), tarata per strumenti con      |
+//| volumi enormi. Su forex (tick volume) il totale di un profilo     |
+//| raramente arriva a quella cifra, quindi la feature restava quasi  |
+//| sempre vicina a 0 su qualunque coppia FX, penalizzando ogni score |
+//| a prescindere dal setup. Ora si autoscala sul volume medio dei    |
+//| profili attualmente tracciati: 1.0 quando il profilo ha >= 1.5x   |
+//| il volume medio, proporzionale sotto — funziona su qualunque      |
+//| strumento/scala senza bisogno di ritarare un numero a mano.       |
+//+------------------------------------------------------------------+
+double GetAverageProfileVolume()
+{
+    double sum = 0;
+    int count = 0;
+    for(int i = 0; i < g_TotalProfiles; i++) {
+        if(g_Profiles[i].is_valid && g_Profiles[i].total_vol > EPSILON) {
+            sum += g_Profiles[i].total_vol;
+            count++;
+        }
+    }
+    return (count > 0) ? sum / count : 0;
+}
+
+double CalculateVolumeQuality(double profile_total_vol)
+{
+    if(profile_total_vol <= EPSILON) return 0.5;
+    double avg_vol = GetAverageProfileVolume();
+    if(avg_vol <= EPSILON) return 0.5;
+    return MathMin(profile_total_vol / (avg_vol * 1.5), 1.0);
+}
+
+//+------------------------------------------------------------------+
 //| Extract features                                                  |
 //+------------------------------------------------------------------+
 SMLFeatures ExtractFeatures(int bar, bool is_long, const datetime &time[],
@@ -1088,7 +1127,7 @@ SMLFeatures ExtractFeatures(int bar, bool is_long, const datetime &time[],
     // CopyBuffer/iBarShift lavorano in shift (0=corrente), quindi va convertito.
     f.atr_percentile = CalculateATRPercentileAdvanced(rates_total - 1 - bar);
     f.time_of_day = CalculateTimeScore(time[bar]);
-    f.volume_quality = (profile.total_vol > 0) ? MathMin(profile.total_vol / 1000000.0, 1.0) : 0.5;
+    f.volume_quality = CalculateVolumeQuality(profile.total_vol);
     f.price_momentum = CalculateMomentum(bar, close, 3);
 
     double dist_high = MathAbs(close[bar] - profile.high);
@@ -1459,6 +1498,13 @@ void DrawMLDashboard()
     CreateLabel(prefix + "rejected", StringFormat("Rejected: %d | Avg Score: %.1f%%",
                g_MLStats.ensemble_rejected, g_MLStats.avg_ensemble_score),
                x, y + (line++ * line_h), InpMLDashboardFontSize, clrGray, corner);
+    // Score migliore mai raggiunto vs soglia: la media e' diluita da migliaia di
+    // barre storiche, questo dice a colpo d'occhio quanto siamo lontani dalla soglia.
+    color gap_color = (g_MLStats.max_ensemble_score >= InpMLThreshold) ? clrLime :
+                       (g_MLStats.max_ensemble_score >= InpMLThreshold - 5.0) ? clrYellow : clrRed;
+    CreateLabel(prefix + "maxscore", StringFormat("Best Score: %.1f%% | Soglia: %.1f%%",
+               g_MLStats.max_ensemble_score, InpMLThreshold),
+               x, y + (line++ * line_h), InpMLDashboardFontSize, gap_color, corner);
     line++;
 
     // Vote distribution
