@@ -12,9 +12,16 @@
 //|    mai dati e non poteva mai allenarsi (Approved: 0% per sempre). |
 //|    Ora si registra ogni segnale tecnicamente valido, approvato o  |
 //|    no; solo la FRECCIA resta condizionata all'approvazione.       |
+//|    v9.2c: fix oggetti grafici orfani — ID istanza ora stabile     |
+//|    (non piu' basato su GetTickCount64) e pulizia oggetti eseguita |
+//|    ad OGNI OnDeinit, non solo su REASON_REMOVE/CHARTCLOSE/        |
+//|    CHARTCHANGE: prima, cambiando un qualunque input o riavviando  |
+//|    il terminale, gli oggetti della sessione precedente restavano  |
+//|    orfani per sempre (ID diverso ad ogni init) e andavano tolti a |
+//|    mano.                                                          |
 //+------------------------------------------------------------------+
 #property copyright "Advanced Quant Systems - ULTIMATE v9.2"
-#property version   "9.21"
+#property version   "9.22"
 #property indicator_chart_window
 #property indicator_buffers 4
 #property indicator_plots   3
@@ -367,7 +374,12 @@ int OnInit()
 {
     if(!ValidateInputs()) return INIT_PARAMETERS_INCORRECT;
 
-    g_UniqueID = StringFormat("VP9_%s_%d_%I64d_", _Symbol, PeriodSeconds(_Period)/60, GetTickCount64());
+    // ID STABILE (niente GetTickCount64): cosi' ogni nuova istanza puo' ritrovare e
+    // ripulire gli oggetti lasciati da una precedente istanza sullo stesso grafico
+    // (cambio parametri, ricompilazione, riavvio del terminale, run del tester...).
+    // Con un ID casuale ad ogni init, CleanMyObjects() non trova mai gli oggetti
+    // "vecchi" (prefisso diverso) e restano orfani finche' non li cancelli a mano.
+    g_UniqueID = StringFormat("VP9_%s_%d_%d_", _Symbol, PeriodSeconds(_Period)/60, (int)InpProfileMode);
 
     SetIndexBuffer(0, g_LongBuffer, INDICATOR_DATA);
     SetIndexBuffer(1, g_ShortBuffer, INDICATOR_DATA);
@@ -1535,13 +1547,17 @@ void CleanMyObjects() {
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+    // Pulizia oggetti SEMPRE, indipendentemente dal motivo del deinit — prima
+    // veniva saltata su REASON_PARAMETERS (cambio di un qualunque input) e su
+    // altri motivi non elencati, lasciando gli oggetti della sessione precedente
+    // a schermo anche con l'ID stabile qui sopra.
+    CleanMyObjects();
+
     if(reason == REASON_REMOVE || reason == REASON_CHARTCLOSE || reason == REASON_CHARTCHANGE) {
         // Export final weights before exit
         if(InpAutoExportWeights && InpEnableML) {
             ExportWeightsToFile();
         }
-
-        CleanMyObjects();
 
         if(InpDebugMode) {
             PrintFormat("═══ VP v9.2 ULTIMATE REMOVED ═══");
