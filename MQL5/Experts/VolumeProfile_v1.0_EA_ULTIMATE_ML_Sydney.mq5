@@ -40,9 +40,18 @@
 //|  enorme in ottimizzazione. Ora la scansione e' incrementale         |
 //|  (bars_checked) e i segnali che non risolvono entro la finestra     |
 //|  vengono chiusi definitivamente invece di restare in coda.          |
+//|                                                                    |
+//|  v1.04: performance — il lavoro pesante (ricalcolo profili, Hull,   |
+//|  segnali, training) ora gira UNA volta per nuova barra invece che   |
+//|  ad ogni tick (i profili si ricalcolavano piu' volte per barra e la |
+//|  Hull ad ogni singolo tick pur non cambiando mai finche' la barra   |
+//|  non chiude). Disegno pannello disattivato in ottimizzazione/test   |
+//|  non-visuale; persistenza pesi su file disattivata in QUALUNQUE run |
+//|  del tester (evita che i core paralleli si contendano/contaminino   |
+//|  lo stesso file). Trailing esce subito se non ci sono posizioni.    |
 //+------------------------------------------------------------------+
-#property copyright "Advanced Quant Systems - EA v1.03"
-#property version   "1.03"
+#property copyright "Advanced Quant Systems - EA v1.04"
+#property version   "1.04"
 #property strict
 
 //=== PROFILE MODE ===
@@ -149,7 +158,6 @@ input bool InpDrawActiveLevels = true;       // Disegna POC/VAH/VAL del profilo 
 
 //=== PERFORMANCE / DEBUG ===
 input group "═══ ⚡ PERFORMANCE / DEBUG ═══"
-input int  InpUpdateInterval = 60;           // Secondi minimi tra due ricalcoli completi dei profili
 input bool SendNotifications = false;        // Invia push notification su apertura/chiusura posizioni
 input bool InpDebugMode = false;             // Log dettagliati nel tab Experts
 
@@ -352,7 +360,6 @@ string   g_FeatureNames[ML_FEATURES] = {
     "EdgeDist", "Consecutive", "WickAsym", "VAWidth"
 };
 
-datetime g_LastUpdate = 0;
 datetime g_LastBarTime = 0;
 bool     g_UseRealVolume = false;
 string   g_UniqueID = "";
@@ -364,6 +371,11 @@ int      g_SignalsSinceExport = 0;
 int      g_MultiSymbolCount = 0;
 int      g_ATRHandle = INVALID_HANDLE;
 double   g_HullValue = EMPTY_VALUE;
+bool     g_ShouldDraw = true;      // false durante il tester senza modalita' visuale (ottimizzazione
+                                    // o singolo test non-visuale): evita ObjectCreate/ChartRedraw inutili
+bool     g_PersistWeights = true;  // false durante QUALUNQUE run del tester: evita che passate di
+                                    // ottimizzazione in parallelo si contendano/contaminino lo stesso
+                                    // file pesi condiviso, e che un backtest sporchi i pesi del live
 
 //+------------------------------------------------------------------+
 //| OnInit                                                            |
@@ -417,12 +429,21 @@ int OnInit()
     g_MultiSymbolCount = 0;
     ZeroMemory(g_Stats);
 
-    if(InpEnableML) LoadWeightsFromFile();
+    // Disegno: attivo su grafico live e nei backtest VISUALI (l'utente guarda), spento
+    // in ottimizzazione / test non-visuale (nessun grafico, solo spreco di ObjectCreate).
+    // Persistenza pesi: attiva SOLO fuori dal tester — in qualunque run del tester i core
+    // paralleli condividerebbero/contaminerebbero lo stesso file pesi su disco.
+    bool in_tester = (bool)MQLInfoInteger(MQL_TESTER);
+    bool visual    = (bool)MQLInfoInteger(MQL_VISUAL_MODE);
+    g_ShouldDraw     = ShowPanel && (!in_tester || visual);
+    g_PersistWeights = !in_tester;
 
-    g_LastUpdate = 0;
+    if(InpEnableML && g_PersistWeights) LoadWeightsFromFile();
+
     g_LastBarTime = 0;
 
-    EventSetTimer(5);
+    // Timer solo quando serve aggiornare il pannello live; in tester e' inutile.
+    if(g_ShouldDraw) EventSetTimer(5);
 
     g_IsInitialized = true;
     PrintInitInfo();
@@ -515,14 +536,15 @@ void OnDeinit(const int reason)
 {
     EventKillTimer();
 
-    if(InpAutoExportWeights && InpEnableML) {
+    // Salvataggio finale pesi solo fuori dal tester (vedi g_PersistWeights).
+    if(g_PersistWeights && InpAutoExportWeights && InpEnableML) {
         ExportWeightsToFile();
         BackupWeights();
     }
 
     if(g_ATRHandle != INVALID_HANDLE) { IndicatorRelease(g_ATRHandle); g_ATRHandle = INVALID_HANDLE; }
 
-    if(ShowPanel) DeletePanelObjects();
+    if(g_ShouldDraw) DeletePanelObjects();
 
     PrintStats();
 
@@ -543,21 +565,25 @@ void OnTick()
     if(!g_IsInitialized) return;
     if(Bars(_Symbol, _Period) < MIN_BARS_REQUIRED) return;
 
-    datetime current = TimeCurrent();
     bool is_new_bar = IsNewBar();
 
-    if(is_new_bar || (current - g_LastUpdate >= InpUpdateInterval)) {
-        UpdateProfiles();
-        g_LastUpdate = current;
-    }
-
-    if(InpUseHullFilter) UpdateHullLatest();
-
+    // Il trailing gestisce posizioni GIA' aperte: reagisce al prezzo corrente, quindi
+    // resta l'unico lavoro fatto ad ogni tick (ma solo se ci sono posizioni aperte).
     if(UseTrailing) ManageTrailingStops();
 
+    // Tutto il resto — profili volume, Hull, ricerca segnale, training ML, disegno —
+    // dipende SOLO da barre chiuse: ricalcolarlo ad ogni tick e' spreco puro. Prima
+    // UpdateProfiles() poteva scattare piu' volte per barra (era legato a un intervallo
+    // in secondi che in modalita' ogni-tick scorre rapidissimo) e UpdateHullLatest()
+    // girava ad ogni singolo tick pur non cambiando mai finche' la barra non chiude.
+    // Ora tutto questo gira esattamente una volta per nuova barra.
     if(!is_new_bar) return;
 
     g_Adaptive.Calculate(_Symbol, g_ATRHandle);
+
+    UpdateProfiles();
+
+    if(InpUseHullFilter) UpdateHullLatest();
 
     if(!(g_TimeFilter.enabled && !IsTimeAllowedFast())) {
         CheckForSignal();
@@ -566,13 +592,13 @@ void OnTick()
     UpdateShadowOutcomes();
     UpdateMLTraining();
 
-    if(ShowPanel) UpdateDashboard();
+    if(g_ShouldDraw) UpdateDashboard();
 }
 
 void OnTimer()
 {
     if(!g_IsInitialized) return;
-    if(ShowPanel) UpdateDashboard();
+    if(g_ShouldDraw) UpdateDashboard();
 }
 
 //+------------------------------------------------------------------+
@@ -683,7 +709,7 @@ void UpdateProfiles()
     if(InpProfileMode == MODE_SESSIONS) UpdateSessionProfiles();
     else UpdateStandardProfiles();
 
-    if(InpDrawActiveLevels) DrawActiveLevels();
+    if(InpDrawActiveLevels && g_ShouldDraw) DrawActiveLevels();
 }
 
 void UpdateSessionProfiles()
@@ -1283,7 +1309,9 @@ void UpdateMLTraining()
         UpdateFeatureImportance();
         g_SignalsSinceRetrain = 0;
     }
-    if(InpAutoExportWeights && g_SignalsSinceExport >= InpExportInterval) {
+    // Export su file solo fuori dal tester: in ottimizzazione scriverebbe di continuo
+    // su disco da tutti i core in parallelo sullo stesso file (contesa + I/O inutile).
+    if(g_PersistWeights && InpAutoExportWeights && g_SignalsSinceExport >= InpExportInterval) {
         ExportWeightsToFile();
         BackupWeights();
         g_SignalsSinceExport = 0;
@@ -1626,6 +1654,10 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 //+------------------------------------------------------------------+
 void ManageTrailingStops()
 {
+    // Uscita immediata se non abbiamo posizioni: evita di ricalcolare distanze e
+    // scorrere PositionsTotal() ad ogni tick quando non c'e' nulla da gestire.
+    if(PositionsTotal() == 0) return;
+
     static datetime last_check = 0;
     datetime current = TimeCurrent();
     if(current == last_check) return;
