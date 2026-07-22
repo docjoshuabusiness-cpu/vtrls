@@ -31,9 +31,18 @@
 //|  InpTPPoints/InpTrailing*Points). La stessa modalita' viene usata  |
 //|  anche dalla simulazione ML dei segnali "shadow" (UpdateShadowOutcomes)|
 //|  cosi' l'etichetta di training resta coerente con l'esecuzione reale.|
+//|                                                                    |
+//|  v1.03: fix performance critico in UpdateShadowOutcomes — prima    |
+//|  riscandagliava da capo l'intera finestra di 50 barre per ogni      |
+//|  segnale "shadow" non risolto AD OGNI barra, e un segnale che non   |
+//|  si risolveva mai restava in scansione per tutto il resto del       |
+//|  backtest. Su 10 anni di dati questo era un collo di bottiglia      |
+//|  enorme in ottimizzazione. Ora la scansione e' incrementale         |
+//|  (bars_checked) e i segnali che non risolvono entro la finestra     |
+//|  vengono chiusi definitivamente invece di restare in coda.          |
 //+------------------------------------------------------------------+
-#property copyright "Advanced Quant Systems - EA v1.02"
-#property version   "1.02"
+#property copyright "Advanced Quant Systems - EA v1.03"
+#property version   "1.03"
 #property strict
 
 //=== PROFILE MODE ===
@@ -217,12 +226,15 @@ struct SMLRecord {
     double entry_price;
     double atr_at_signal;  // ATR al momento del segnale, usato per classificare l'esito shadow
     long   position_id;    // per i segnali REALI: riconcilia l'esito effettivo alla chiusura
+    int    bars_checked;   // quante barre dopo il segnale sono gia' state controllate da
+                            // UpdateShadowOutcomes — evita di riscandagliare da capo la stessa
+                            // finestra ad ogni barra (era un vero collo di bottiglia su backtest lunghi)
     string symbol;
 
     void Reset() {
         ZeroMemory(features);
         is_long = false; is_winner = false; is_closed = false; is_shadow = true;
-        time = 0; entry_price = 0; atr_at_signal = 0; position_id = 0; symbol = "";
+        time = 0; entry_price = 0; atr_at_signal = 0; position_id = 0; bars_checked = 0; symbol = "";
     }
 };
 
@@ -1478,16 +1490,30 @@ void UpgradeShadowToReal(bool is_long, datetime signal_time, long position_id, d
 }
 
 //+------------------------------------------------------------------+
-//| Esito SINTETICO (via ATR) per i segnali "shadow" mai eseguiti —    |
-//| serve solo a dare dati al training ML quando l'ensemble rifiuta    |
-//| (o non puo' eseguire) un segnale tecnicamente valido; senza questo |
-//| l'ensemble non riceverebbe mai feedback sui segnali che scarta e   |
-//| non potrebbe mai correggere la propria soglia di rigetto. Non      |
-//| tocca g_Stats.wins/losses/total_profit, riservate ai trade reali.  |
-//| Shift-based e coerente (niente mix series/non-series).             |
+//| Esito SINTETICO (via ATR o punti fissi) per i segnali "shadow" mai |
+//| eseguiti — serve solo a dare dati al training ML quando l'ensemble |
+//| rifiuta (o non puo' eseguire) un segnale tecnicamente valido; senza|
+//| questo l'ensemble non riceverebbe mai feedback sui segnali che     |
+//| scarta e non potrebbe mai correggere la propria soglia di rigetto. |
+//| Non tocca g_Stats.wins/losses/total_profit, riservate ai trade     |
+//| reali. Shift-based e coerente (niente mix series/non-series).      |
+//|                                                                     |
+//| FIX PERFORMANCE: la versione precedente riscandagliava da capo      |
+//| l'intera finestra di 50 barre per OGNI record non ancora risolto,   |
+//| ad OGNI singola barra — e un record che non si risolve mai restava  |
+//| in scansione per il resto del backtest. Su backtest lunghi (10 anni |
+//| di tick Dukascopy) questo diventava un vero collo di bottiglia:     |
+//| fino a InpMLTrainingPeriod record x 50 barre, ripetuto ad ogni      |
+//| barra, per l'intero periodo. Ora si scandaglia in modo incrementale |
+//| (solo le barre nuove dall'ultimo controllo, tracciate in            |
+//| bars_checked) e un segnale che non risolve entro la finestra viene  |
+//| chiuso definitivamente come "loss" invece di restare in coda        |
+//| all'infinito.                                                       |
 //+------------------------------------------------------------------+
 void UpdateShadowOutcomes()
 {
+    const int MAX_BARS_AFTER = 50;
+
     for(int i = 0; i < g_MLRecordCount; i++) {
         if(g_MLHistory[i].is_closed || !g_MLHistory[i].is_shadow) continue;
 
@@ -1498,40 +1524,58 @@ void UpdateShadowOutcomes()
         double sl_distance, tp_distance;
         if(InpUseATRStops) {
             double atr = g_MLHistory[i].atr_at_signal;
-            if(atr < EPSILON) continue;
+            if(atr < EPSILON) { g_MLHistory[i].is_closed = true; continue; }
             sl_distance = InpSLATRMultiplier * atr;
             tp_distance = InpTPATRMultiplier * atr;
         } else {
             sl_distance = InpSLPoints * g_SymbolCache.point;
             tp_distance = InpTPPoints * g_SymbolCache.point;
         }
-        if(sl_distance <= 0 && tp_distance <= 0) continue;
+        if(sl_distance <= 0 && tp_distance <= 0) { g_MLHistory[i].is_closed = true; continue; }
 
         int signal_shift = iBarShift(_Symbol, _Period, g_MLHistory[i].time);
         if(signal_shift < 0) continue;
 
+        int already = g_MLHistory[i].bars_checked;
+        if(already >= MAX_BARS_AFTER) { g_MLHistory[i].is_closed = true; continue; }
+
+        // Scandaglia solo le barre NUOVE dall'ultimo controllo: dalla piu' recente non
+        // ancora vista (signal_shift-1-already) fino al fondo della finestra dei 50.
+        int newest_unchecked = signal_shift - 1 - already;
+        int window_floor = MathMax(0, signal_shift - MAX_BARS_AFTER);
+
         double entry = g_MLHistory[i].entry_price;
         bool is_long = g_MLHistory[i].is_long;
+        bool hit = false;
+        int scanned = already;
 
-        for(int j = signal_shift; j >= MathMax(0, signal_shift - 50); j--) {
+        for(int j = newest_unchecked; j >= window_floor && scanned < MAX_BARS_AFTER; j--) {
+            scanned++;
             double h = iHigh(_Symbol, _Period, j);
             double l = iLow(_Symbol, _Period, j);
             if(h <= 0 || l <= 0) continue;
-            bool hit = false;
 
             if(is_long) {
-                if(tp_distance > 0 && h >= entry + tp_distance) { g_MLHistory[i].is_winner = true; hit = true; }
-                else if(sl_distance > 0 && l <= entry - sl_distance) { g_MLHistory[i].is_winner = false; hit = true; }
+                if(tp_distance > 0 && h >= entry + tp_distance) { g_MLHistory[i].is_winner = true; hit = true; break; }
+                if(sl_distance > 0 && l <= entry - sl_distance) { g_MLHistory[i].is_winner = false; hit = true; break; }
             } else {
-                if(tp_distance > 0 && l <= entry - tp_distance) { g_MLHistory[i].is_winner = true; hit = true; }
-                else if(sl_distance > 0 && h >= entry + sl_distance) { g_MLHistory[i].is_winner = false; hit = true; }
+                if(tp_distance > 0 && l <= entry - tp_distance) { g_MLHistory[i].is_winner = true; hit = true; break; }
+                if(sl_distance > 0 && h >= entry + sl_distance) { g_MLHistory[i].is_winner = false; hit = true; break; }
             }
+        }
 
-            if(hit) {
-                g_MLHistory[i].is_closed = true;
-                if(InpEnableMultiSymbol) UpdateMultiSymbolDB(g_MLHistory[i].symbol, g_MLHistory[i].is_winner);
-                break;
-            }
+        g_MLHistory[i].bars_checked = scanned;
+
+        if(hit) {
+            g_MLHistory[i].is_closed = true;
+            if(InpEnableMultiSymbol) UpdateMultiSymbolDB(g_MLHistory[i].symbol, g_MLHistory[i].is_winner);
+        } else if(scanned >= MAX_BARS_AFTER) {
+            // Finestra esaurita senza toccare ne' TP ne' SL: chiudiamo come "loss" (semplificazione
+            // deliberata — nessuna classe "indeciso") invece di continuare a riscandagliarlo
+            // ad ogni barra per il resto del backtest.
+            g_MLHistory[i].is_closed = true;
+            g_MLHistory[i].is_winner = false;
+            if(InpEnableMultiSymbol) UpdateMultiSymbolDB(g_MLHistory[i].symbol, false);
         }
     }
 }
