@@ -25,9 +25,15 @@
 //|  bloccato a 0 trade per sempre. I segnali REALMENTE eseguiti        |
 //|  vengono "promossi" da shadow a reali e il loro esito arriva dal   |
 //|  trade vero (OnTradeTransaction), non dalla simulazione.           |
+//|                                                                    |
+//|  v1.02: aggiunto il toggle InpUseATRStops per scegliere tra SL/TP/ |
+//|  trailing basati su ATR (adattivi) o su punti fissi (InpSLPoints/  |
+//|  InpTPPoints/InpTrailing*Points). La stessa modalita' viene usata  |
+//|  anche dalla simulazione ML dei segnali "shadow" (UpdateShadowOutcomes)|
+//|  cosi' l'etichetta di training resta coerente con l'esecuzione reale.|
 //+------------------------------------------------------------------+
-#property copyright "Advanced Quant Systems - EA v1.01"
-#property version   "1.01"
+#property copyright "Advanced Quant Systems - EA v1.02"
+#property version   "1.02"
 #property strict
 
 //=== PROFILE MODE ===
@@ -90,15 +96,21 @@ input group "═══ 💰 RISK MANAGEMENT ═══"
 input double LotSize = 0.1;                  // Lotti fissi (usati se UseFixedRisk = false)
 input bool   UseFixedRisk = false;           // Se true calcola i lotti in base a RiskPercent
 input double RiskPercent = 1.0;              // % di equity rischiata per trade (se UseFixedRisk = true)
-input double InpSLATRMultiplier = 1.0;       // Stop Loss = ATR * questo moltiplicatore
-input double InpTPATRMultiplier = 2.0;       // Take Profit = ATR * questo moltiplicatore
+input bool   InpUseATRStops = true;          // Se true SL/TP/trailing sono basati su ATR (adattivi), se false su punti fissi
+input double InpSLATRMultiplier = 1.0;       // Stop Loss = ATR * questo moltiplicatore (solo se InpUseATRStops=true)
+input double InpTPATRMultiplier = 2.0;       // Take Profit = ATR * questo moltiplicatore (solo se InpUseATRStops=true)
+input int    InpSLPoints = 500;              // Stop Loss fisso in punti (solo se InpUseATRStops=false; 0=nessuno SL)
+input int    InpTPPoints = 1000;             // Take Profit fisso in punti (solo se InpUseATRStops=false; 0=nessun TP)
 
-//=== TRAILING STOP (ATR-based) ===
-input group "═══ 🎯 TRAILING STOP (ATR-based) ═══"
+//=== TRAILING STOP ===
+input group "═══ 🎯 TRAILING STOP ═══"
 input bool   UseTrailing = true;                  // Abilita trailing stop
-input double InpTrailingActivationATR = 1.0;      // Attiva il trailing dopo profitto >= ATR * questo valore
-input double InpTrailingStopATR = 0.6;            // Distanza dello stop trailing = ATR * questo valore
-input double InpTrailingStepATR = 0.1;            // Step minimo per aggiornare lo stop = ATR * questo valore
+input double InpTrailingActivationATR = 1.0;      // Attiva il trailing dopo profitto >= ATR * questo valore (solo se InpUseATRStops=true)
+input double InpTrailingStopATR = 0.6;            // Distanza dello stop trailing = ATR * questo valore (solo se InpUseATRStops=true)
+input double InpTrailingStepATR = 0.1;            // Step minimo per aggiornare lo stop = ATR * questo valore (solo se InpUseATRStops=true)
+input int    InpTrailingActivationPoints = 400;   // Attiva il trailing dopo profitto >= questi punti (solo se InpUseATRStops=false)
+input int    InpTrailingStopPoints = 300;         // Distanza dello stop trailing in punti (solo se InpUseATRStops=false)
+input int    InpTrailingStepPoints = 50;          // Step minimo in punti per aggiornare lo stop (solo se InpUseATRStops=false)
 
 //=== POSITION MANAGEMENT ===
 input group "═══ 📊 POSITION MANAGEMENT ═══"
@@ -419,7 +431,9 @@ bool ValidateInputs()
     if(InpValueAreaPercent <= 0 || InpValueAreaPercent > 100) { Print("❌ Value Area Percent: 1-100"); valid = false; }
     if(InpMinTouchBars < 1) { Print("❌ Min Touch Bars: minimo 1"); valid = false; }
     if(MaxPositionsPerDirection <= 0 || MaxTotalPositions <= 0) { Print("❌ Limiti posizioni non validi"); valid = false; }
-    if(InpSLATRMultiplier <= 0) { Print("❌ SL ATR multiplier deve essere > 0"); valid = false; }
+    if(InpUseATRStops && InpSLATRMultiplier <= 0) { Print("❌ SL ATR multiplier deve essere > 0"); valid = false; }
+    if(!InpUseATRStops && InpSLPoints < 0) { Print("❌ SL Points non puo' essere negativo"); valid = false; }
+    if(!InpUseATRStops && InpTPPoints < 0) { Print("❌ TP Points non puo' essere negativo"); valid = false; }
     if(!UseFixedRisk && LotSize <= 0) { Print("❌ LotSize deve essere > 0"); valid = false; }
     return valid;
 }
@@ -1339,21 +1353,43 @@ double CalculateLotSize(double stopLossPoints)
     return NormalizeDouble(lots, 2);
 }
 
+//+------------------------------------------------------------------+
+//| Distanze SL/TP in prezzo, ATR-based o a punti fissi a seconda di   |
+//| InpUseATRStops. Usata sia per l'esecuzione reale (ExecuteMarketOrder)|
+//| sia per la classificazione sintetica dei segnali "shadow"          |
+//| (UpdateShadowOutcomes), cosi' l'esito simulato riflette sempre     |
+//| esattamente cosa avrebbe fatto un trade vero con la stessa          |
+//| configurazione. Ritorna false solo se in modalita' ATR l'ATR non   |
+//| e' ancora disponibile (dati insufficienti).                        |
+//+------------------------------------------------------------------+
+bool GetStopDistances(double &sl_distance, double &tp_distance)
+{
+    if(InpUseATRStops) {
+        double atr = g_Adaptive.atr_value;
+        if(atr < EPSILON) return false;
+        sl_distance = InpSLATRMultiplier * atr;
+        tp_distance = InpTPATRMultiplier * atr;
+    } else {
+        sl_distance = InpSLPoints * g_SymbolCache.point;
+        tp_distance = InpTPPoints * g_SymbolCache.point;
+    }
+    return true;
+}
+
 bool ExecuteMarketOrder(bool is_long, datetime signal_time)
 {
-    double atr = g_Adaptive.atr_value;
-    if(atr < EPSILON) return false;
+    double sl_distance, tp_distance;
+    if(!GetStopDistances(sl_distance, tp_distance)) return false;
 
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double entry = is_long ? ask : bid;
 
-    double sl = is_long ? entry - InpSLATRMultiplier * atr : entry + InpSLATRMultiplier * atr;
-    double tp = is_long ? entry + InpTPATRMultiplier * atr : entry - InpTPATRMultiplier * atr;
-    sl = NormalizeDouble(sl, g_SymbolCache.digits);
-    tp = NormalizeDouble(tp, g_SymbolCache.digits);
+    double sl = 0, tp = 0;
+    if(sl_distance > 0) sl = NormalizeDouble(is_long ? entry - sl_distance : entry + sl_distance, g_SymbolCache.digits);
+    if(tp_distance > 0) tp = NormalizeDouble(is_long ? entry + tp_distance : entry - tp_distance, g_SymbolCache.digits);
 
-    double sl_points = (InpSLATRMultiplier * atr) / g_SymbolCache.point;
+    double sl_points = sl_distance / g_SymbolCache.point;
     double lots = CalculateLotSize(sl_points);
 
     MqlTradeRequest request = {};
@@ -1455,8 +1491,21 @@ void UpdateShadowOutcomes()
     for(int i = 0; i < g_MLRecordCount; i++) {
         if(g_MLHistory[i].is_closed || !g_MLHistory[i].is_shadow) continue;
 
-        double atr = g_MLHistory[i].atr_at_signal;
-        if(atr < EPSILON) continue;
+        // Stessa logica SL/TP (ATR o punti fissi) che userebbe un trade vero, cosi'
+        // l'esito simulato resta coerente con InpUseATRStops. In modalita' ATR si usa
+        // l'ATR REGISTRATO al momento del segnale (non quello attuale), per non
+        // etichettare vecchi segnali con la volatilita' di oggi.
+        double sl_distance, tp_distance;
+        if(InpUseATRStops) {
+            double atr = g_MLHistory[i].atr_at_signal;
+            if(atr < EPSILON) continue;
+            sl_distance = InpSLATRMultiplier * atr;
+            tp_distance = InpTPATRMultiplier * atr;
+        } else {
+            sl_distance = InpSLPoints * g_SymbolCache.point;
+            tp_distance = InpTPPoints * g_SymbolCache.point;
+        }
+        if(sl_distance <= 0 && tp_distance <= 0) continue;
 
         int signal_shift = iBarShift(_Symbol, _Period, g_MLHistory[i].time);
         if(signal_shift < 0) continue;
@@ -1471,11 +1520,11 @@ void UpdateShadowOutcomes()
             bool hit = false;
 
             if(is_long) {
-                if(h >= entry + (atr * InpTPATRMultiplier)) { g_MLHistory[i].is_winner = true; hit = true; }
-                else if(l <= entry - (atr * InpSLATRMultiplier)) { g_MLHistory[i].is_winner = false; hit = true; }
+                if(tp_distance > 0 && h >= entry + tp_distance) { g_MLHistory[i].is_winner = true; hit = true; }
+                else if(sl_distance > 0 && l <= entry - sl_distance) { g_MLHistory[i].is_winner = false; hit = true; }
             } else {
-                if(l <= entry - (atr * InpTPATRMultiplier)) { g_MLHistory[i].is_winner = true; hit = true; }
-                else if(h >= entry + (atr * InpSLATRMultiplier)) { g_MLHistory[i].is_winner = false; hit = true; }
+                if(tp_distance > 0 && l <= entry - tp_distance) { g_MLHistory[i].is_winner = true; hit = true; }
+                else if(sl_distance > 0 && h >= entry + sl_distance) { g_MLHistory[i].is_winner = false; hit = true; }
             }
 
             if(hit) {
@@ -1528,7 +1577,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 }
 
 //+------------------------------------------------------------------+
-//| TRAILING STOP (ATR-based, scansione live delle posizioni)          |
+//| TRAILING STOP (ATR o punti fissi a seconda di InpUseATRStops,      |
+//| scansione live delle posizioni)                                    |
 //+------------------------------------------------------------------+
 void ManageTrailingStops()
 {
@@ -1537,18 +1587,29 @@ void ManageTrailingStops()
     if(current == last_check) return;
     last_check = current;
 
-    double atr = g_Adaptive.atr_value;
-    if(atr < EPSILON) return;
+    double activation, stop_dist, step_dist;
+    if(InpUseATRStops) {
+        double atr = g_Adaptive.atr_value;
+        if(atr < EPSILON) return;
+        activation = InpTrailingActivationATR * atr;
+        stop_dist  = InpTrailingStopATR * atr;
+        step_dist  = InpTrailingStepATR * atr;
+    } else {
+        activation = InpTrailingActivationPoints * g_SymbolCache.point;
+        stop_dist  = InpTrailingStopPoints * g_SymbolCache.point;
+        step_dist  = InpTrailingStepPoints * g_SymbolCache.point;
+    }
+    if(stop_dist <= 0) return; // trailing disabilitato di fatto (distanza nulla)
 
     for(int i = PositionsTotal() - 1; i >= 0; i--) {
         ulong ticket = PositionGetTicket(i);
         if(ticket <= 0) continue;
         if(PositionGetString(POSITION_SYMBOL) != _Symbol || PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-        ProcessTrailing(ticket, atr);
+        ProcessTrailing(ticket, activation, stop_dist, step_dist);
     }
 }
 
-void ProcessTrailing(ulong ticket, double atr)
+void ProcessTrailing(ulong ticket, double activation, double stop_dist, double step_dist)
 {
     if(!PositionSelectByTicket(ticket)) return;
 
@@ -1558,15 +1619,15 @@ void ProcessTrailing(ulong ticket, double atr)
     double current = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
     double profit = (type == POSITION_TYPE_BUY) ? (current - openPrice) : (openPrice - current);
-    if(profit < InpTrailingActivationATR * atr) return;
+    if(profit < activation) return;
 
     double newSL; bool shouldModify;
     if(type == POSITION_TYPE_BUY) {
-        newSL = NormalizeDouble(current - InpTrailingStopATR * atr, g_SymbolCache.digits);
-        shouldModify = (newSL > posSL + InpTrailingStepATR * atr || posSL == 0);
+        newSL = NormalizeDouble(current - stop_dist, g_SymbolCache.digits);
+        shouldModify = (newSL > posSL + step_dist || posSL == 0);
     } else {
-        newSL = NormalizeDouble(current + InpTrailingStopATR * atr, g_SymbolCache.digits);
-        shouldModify = (newSL < posSL - InpTrailingStepATR * atr || posSL == 0);
+        newSL = NormalizeDouble(current + stop_dist, g_SymbolCache.digits);
+        shouldModify = (newSL < posSL - step_dist || posSL == 0);
     }
 
     if(shouldModify) {
@@ -1693,6 +1754,11 @@ void UpdateDashboard()
                InpUseHullFilter ? "ON" : "OFF", InpHullPeriod),
                x, y + (line++ * line_h), InpDashboardFontSize, clrSilver, corner);
 
+    CreateLabel(prefix + "stopsmode", InpUseATRStops ?
+               StringFormat("Stops: ATR (SL x%.1f / TP x%.1f)", InpSLATRMultiplier, InpTPATRMultiplier) :
+               StringFormat("Stops: Punti (SL %d / TP %d)", InpSLPoints, InpTPPoints),
+               x, y + (line++ * line_h), InpDashboardFontSize, clrSilver, corner);
+
     int buy = 0, sell = 0, total = 0;
     for(int i = PositionsTotal() - 1; i >= 0; i--) {
         ulong t = PositionGetTicket(i);
@@ -1756,7 +1822,10 @@ void PrintInitInfo()
     Print("Symbol: ", _Symbol, " | Period: ", EnumToString(_Period), " | Profile Mode: ", EnumToString(InpProfileMode));
     Print("Ensemble ML: ", InpEnableEnsemble ? "ON (3 modelli)" : "OFF (single model)", " | Threshold: ", InpMLThreshold, "%");
     Print("Hull Filter: ", InpUseHullFilter ? "ON" : "OFF", " (periodo ", InpHullPeriod, ")");
-    Print("SL/TP: ATR x", InpSLATRMultiplier, " / ATR x", InpTPATRMultiplier);
+    if(InpUseATRStops)
+        Print("SL/TP: ATR x", InpSLATRMultiplier, " / ATR x", InpTPATRMultiplier, " | Trailing: ATR x", InpTrailingStopATR, " (attiva a +", InpTrailingActivationATR, " ATR)");
+    else
+        Print("SL/TP: ", InpSLPoints, " / ", InpTPPoints, " punti | Trailing: ", InpTrailingStopPoints, " punti (attiva a +", InpTrailingActivationPoints, " punti)");
     Print("Lots: ", LotSize, UseFixedRisk ? " (Risk: " + DoubleToString(RiskPercent, 1) + "%)" : "");
     Print("Position Limits: Totale ", MaxTotalPositions, " | Per direzione ", MaxPositionsPerDirection);
     Print("Auto-DST: ", InpAutoDST ? "ON" : "OFF", " | DST attivo ora: ", IsEEST_DST(TimeCurrent()) ? "SI" : "NO");
