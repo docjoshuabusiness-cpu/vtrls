@@ -16,9 +16,18 @@
 //|  - Tutte le funzioni feature/segnale usano SHIFT diretto           |
 //|    (iOpen/iHigh/iLow/iClose, 0=barra corrente) invece di array     |
 //|    misti series/non-series.                                       |
+//|                                                                    |
+//|  v1.01: fix deadlock training ML — ogni segnale tecnicamente       |
+//|  valido viene registrato per il training (record "shadow" con      |
+//|  esito simulato via ATR), indipendentemente dall'approvazione ML.  |
+//|  Se registrasse solo i segnali approvati, un ensemble che parte    |
+//|  sotto soglia non riceverebbe mai dati per allenarsi e resterebbe  |
+//|  bloccato a 0 trade per sempre. I segnali REALMENTE eseguiti        |
+//|  vengono "promossi" da shadow a reali e il loro esito arriva dal   |
+//|  trade vero (OnTradeTransaction), non dalla simulazione.           |
 //+------------------------------------------------------------------+
-#property copyright "Advanced Quant Systems - EA v1.0"
-#property version   "1.00"
+#property copyright "Advanced Quant Systems - EA v1.01"
+#property version   "1.01"
 #property strict
 
 //=== PROFILE MODE ===
@@ -189,15 +198,19 @@ struct SMLRecord {
     bool is_long;
     bool is_winner;
     bool is_closed;
+    bool is_shadow;        // true = segnale MAI eseguito (rifiutato dall'ML o bloccato da limiti/
+                            // one-per-session): l'esito viene simulato via ATR solo per il training,
+                            // non conta nelle statistiche di trading reali (g_Stats.wins/losses).
     datetime time;
     double entry_price;
-    long   position_id;   // usato per riconciliare l'esito REALE della posizione alla chiusura
+    double atr_at_signal;  // ATR al momento del segnale, usato per classificare l'esito shadow
+    long   position_id;    // per i segnali REALI: riconcilia l'esito effettivo alla chiusura
     string symbol;
 
     void Reset() {
         ZeroMemory(features);
-        is_long = false; is_winner = false; is_closed = false;
-        time = 0; entry_price = 0; position_id = 0; symbol = "";
+        is_long = false; is_winner = false; is_closed = false; is_shadow = true;
+        time = 0; entry_price = 0; atr_at_signal = 0; position_id = 0; symbol = "";
     }
 };
 
@@ -524,6 +537,7 @@ void OnTick()
         CheckForSignal();
     }
 
+    UpdateShadowOutcomes();
     UpdateMLTraining();
 
     if(ShowPanel) UpdateDashboard();
@@ -901,6 +915,7 @@ void EvaluateSignal(int shift, SSessionProfile &profile)
 void TryFireSignal(bool is_long, int shift, SSessionProfile &profile, double price,
                     double distance, int touches, double rejection)
 {
+    datetime signal_time = iTime(_Symbol, _Period, shift);
     SMLFeatures features = ExtractFeatures(shift, is_long, profile, distance, touches, rejection);
     SEnsembleVote vote = GetEnsembleVote(features);
 
@@ -909,6 +924,16 @@ void TryFireSignal(bool is_long, int shift, SSessionProfile &profile, double pri
     if(vote.consensus == 3) g_Stats.unanimous_votes++;
     else if(vote.consensus == 2) g_Stats.majority_votes++;
     else g_Stats.split_votes++;
+
+    // FIX: registra SEMPRE il segnale tecnicamente valido come candidato "shadow"
+    // per il training, indipendentemente dall'approvazione ML. Se la registrazione
+    // avvenisse solo per i segnali approvati, un ensemble che parte sotto soglia
+    // (pesi iniziali hardcoded) non riceverebbe mai dati per allenarsi e resterebbe
+    // bloccato per sempre a 0 approvazioni — un deadlock. L'esito dei segnali MAI
+    // eseguiti viene simulato via ATR da UpdateShadowOutcomes() solo ai fini del
+    // training; se invece il segnale viene eseguito, il record viene "promosso" a
+    // reale e il suo esito arriva dal trade vero (OnTradeTransaction).
+    RecordMLSignal(features, is_long, signal_time, price, 0, true);
 
     if(InpEnableML && vote.ensemble_prob < InpMLThreshold) {
         g_Stats.ensemble_rejected++;
@@ -932,7 +957,7 @@ void TryFireSignal(bool is_long, int shift, SSessionProfile &profile, double pri
         return;
     }
 
-    if(ExecuteMarketOrder(is_long, features)) {
+    if(ExecuteMarketOrder(is_long, signal_time)) {
         if(InpOneSignalPerSession) UpdateSignalTracker(profile.start, is_long);
         if(InpDebugMode)
             PrintFormat("✅ %s APPROVED | ENS:%.1f%% M1:%.1f M2:%.1f M3:%.1f",
@@ -1314,7 +1339,7 @@ double CalculateLotSize(double stopLossPoints)
     return NormalizeDouble(lots, 2);
 }
 
-bool ExecuteMarketOrder(bool is_long, SMLFeatures &features)
+bool ExecuteMarketOrder(bool is_long, datetime signal_time)
 {
     double atr = g_Adaptive.atr_value;
     if(atr < EPSILON) return false;
@@ -1359,7 +1384,11 @@ bool ExecuteMarketOrder(bool is_long, SMLFeatures &features)
     long position_id = 0;
     if(HistoryDealSelect(result.deal)) position_id = HistoryDealGetInteger(result.deal, DEAL_POSITION_ID);
 
-    RecordMLSignal(features, is_long, TimeCurrent(), entry, position_id);
+    // Il segnale e' gia' stato registrato come "shadow" in TryFireSignal prima
+    // ancora di sapere se sarebbe stato approvato/eseguito. Ora che l'ordine e'
+    // stato eseguito davvero, promuoviamo quel record a "reale": il suo esito
+    // arrivera' dal trade vero (OnTradeTransaction), non da una simulazione ATR.
+    UpgradeShadowToReal(is_long, signal_time, position_id, entry);
 
     g_Stats.total_trades++;
     if(is_long) g_Stats.long_trades++; else g_Stats.short_trades++;
@@ -1370,7 +1399,7 @@ bool ExecuteMarketOrder(bool is_long, SMLFeatures &features)
     return true;
 }
 
-void RecordMLSignal(SMLFeatures &features, bool is_long, datetime time, double price, long position_id)
+void RecordMLSignal(SMLFeatures &features, bool is_long, datetime time, double price, long position_id, bool is_shadow)
 {
     if(g_MLRecordCount >= InpMLTrainingPeriod) {
         for(int i = 0; i < InpMLTrainingPeriod - 1; i++) g_MLHistory[i] = g_MLHistory[i + 1];
@@ -1381,13 +1410,81 @@ void RecordMLSignal(SMLFeatures &features, bool is_long, datetime time, double p
     g_MLHistory[g_MLRecordCount].is_long = is_long;
     g_MLHistory[g_MLRecordCount].time = time;
     g_MLHistory[g_MLRecordCount].entry_price = price;
+    g_MLHistory[g_MLRecordCount].atr_at_signal = g_Adaptive.atr_value;
     g_MLHistory[g_MLRecordCount].position_id = position_id;
+    g_MLHistory[g_MLRecordCount].is_shadow = is_shadow;
     g_MLHistory[g_MLRecordCount].is_closed = false;
     g_MLHistory[g_MLRecordCount].symbol = _Symbol;
 
     g_MLRecordCount++;
     g_SignalsSinceRetrain++;
     g_SignalsSinceExport++;
+}
+
+//+------------------------------------------------------------------+
+//| Promuove un record "shadow" (mai eseguito) a "reale" appena         |
+//| l'ordine corrispondente viene effettivamente riempito. Match per   |
+//| direzione+orario del segnale invece di un indice salvato, per      |
+//| restare corretto anche se nel frattempo il buffer circolare ha     |
+//| fatto scorrere gli elementi.                                       |
+//+------------------------------------------------------------------+
+void UpgradeShadowToReal(bool is_long, datetime signal_time, long position_id, double entry_price)
+{
+    for(int i = g_MLRecordCount - 1; i >= 0; i--) {
+        if(g_MLHistory[i].is_shadow && !g_MLHistory[i].is_closed &&
+           g_MLHistory[i].is_long == is_long && g_MLHistory[i].time == signal_time) {
+            g_MLHistory[i].is_shadow = false;
+            g_MLHistory[i].position_id = position_id;
+            g_MLHistory[i].entry_price = entry_price;
+            return;
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Esito SINTETICO (via ATR) per i segnali "shadow" mai eseguiti —    |
+//| serve solo a dare dati al training ML quando l'ensemble rifiuta    |
+//| (o non puo' eseguire) un segnale tecnicamente valido; senza questo |
+//| l'ensemble non riceverebbe mai feedback sui segnali che scarta e   |
+//| non potrebbe mai correggere la propria soglia di rigetto. Non      |
+//| tocca g_Stats.wins/losses/total_profit, riservate ai trade reali.  |
+//| Shift-based e coerente (niente mix series/non-series).             |
+//+------------------------------------------------------------------+
+void UpdateShadowOutcomes()
+{
+    for(int i = 0; i < g_MLRecordCount; i++) {
+        if(g_MLHistory[i].is_closed || !g_MLHistory[i].is_shadow) continue;
+
+        double atr = g_MLHistory[i].atr_at_signal;
+        if(atr < EPSILON) continue;
+
+        int signal_shift = iBarShift(_Symbol, _Period, g_MLHistory[i].time);
+        if(signal_shift < 0) continue;
+
+        double entry = g_MLHistory[i].entry_price;
+        bool is_long = g_MLHistory[i].is_long;
+
+        for(int j = signal_shift; j >= MathMax(0, signal_shift - 50); j--) {
+            double h = iHigh(_Symbol, _Period, j);
+            double l = iLow(_Symbol, _Period, j);
+            if(h <= 0 || l <= 0) continue;
+            bool hit = false;
+
+            if(is_long) {
+                if(h >= entry + (atr * InpTPATRMultiplier)) { g_MLHistory[i].is_winner = true; hit = true; }
+                else if(l <= entry - (atr * InpSLATRMultiplier)) { g_MLHistory[i].is_winner = false; hit = true; }
+            } else {
+                if(l <= entry - (atr * InpTPATRMultiplier)) { g_MLHistory[i].is_winner = true; hit = true; }
+                else if(h >= entry + (atr * InpSLATRMultiplier)) { g_MLHistory[i].is_winner = false; hit = true; }
+            }
+
+            if(hit) {
+                g_MLHistory[i].is_closed = true;
+                if(InpEnableMultiSymbol) UpdateMultiSymbolDB(g_MLHistory[i].symbol, g_MLHistory[i].is_winner);
+                break;
+            }
+        }
+    }
 }
 
 //+------------------------------------------------------------------+

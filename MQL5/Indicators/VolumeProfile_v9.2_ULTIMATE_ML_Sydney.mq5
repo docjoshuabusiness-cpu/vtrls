@@ -6,9 +6,15 @@
 //|    non-series), fix alert flood al primo load, ATR percentile     |
 //|    reale (non piu' stub), multi-symbol learning agganciato,       |
 //|    CountTouches corretto, filtro direzionale Hull MA embedded     |
+//|    v9.2b: fix deadlock training ML — i segnali venivano registrati|
+//|    per il training SOLO se gia' approvati dalla soglia ML; se lo  |
+//|    score a freddo restava sotto soglia, l'ensemble non riceveva   |
+//|    mai dati e non poteva mai allenarsi (Approved: 0% per sempre). |
+//|    Ora si registra ogni segnale tecnicamente valido, approvato o  |
+//|    no; solo la FRECCIA resta condizionata all'approvazione.       |
 //+------------------------------------------------------------------+
 #property copyright "Advanced Quant Systems - ULTIMATE v9.2"
-#property version   "9.20"
+#property version   "9.21"
 #property indicator_chart_window
 #property indicator_buffers 4
 #property indicator_plots   3
@@ -827,6 +833,16 @@ void CheckSignalEnsemble(int bar, const datetime &time[], const double &open[],
         else if(vote.consensus == 2) g_MLStats.majority_votes++;
         else g_MLStats.split_votes++;
 
+        // FIX v9.2b: registra SEMPRE il segnale tecnicamente valido per il training,
+        // indipendentemente dall'approvazione ML. Prima RecordMLSignal veniva chiamato
+        // solo per i segnali APPROVATI: se lo score iniziale (pesi hardcoded, mai
+        // allenati) resta sotto soglia, nessun segnale viene mai registrato, quindi
+        // TrainEnsembleModels() non parte mai (richiede >=20 chiusi), i pesi non
+        // cambiano mai e lo score medio resta bloccato sotto soglia per sempre —
+        // un deadlock che impedisce all'ensemble di imparare. Registrando comunque,
+        // il training può avvenire anche sui segnali rifiutati.
+        RecordMLSignal(features, true, time[bar], price);
+
         // ML Filter
         if(vote.ensemble_prob < InpMLThreshold) {
             g_MLStats.ensemble_rejected++;
@@ -851,7 +867,6 @@ void CheckSignalEnsemble(int bar, const datetime &time[], const double &open[],
 
         if(can_fire) {
             g_LongBuffer[bar] = low[bar] - g_Adaptive.arrow_offset;
-            RecordMLSignal(features, true, time[bar], price);
 
             if(InpShowAlerts && allow_alert) {
                 string alert_msg = StringFormat("🟢 LONG | %s | %.5f", _Symbol, price);
@@ -896,6 +911,10 @@ void CheckSignalEnsemble(int bar, const datetime &time[], const double &open[],
         else if(vote.consensus == 2) g_MLStats.majority_votes++;
         else g_MLStats.split_votes++;
 
+        // FIX v9.2b: vedi commento nel blocco LONG — registra sempre, indipendentemente
+        // dall'approvazione, per evitare il deadlock di training.
+        RecordMLSignal(features, false, time[bar], price);
+
         // ML Filter per SHORT
         if(vote.ensemble_prob < InpMLThreshold) {
             g_MLStats.ensemble_rejected++;
@@ -920,7 +939,6 @@ void CheckSignalEnsemble(int bar, const datetime &time[], const double &open[],
 
         if(can_fire) {
             g_ShortBuffer[bar] = high[bar] + g_Adaptive.arrow_offset;
-            RecordMLSignal(features, false, time[bar], price);
 
             if(InpShowAlerts && allow_alert) {
                 string alert_msg = StringFormat("🔴 SHORT | %s | %.5f", _Symbol, price);
