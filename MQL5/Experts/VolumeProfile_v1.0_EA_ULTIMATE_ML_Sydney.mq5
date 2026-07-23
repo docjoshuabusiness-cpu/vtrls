@@ -49,9 +49,23 @@
 //|  non-visuale; persistenza pesi su file disattivata in QUALUNQUE run |
 //|  del tester (evita che i core paralleli si contendano/contaminino   |
 //|  lo stesso file). Trailing esce subito se non ci sono posizioni.    |
+//|                                                                    |
+//|  v1.05: performance ottimizzazione — caching dei profili volume.    |
+//|  Prima UpdateProfiles() ricostruiva da capo TUTTI i profili storici |
+//|  (fino a InpHistoryPeriods*4, ognuno riscandagliando l'intera        |
+//|  finestra di barre) AD OGNI nuova barra, anche se le sessioni /      |
+//|  periodi ormai CHIUSI non cambiano mai piu'. Su un backtest di 10    |
+//|  anni era il collo di bottiglia dominante. Ora i profili usano uno   |
+//|  layout a slot fissi (giorno*4 + sessione) e si ricostruisce solo    |
+//|  il giorno/periodo corrente ad ogni barra, mentre gli storici si     |
+//|  ricalcolano una sola volta quando la data (o la barra del TF nei    |
+//|  modi Daily/Weekly/Monthly) cambia: da decine di profili per barra   |
+//|  a ~4. Corretto anche un bug latente del vecchio packing a idx       |
+//|  compattato, che poteva lasciare "profili stantii" marcati validi    |
+//|  in coda all'array dopo un ricalcolo con meno sessioni valide.       |
 //+------------------------------------------------------------------+
-#property copyright "Advanced Quant Systems - EA v1.04"
-#property version   "1.04"
+#property copyright "Advanced Quant Systems - EA v1.05"
+#property version   "1.05"
 #property strict
 
 //=== PROFILE MODE ===
@@ -361,6 +375,11 @@ string   g_FeatureNames[ML_FEATURES] = {
 };
 
 datetime g_LastBarTime = 0;
+int      g_LastProfileDay = -1;    // giorno (day-of-month) dell'ultimo ricalcolo profili SESSIONS:
+                                    // le sessioni dei giorni passati sono chiuse e immutabili, si
+                                    // ricostruiscono solo quando la data cambia (non ad ogni barra)
+datetime g_LastStdProfileBar = 0;  // stesso concetto per i profili Daily/Weekly/Monthly: i profili
+                                    // storici cambiano solo quando si forma una nuova barra del TF
 bool     g_UseRealVolume = false;
 string   g_UniqueID = "";
 int      g_TotalProfiles = 0;
@@ -427,6 +446,8 @@ int OnInit()
     g_SignalsSinceRetrain = 0;
     g_SignalsSinceExport = 0;
     g_MultiSymbolCount = 0;
+    g_LastProfileDay = -1;      // forza un ricalcolo completo dei profili alla prima barra
+    g_LastStdProfileBar = 0;
     ZeroMemory(g_Stats);
 
     // Disegno: attivo su grafico live e nei backtest VISUALI (l'utente guarda), spento
@@ -712,37 +733,70 @@ void UpdateProfiles()
     if(InpDrawActiveLevels && g_ShouldDraw) DrawActiveLevels();
 }
 
-void UpdateSessionProfiles()
+//+------------------------------------------------------------------+
+//| Costruisce (o azzera) il profilo di UNA sessione in uno slot FISSO |
+//| dell'array (slot = giorno*SESSIONS_PER_DAY + indice_sessione). Lo  |
+//| slot viene sempre resettato prima: se la sessione non e' valida    |
+//| resta marcato is_valid=false — questo elimina i "profili stantii"  |
+//| che con il vecchio packing a idx compattato potevano restare       |
+//| marcati validi in coda all'array da un ricalcolo precedente.       |
+//+------------------------------------------------------------------+
+void BuildSessionSlot(int days_back, string start_str, string end_str, int slot)
 {
-    int idx = 0;
-    for(int i = 0; i < InpHistoryPeriods && idx < g_TotalProfiles - (SESSIONS_PER_DAY - 1); i++) {
+    if(slot < 0 || slot >= g_TotalProfiles) return;
+    g_Profiles[slot].Reset();
+    g_Profiles[slot].id = slot;
 
-        SSessionProfile sydney; sydney.id = idx; sydney.Reset();
-        if(GetSessionTime(InpSydneyStart, InpSydneyEnd, i, sydney.start, sydney.end)) {
-            BuildProfile(sydney);
-            if(sydney.is_valid) { CalculateKeyLevels(sydney); g_Profiles[idx++] = sydney; }
-        }
+    datetime st = 0, en = 0;
+    if(!GetSessionTime(start_str, end_str, days_back, st, en)) return;
+    g_Profiles[slot].start = st;
+    g_Profiles[slot].end   = en;
 
-        SSessionProfile asian; asian.id = idx; asian.Reset();
-        if(GetSessionTime(InpAsianStart, InpAsianEnd, i, asian.start, asian.end)) {
-            BuildProfile(asian);
-            if(asian.is_valid) { CalculateKeyLevels(asian); g_Profiles[idx++] = asian; }
-        }
-
-        SSessionProfile london; london.id = idx; london.Reset();
-        if(GetSessionTime(InpLondonStart, InpLondonEnd, i, london.start, london.end)) {
-            BuildProfile(london);
-            if(london.is_valid) { CalculateKeyLevels(london); g_Profiles[idx++] = london; }
-        }
-
-        SSessionProfile ny; ny.id = idx; ny.Reset();
-        if(GetSessionTime(InpNewYorkStart, InpNewYorkEnd, i, ny.start, ny.end)) {
-            BuildProfile(ny);
-            if(ny.is_valid) { CalculateKeyLevels(ny); g_Profiles[idx++] = ny; }
-        }
-    }
+    BuildProfile(g_Profiles[slot]);
+    if(g_Profiles[slot].is_valid) CalculateKeyLevels(g_Profiles[slot]);
 }
 
+//+------------------------------------------------------------------+
+//| PERF: layout a slot fissi (giorno*4 + sessione). Solo le sessioni  |
+//| del GIORNO corrente (days_back==0) sono ancora in formazione e     |
+//| vanno ricostruite ad ogni nuova barra; le sessioni dei giorni      |
+//| passati sono chiuse e immutabili -> si ricostruiscono una sola     |
+//| volta e poi si riusano finche' la data non cambia. Prima si        |
+//| ricostruivano TUTTI i profili (fino a InpHistoryPeriods*4, ognuno  |
+//| riscandagliando l'intera finestra di barre) ad OGNI barra: su un    |
+//| backtest di 10 anni era il collo di bottiglia dominante            |
+//| dell'ottimizzazione. Ora, a data invariata, per barra si           |
+//| ricostruiscono solo 4 profili invece di decine.                   |
+//+------------------------------------------------------------------+
+void UpdateSessionProfiles()
+{
+    MqlDateTime cur;
+    TimeToStruct(TimeCurrent(), cur);
+    bool full_rebuild = (cur.day != g_LastProfileDay);
+
+    int max_days = InpHistoryPeriods;
+    if(max_days > g_TotalProfiles / SESSIONS_PER_DAY) max_days = g_TotalProfiles / SESSIONS_PER_DAY;
+
+    for(int i = 0; i < max_days; i++) {
+        // giorno corrente sempre; giorni passati solo quando la data cambia
+        if(i != 0 && !full_rebuild) continue;
+
+        int base = i * SESSIONS_PER_DAY;
+        BuildSessionSlot(i, InpSydneyStart,  InpSydneyEnd,  base + 0);
+        BuildSessionSlot(i, InpAsianStart,   InpAsianEnd,   base + 1);
+        BuildSessionSlot(i, InpLondonStart,  InpLondonEnd,  base + 2);
+        BuildSessionSlot(i, InpNewYorkStart, InpNewYorkEnd, base + 3);
+    }
+
+    g_LastProfileDay = cur.day;
+}
+
+//+------------------------------------------------------------------+
+//| Stessa strategia di caching per Daily/Weekly/Monthly: il profilo   |
+//| i=0 e' in formazione e va aggiornato ad ogni barra; gli storici    |
+//| (i>=1) cambiano solo quando si forma una nuova barra del TF del     |
+//| profilo, quindi si ricostruiscono solo in quel caso.               |
+//+------------------------------------------------------------------+
 void UpdateStandardProfiles()
 {
     ENUM_TIMEFRAMES tf;
@@ -753,16 +807,27 @@ void UpdateStandardProfiles()
         default: return;
     }
 
-    for(int i = 0; i < InpHistoryPeriods && i < g_TotalProfiles; i++) {
-        SSessionProfile profile; profile.id = i; profile.Reset();
-        profile.start = iTime(_Symbol, tf, i + 1);
-        profile.end   = iTime(_Symbol, tf, i);
-        if(profile.start <= 0 || profile.end <= 0) continue;
-        if(i == 0) profile.end = TimeCurrent();
+    datetime cur_tf_bar = iTime(_Symbol, tf, 0);
+    bool full_rebuild = (cur_tf_bar != g_LastStdProfileBar);
 
-        BuildProfile(profile);
-        if(profile.is_valid) { CalculateKeyLevels(profile); g_Profiles[i] = profile; }
+    int max_i = InpHistoryPeriods;
+    if(max_i > g_TotalProfiles) max_i = g_TotalProfiles;
+
+    for(int i = 0; i < max_i; i++) {
+        if(i != 0 && !full_rebuild) continue;
+
+        g_Profiles[i].Reset();
+        g_Profiles[i].id = i;
+        g_Profiles[i].start = iTime(_Symbol, tf, i + 1);
+        g_Profiles[i].end   = iTime(_Symbol, tf, i);
+        if(g_Profiles[i].start <= 0 || g_Profiles[i].end <= 0) continue;
+        if(i == 0) g_Profiles[i].end = TimeCurrent();
+
+        BuildProfile(g_Profiles[i]);
+        if(g_Profiles[i].is_valid) CalculateKeyLevels(g_Profiles[i]);
     }
+
+    g_LastStdProfileBar = cur_tf_bar;
 }
 
 bool GetSessionTime(string start_str, string end_str, int days_back, datetime &start_out, datetime &end_out)
@@ -869,16 +934,27 @@ void CalculateKeyLevels(SSessionProfile &profile)
 }
 
 //+------------------------------------------------------------------+
-//| Disegna solo POC/VAH/VAL del profilo attivo (indice 0)            |
+//| Disegna solo POC/VAH/VAL del profilo attivo. Con il layout a slot  |
+//| fissi lo slot 0 puo' essere legittimamente invalido (sessione del  |
+//| giorno non ancora iniziata), quindi si sceglie la sessione valida  |
+//| che contiene l'ora corrente; in mancanza, il primo profilo valido. |
 //+------------------------------------------------------------------+
 void DrawActiveLevels()
 {
-    if(g_TotalProfiles == 0 || !g_Profiles[0].is_valid) return;
+    datetime now = TimeCurrent();
+    int active = -1, first_valid = -1;
+    for(int p = 0; p < g_TotalProfiles; p++) {
+        if(!g_Profiles[p].is_valid) continue;
+        if(first_valid < 0) first_valid = p;
+        if(now >= g_Profiles[p].start && now <= g_Profiles[p].end) { active = p; break; }
+    }
+    if(active < 0) active = first_valid;
+    if(active < 0) return;
+
     string prefix = g_UniqueID + "LVL_";
-    datetime end = TimeCurrent();
-    DrawLevelLine(prefix + "POC", g_Profiles[0].start, g_Profiles[0].poc, end, clrRed, STYLE_SOLID);
-    DrawLevelLine(prefix + "VAH", g_Profiles[0].start, g_Profiles[0].vah, end, clrOrange, STYLE_DASH);
-    DrawLevelLine(prefix + "VAL", g_Profiles[0].start, g_Profiles[0].val, end, clrOrange, STYLE_DASH);
+    DrawLevelLine(prefix + "POC", g_Profiles[active].start, g_Profiles[active].poc, now, clrRed, STYLE_SOLID);
+    DrawLevelLine(prefix + "VAH", g_Profiles[active].start, g_Profiles[active].vah, now, clrOrange, STYLE_DASH);
+    DrawLevelLine(prefix + "VAL", g_Profiles[active].start, g_Profiles[active].val, now, clrOrange, STYLE_DASH);
 }
 
 void DrawLevelLine(string name, datetime t1, double price, datetime t2, color clr, ENUM_LINE_STYLE style)
