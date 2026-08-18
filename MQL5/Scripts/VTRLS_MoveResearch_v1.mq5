@@ -113,6 +113,8 @@ input int             InpDebugDays      = 5;               // giornate da dumpar
 
 input string          s6                = "=== OUTPUT ===";
 input string          InpOutDir         = "VTRLS_Research";// Sottocartella in MQL5/Files
+input bool            InpWriteCsv       = true;            // Scrive i CSV (dati grezzi, per Excel/Python)
+input bool            InpWriteHtml      = true;            // Scrive il report HTML (doppio clic, si apre nel browser)
 
 //==================================================================
 //  GLOBALI
@@ -595,7 +597,8 @@ string BinLabel(int b, const double &edges[], string unit)
 
 //--- prototipi (le definizioni sono piu' avanti nel file)
 void   BuildConditions(string sym,string dir);
-void   WriteCells(string path,string keyHeader,const int &basePt[],const int &baseAtr[]);
+void   WriteCells(string path,string keyHeader,const int &basePt[],const int &baseAtr[],
+                  string title,string note,string tid);
 
 //------------------------------------------------------------------
 // CopyRates con retry: alla prima chiamata lo storico puo' non essere
@@ -769,6 +772,132 @@ string SafeName(string s)
    return r;
 }
 
+
+//==================================================================
+//  REPORT HTML
+//  Un unico file autonomo per simbolo: nessuna libreria esterna,
+//  nessuna connessione. Contiene le stesse tabelle dei CSV, con
+//  ordinamento per colonna, filtro testuale e evidenziazione delle
+//  celle statisticamente interessanti.
+//  I CSV restano la fonte per l'analisi seria (Excel, Python): l'HTML
+//  serve a guardare i numeri senza importare niente.
+//==================================================================
+int g_html=INVALID_HANDLE;
+
+void H(string x){ if(g_html!=INVALID_HANDLE) FileWriteString(g_html,x); }
+void W(int h,string x){ if(h!=INVALID_HANDLE) FileWriteString(h,x); }
+
+string HE(string x)                       // escape HTML
+{
+   StringReplace(x,"&","&amp;");
+   StringReplace(x,"<","&lt;");
+   StringReplace(x,">","&gt;");
+   StringReplace(x,"\"","&quot;");
+   return x;
+}
+
+void HtmlHead(string sym)
+{
+   H("<!DOCTYPE html><html lang=\"it\"><head><meta charset=\"windows-1252\">");
+   H("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+   H("<title>VTRLS - "+HE(sym)+"</title><style>");
+   H(":root{--bg:#0f1216;--pan:#171b21;--ln:#232a33;--tx:#dfe5ec;--mut:#8b97a6;--acc:#5aa9e6;--good:#3fb950;--bad:#f85149;--warn:#d29922}");
+   H("*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:13px/1.45 -apple-system,Segoe UI,Roboto,Arial,sans-serif}");
+   H("header{padding:16px 22px;background:var(--pan);border-bottom:1px solid var(--ln)}");
+   H("h1{margin:0 0 3px;font-size:17px}h2{font-size:14px;margin:20px 0 6px}.sub{color:var(--mut);font-size:12px}");
+   H("nav{display:flex;gap:6px;padding:10px 22px;background:var(--pan);border-bottom:1px solid var(--ln);flex-wrap:wrap;position:sticky;top:0;z-index:4}");
+   H("nav button{background:#1e242c;color:var(--tx);border:1px solid var(--ln);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px}");
+   H("nav button.on{background:var(--acc);color:#06121f;border-color:var(--acc);font-weight:600}");
+   H("main{padding:14px 22px 60px}section{display:none}section.on{display:block}");
+   H(".sum{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin:12px 0}");
+   H(".card{background:var(--pan);border:1px solid var(--ln);border-radius:8px;padding:10px 12px}");
+   H(".card b{display:block;font-size:18px;font-variant-numeric:tabular-nums}");
+   H(".card span{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.04em}");
+   H(".tools{margin:10px 0}.tools input{background:#0c0f13;border:1px solid var(--ln);color:var(--tx);padding:6px 10px;border-radius:6px;width:320px;max-width:100%}");
+   H(".wrap{overflow:auto;max-height:72vh;border:1px solid var(--ln);border-radius:8px;background:var(--pan)}");
+   H("table{border-collapse:collapse;width:100%;font-size:12px}");
+   H("th,td{padding:5px 8px;border-bottom:1px solid var(--ln);white-space:nowrap;text-align:right}");
+   H("th{position:sticky;top:0;background:#1b212a;cursor:pointer;user-select:none;font-weight:600}");
+   H("th:first-child,td:first-child{text-align:left}td{font-variant-numeric:tabular-nums}");
+   H("tbody tr:hover{background:#1d232c}.up{color:var(--good)}.dn{color:var(--bad)}");
+   H(".hi{color:var(--good);font-weight:600}.lo{color:var(--bad)}.nz{color:var(--mut)}");
+   H(".bw{background:#0c0f13;border-radius:3px;height:9px;width:110px;display:inline-block;vertical-align:middle}");
+   H(".bf{background:var(--acc);height:9px;border-radius:3px;display:block}");
+   H(".note{color:var(--mut);font-size:12px;margin:6px 0 14px;max-width:95ch}");
+   H(".note b{color:var(--tx)}");
+   H("</style></head><body>");
+   H("<header><h1>VTRLS Move Research - "+HE(sym)+"</h1><div class=\"sub\">TF base "+EnumToString(InpBaseTF)+
+     " | periodo "+TimeToString(InpFrom,TIME_DATE)+" - "+TimeToString(InpTo,TIME_DATE)+
+     " | generato "+TimeToString(TimeCurrent(),TIME_DATE|TIME_MINUTES)+"</div></header>");
+   H("<nav>");
+   H("<button class=\"on\" onclick=\"tab(0)\">Riepilogo</button>");
+   H("<button onclick=\"tab(1)\">Giornaliero</button>");
+   H("<button onclick=\"tab(2)\">Largest Move</button>");
+   H("<button onclick=\"tab(3)\">Orari</button>");
+   H("<button onclick=\"tab(4)\">Condizioni incrociate</button>");
+   H("<button onclick=\"tab(5)\">Condizioni marginali</button>");
+   H("</nav><main>");
+   H("<section class=\"on\"><div id=\"sum\" class=\"sum\"></div>");
+   H("<h2>Come leggere questo report</h2><div class=\"note\">");
+   H("<b>Largest Move</b> e' la massima escursione direzionale della giornata. E' nota solo a posteriori: descrive, non predice. ");
+   H("Le tabelle <b>Condizioni</b> non la usano come obiettivo: partono da una griglia point-in-time in cui le feature ");
+   H("all'istante t sono costruite solo con barre chiuse prima di t, l'ingresso e' all'apertura della barra t e l'esito e' ");
+   H("un first touch target/stop entro l'orizzonte. Nessun dato successivo a t entra nelle condizioni.<br><br>");
+   H("<b>p</b> e' la probabilita' grezza, <b>wlow</b> il limite inferiore di Wilson al 95%, <b>lift</b> il rapporto con la ");
+   H("baseline incondizionata. Una cella e' interessante solo se <b>lift &gt; 1.20</b> E <b>wlow &gt; baseline</b>: le celle ");
+   H("che soddisfano entrambe sono in verde, quelle sotto baseline in rosso, il resto in grigio perche' e' rumore. ");
+   H("Con centinaia di celle testate qualcuna sembrera' ottima per puro caso: verifica sempre su un secondo periodo e un ");
+   H("secondo simbolo prima di crederci.</div></section>");
+}
+
+void HtmlFoot()
+{
+   H("</main><script>");
+   H("function tab(i){var s=document.querySelectorAll('section'),b=document.querySelectorAll('nav button');");
+   H("for(var k=0;k<s.length;k++){s[k].className=(k==i?'on':'');}");
+   H("for(var k=0;k<b.length;k++){b[k].className=(k==i?'on':'');}}");
+   H("function srt(th){var t=th.closest('table'),i=0,c=th.parentNode.children;");
+   H("for(var k=0;k<c.length;k++){if(c[k]==th)i=k;}");
+   H("var b=t.tBodies[0],r=[];for(var k=0;k<b.rows.length;k++)r.push(b.rows[k]);");
+   H("var d=(th.getAttribute('d')=='1')?-1:1;th.setAttribute('d',d==1?'1':'0');");
+   H("r.sort(function(x,y){var a=x.cells[i].innerText.trim(),e=y.cells[i].innerText.trim();");
+   H("var na=parseFloat(a),ne=parseFloat(e);");
+   H("if(!isNaN(na)&&!isNaN(ne)&&a!=''&&e!='')return (na-ne)*d;return a.localeCompare(e)*d;});");
+   H("for(var k=0;k<r.length;k++)b.appendChild(r[k]);}");
+   H("function flt(el){var t=document.getElementById(el.getAttribute('t')),q=el.value.toLowerCase(),b=t.tBodies[0];");
+   H("for(var k=0;k<b.rows.length;k++){var r=b.rows[k];r.style.display=(r.innerText.toLowerCase().indexOf(q)>=0)?'':'none';}}");
+   H("var sc=document.getElementById('sumsrc');if(sc){document.getElementById('sum').appendChild(sc);sc.style.display='contents';}");
+   H("</script></body></html>");
+}
+
+// intestazione di tabella da una lista separata da ';'
+void HtmlTableHead(string id, string cols, bool withFilter)
+{
+   if(withFilter)
+      H("<div class=\"tools\"><input placeholder=\"filtra righe...\" t=\""+id+"\" oninput=\"flt(this)\"></div>");
+   H("<div class=\"wrap\"><table id=\""+id+"\"><thead><tr>");
+   string c[]; int n=StringSplit(cols,StringGetCharacter(";",0),c);
+   for(int i=0;i<n;i++) H("<th onclick=\"srt(this)\">"+HE(c[i])+"</th>");
+   H("</tr></thead><tbody>");
+}
+void HtmlTableEnd(){ H("</tbody></table></div>"); }
+
+// una cella "probabilita' (lift)" colorata: verde solo se il lift supera 1.20
+// E il limite inferiore di Wilson resta sopra la baseline. Tutto il resto e'
+// grigio, perche' statisticamente non distinguibile dal caso.
+string CondCell(int hits,int n,int base)
+{
+   if(n<=0) return "<td>-</td>";
+   double p =(double)hits/n;
+   double bp=(g_nScan>0 ? (double)base/g_nScan : 0.0);
+   double wl=WilsonLow(hits,n);
+   double lift=(bp>0 ? p/bp : 0.0);
+   string cls="nz";
+   if(bp>0 && lift>1.20 && wl>bp)      cls="hi";
+   else if(bp>0 && lift<0.80)          cls="lo";
+   return "<td class=\""+cls+"\">"+F(100.0*p,1)+"% <span class=\"nz\">x"+F(lift,2)+"</span></td>";
+}
+
 //==================================================================
 //  ELABORAZIONE DI UN SIMBOLO
 //==================================================================
@@ -838,9 +967,22 @@ bool ProcessSymbol(string sym)
    //--- file di output
    string dir = InpOutDir+"\\";
    string fn  = SafeName(sym);
-   int fDaily = FileOpen(dir+fn+"_daily.csv",   FILE_WRITE|FILE_TXT|FILE_ANSI);
-   int fLm    = FileOpen(dir+fn+"_largest.csv", FILE_WRITE|FILE_TXT|FILE_ANSI);
-   if(fDaily==INVALID_HANDLE || fLm==INVALID_HANDLE)
+   int fDaily = INVALID_HANDLE, fLm = INVALID_HANDLE;
+   if(InpWriteCsv)
+   {
+      fDaily = FileOpen(dir+fn+"_daily.csv",   FILE_WRITE|FILE_TXT|FILE_ANSI);
+      fLm    = FileOpen(dir+fn+"_largest.csv", FILE_WRITE|FILE_TXT|FILE_ANSI);
+   }
+   g_html = INVALID_HANDLE;
+   if(InpWriteHtml)
+   {
+      g_html = FileOpen(dir+fn+"_report.html", FILE_WRITE|FILE_TXT|FILE_ANSI);
+      if(g_html==INVALID_HANDLE)
+         PrintFormat("[%s] ATTENZIONE: report HTML non creato (err %d)",sym,GetLastError());
+      else
+         HtmlHead(sym);
+   }
+   if(InpWriteCsv && (fDaily==INVALID_HANDLE || fLm==INVALID_HANDLE))
    {
       PrintFormat("[%s] ERRORE: impossibile aprire i file di output in %s\\MQL5\\Files\\%s (err %d)",
                   sym,TerminalInfoString(TERMINAL_DATA_PATH),InpOutDir,GetLastError());
@@ -849,7 +991,7 @@ bool ProcessSymbol(string sym)
    DBG(1,"=== ["+sym+"] FASE 5: output in "+TerminalInfoString(TERMINAL_DATA_PATH)+
          "\\MQL5\\Files\\"+InpOutDir+" ===");
 
-   FileWriteString(fDaily,
+   W(fDaily,
       "date;dow;month;"
       "prev_open;prev_high;prev_low;prev_close;prev_range_pt;prev_body_pt;prev_upwick_pt;prev_dnwick_pt;"
       "prev_dir;prev_close_pos;atr_pt;prev_range_atr;prev_body_atr;"
@@ -860,7 +1002,7 @@ bool ProcessSymbol(string sym)
       "lm_start;lm_end;lm_dir;lm_pt;lm_atr;lm_dur_min;lm_sess;lm_h1;lm_m15;"
       "news_flag;news_name;news_dist_min;news_imp\r\n");
 
-   FileWriteString(fLm,
+   W(fLm,
       "date;dow;lm_start;lm_end;lm_dir;lm_pt;lm_atr;lm_dur_min;lm_sess;lm_h1;lm_m15;"
       "atr_pt;news_flag;news_name;news_dist_min;news_imp\r\n");
 
@@ -874,6 +1016,7 @@ bool ProcessSymbol(string sym)
    int c1AtrM15[96];   ArrayInitialize(c1AtrM15,0);
    int c2AtrM15[96];   ArrayInitialize(c2AtrM15,0);
 
+   string htmlLm[];    ArrayResize(htmlLm,0);      // righe della tabella Largest Move (scritte a fine ciclo)
    double lmAtrAll[];  ArrayResize(lmAtrAll,0);
    int    lmHourAll[]; ArrayResize(lmHourAll,0);
    int    nDays=0;
@@ -885,6 +1028,16 @@ bool ProcessSymbol(string sym)
    int stepMin  = (int)MathMax(InpScanStepMin, g_tfMin);
    int stepBars = (int)MathMax(1, stepMin/g_tfMin);
    int horBars  = (int)MathMax(1, InpScanHorizonMin/g_tfMin);
+
+   if(g_html!=INVALID_HANDLE)
+   {
+      H("<section><h2>Tabella giornaliera</h2><div class=\"note\">Una riga per giornata. Il blocco <b>prev_*</b> "
+        "descrive il giorno precedente; il blocco <b>pre_*</b> descrive cio' che il prezzo ha fatto nel giorno corrente "
+        "<b>prima</b> che il Largest Move iniziasse, senza usare un solo dato successivo. Clic sull'intestazione per ordinare. "
+        "Tutte le colonne, comprese quelle omesse qui, sono nel CSV.</div>");
+      HtmlTableHead("tD","data;gg;range D-1;range D-1 ATR;dir D-1;close pos;ATR pt;pre min;pre up;pre dn;pre tot;"
+                         "pre net;pre range;% range D-1;LM inizio;LM fine;LM dir;LM pt;LM ATR;durata;sessione;news",true);
+   }
 
    //--- conteggio giornate nel periodo, per la barra di avanzamento
    int totDays=0;
@@ -1027,13 +1180,34 @@ bool ProcessSymbol(string sym)
          F(lmPt,1)+";"+F(lmAtr,3)+";"+IntegerToString(lmDur)+";"+SessName(sess)+";"+
          D2(st.hour)+":00;"+M15Label(st.hour,st.min)+";"+
          IntegerToString(nFlag)+";"+nName+";"+IntegerToString(nDist)+";"+IntegerToString(nImp);
-      FileWriteString(fDaily,dayRow+"\r\n");
+      W(fDaily,dayRow+"\r\n");
 
-      FileWriteString(fLm,
+      W(fLm,
          DateStr(dStart)+";"+DowIT(st.day_of_week)+";"+HM(lmStart)+";"+HM(lmEnd)+";"+
          (lmDir>0?"BUY":"SELL")+";"+F(lmPt,1)+";"+F(lmAtr,3)+";"+IntegerToString(lmDur)+";"+
          SessName(sess)+";"+D2(st.hour)+":00;"+M15Label(st.hour,st.min)+";"+F(atrPt,1)+";"+
          IntegerToString(nFlag)+";"+nName+";"+IntegerToString(nDist)+";"+IntegerToString(nImp)+"\r\n");
+
+      if(g_html!=INVALID_HANDLE)
+      {
+         string cd=(lmDir>0?"up":"dn"), cn=(preNet>=0?"up":"dn");
+         H("<tr><td>"+DateStr(dStart)+"</td><td>"+DowIT(st.day_of_week)+"</td><td>"+F(pRange,1)+"</td><td>"+
+           F(pRange/atrPt,2)+"</td><td class=\""+(pDir>0?"up":"dn")+"\">"+(pDir>0?"UP":"DOWN")+"</td><td>"+
+           F(pClosePos,2)+"</td><td>"+F(atrPt,1)+"</td><td>"+IntegerToString(preBars*g_tfMin)+"</td><td>"+
+           F(preUp,1)+"</td><td>"+F(preDn,1)+"</td><td>"+F(preTot,1)+"</td><td class=\""+cn+"\">"+F(preNet,1)+
+           "</td><td>"+F(preRange,1)+"</td><td>"+F(prePct,1)+"</td><td>"+HM(lmStart)+"</td><td>"+HM(lmEnd)+
+           "</td><td class=\""+cd+"\">"+(lmDir>0?"BUY":"SELL")+"</td><td>"+F(lmPt,1)+"</td><td>"+F(lmAtr,2)+
+           "</td><td>"+IntegerToString(lmDur)+"</td><td>"+SessName(sess)+"</td><td>"+
+           (nFlag>0?HE(nName):"-")+"</td></tr>");
+
+         int hq=ArraySize(htmlLm);
+         ArrayResize(htmlLm,hq+1,512);
+         htmlLm[hq]="<tr><td>"+DateStr(dStart)+"</td><td>"+DowIT(st.day_of_week)+"</td><td>"+HM(lmStart)+
+           "</td><td>"+HM(lmEnd)+"</td><td class=\""+cd+"\">"+(lmDir>0?"BUY":"SELL")+"</td><td>"+F(lmPt,1)+
+           "</td><td>"+F(lmAtr,2)+"</td><td>"+IntegerToString(lmDur)+"</td><td>"+SessName(sess)+"</td><td>"+
+           D2(st.hour)+":00</td><td>"+M15Label(st.hour,st.min)+"</td><td>"+F(atrPt,1)+"</td><td>"+
+           (nFlag>0?HE(nName):"-")+"</td><td>"+(ni>=0?IntegerToString(nDist):"")+"</td></tr>";
+      }
 
       cntH1[st.hour]++;  sumH1[st.hour]+=lmPt;
       if(lmAtr>1.0) c1AtrH1[st.hour]++;
@@ -1102,22 +1276,74 @@ bool ProcessSymbol(string sym)
       }
    }
 
-   FileClose(fDaily);
-   FileClose(fLm);
+   if(fDaily!=INVALID_HANDLE) FileClose(fDaily);
+   if(fLm   !=INVALID_HANDLE) FileClose(fLm);
+
+   if(g_html!=INVALID_HANDLE)
+   {
+      HtmlTableEnd(); H("</section>");                       // chiude la tabella giornaliera
+
+      H("<section><h2>Largest Move per giornata</h2><div class=\"note\">Il movimento direzionale piu' ampio di ogni "
+        "giornata, con orario di inizio ricavato dal timestamp della barra che lo avvia (risoluzione = TF base), "
+        "non dalla chiusura daily. Ordina per <b>LM ATR</b> per isolare le giornate realmente esplosive.</div>");
+      HtmlTableHead("tL","data;gg;inizio;fine;dir;punti;ATR;durata min;sessione;ora;fascia 15m;ATR pt;news;dist news min",true);
+      for(int i=0;i<ArraySize(htmlLm);i++) H(htmlLm[i]);
+      HtmlTableEnd(); H("</section>");
+   }
    DBG(1,"["+sym+"] scritte "+IntegerToString(nDays)+" righe in "+fn+"_daily.csv e "+fn+"_largest.csv");
 
    //--- tabella distribuzione oraria
-   int fTd=FileOpen(dir+fn+"_timedist.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
+   int maxH1=0, maxM15=0;
+   for(int h=0;h<24;h++) if(cntH1[h]>maxH1)   maxH1=cntH1[h];
+   for(int b=0;b<96;b++) if(cntM15[b]>maxM15) maxM15=cntM15[b];
+
+   if(g_html!=INVALID_HANDLE)
+   {
+      H("<section><h2>Quando avviene il movimento maggiore</h2><div class=\"note\">Distribuzione dell'orario di inizio "
+        "del Largest Move. La granularita' a 15 minuti serve a distinguere una singola finestra realmente calda da "
+        "un'intera sessione: se una fascia da 15 minuti concentra molti piu' movimenti delle vicine, e' li' che vale "
+        "la pena essere presenti. <b>Ora server del broker</b>: con il cambio ora legale le fasce slittano di un'ora.</div>");
+      H("<h2>Fasce orarie (H1)</h2>");
+      HtmlTableHead("tH","fascia;n movimenti;distribuzione;% giornate;media pt;mediana ATR;&gt;1 ATR;&gt;2 ATR",false);
+      for(int h=0;h<24;h++)
+      {
+         if(cntH1[h]==0) continue;
+         double med[]; ArrayResize(med,0);
+         for(int i=0;i<ArraySize(lmAtrAll);i++)
+            if(lmHourAll[i]==h){ int m=ArraySize(med); ArrayResize(med,m+1,512); med[m]=lmAtrAll[i]; }
+         int wpc=(maxH1>0? (int)(100.0*cntH1[h]/maxH1) : 0);
+         H("<tr><td>"+D2(h)+":00-"+D2((h+1)%24)+":00</td><td>"+IntegerToString(cntH1[h])+
+           "</td><td><span class=\"bw\"><span class=\"bf\" style=\"width:"+IntegerToString(wpc)+"%\"></span></span></td><td>"+
+           F(100.0*cntH1[h]/MathMax(1,nDays),1)+"</td><td>"+F(sumH1[h]/cntH1[h],1)+"</td><td>"+F(Median(med),2)+
+           "</td><td>"+IntegerToString(c1AtrH1[h])+"</td><td>"+IntegerToString(c2AtrH1[h])+"</td></tr>");
+      }
+      HtmlTableEnd();
+      H("<h2>Fasce da 15 minuti</h2>");
+      HtmlTableHead("tM","fascia;n movimenti;distribuzione;% giornate;media pt;&gt;1 ATR;&gt;2 ATR",true);
+      for(int b=0;b<96;b++)
+      {
+         if(cntM15[b]==0) continue;
+         int hh2=b/4, mm2=(b%4)*15;
+         int wpc=(maxM15>0? (int)(100.0*cntM15[b]/maxM15) : 0);
+         H("<tr><td>"+M15Label(hh2,mm2)+"</td><td>"+IntegerToString(cntM15[b])+
+           "</td><td><span class=\"bw\"><span class=\"bf\" style=\"width:"+IntegerToString(wpc)+"%\"></span></span></td><td>"+
+           F(100.0*cntM15[b]/MathMax(1,nDays),1)+"</td><td>"+F(sumM15[b]/cntM15[b],1)+"</td><td>"+
+           IntegerToString(c1AtrM15[b])+"</td><td>"+IntegerToString(c2AtrM15[b])+"</td></tr>");
+      }
+      HtmlTableEnd(); H("</section>");
+   }
+
+   int fTd=(InpWriteCsv? FileOpen(dir+fn+"_timedist.csv",FILE_WRITE|FILE_TXT|FILE_ANSI) : INVALID_HANDLE);
    if(fTd!=INVALID_HANDLE)
    {
-      FileWriteString(fTd,"granularita;bucket;n_lm;pct_giornate;media_pt;mediana_atr;n_gt1atr;n_gt2atr\r\n");
+      W(fTd,"granularita;bucket;n_lm;pct_giornate;media_pt;mediana_atr;n_gt1atr;n_gt2atr\r\n");
       for(int h=0;h<24;h++)
       {
          if(cntH1[h]==0) continue;
          double med[]; ArrayResize(med,0);
          for(int i=0;i<ArraySize(lmAtrAll);i++)
             if(lmHourAll[i]==h){ int m=ArraySize(med); ArrayResize(med,m+1); med[m]=lmAtrAll[i]; }
-         FileWriteString(fTd,"H1;"+D2(h)+":00-"+D2((h+1)%24)+":00;"+IntegerToString(cntH1[h])+";"+
+         W(fTd,"H1;"+D2(h)+":00-"+D2((h+1)%24)+":00;"+IntegerToString(cntH1[h])+";"+
             F(100.0*cntH1[h]/MathMax(1,nDays),2)+";"+F(sumH1[h]/cntH1[h],1)+";"+F(Median(med),3)+";"+
             IntegerToString(c1AtrH1[h])+";"+IntegerToString(c2AtrH1[h])+"\r\n");
       }
@@ -1125,7 +1351,7 @@ bool ProcessSymbol(string sym)
       {
          if(cntM15[b]==0) continue;
          int hh2=b/4, mm2=(b%4)*15;
-         FileWriteString(fTd,"M15;"+M15Label(hh2,mm2)+";"+IntegerToString(cntM15[b])+";"+
+         W(fTd,"M15;"+M15Label(hh2,mm2)+";"+IntegerToString(cntM15[b])+";"+
             F(100.0*cntM15[b]/MathMax(1,nDays),2)+";"+F(sumM15[b]/cntM15[b],1)+";;"+
             IntegerToString(c1AtrM15[b])+";"+IntegerToString(c2AtrM15[b])+"\r\n");
       }
@@ -1135,7 +1361,7 @@ bool ProcessSymbol(string sym)
    //--- CSV grezzo dello scan
    if(InpDoScan && InpWriteScanRows && g_nScan>0)
    {
-      int fS=FileOpen(dir+fn+"_scan.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
+      int fS=(InpWriteCsv? FileOpen(dir+fn+"_scan.csv",FILE_WRITE|FILE_TXT|FILE_ANSI) : INVALID_HANDLE);
       if(fS!=INVALID_HANDLE)
       {
          string hdr="datetime;date;dow;hour;m15;sess;atr_pt;prev_dir;prev_range_atr;prev_body_atr;prev_close_pos;"
@@ -1144,7 +1370,7 @@ bool ProcessSymbol(string sym)
                     "news_flag;news_ahead_min;mfe_up_pt;mfe_dn_pt;mfe_up_atr;mfe_dn_atr;mfe_max_atr";
          for(int k=0;k<g_nPt;k++)  hdr+=";hitup_"+F(g_thrPt[k],0)+"pt;hitdn_"+F(g_thrPt[k],0)+"pt";
          for(int k=0;k<g_nAtr;k++) hdr+=";hitup_"+F(g_thrAtr[k],2)+"atr;hitdn_"+F(g_thrAtr[k],2)+"atr";
-         FileWriteString(fS,hdr+"\r\n");
+         W(fS,hdr+"\r\n");
 
          for(int i=0;i<g_nScan;i++)
          {
@@ -1159,7 +1385,7 @@ bool ProcessSymbol(string sym)
                F(s.mfeUpPt,1)+";"+F(s.mfeDnPt,1)+";"+F(s.mfeUpAtr,3)+";"+F(s.mfeDnAtr,3)+";"+F(s.mfeMaxAtr,3);
             for(int k=0;k<g_nPt;k++)  row+=";"+IntegerToString(s.hitUpPt[k])+";"+IntegerToString(s.hitDnPt[k]);
             for(int k=0;k<g_nAtr;k++) row+=";"+IntegerToString(s.hitUpAtr[k])+";"+IntegerToString(s.hitDnAtr[k]);
-            FileWriteString(fS,row+"\r\n");
+            W(fS,row+"\r\n");
          }
          FileClose(fS);
       }
@@ -1167,6 +1393,39 @@ bool ProcessSymbol(string sym)
 
    //--- tabelle delle condizioni
    if(InpDoScan && g_nScan>0) BuildConditions(sym,dir);
+   else if(g_html!=INVALID_HANDLE)
+   {
+      H("<section><h2>Condizioni incrociate</h2><div class=\"note\">Non generate: "
+        "InpDoScan disattivato oppure zero righe nella griglia point-in-time.</div></section>");
+      H("<section><h2>Condizioni marginali</h2><div class=\"note\">Non generate.</div></section>");
+   }
+
+   if(g_html!=INVALID_HANDLE)
+   {
+      double avgLm=0, medLm=0;
+      double cp[]; ArrayCopy(cp,lmAtrAll);
+      for(int i=0;i<ArraySize(lmAtrAll);i++) avgLm+=lmAtrAll[i];
+      if(ArraySize(lmAtrAll)>0) avgLm/=ArraySize(lmAtrAll);
+      medLm=Median(cp);
+      int nBig=0; for(int i=0;i<ArraySize(lmAtrAll);i++) if(lmAtrAll[i]>1.0) nBig++;
+
+      H("<div id=\"sumsrc\" style=\"display:none\">");
+      H("<div class=\"card\"><span>giornate</span><b>"+IntegerToString(nDays)+"</b></div>");
+      H("<div class=\"card\"><span>scartate</span><b>"+IntegerToString(nSkipped)+"</b></div>");
+      H("<div class=\"card\"><span>righe point-in-time</span><b>"+IntegerToString(g_nScan)+"</b></div>");
+      H("<div class=\"card\"><span>largest move medio</span><b>"+F(avgLm,2)+" ATR</b></div>");
+      H("<div class=\"card\"><span>largest move mediano</span><b>"+F(medLm,2)+" ATR</b></div>");
+      H("<div class=\"card\"><span>giornate &gt; 1 ATR</span><b>"+
+        F(100.0*nBig/MathMax(1,nDays),1)+"%</b></div>");
+      H("<div class=\"card\"><span>orizzonte forward</span><b>"+IntegerToString(InpScanHorizonMin)+" min</b></div>");
+      H("<div class=\"card\"><span>stop / target</span><b>"+F(InpAdverseRatio,2)+"</b></div>");
+      H("</div>");
+      HtmlFoot();
+      FileClose(g_html);
+      g_html=INVALID_HANDLE;
+      PrintFormat("[%s] report HTML: %s\\MQL5\\Files\\%s\\%s_report.html",
+                  sym,TerminalInfoString(TERMINAL_DATA_PATH),InpOutDir,fn);
+   }
 
    PrintFormat("[%s] RIEPILOGO: giornate analizzate %d | scartate %d (senza dati %d, poche barre %d, ATR nullo %d) | righe scan %d | TF %s",
                sym,nDays,nSkipped,skNoData,skFewBars,skNoAtr,g_nScan,EnumToString(InpBaseTF));
@@ -1217,7 +1476,15 @@ void BuildConditions(string sym,string dir)
    }
    WriteCells(dir+fn+"_conditions.csv",
               "prev_range;prev_dir;pre_total;pre_net;sessione;news",
-              basePt,baseAtr);
+              basePt,baseAtr,
+              "Condizioni incrociate",
+              "Ogni riga e' una combinazione di sei condizioni misurate <b>prima</b> dell'ingresso. "
+              "Le colonne delle soglie mostrano la probabilita' che il prezzo faccia quel movimento entro l'orizzonte "
+              "prima di subire lo stop, e tra parentesi il <b>lift</b> sulla baseline. Verde = lift &gt; 1.20 e Wilson-low "
+              "sopra la baseline, cioe' l'unico caso in cui vale la pena guardare. Rosso = sotto baseline. Grigio = rumore. "
+              "Molte celle qui hanno pochi campioni: incrociare sei dimensioni frammenta i dati, quindi usa questa tabella "
+              "per generare ipotesi e la tabella marginale per verificarle.",
+              "tC");
 
    //--- 2) tabella marginale (una dimensione per volta)
    CellsInit();
@@ -1237,10 +1504,16 @@ void BuildConditions(string sym,string dir)
       CellAdd("H|"+IntegerToString(s.hour*4+s.minute/15),"m15;"+M15Label(s.hour,s.minute),s);
       CellAdd("I|"+IntegerToString(s.dow),"giorno;"+DowIT(s.dow),s);
    }
-   WriteCells(dir+fn+"_conditions_marg.csv","dimensione;valore",basePt,baseAtr);
+   WriteCells(dir+fn+"_conditions_marg.csv","dimensione;valore",basePt,baseAtr,
+              "Condizioni marginali",
+              "La stessa statistica con una sola dimensione per volta. Molti piu' campioni per cella, quindi molto piu' "
+              "affidabile: e' qui che si vede se una condizione regge davvero. Se un effetto e' visibile nella tabella "
+              "incrociata ma sparisce qui, quasi sempre era rumore.",
+              "tG");
 }
 
-void WriteCells(string path,string keyHeader,const int &basePt[],const int &baseAtr[])
+void WriteCells(string path,string keyHeader,const int &basePt[],const int &baseAtr[],
+                string title,string note,string tid)
 {
    int f=FileOpen(path,FILE_WRITE|FILE_TXT|FILE_ANSI);
    if(f==INVALID_HANDLE){ PrintFormat("impossibile scrivere %s (err %d)",path,GetLastError()); return; }
@@ -1251,7 +1524,19 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
    for(int k=0;k<g_nAtr;k++)
       hdr+=";n_"+F(g_thrAtr[k],2)+"atr;p_"+F(g_thrAtr[k],2)+"atr;wlow_"+F(g_thrAtr[k],2)+"atr;lift_"+F(g_thrAtr[k],2)+"atr";
    hdr+=";media_mfe_atr;mediana_mfe_atr";
-   FileWriteString(f,hdr+"\r\n");
+   W(f,hdr+"\r\n");
+
+   //--- stessa tabella in HTML, in forma compatta: per ogni soglia una sola
+   //--- cella "probabilita' (lift)", colorata secondo il criterio di rilevanza
+   if(g_html!=INVALID_HANDLE)
+   {
+      H("<section><h2>"+HE(title)+"</h2><div class=\"note\">"+note+"</div>");
+      string hcols=keyHeader+";n";
+      for(int k=0;k<g_nPt;k++)  hcols+=";"+F(g_thrPt[k],0)+"pt";
+      for(int k=0;k<g_nAtr;k++) hcols+=";"+F(g_thrAtr[k],2)+" ATR";
+      hcols+=";MFE medio ATR;MFE mediano ATR";
+      HtmlTableHead(tid,hcols,true);
+   }
 
    for(int c=0;c<g_nCell;c++)
    {
@@ -1275,19 +1560,49 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
               (bp>0? F(p/bp,3) : "");
       }
       double med[]; ArrayCopy(med,g_cell[c].mfe);
-      row+=";"+F(g_cell[c].sumMfe/n,3)+";"+F(Median(med),3);
-      FileWriteString(f,row+"\r\n");
+      double mMean=g_cell[c].sumMfe/n, mMed=Median(med);
+      row+=";"+F(mMean,3)+";"+F(mMed,3);
+      W(f,row+"\r\n");
+
+      if(g_html!=INVALID_HANDLE)
+      {
+         string h="<tr>";
+         string lab[]; int nl=StringSplit(g_cell[c].label,StringGetCharacter(";",0),lab);
+         for(int i=0;i<nl;i++) h+="<td>"+HE(lab[i])+"</td>";
+         h+="<td>"+IntegerToString(n)+"</td>";
+         for(int k=0;k<g_nPt;k++)  h+=CondCell(g_cell[c].hitPt[k], n, basePt[k]);
+         for(int k=0;k<g_nAtr;k++) h+=CondCell(g_cell[c].hitAtr[k],n, baseAtr[k]);
+         h+="<td>"+F(mMean,2)+"</td><td>"+F(mMed,2)+"</td></tr>";
+         H(h);
+      }
    }
 
    // riga baseline in coda: serve per leggere il lift in modo onesto
+   string bl[];
    string b="BASELINE (tutte le righe);"+IntegerToString(g_nScan);
    for(int k=0;k<g_nPt;k++)
       b+=";"+IntegerToString(basePt[k])+";"+F(100.0*basePt[k]/MathMax(1,g_nScan),2)+";;1.000";
    for(int k=0;k<g_nAtr;k++)
       b+=";"+IntegerToString(baseAtr[k])+";"+F(100.0*baseAtr[k]/MathMax(1,g_nScan),2)+";;1.000";
    b+=";;";
-   FileWriteString(f,b+"\r\n");
-   FileClose(f);
+   W(f,b+"\r\n");
+   if(f!=INVALID_HANDLE) FileClose(f);
+
+   if(g_html!=INVALID_HANDLE)
+   {
+      string hb="<tr class=\"nz\">";
+      int nk=StringSplit(keyHeader,StringGetCharacter(";",0),bl);
+      hb+="<td><b>BASELINE</b></td>";
+      for(int i=1;i<nk;i++) hb+="<td>-</td>";
+      hb+="<td>"+IntegerToString(g_nScan)+"</td>";
+      for(int k=0;k<g_nPt;k++)
+         hb+="<td>"+F(100.0*basePt[k]/MathMax(1,g_nScan),1)+"%</td>";
+      for(int k=0;k<g_nAtr;k++)
+         hb+="<td>"+F(100.0*baseAtr[k]/MathMax(1,g_nScan),1)+"%</td>";
+      hb+="<td>-</td><td>-</td></tr>";
+      H(hb);
+      HtmlTableEnd(); H("</section>");
+   }
    PrintFormat("scritto %s (%d celle, %d sopra soglia campioni)",path,g_nCell,InpMinSamples);
 }
 

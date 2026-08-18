@@ -28,6 +28,20 @@ Percio':
   Se target e stop cadono nella stessa barra si conta **stop** (ipotesi
   conservativa: senza tick non si conosce l'ordine intrabar).
 
+## Due formati di output
+`InpWriteHtml` (default true) produce **`<SYM>_report.html`**: un file autonomo,
+doppio clic e si apre nel browser. Nessuna libreria esterna, nessuna
+connessione, funziona offline. Contiene sei schede (Riepilogo, Giornaliero,
+Largest Move, Orari, Condizioni incrociate, Condizioni marginali) con
+ordinamento cliccando sulle intestazioni, filtro testuale e colorazione
+automatica delle celle rilevanti.
+
+`InpWriteCsv` (default true) produce i CSV con tutte le colonne, inclusa la
+griglia point-in-time grezza, per Excel e Python. L'HTML omette qualche colonna
+per restare leggibile: per l'analisi seria usa i CSV.
+
+Puoi disattivare l'uno o l'altro.
+
 ## File prodotti
 
 | File | Contenuto |
@@ -38,6 +52,7 @@ Percio':
 | `<SYM>_scan.csv` | griglia point-in-time grezza (feature a *t* + esito forward) |
 | `<SYM>_conditions.csv` | condizioni incrociate (range D-1 x dir D-1 x punti pre x net x sessione x news) |
 | `<SYM>_conditions_marg.csv` | stesse metriche, una dimensione per volta (piu' campioni, piu' robusto) |
+| `<SYM>_report.html` | tutto quanto sopra (tranne lo scan grezzo) in un report navigabile |
 
 ## Normalizzazione cross-simbolo
 Le soglie in punti non sono confrontabili tra XAUUSD, US30 ed EURUSD. Ogni
@@ -50,6 +65,11 @@ Ogni cella riporta, per ogni soglia:
 - `n_<soglia>` numero di successi, `p_<soglia>` probabilita' %,
 - `wlow_<soglia>` **limite inferiore di Wilson al 95%**,
 - `lift_<soglia>` rapporto con la baseline incondizionata (ultima riga del file).
+
+Nel report HTML questo criterio e' gia' applicato: una cella e' **verde** solo
+se `lift > 1.20` **e** Wilson-low sopra la baseline, **rossa** se sotto
+baseline, **grigia** in tutti gli altri casi, cioe' quando non e'
+distinguibile dal caso. Guarda solo il verde, e verificalo comunque.
 
 Una cella con `p=40%`, baseline 38% e `wlow=31%` non e' un edge: e' rumore.
 Si guardano **wlow** e **lift**, mai la probabilita' nuda. Con centinaia di
