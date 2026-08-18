@@ -618,7 +618,7 @@ int SafeCopyRates(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, Mq
 // analizzabile.
 //
 // Tre cose diverse limitano quanti dati ottieni, e vanno distinte:
-//  1. SERIES_SERVERFIRSTDATE  - da dove parte lo storico SUL SERVER del
+//  1. SERIES_SERVER_FIRSTDATE  - da dove parte lo storico SUL SERVER del
 //     broker. Se l'intervallo richiesto e' tutto prima di questa data,
 //     nessuna attesa servira' a niente: quei dati non esistono.
 //  2. TERMINAL_MAXBARS - il tetto di barre che il terminale accetta di
@@ -662,7 +662,7 @@ bool PrepareHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, 
       long synced=0;
       int  b   = Bars(sym,tf,from,to);
       bool ok  = (SeriesInfoInteger(sym,tf,SERIES_SYNCHRONIZED,synced) && synced!=0);
-      srvFirst = (datetime)SeriesInfoInteger(sym,tf,SERIES_SERVERFIRSTDATE);
+      srvFirst = (datetime)SeriesInfoInteger(sym,tf,SERIES_SERVER_FIRSTDATE);
       locFirst = (datetime)SeriesInfoInteger(sym,tf,SERIES_FIRSTDATE);
 
       // il broker non ha proprio questi dati: inutile aspettare
@@ -703,7 +703,7 @@ bool PrepareHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, 
       Sleep(500);
    }
 
-   srvFirst=(datetime)SeriesInfoInteger(sym,tf,SERIES_SERVERFIRSTDATE);
+   srvFirst=(datetime)SeriesInfoInteger(sym,tf,SERIES_SERVER_FIRSTDATE);
    locFirst=(datetime)SeriesInfoInteger(sym,tf,SERIES_FIRSTDATE);
    datetime avail=locFirst;
    if(srvFirst>0 && (avail==0 || srvFirst>avail)) avail=srvFirst;
