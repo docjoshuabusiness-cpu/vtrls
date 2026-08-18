@@ -82,3 +82,23 @@ su un secondo periodo e su un secondo simbolo prima di considerarla reale.
 - La giornata e' quella del broker (barra D1 del server), quindi FP Markets =
   GMT+2/+3 con DST. Confrontando simboli o periodi lunghi, tienine conto:
   i bucket M15 slittano di un'ora tra ora solare e ora legale.
+
+## Come si esegue (procedura)
+1. Copia lo `.mq5` in `MQL5/Scripts/`, compila con F7 in MetaEditor.
+2. Nel terminale, Strumenti > Opzioni > Grafici > **Barre massime nel grafico =
+   illimitato**. Apri il grafico del simbolo sul TF base (es. M1) e tieni premuto
+   Home finche' la storia non arriva alla data che ti serve.
+3. Trascina lo script sul grafico: si apre la finestra **Input** (il TF del
+   grafico e' irrilevante, conta solo `InpBaseTF`; il simbolo del grafico conta
+   solo se `InpSymbols` e' vuoto).
+4. Imposta `InpFrom` / `InpTo` / `InpBaseTF` / `InpSymbols` e conferma.
+5. Lo script gira una volta e termina da solo. Segui l'avanzamento nella scheda
+   **Esperti**: stampa prima barra disponibile, barre nel periodo, giornate
+   analizzate e giornate scartate.
+6. Output: File > Apri cartella dati > `MQL5\\Files\\VTRLS_Research\\`.
+
+**Primo run consigliato**: 3 mesi, `InpDoScan=false`. Verifichi che i CSV
+abbiano senso, poi rilanci sul periodo pieno con lo scan attivo.
+
+Se la riga "giornate scartate" e' alta, lo storico non e' completo: ripeti il
+punto 2 e rilancia (al secondo run i dati sono gia' in cache locale).

@@ -574,6 +574,26 @@ int SafeCopyRates(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, Mq
 }
 
 //------------------------------------------------------------------
+// Attende che la serie del TF base sia sincronizzata con il server.
+// Senza questa attesa il primo run puo' produrre file parziali in
+// silenzio: MT5 scarica lo storico in modo asincrono e CopyRates
+// ritorna -1 sulle giornate non ancora disponibili.
+//------------------------------------------------------------------
+bool WaitHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to)
+{
+   for(int a=0; a<200; a++)
+   {
+      long synced=0;
+      int  b=Bars(sym,tf,from,to);
+      if(b>0 && SeriesInfoInteger(sym,tf,SERIES_SYNCHRONIZED,synced) && synced!=0)
+         return true;
+      if(IsStopped()) return false;
+      Sleep(300);
+   }
+   return (Bars(sym,tf,from,to)>0);
+}
+
+//------------------------------------------------------------------
 // ripulisce il nome del simbolo per usarlo come nome file
 //------------------------------------------------------------------
 string SafeName(string s)
@@ -619,6 +639,19 @@ bool ProcessSymbol(string sym)
       atr[i]=s/InpATRPeriod;
    }
 
+   //--- attesa sincronizzazione del TF base e diagnostica della copertura reale
+   if(!WaitHistory(sym, InpBaseTF, InpFrom, InpTo))
+      PrintFormat("[%s] ATTENZIONE: serie %s non sincronizzata, risultati potenzialmente parziali.",
+                  sym, EnumToString(InpBaseTF));
+   datetime firstBase = (datetime)SeriesInfoInteger(sym, InpBaseTF, SERIES_FIRSTDATE);
+   int      barsBase  = Bars(sym, InpBaseTF, InpFrom, InpTo);
+   PrintFormat("[%s] storico %s: prima barra disponibile %s | barre nel periodo richiesto: %d",
+               sym, EnumToString(InpBaseTF),
+               (firstBase>0? TimeToString(firstBase,TIME_DATE):"n/d"), barsBase);
+   if(firstBase>InpFrom && firstBase>0)
+      PrintFormat("[%s] NOTA: il broker parte dal %s, la data InpFrom (%s) non e' coperta.",
+                  sym, TimeToString(firstBase,TIME_DATE), TimeToString(InpFrom,TIME_DATE));
+
    LoadCalendar(sym, warm, InpTo);
 
    //--- file di output
@@ -657,6 +690,7 @@ bool ProcessSymbol(string sym)
    double lmAtrAll[];  ArrayResize(lmAtrAll,0);
    int    lmHourAll[]; ArrayResize(lmHourAll,0);
    int    nDays=0;
+   int    nSkipped=0;
 
    g_nScan=0; ArrayResize(g_scan,0);
 
@@ -676,8 +710,8 @@ bool ProcessSymbol(string sym)
 
       MqlRates r[];
       int n = CopyRates(sym, InpBaseTF, dStart, dEnd, r);
-      if(n<=0) continue;
-      if(n<InpMinBarsDay) continue;
+      if(n<=0){ nSkipped++; continue; }
+      if(n<InpMinBarsDay){ nSkipped++; continue; }
 
       double atrPt = atr[di-1]/g_point;             // ATR del giorno PRECEDENTE (point-in-time)
       if(atrPt<=0) continue;
@@ -935,8 +969,8 @@ bool ProcessSymbol(string sym)
    //--- tabelle delle condizioni
    if(InpDoScan && g_nScan>0) BuildConditions(sym,dir);
 
-   PrintFormat("[%s] giornate analizzate: %d | righe scan: %d | TF base: %s",
-               sym,nDays,g_nScan,EnumToString(InpBaseTF));
+   PrintFormat("[%s] giornate analizzate: %d | scartate (dati mancanti/insufficienti): %d | righe scan: %d | TF base: %s",
+               sym,nDays,nSkipped,g_nScan,EnumToString(InpBaseTF));
    return true;
 }
 
