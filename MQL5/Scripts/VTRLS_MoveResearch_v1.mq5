@@ -109,6 +109,7 @@ input int             InpNYLateStart    = 17;              // Inizio NY late
 input string          s5                = "=== DEBUG ===";
 input int             InpDebug          = 1;               // 0=minimo 1=normale 2=verboso 3=dump giornaliero
 input int             InpSyncTimeoutSec = 900;             // Timeout massimo per il download dello storico (s)
+input bool            InpAutoAdjustRange= true;            // Se il periodo richiesto non esiste, analizza quello disponibile
 input int             InpDebugDays      = 5;               // giornate da dumpare in dettaglio (debug>=3)
 
 input string          s6                = "=== OUTPUT ===";
@@ -635,9 +636,11 @@ int SafeCopyRates(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, Mq
 // anche quando il conteggio era fermo a zero, cioe' proprio nel caso in
 // cui l'attesa era inutile per definizione.
 //------------------------------------------------------------------
-bool PrepareHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, datetime &effFrom)
+bool PrepareHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to,
+                    datetime &effFrom, datetime &effTo)
 {
    effFrom=from;
+   effTo  =to;
 
    long maxbars = TerminalInfoInteger(TERMINAL_MAXBARS);
    long needed  = (long)((to-from)/(60*g_tfMin));
@@ -706,6 +709,14 @@ bool PrepareHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, 
       if(GetTickCount()-tMove >= 30000)             // 30s senza alcun avanzamento
       {
          if(b>0) break;
+         // un conteggio fermo su un valore tondo e' quasi sempre il vecchio tetto
+         // di 'Barre massime nel grafico' congelato nella serie gia' caricata:
+         // il nuovo valore non ha effetto finche' il terminale non riparte.
+         if(cnt==100000 || cnt==500000 || cnt==1000000 || cnt==2000000)
+            PrintFormat("[%s] Il conteggio e' fermo esattamente su %d, un valore tondo: e' il vecchio limite "
+                        "'Barre massime nel grafico' rimasto nella serie gia' caricata in memoria. "
+                        "Il nuovo limite non ha effetto finche' non RIAVVII il terminale. Riavvia MT5 e riprova.",
+                        sym,cnt);
          PrintFormat("[%s] STOP: nessun avanzamento del download da 30s. "
                      "Barre totali in locale: %d, prima barra locale %s, storico server dal %s, "
                      "barre nell'intervallo richiesto: %d.",
@@ -734,41 +745,54 @@ bool PrepareHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, 
 
    srvFirst=(datetime)SeriesInfoInteger(sym,tf,SERIES_SERVER_FIRSTDATE);
    locFirst=(datetime)SeriesInfoInteger(sym,tf,SERIES_FIRSTDATE);
-   datetime avail=locFirst;
-   if(srvFirst>0 && (avail==0 || srvFirst>avail)) avail=srvFirst;
+   datetime locLast=(datetime)SeriesInfoInteger(sym,tf,SERIES_LASTBAR_DATE);
 
-   // restringe l'analisi a cio' che esiste davvero, invece di fallire
-   if(avail>0 && avail>effFrom)
+   PrintFormat("[%s] storico %s effettivamente disponibile in locale: %s -> %s",
+               sym,EnumToString(tf),
+               (locFirst>0?TimeToString(locFirst,TIME_DATE):"n/d"),
+               (locLast >0?TimeToString(locLast, TIME_DATE):"n/d"));
+
+   // intersezione tra il periodo richiesto e quello che esiste davvero
+   if(locFirst>0 && locFirst>effFrom) effFrom=locFirst;
+   if(locLast >0 && locLast <effTo)   effTo  =locLast;
+
+   if(effFrom>=effTo)
    {
-      PrintFormat("[%s] intervallo richiesto %s-%s, ma lo storico %s parte dal %s: "
-                  "l'analisi viene ristretta a %s-%s.",
-                  sym,TimeToString(from,TIME_DATE),TimeToString(to,TIME_DATE),
-                  EnumToString(tf),TimeToString(avail,TIME_DATE),
-                  TimeToString(avail,TIME_DATE),TimeToString(to,TIME_DATE));
-      effFrom=avail;
+      if(InpAutoAdjustRange && locFirst>0 && locLast>locFirst)
+      {
+         effFrom=locFirst;
+         effTo  =locLast;
+         PrintFormat("[%s] Il periodo richiesto (%s - %s) non si sovrappone allo storico disponibile. "
+                     "InpAutoAdjustRange e' attivo: analizzo comunque tutto lo storico presente, %s - %s. "
+                     "I risultati valgono per QUEL periodo, non per quello che avevi chiesto.",
+                     sym,TimeToString(from,TIME_DATE),TimeToString(to,TIME_DATE),
+                     TimeToString(effFrom,TIME_DATE),TimeToString(effTo,TIME_DATE));
+      }
+      else
+      {
+         PrintFormat("[%s] STOP: il periodo richiesto (%s - %s) non si sovrappone allo storico disponibile "
+                     "(%s - %s). Correggi InpFrom/InpTo oppure attiva InpAutoAdjustRange.",
+                     sym,TimeToString(from,TIME_DATE),TimeToString(to,TIME_DATE),
+                     (locFirst>0?TimeToString(locFirst,TIME_DATE):"n/d"),
+                     (locLast >0?TimeToString(locLast, TIME_DATE):"n/d"));
+         return false;
+      }
    }
+   else if(effFrom>from || effTo<to)
+      PrintFormat("[%s] periodo ristretto a cio' che esiste: %s - %s (richiesto %s - %s).",
+                  sym,TimeToString(effFrom,TIME_DATE),TimeToString(effTo,TIME_DATE),
+                  TimeToString(from,TIME_DATE),TimeToString(to,TIME_DATE));
 
-   if(effFrom>=to)
-   {
-      PrintFormat("[%s] STOP: lo storico %s disponibile parte dal %s, cioe' DOPO InpTo (%s): "
-                  "l'intervallo da analizzare sarebbe vuoto. "
-                  "Sposta InpTo a una data successiva al %s, oppure scarica piu' storia.",
-                  sym,EnumToString(tf),TimeToString(effFrom,TIME_DATE),TimeToString(to,TIME_DATE),
-                  TimeToString(effFrom,TIME_DATE));
-      return false;
-   }
-
-   int bFinal=Bars(sym,tf,effFrom,to);
-   PrintFormat("[%s] barre %s utilizzabili: %d nel periodo effettivo %s-%s",
-               sym,EnumToString(tf),bFinal,TimeToString(effFrom,TIME_DATE),TimeToString(to,TIME_DATE));
+   int bFinal=Bars(sym,tf,effFrom,effTo);
+   PrintFormat("[%s] barre %s utilizzabili: %d nel periodo effettivo %s - %s",
+               sym,EnumToString(tf),bFinal,TimeToString(effFrom,TIME_DATE),TimeToString(effTo,TIME_DATE));
    if(bFinal<=0)
    {
       PrintFormat("[%s] NESSUN DATO UTILIZZABILE. Rimedi, in ordine: "
-                  "(1) apri il grafico %s del simbolo e tieni premuto Home; "
-                  "(2) Strumenti > Opzioni > Grafici > Barre massime = Illimitato e riavvia; "
-                  "(3) usa un TF base piu' alto (M5/M15), che il broker conserva molto piu' a lungo; "
-                  "(4) sposta InpFrom dopo il %s.",
-                  sym,EnumToString(tf),(avail>0?TimeToString(avail,TIME_DATE):"(data non nota)"));
+                  "(1) RIAVVIA il terminale se hai appena cambiato 'Barre massime nel grafico'; "
+                  "(2) Visualizza > Simboli > %s > scheda Barre > %s > Richiedi; "
+                  "(3) apri il grafico %s e tieni premuto Home.",
+                  sym,sym,EnumToString(tf),EnumToString(tf));
       return false;
    }
    return true;
@@ -965,8 +989,8 @@ bool ProcessSymbol(string sym)
    //--- storico del TF base e intervallo realmente analizzabile
    DBG(1,"=== ["+sym+"] FASE 3: storico "+EnumToString(InpBaseTF)+" ===");
    tPhase=GetTickCount();
-   datetime effFrom=InpFrom;
-   if(!PrepareHistory(sym, InpBaseTF, InpFrom, InpTo, effFrom))
+   datetime effFrom=InpFrom, effTo=InpTo;
+   if(!PrepareHistory(sym, InpBaseTF, InpFrom, InpTo, effFrom, effTo))
    {
       PrintFormat("[%s] elaborazione annullata: storico %s non utilizzabile.",sym,EnumToString(InpBaseTF));
       return false;
@@ -1056,7 +1080,7 @@ bool ProcessSymbol(string sym)
    //--- conteggio giornate nel periodo, per la barra di avanzamento
    int totDays=0;
    for(int di=1; di<nd; di++)
-      if(d1[di].time>=effFrom && d1[di].time<=InpTo) totDays++;
+      if(d1[di].time>=effFrom && d1[di].time<=effTo) totDays++;
    PrintFormat("[%s] giornate da elaborare: %d - inizio...",sym,totDays);
    uint tSym=GetTickCount();
    int  nProc=0;
@@ -1066,7 +1090,7 @@ bool ProcessSymbol(string sym)
    {
       if(IsStopped()){ Print("[",sym,"] interrotto dall'utente."); break; }
       if(d1[di].time < effFrom) continue;
-      if(d1[di].time > InpTo)   break;
+      if(d1[di].time > effTo)   break;
       if(atr[di-1]<=0) continue;
 
       datetime dStart = d1[di].time;
