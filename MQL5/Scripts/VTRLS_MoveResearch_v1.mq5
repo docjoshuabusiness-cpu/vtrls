@@ -108,6 +108,7 @@ input int             InpNYLateStart    = 17;              // Inizio NY late
 
 input string          s5                = "=== DEBUG ===";
 input int             InpDebug          = 1;               // 0=minimo 1=normale 2=verboso 3=dump giornaliero
+input int             InpSyncTimeoutSec = 300;             // Timeout massimo per il download dello storico (s)
 input int             InpDebugDays      = 5;               // giornate da dumpare in dettaglio (debug>=3)
 
 input string          s6                = "=== OUTPUT ===";
@@ -614,22 +615,61 @@ int SafeCopyRates(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, Mq
 
 //------------------------------------------------------------------
 // Attende che la serie del TF base sia sincronizzata con il server.
-// Senza questa attesa il primo run puo' produrre file parziali in
-// silenzio: MT5 scarica lo storico in modo asincrono e CopyRates
-// ritorna -1 sulle giornate non ancora disponibili.
+// Senza questa attesa il primo run produce file parziali in silenzio:
+// MT5 scarica lo storico in modo asincrono e CopyRates ritorna -1 sulle
+// giornate non ancora disponibili.
+//
+// Su anni di M1 il download vale milioni di barre e puo' durare minuti,
+// quindi l'attesa stampa l'avanzamento (barre disponibili e data della
+// prima barra, che scorre all'indietro mentre il server invia i dati).
+// Se il conteggio smette di crescere per 5 secondi consecutivi il
+// download e' considerato concluso anche senza il flag SYNCHRONIZED,
+// che su alcuni broker non si alza mai su intervalli molto lunghi.
 //------------------------------------------------------------------
 bool WaitHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to)
 {
-   for(int a=0; a<200; a++)
+   uint t0=GetTickCount();
+   uint tLast=t0;
+   uint timeoutMs=(uint)MathMax(10,InpSyncTimeoutSec)*1000;
+   int  lastBars=-1;
+   int  stable=0;
+
+   while(GetTickCount()-t0 < timeoutMs)
    {
+      if(IsStopped()){ Print("[",sym,"] sincronizzazione interrotta dall'utente."); return false; }
+
       long synced=0;
       int  b=Bars(sym,tf,from,to);
-      if(b>0 && SeriesInfoInteger(sym,tf,SERIES_SYNCHRONIZED,synced) && synced!=0)
+      bool ok=(SeriesInfoInteger(sym,tf,SERIES_SYNCHRONIZED,synced) && synced!=0);
+      if(b>0 && ok) return true;
+
+      if(b==lastBars) stable++; else { stable=0; lastBars=b; }
+
+      // il conteggio non cresce da ~5s: il server ha finito di inviare
+      if(b>0 && stable>=10)
+      {
+         DBG(1,"["+sym+"] download fermo a "+IntegerToString(b)+" barre da 5s: procedo.");
          return true;
-      if(IsStopped()) return false;
-      Sleep(300);
+      }
+
+      if(GetTickCount()-tLast >= 3000)
+      {
+         tLast=GetTickCount();
+         datetime fd=(datetime)SeriesInfoInteger(sym,tf,SERIES_FIRSTDATE);
+         PrintFormat("[%s] download %s in corso: %d barre nel periodo, prima barra %s (%.0fs)",
+                     sym,EnumToString(tf),b,(fd>0?TimeToString(fd,TIME_DATE):"n/d"),
+                     (GetTickCount()-t0)/1000.0);
+      }
+      Sleep(500);
    }
-   return (Bars(sym,tf,from,to)>0);
+
+   int bf=Bars(sym,tf,from,to);
+   PrintFormat("[%s] TIMEOUT sincronizzazione dopo %d s: %d barre disponibili. "
+               "Proseguo comunque; le giornate mancanti verranno contate come scartate. "
+               "Per risolvere: apri il grafico %s e tieni premuto Home fino alla data voluta, "
+               "oppure alza InpSyncTimeoutSec, oppure riduci l'intervallo InpFrom-InpTo.",
+               sym,InpSyncTimeoutSec,bf,EnumToString(tf));
+   return (bf>0);
 }
 
 //------------------------------------------------------------------
