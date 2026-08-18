@@ -106,7 +106,11 @@ input int             InpLondonStart    = 8;               // Inizio London
 input int             InpNYStart        = 13;              // Inizio NY (overlap)
 input int             InpNYLateStart    = 17;              // Inizio NY late
 
-input string          s5                = "=== OUTPUT ===";
+input string          s5                = "=== DEBUG ===";
+input int             InpDebug          = 1;               // 0=minimo 1=normale 2=verboso 3=dump giornaliero
+input int             InpDebugDays      = 5;               // giornate da dumpare in dettaglio (debug>=3)
+
+input string          s6                = "=== OUTPUT ===";
 input string          InpOutDir         = "VTRLS_Research";// Sottocartella in MQL5/Files
 
 //==================================================================
@@ -182,6 +186,10 @@ int   g_slotMask=0;
 //==================================================================
 //  UTILITY
 //==================================================================
+// log a livelli: 1=normale, 2=verboso, 3=dump per giornata
+void DBG(int lvl, string msg){ if(InpDebug>=lvl) Print(msg); }
+string MS(uint t0){ return "["+DoubleToString((GetTickCount()-t0)/1000.0,2)+"s]"; }
+
 int TFMinutes(ENUM_TIMEFRAMES tf)
 {
    switch(tf)
@@ -641,16 +649,32 @@ string SafeName(string s)
 //==================================================================
 bool ProcessSymbol(string sym)
 {
+   uint tPhase=GetTickCount();
    g_sym=sym;
-   if(!SymbolSelect(sym,true)){ PrintFormat("[%s] impossibile selezionare il simbolo",sym); return false; }
+   DBG(1,"=== ["+sym+"] FASE 1: selezione simbolo ===");
+   if(!SymbolSelect(sym,true)){ PrintFormat("[%s] ERRORE: impossibile selezionare il simbolo (err %d)",sym,GetLastError()); return false; }
    g_point=SymbolInfoDouble(sym,SYMBOL_POINT);
-   if(g_point<=0){ PrintFormat("[%s] point non valido",sym); return false; }
+   if(g_point<=0){ PrintFormat("[%s] ERRORE: point non valido (%.10f)",sym,g_point); return false; }
+   int digits=(int)SymbolInfoInteger(sym,SYMBOL_DIGITS);
+   DBG(1,"["+sym+"] point="+DoubleToString(g_point,10)+" digits="+IntegerToString(digits)+
+         " -> 1 pip = "+IntegerToString(digits==3||digits==5?10:1)+" punti | trade mode="+
+         IntegerToString((int)SymbolInfoInteger(sym,SYMBOL_TRADE_MODE))+" "+MS(tPhase));
 
    //--- daily (serve un warm-up per l'ATR)
+   DBG(1,"=== ["+sym+"] FASE 2: storico DAILY ===");
+   tPhase=GetTickCount();
    datetime warm = InpFrom - (datetime)((InpATRPeriod+5)*86400);
    MqlRates d1[];
    int nd = SafeCopyRates(sym, PERIOD_D1, warm, InpTo, d1);
-   if(nd<InpATRPeriod+2){ PrintFormat("[%s] storico daily insufficiente (%d barre)",sym,nd); return false; }
+   if(nd<InpATRPeriod+2)
+   {
+      PrintFormat("[%s] ERRORE: storico daily insufficiente (%d barre, ne servono %d). "
+                  "Apri il grafico D1 del simbolo e premi Home per scaricare la storia. err=%d",
+                  sym,nd,InpATRPeriod+2,GetLastError());
+      return false;
+   }
+   DBG(1,"["+sym+"] D1: "+IntegerToString(nd)+" barre da "+TimeToString(d1[0].time,TIME_DATE)+
+         " a "+TimeToString(d1[nd-1].time,TIME_DATE)+" "+MS(tPhase));
 
    //--- ATR daily calcolato in casa (indipendente da handle/indicatori)
    double atr[];
@@ -671,6 +695,8 @@ bool ProcessSymbol(string sym)
    }
 
    //--- attesa sincronizzazione del TF base e diagnostica della copertura reale
+   DBG(1,"=== ["+sym+"] FASE 3: sincronizzazione "+EnumToString(InpBaseTF)+" (puo' richiedere fino a 60s) ===");
+   tPhase=GetTickCount();
    if(!WaitHistory(sym, InpBaseTF, InpFrom, InpTo))
       PrintFormat("[%s] ATTENZIONE: serie %s non sincronizzata, risultati potenzialmente parziali.",
                   sym, EnumToString(InpBaseTF));
@@ -682,8 +708,15 @@ bool ProcessSymbol(string sym)
    if(firstBase>InpFrom && firstBase>0)
       PrintFormat("[%s] NOTA: il broker parte dal %s, la data InpFrom (%s) non e' coperta.",
                   sym, TimeToString(firstBase,TIME_DATE), TimeToString(InpFrom,TIME_DATE));
+   DBG(1,"["+sym+"] sincronizzazione conclusa "+MS(tPhase));
+   if(barsBase<=0)
+      PrintFormat("[%s] ATTENZIONE: 0 barre %s nel periodo. Nessuna giornata verra' analizzata.",
+                  sym,EnumToString(InpBaseTF));
 
+   DBG(1,"=== ["+sym+"] FASE 4: calendario economico ===");
+   tPhase=GetTickCount();
    LoadCalendar(sym, warm, InpTo);
+   DBG(2,"["+sym+"] calendario "+MS(tPhase));
 
    //--- file di output
    string dir = InpOutDir+"\\";
@@ -691,7 +724,13 @@ bool ProcessSymbol(string sym)
    int fDaily = FileOpen(dir+fn+"_daily.csv",   FILE_WRITE|FILE_TXT|FILE_ANSI);
    int fLm    = FileOpen(dir+fn+"_largest.csv", FILE_WRITE|FILE_TXT|FILE_ANSI);
    if(fDaily==INVALID_HANDLE || fLm==INVALID_HANDLE)
-   { PrintFormat("[%s] impossibile aprire i file di output (err %d)",sym,GetLastError()); return false; }
+   {
+      PrintFormat("[%s] ERRORE: impossibile aprire i file di output in %s\\MQL5\\Files\\%s (err %d)",
+                  sym,TerminalInfoString(TERMINAL_DATA_PATH),InpOutDir,GetLastError());
+      return false;
+   }
+   DBG(1,"=== ["+sym+"] FASE 5: output in "+TerminalInfoString(TERMINAL_DATA_PATH)+
+         "\\MQL5\\Files\\"+InpOutDir+" ===");
 
    FileWriteString(fDaily,
       "date;dow;month;"
@@ -722,6 +761,7 @@ bool ProcessSymbol(string sym)
    int    lmHourAll[]; ArrayResize(lmHourAll,0);
    int    nDays=0;
    int    nSkipped=0;
+   int    skNoData=0, skFewBars=0, skNoAtr=0;   // motivi di scarto, per la diagnostica
 
    g_nScan=0; ArrayResize(g_scan,0);
 
@@ -750,11 +790,23 @@ bool ProcessSymbol(string sym)
 
       MqlRates r[];
       int n = CopyRates(sym, InpBaseTF, dStart, dEnd, r);
-      if(n<=0){ nSkipped++; continue; }
-      if(n<InpMinBarsDay){ nSkipped++; continue; }
+      if(n<=0)
+      {
+         nSkipped++; skNoData++;
+         if(skNoData<=3) DBG(2,"["+sym+"] "+DateStr(dStart)+": nessuna barra "+EnumToString(InpBaseTF)+
+                               " (CopyRates="+IntegerToString(n)+", err "+IntegerToString(GetLastError())+")");
+         continue;
+      }
+      if(n<InpMinBarsDay)
+      {
+         nSkipped++; skFewBars++;
+         if(skFewBars<=3) DBG(2,"["+sym+"] "+DateStr(dStart)+": solo "+IntegerToString(n)+
+                               " barre, minimo richiesto "+IntegerToString(InpMinBarsDay));
+         continue;
+      }
 
       double atrPt = atr[di-1]/g_point;             // ATR del giorno PRECEDENTE (point-in-time)
-      if(atrPt<=0) continue;
+      if(atrPt<=0){ nSkipped++; skNoAtr++; continue; }
 
       nProc++;
       if(nProc%100==0)
@@ -873,6 +925,13 @@ bool ProcessSymbol(string sym)
       if(lmAtr>1.0) c1AtrM15[m15]++;
       if(lmAtr>2.0) c2AtrM15[m15]++;
 
+      if(InpDebug>=3 && nDays<InpDebugDays)
+         PrintFormat("[%s] DUMP %s | barre=%d ATR(D-1)=%.1fpt | D-1 range=%.1fpt dir=%s | "
+                     "LM %s->%s %s %.1fpt (%.2f ATR) dur=%dmin | pre: barre=%d up=%.1f dn=%.1f net=%.1f range=%.1f (%.1f%% del range D-1)",
+                     sym,DateStr(dStart),n,atrPt,pRange,(pDir>0?"UP":"DOWN"),
+                     HM(lmStart),HM(lmEnd),(lmDir>0?"BUY":"SELL"),lmPt,lmAtr,lmDur,
+                     preBars,preUp,preDn,preNet,preRange,prePct);
+
       int q=ArraySize(lmAtrAll);
       ArrayResize(lmAtrAll,q+1,512); lmAtrAll[q]=lmAtr;
       ArrayResize(lmHourAll,q+1,512); lmHourAll[q]=st.hour;
@@ -928,6 +987,7 @@ bool ProcessSymbol(string sym)
 
    FileClose(fDaily);
    FileClose(fLm);
+   DBG(1,"["+sym+"] scritte "+IntegerToString(nDays)+" righe in "+fn+"_daily.csv e "+fn+"_largest.csv");
 
    //--- tabella distribuzione oraria
    int fTd=FileOpen(dir+fn+"_timedist.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
@@ -991,8 +1051,17 @@ bool ProcessSymbol(string sym)
    //--- tabelle delle condizioni
    if(InpDoScan && g_nScan>0) BuildConditions(sym,dir);
 
-   PrintFormat("[%s] giornate analizzate: %d | scartate (dati mancanti/insufficienti): %d | righe scan: %d | TF base: %s",
-               sym,nDays,nSkipped,g_nScan,EnumToString(InpBaseTF));
+   PrintFormat("[%s] RIEPILOGO: giornate analizzate %d | scartate %d (senza dati %d, poche barre %d, ATR nullo %d) | righe scan %d | TF %s",
+               sym,nDays,nSkipped,skNoData,skFewBars,skNoAtr,g_nScan,EnumToString(InpBaseTF));
+   if(nDays==0)
+      PrintFormat("[%s] NESSUNA GIORNATA ANALIZZATA. Cause tipiche: storico %s non scaricato "
+                  "(apri il grafico e premi Home), InpFrom/InpTo fuori dalla storia disponibile, "
+                  "oppure InpMinBarsDay troppo alto (ora %d).",
+                  sym,EnumToString(InpBaseTF),InpMinBarsDay);
+   else if(InpDoScan && g_nScan==0)
+      PrintFormat("[%s] ATTENZIONE: 0 righe di scan. InpScanHorizonMin (%d) o InpScanStepMin (%d) "
+                  "sono probabilmente troppo grandi rispetto alla lunghezza della giornata.",
+                  sym,InpScanHorizonMin,InpScanStepMin);
    return true;
 }
 
@@ -1153,6 +1222,26 @@ void OnStart()
    PrintFormat("Anti-bias: feature costruite solo con barre chiuse prima di t; "
                "esito = first touch target/stop (stop=%.2f*target) entro %d minuti.",
                InpAdverseRatio,InpScanHorizonMin);
+
+   //--- dump della configurazione effettivamente in uso
+   if(InpDebug>=1)
+   {
+      string sp="soglie punti ("+IntegerToString(g_nPt)+"):";
+      for(int i=0;i<g_nPt;i++)  sp+=" "+F(g_thrPt[i],0);
+      string sa="soglie ATR ("+IntegerToString(g_nAtr)+"):";
+      for(int i=0;i<g_nAtr;i++) sa+=" "+F(g_thrAtr[i],2);
+      Print(sp);
+      Print(sa);
+      PrintFormat("scan: passo %d min (%d barre), orizzonte %d min (%d barre), TF base %d min",
+                  (int)MathMax(InpScanStepMin,g_tfMin),(int)MathMax(1,(int)MathMax(InpScanStepMin,g_tfMin)/g_tfMin),
+                  InpScanHorizonMin,(int)MathMax(1,InpScanHorizonMin/g_tfMin),g_tfMin);
+      PrintFormat("cartella dati terminale: %s",TerminalInfoString(TERMINAL_DATA_PATH));
+      for(int i=0;i<ArraySize(syms);i++) Print("simbolo in coda: ",syms[i]);
+      if(g_nPt>0)
+         Print("PROMEMORIA: 1 punto = 1 tick del simbolo, NON 1 pip. "
+               "Su un simbolo a 5 decimali 100 punti = 10 pip: taratura delle soglie in punti a tuo carico. "
+               "Le soglie in ATR non hanno questo problema.");
+   }
 
    uint t0=GetTickCount();
    for(int i=0;i<ArraySize(syms);i++)
