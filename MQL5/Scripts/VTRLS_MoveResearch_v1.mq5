@@ -452,33 +452,64 @@ void MaxRun(const MqlRates &r[], int n, int dir, bool clean, double retrPct,
 }
 
 //==================================================================
-//  FORWARD FIRST TOUCH
-//  Dall'apertura della barra `from`, entro `endIdx`, verifica se il
-//  target viene raggiunto PRIMA dello stop. Se nella stessa barra
-//  vengono toccati entrambi si conta come stop (ipotesi conservativa:
-//  senza dati tick non si conosce l'ordine degli eventi intrabar).
-//  Ritorna i minuti al target, -1 se non raggiunto o stoppato prima.
+//  ESITO FORWARD (first touch) - PASSATA UNICA
+//  Per ogni soglia (in punti e in ATR) e per entrambe le direzioni
+//  determina se il target viene raggiunto PRIMA dello stop, con una
+//  sola scansione delle barre.
+//  La versione precedente ripeteva una scansione completa per ogni
+//  soglia e per ogni direzione: fino a 22 passate su 240 barre per
+//  ogni punto della griglia, cioe' ~900 milioni di iterazioni su 7
+//  anni di M1. Questo era il collo di bottiglia dello script.
+//  Se target e stop cadono nella stessa barra si conta STOP (ipotesi
+//  conservativa: senza tick non si conosce l'ordine intrabar).
 //==================================================================
-int FirstTouch(const MqlRates &r[], int from, int endIdx, double entry,
-               double target, double stop, int dir)
+void ResolveForward(const MqlRates &r[], int g, int endIdx, double entry, double atrPt, SScan &s)
 {
-   for(int i=from;i<=endIdx;i++)
+   int nT = g_nPt + g_nAtr;
+   double tgt[16];                                   // target in PUNTI
+   for(int k=0;k<g_nPt;k++)  tgt[k]       = g_thrPt[k];
+   for(int k=0;k<g_nAtr;k++) tgt[g_nPt+k] = g_thrAtr[k]*atrPt;
+
+   int  outUp[16],  outDn[16];
+   bool openUp[16], openDn[16];
+   for(int k=0;k<nT;k++){ outUp[k]=-1; outDn[k]=-1; openUp[k]=true; openDn[k]=true; }
+   int openCnt=2*nT;
+
+   double mfeU=0, mfeD=0;
+   for(int i=g;i<=endIdx;i++)
    {
-      bool hit, stopped;
-      if(dir>0)
+      double u=(r[i].high-entry)/g_point;
+      double d=(entry-r[i].low)/g_point;
+      if(u>mfeU) mfeU=u;
+      if(d>mfeD) mfeD=d;
+      if(openCnt<=0) continue;                       // l'MFE va comunque completato
+
+      int mins=(int)((r[i].time-r[g].time)/60);
+      for(int k=0;k<nT;k++)
       {
-         hit     = (r[i].high >= entry+target);
-         stopped = (r[i].low  <= entry-stop);
+         double T=tgt[k];
+         double S=T*InpAdverseRatio;
+         if(openUp[k])
+         {
+            if(d>=S){ openUp[k]=false; openCnt--; }
+            else if(u>=T){ outUp[k]=mins; openUp[k]=false; openCnt--; }
+         }
+         if(openDn[k])
+         {
+            if(u>=S){ openDn[k]=false; openCnt--; }
+            else if(d>=T){ outDn[k]=mins; openDn[k]=false; openCnt--; }
+         }
       }
-      else
-      {
-         hit     = (r[i].low  <= entry-target);
-         stopped = (r[i].high >= entry+stop);
-      }
-      if(stopped) return -1;
-      if(hit) return (int)((r[i].time - r[from].time)/60);
    }
-   return -1;
+
+   s.mfeUpPt=mfeU; s.mfeDnPt=mfeD;
+   s.mfeUpAtr=mfeU/atrPt; s.mfeDnAtr=mfeD/atrPt;
+   s.mfeMaxAtr=MathMax(s.mfeUpAtr,s.mfeDnAtr);
+
+   ArrayInitialize(s.hitUpPt,-1);  ArrayInitialize(s.hitDnPt,-1);
+   ArrayInitialize(s.hitUpAtr,-1); ArrayInitialize(s.hitDnAtr,-1);
+   for(int k=0;k<g_nPt;k++) { s.hitUpPt[k] =outUp[k];        s.hitDnPt[k] =outDn[k];        }
+   for(int k=0;k<g_nAtr;k++){ s.hitUpAtr[k]=outUp[g_nPt+k];  s.hitDnAtr[k]=outDn[g_nPt+k];  }
 }
 
 //==================================================================
@@ -698,9 +729,18 @@ bool ProcessSymbol(string sym)
    int stepBars = (int)MathMax(1, stepMin/g_tfMin);
    int horBars  = (int)MathMax(1, InpScanHorizonMin/g_tfMin);
 
+   //--- conteggio giornate nel periodo, per la barra di avanzamento
+   int totDays=0;
+   for(int di=1; di<nd; di++)
+      if(d1[di].time>=InpFrom && d1[di].time<=InpTo) totDays++;
+   PrintFormat("[%s] giornate da elaborare: %d - inizio...",sym,totDays);
+   uint tSym=GetTickCount();
+   int  nProc=0;
+
    //--- ciclo sulle giornate
    for(int di=1; di<nd; di++)
    {
+      if(IsStopped()){ Print("[",sym,"] interrotto dall'utente."); break; }
       if(d1[di].time < InpFrom) continue;
       if(d1[di].time > InpTo)   break;
       if(atr[di-1]<=0) continue;
@@ -715,6 +755,15 @@ bool ProcessSymbol(string sym)
 
       double atrPt = atr[di-1]/g_point;             // ATR del giorno PRECEDENTE (point-in-time)
       if(atrPt<=0) continue;
+
+      nProc++;
+      if(nProc%100==0)
+      {
+         double el =(GetTickCount()-tSym)/1000.0;
+         double eta=(nProc>0 ? el*(totDays-nProc)/nProc : 0.0);
+         PrintFormat("[%s] %d/%d giorni (%.1f%%) - trascorsi %.0fs, stimati %.0fs rimanenti - righe scan: %d",
+                     sym,nProc,totDays,100.0*nProc/MathMax(1,totDays),el,eta,g_nScan);
+      }
 
       //--- blocco D-1
       double pO=d1[di-1].open, pH=d1[di-1].high, pL=d1[di-1].low, pC=d1[di-1].close;
@@ -867,35 +916,8 @@ bool ProcessSymbol(string sym)
             s.newsAheadMin=nextNews;
             s.newsFlag=((nextNews>=0 && nextNews<=InpNewsWindowMin)?1:0);
 
-            // esito forward
-            double mfeU=0, mfeD=0;
-            for(int i=g;i<=endIdx;i++)
-            {
-               double u=(r[i].high-entry)/g_point;
-               double d=(entry-r[i].low)/g_point;
-               if(u>mfeU) mfeU=u;
-               if(d>mfeD) mfeD=d;
-            }
-            s.mfeUpPt=mfeU; s.mfeDnPt=mfeD;
-            s.mfeUpAtr=mfeU/atrPt; s.mfeDnAtr=mfeD/atrPt;
-            s.mfeMaxAtr=MathMax(s.mfeUpAtr,s.mfeDnAtr);
-
-            ArrayInitialize(s.hitUpPt,-1);  ArrayInitialize(s.hitDnPt,-1);
-            ArrayInitialize(s.hitUpAtr,-1); ArrayInitialize(s.hitDnAtr,-1);
-            for(int k=0;k<g_nPt;k++)
-            {
-               double tg=g_thrPt[k]*g_point;
-               double sp=tg*InpAdverseRatio;
-               s.hitUpPt[k]=FirstTouch(r,g,endIdx,entry,tg,sp,+1);
-               s.hitDnPt[k]=FirstTouch(r,g,endIdx,entry,tg,sp,-1);
-            }
-            for(int k=0;k<g_nAtr;k++)
-            {
-               double tg=g_thrAtr[k]*atrPt*g_point;
-               double sp=tg*InpAdverseRatio;
-               s.hitUpAtr[k]=FirstTouch(r,g,endIdx,entry,tg,sp,+1);
-               s.hitDnAtr[k]=FirstTouch(r,g,endIdx,entry,tg,sp,-1);
-            }
+            // esito forward (passata unica: MFE + first touch di tutte le soglie)
+            ResolveForward(r,g,endIdx,entry,atrPt,s);
 
             ArrayResize(g_scan,g_nScan+1,4096);
             g_scan[g_nScan]=s;
