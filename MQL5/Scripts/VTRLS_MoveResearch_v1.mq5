@@ -614,62 +614,125 @@ int SafeCopyRates(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, Mq
 }
 
 //------------------------------------------------------------------
-// Attende che la serie del TF base sia sincronizzata con il server.
-// Senza questa attesa il primo run produce file parziali in silenzio:
-// MT5 scarica lo storico in modo asincrono e CopyRates ritorna -1 sulle
-// giornate non ancora disponibili.
+// Prepara lo storico del TF base e restituisce l'intervallo REALMENTE
+// analizzabile.
 //
-// Su anni di M1 il download vale milioni di barre e puo' durare minuti,
-// quindi l'attesa stampa l'avanzamento (barre disponibili e data della
-// prima barra, che scorre all'indietro mentre il server invia i dati).
-// Se il conteggio smette di crescere per 5 secondi consecutivi il
-// download e' considerato concluso anche senza il flag SYNCHRONIZED,
-// che su alcuni broker non si alza mai su intervalli molto lunghi.
+// Tre cose diverse limitano quanti dati ottieni, e vanno distinte:
+//  1. SERIES_SERVERFIRSTDATE  - da dove parte lo storico SUL SERVER del
+//     broker. Se l'intervallo richiesto e' tutto prima di questa data,
+//     nessuna attesa servira' a niente: quei dati non esistono.
+//  2. TERMINAL_MAXBARS - il tetto di barre che il terminale accetta di
+//     tenere. Se e' inferiore alle barre del periodo, MT5 tronca la
+//     storia a prescindere dal broker (Strumenti > Opzioni > Grafici >
+//     Barre massime nel grafico).
+//  3. SERIES_FIRSTDATE - da dove parte lo storico gia' scaricato in
+//     locale. E' l'unico dei tre che il download puo' far arretrare.
+//
+// La versione precedente guardava solo il punto 3 e restava in attesa
+// anche quando il conteggio era fermo a zero, cioe' proprio nel caso in
+// cui l'attesa era inutile per definizione.
 //------------------------------------------------------------------
-bool WaitHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to)
+bool PrepareHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, datetime &effFrom)
 {
+   effFrom=from;
+
+   long maxbars = TerminalInfoInteger(TERMINAL_MAXBARS);
+   long needed  = (long)((to-from)/(60*g_tfMin));
+   PrintFormat("[%s] limite barre terminale: %d | barre teoriche nel periodo richiesto: %d",
+               sym,maxbars,needed);
+   if(maxbars>0 && maxbars<needed)
+      PrintFormat("[%s] ATTENZIONE: 'Barre massime nel grafico' = %d, inferiore alle %d barre del periodo. "
+                  "MT5 tronchera' la storia. Strumenti > Opzioni > Grafici > Barre massime = Illimitato, "
+                  "poi riavvia il terminale.", sym,maxbars,needed);
+
+   // sollecita il download della zona richiesta
+   MqlRates kick[];
+   CopyRates(sym,tf,from,2,kick);
+
    uint t0=GetTickCount();
    uint tLast=t0;
    uint timeoutMs=(uint)MathMax(10,InpSyncTimeoutSec)*1000;
-   int  lastBars=-1;
-   int  stable=0;
+   int  lastBars=-1, stable=0;
+   datetime srvFirst=0, locFirst=0;
 
    while(GetTickCount()-t0 < timeoutMs)
    {
       if(IsStopped()){ Print("[",sym,"] sincronizzazione interrotta dall'utente."); return false; }
 
       long synced=0;
-      int  b=Bars(sym,tf,from,to);
-      bool ok=(SeriesInfoInteger(sym,tf,SERIES_SYNCHRONIZED,synced) && synced!=0);
-      if(b>0 && ok) return true;
+      int  b   = Bars(sym,tf,from,to);
+      bool ok  = (SeriesInfoInteger(sym,tf,SERIES_SYNCHRONIZED,synced) && synced!=0);
+      srvFirst = (datetime)SeriesInfoInteger(sym,tf,SERIES_SERVERFIRSTDATE);
+      locFirst = (datetime)SeriesInfoInteger(sym,tf,SERIES_FIRSTDATE);
+
+      // il broker non ha proprio questi dati: inutile aspettare
+      if(srvFirst>0 && srvFirst>=to)
+      {
+         PrintFormat("[%s] STOP: il server ha storico %s solo dal %s, mentre InpTo e' %s. "
+                     "L'intervallo richiesto non esiste sul broker.",
+                     sym,EnumToString(tf),TimeToString(srvFirst,TIME_DATE),TimeToString(to,TIME_DATE));
+         return false;
+      }
+
+      if(b>0 && ok) break;
 
       if(b==lastBars) stable++; else { stable=0; lastBars=b; }
 
-      // il conteggio non cresce da ~5s: il server ha finito di inviare
-      if(b>0 && stable>=10)
+      // conteggio fermo da ~5s: il download ha dato tutto quello che aveva,
+      // che siano barre o zero barre
+      if(stable>=10)
       {
-         DBG(1,"["+sym+"] download fermo a "+IntegerToString(b)+" barre da 5s: procedo.");
-         return true;
+         if(b>0){ DBG(1,"["+sym+"] download fermo a "+IntegerToString(b)+" barre da 5s: procedo."); break; }
+         PrintFormat("[%s] STOP: 0 barre %s nel periodo e il download non avanza da 5s. "
+                     "Storico locale dal %s, storico server dal %s.",
+                     sym,EnumToString(tf),
+                     (locFirst>0?TimeToString(locFirst,TIME_DATE):"n/d"),
+                     (srvFirst>0?TimeToString(srvFirst,TIME_DATE):"n/d"));
+         break;
       }
 
-      if(GetTickCount()-tLast >= 3000)
+      if(GetTickCount()-tLast>=3000)
       {
          tLast=GetTickCount();
-         datetime fd=(datetime)SeriesInfoInteger(sym,tf,SERIES_FIRSTDATE);
-         PrintFormat("[%s] download %s in corso: %d barre nel periodo, prima barra %s (%.0fs)",
-                     sym,EnumToString(tf),b,(fd>0?TimeToString(fd,TIME_DATE):"n/d"),
+         PrintFormat("[%s] download %s: %d barre nel periodo | locale dal %s | server dal %s (%.0fs)",
+                     sym,EnumToString(tf),b,
+                     (locFirst>0?TimeToString(locFirst,TIME_DATE):"n/d"),
+                     (srvFirst>0?TimeToString(srvFirst,TIME_DATE):"n/d"),
                      (GetTickCount()-t0)/1000.0);
       }
       Sleep(500);
    }
 
-   int bf=Bars(sym,tf,from,to);
-   PrintFormat("[%s] TIMEOUT sincronizzazione dopo %d s: %d barre disponibili. "
-               "Proseguo comunque; le giornate mancanti verranno contate come scartate. "
-               "Per risolvere: apri il grafico %s e tieni premuto Home fino alla data voluta, "
-               "oppure alza InpSyncTimeoutSec, oppure riduci l'intervallo InpFrom-InpTo.",
-               sym,InpSyncTimeoutSec,bf,EnumToString(tf));
-   return (bf>0);
+   srvFirst=(datetime)SeriesInfoInteger(sym,tf,SERIES_SERVERFIRSTDATE);
+   locFirst=(datetime)SeriesInfoInteger(sym,tf,SERIES_FIRSTDATE);
+   datetime avail=locFirst;
+   if(srvFirst>0 && (avail==0 || srvFirst>avail)) avail=srvFirst;
+
+   // restringe l'analisi a cio' che esiste davvero, invece di fallire
+   if(avail>0 && avail>effFrom)
+   {
+      PrintFormat("[%s] intervallo richiesto %s-%s, ma lo storico %s parte dal %s: "
+                  "l'analisi viene ristretta a %s-%s.",
+                  sym,TimeToString(from,TIME_DATE),TimeToString(to,TIME_DATE),
+                  EnumToString(tf),TimeToString(avail,TIME_DATE),
+                  TimeToString(avail,TIME_DATE),TimeToString(to,TIME_DATE));
+      effFrom=avail;
+   }
+
+   int bFinal=Bars(sym,tf,effFrom,to);
+   PrintFormat("[%s] barre %s utilizzabili: %d nel periodo effettivo %s-%s",
+               sym,EnumToString(tf),bFinal,TimeToString(effFrom,TIME_DATE),TimeToString(to,TIME_DATE));
+   if(bFinal<=0)
+   {
+      PrintFormat("[%s] NESSUN DATO UTILIZZABILE. Rimedi, in ordine: "
+                  "(1) apri il grafico %s del simbolo e tieni premuto Home; "
+                  "(2) Strumenti > Opzioni > Grafici > Barre massime = Illimitato e riavvia; "
+                  "(3) usa un TF base piu' alto (M5/M15), che il broker conserva molto piu' a lungo; "
+                  "(4) sposta InpFrom dopo il %s.",
+                  sym,EnumToString(tf),(avail>0?TimeToString(avail,TIME_DATE):"(data non nota)"));
+      return false;
+   }
+   return true;
 }
 
 //------------------------------------------------------------------
@@ -734,24 +797,16 @@ bool ProcessSymbol(string sym)
       atr[i]=s/InpATRPeriod;
    }
 
-   //--- attesa sincronizzazione del TF base e diagnostica della copertura reale
-   DBG(1,"=== ["+sym+"] FASE 3: sincronizzazione "+EnumToString(InpBaseTF)+" (puo' richiedere fino a 60s) ===");
+   //--- storico del TF base e intervallo realmente analizzabile
+   DBG(1,"=== ["+sym+"] FASE 3: storico "+EnumToString(InpBaseTF)+" ===");
    tPhase=GetTickCount();
-   if(!WaitHistory(sym, InpBaseTF, InpFrom, InpTo))
-      PrintFormat("[%s] ATTENZIONE: serie %s non sincronizzata, risultati potenzialmente parziali.",
-                  sym, EnumToString(InpBaseTF));
-   datetime firstBase = (datetime)SeriesInfoInteger(sym, InpBaseTF, SERIES_FIRSTDATE);
-   int      barsBase  = Bars(sym, InpBaseTF, InpFrom, InpTo);
-   PrintFormat("[%s] storico %s: prima barra disponibile %s | barre nel periodo richiesto: %d",
-               sym, EnumToString(InpBaseTF),
-               (firstBase>0? TimeToString(firstBase,TIME_DATE):"n/d"), barsBase);
-   if(firstBase>InpFrom && firstBase>0)
-      PrintFormat("[%s] NOTA: il broker parte dal %s, la data InpFrom (%s) non e' coperta.",
-                  sym, TimeToString(firstBase,TIME_DATE), TimeToString(InpFrom,TIME_DATE));
-   DBG(1,"["+sym+"] sincronizzazione conclusa "+MS(tPhase));
-   if(barsBase<=0)
-      PrintFormat("[%s] ATTENZIONE: 0 barre %s nel periodo. Nessuna giornata verra' analizzata.",
-                  sym,EnumToString(InpBaseTF));
+   datetime effFrom=InpFrom;
+   if(!PrepareHistory(sym, InpBaseTF, InpFrom, InpTo, effFrom))
+   {
+      PrintFormat("[%s] elaborazione annullata: storico %s non utilizzabile.",sym,EnumToString(InpBaseTF));
+      return false;
+   }
+   DBG(1,"["+sym+"] storico pronto "+MS(tPhase));
 
    DBG(1,"=== ["+sym+"] FASE 4: calendario economico ===");
    tPhase=GetTickCount();
@@ -812,7 +867,7 @@ bool ProcessSymbol(string sym)
    //--- conteggio giornate nel periodo, per la barra di avanzamento
    int totDays=0;
    for(int di=1; di<nd; di++)
-      if(d1[di].time>=InpFrom && d1[di].time<=InpTo) totDays++;
+      if(d1[di].time>=effFrom && d1[di].time<=InpTo) totDays++;
    PrintFormat("[%s] giornate da elaborare: %d - inizio...",sym,totDays);
    uint tSym=GetTickCount();
    int  nProc=0;
@@ -821,7 +876,7 @@ bool ProcessSymbol(string sym)
    for(int di=1; di<nd; di++)
    {
       if(IsStopped()){ Print("[",sym,"] interrotto dall'utente."); break; }
-      if(d1[di].time < InpFrom) continue;
+      if(d1[di].time < effFrom) continue;
       if(d1[di].time > InpTo)   break;
       if(atr[di-1]<=0) continue;
 
