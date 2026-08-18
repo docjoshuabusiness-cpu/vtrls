@@ -108,7 +108,7 @@ input int             InpNYLateStart    = 17;              // Inizio NY late
 
 input string          s5                = "=== DEBUG ===";
 input int             InpDebug          = 1;               // 0=minimo 1=normale 2=verboso 3=dump giornaliero
-input int             InpSyncTimeoutSec = 300;             // Timeout massimo per il download dello storico (s)
+input int             InpSyncTimeoutSec = 900;             // Timeout massimo per il download dello storico (s)
 input int             InpDebugDays      = 5;               // giornate da dumpare in dettaglio (debug>=3)
 
 input string          s6                = "=== OUTPUT ===";
@@ -660,25 +660,29 @@ bool PrepareHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, 
                   (long)((double)maxbars*60/1440.0*7.0/5.0));
    }
 
-   // sollecita il download della zona richiesta
-   MqlRates kick[];
-   CopyRates(sym,tf,from,2,kick);
-
    uint t0=GetTickCount();
    uint tLast=t0;
+   uint tMove=t0;                                  // ultimo avanzamento osservato
    uint timeoutMs=(uint)MathMax(10,InpSyncTimeoutSec)*1000;
-   int  lastBars=-1, stable=0;
-   datetime srvFirst=0, locFirst=0;
+   datetime srvFirst=0, locFirst=0, prevLoc=0;
+   long prevCount=-1;
 
    while(GetTickCount()-t0 < timeoutMs)
    {
-      if(IsStopped()){ Print("[",sym,"] sincronizzazione interrotta dall'utente."); return false; }
+      if(IsStopped()){ Print("[",sym,"] download interrotto dall'utente."); return false; }
+
+      // Ogni giro risollecita la zona richiesta: MT5 accoda la richiesta e
+      // scarica all'indietro a blocchi. Una sola sollecitazione iniziale non
+      // basta se il terminale la scarta mentre e' occupato.
+      MqlRates kick[];
+      CopyRates(sym,tf,from,10,kick);
 
       long synced=0;
-      int  b   = Bars(sym,tf,from,to);
-      bool ok  = (SeriesInfoInteger(sym,tf,SERIES_SYNCHRONIZED,synced) && synced!=0);
-      srvFirst = (datetime)SeriesInfoInteger(sym,tf,SERIES_SERVER_FIRSTDATE);
-      locFirst = (datetime)SeriesInfoInteger(sym,tf,SERIES_FIRSTDATE);
+      long cnt   = SeriesInfoInteger(sym,tf,SERIES_BARS_COUNT);
+      int  b     = Bars(sym,tf,from,to);
+      bool ok    = (SeriesInfoInteger(sym,tf,SERIES_SYNCHRONIZED,synced) && synced!=0);
+      srvFirst   = (datetime)SeriesInfoInteger(sym,tf,SERIES_SERVER_FIRSTDATE);
+      locFirst   = (datetime)SeriesInfoInteger(sym,tf,SERIES_FIRSTDATE);
 
       // il broker non ha proprio questi dati: inutile aspettare
       if(srvFirst>0 && srvFirst>=to)
@@ -691,27 +695,37 @@ bool PrepareHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, 
 
       if(b>0 && ok) break;
 
-      if(b==lastBars) stable++; else { stable=0; lastBars=b; }
+      // AVANZAMENTO: il numero di barre nell'intervallo richiesto resta a zero
+      // finche' il download non arriva fin li', quindi non e' un indicatore di
+      // progresso. Cio' che si muove e' la data della prima barra locale, che
+      // arretra a blocchi, e il conteggio totale delle barre. Basare lo stallo
+      // sul primo dei tre faceva dichiarare "fermo" un download in piena corsa.
+      bool moving=(locFirst!=prevLoc || cnt!=prevCount);
+      if(moving){ tMove=GetTickCount(); prevLoc=locFirst; prevCount=cnt; }
 
-      // conteggio fermo da ~5s: il download ha dato tutto quello che aveva,
-      // che siano barre o zero barre
-      if(stable>=10)
+      if(GetTickCount()-tMove >= 30000)             // 30s senza alcun avanzamento
       {
-         if(b>0){ DBG(1,"["+sym+"] download fermo a "+IntegerToString(b)+" barre da 5s: procedo."); break; }
-         PrintFormat("[%s] STOP: 0 barre %s nel periodo e il download non avanza da 5s. "
-                     "Storico locale dal %s, storico server dal %s.",
-                     sym,EnumToString(tf),
-                     (locFirst>0?TimeToString(locFirst,TIME_DATE):"n/d"),
-                     (srvFirst>0?TimeToString(srvFirst,TIME_DATE):"n/d"));
+         if(b>0) break;
+         PrintFormat("[%s] STOP: nessun avanzamento del download da 30s. "
+                     "Barre totali in locale: %d, prima barra locale %s, storico server dal %s, "
+                     "barre nell'intervallo richiesto: %d.",
+                     sym,cnt,(locFirst>0?TimeToString(locFirst,TIME_DATE):"n/d"),
+                     (srvFirst>0?TimeToString(srvFirst,TIME_DATE):"n/d"),b);
+         PrintFormat("[%s] Scarica la storia a mano: menu Visualizza > Simboli > seleziona %s > "
+                     "scheda Barre > scegli %s e il periodo > Richiedi. "
+                     "In alternativa apri il grafico %s e tieni premuto Home fino alla data voluta, "
+                     "poi rilancia lo script.",
+                     sym,sym,EnumToString(tf),EnumToString(tf));
          break;
       }
 
       if(GetTickCount()-tLast>=3000)
       {
          tLast=GetTickCount();
-         PrintFormat("[%s] download %s: %d barre nel periodo | locale dal %s | server dal %s (%.0fs)",
-                     sym,EnumToString(tf),b,
-                     (locFirst>0?TimeToString(locFirst,TIME_DATE):"n/d"),
+         PrintFormat("[%s] download %s: %d barre totali in locale, prima barra %s | "
+                     "nell'intervallo richiesto %d | server dal %s (%.0fs)",
+                     sym,EnumToString(tf),cnt,
+                     (locFirst>0?TimeToString(locFirst,TIME_DATE):"n/d"),b,
                      (srvFirst>0?TimeToString(srvFirst,TIME_DATE):"n/d"),
                      (GetTickCount()-t0)/1000.0);
       }
