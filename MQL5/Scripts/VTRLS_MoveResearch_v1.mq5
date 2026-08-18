@@ -641,9 +641,21 @@ bool PrepareHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, 
    PrintFormat("[%s] limite barre terminale: %d | barre teoriche nel periodo richiesto: %d",
                sym,maxbars,needed);
    if(maxbars>0 && maxbars<needed)
+   {
+      // barre -> giorni di trading -> giorni di calendario (5 sessioni su 7)
+      long dCal=(long)((double)maxbars*g_tfMin/1440.0*7.0/5.0);
       PrintFormat("[%s] ATTENZIONE: 'Barre massime nel grafico' = %d, inferiore alle %d barre del periodo. "
-                  "MT5 tronchera' la storia. Strumenti > Opzioni > Grafici > Barre massime = Illimitato, "
-                  "poi riavvia il terminale.", sym,maxbars,needed);
+                  "Con questo tetto e TF %s copri circa %d giorni di calendario, non di piu', "
+                  "qualunque sia lo storico del broker.",
+                  sym,maxbars,needed,EnumToString(tf),dCal);
+      PrintFormat("[%s] RIMEDIO: Strumenti > Opzioni > Grafici > 'Barre massime nel grafico' = Illimitato, "
+                  "riavvia il terminale, riapri il grafico %s e tieni premuto Home. "
+                  "In alternativa alza InpBaseTF: con %d barre M5 copri ~%d giorni, M15 ~%d, H1 ~%d.",
+                  sym,EnumToString(tf),maxbars,
+                  (long)((double)maxbars*5/1440.0*7.0/5.0),
+                  (long)((double)maxbars*15/1440.0*7.0/5.0),
+                  (long)((double)maxbars*60/1440.0*7.0/5.0));
+   }
 
    // sollecita il download della zona richiesta
    MqlRates kick[];
@@ -717,6 +729,16 @@ bool PrepareHistory(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to, 
                   EnumToString(tf),TimeToString(avail,TIME_DATE),
                   TimeToString(avail,TIME_DATE),TimeToString(to,TIME_DATE));
       effFrom=avail;
+   }
+
+   if(effFrom>=to)
+   {
+      PrintFormat("[%s] STOP: lo storico %s disponibile parte dal %s, cioe' DOPO InpTo (%s): "
+                  "l'intervallo da analizzare sarebbe vuoto. "
+                  "Sposta InpTo a una data successiva al %s, oppure scarica piu' storia.",
+                  sym,EnumToString(tf),TimeToString(effFrom,TIME_DATE),TimeToString(to,TIME_DATE),
+                  TimeToString(effFrom,TIME_DATE));
+      return false;
    }
 
    int bFinal=Bars(sym,tf,effFrom,to);
