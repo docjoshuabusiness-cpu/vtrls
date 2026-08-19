@@ -98,6 +98,7 @@ input string          InpThrPoints      = "50,100,150,200,300,500";  // Soglie i
 input string          InpThrATR         = "0.5,1.0,1.5,2.0,3.0";     // Soglie in multipli di ATR(D-1)
 input int             InpMinSamples     = 30;              // Campioni minimi per stampare una cella
 input int             InpRankMinN       = 20;              // Movimenti minimi perche' una finestra entri in classifica
+input int             InpRankPerDay     = 5;               // Quante ore migliori mostrare per ciascun giorno
 
 input string          s3                = "=== NEWS ===";
 input bool            InpUseCalendar    = true;            // Usa il calendario economico MQL5
@@ -1102,17 +1103,20 @@ void HtmlHeatM15(string id,const int &cnt[][96],const double &sPt[][96],const do
 struct SRank
 {
    string lab, lab15;
+   int    dow, hour;                       // per raggruppare senza rileggere la label
    int    n, n15, denom, big, buy;
    double sumAtr, score;
 };
 SRank g_rk[];
 int    g_nRk=0;
 
-void RkAdd(string lab,string lab15,int n15,int n,int denom,double sumAtr,int big,int buy)
+void RkAdd(string lab,string lab15,int dow,int hour,int n15,int n,int denom,
+           double sumAtr,int big,int buy)
 {
    if(n<=0 || denom<=0) return;
    ArrayResize(g_rk,g_nRk+1,256);
    g_rk[g_nRk].lab=lab;   g_rk[g_nRk].lab15=lab15; g_rk[g_nRk].n15=n15;
+   g_rk[g_nRk].dow=dow;   g_rk[g_nRk].hour=hour;
    g_rk[g_nRk].n=n;       g_rk[g_nRk].denom=denom;
    g_rk[g_nRk].sumAtr=sumAtr; g_rk[g_nRk].big=big; g_rk[g_nRk].buy=buy;
    g_rk[g_nRk].score=((double)n/denom)*(sumAtr/n)*100.0;
@@ -1816,7 +1820,7 @@ bool ProcessSymbol(string sym)
          for(int q=h*4; q<h*4+4; q++)
             if(cntDM[d][q]>bv){ bv=cntDM[d][q]; bb=q; }
          string l15=(bb>=0 ? M15Label(bb/4,(bb%4)*15) : "-");
-         RkAdd(DowIT(d)+"  "+D2(h)+":00", l15, bv,
+         RkAdd(DowIT(d)+"  "+D2(h)+":00", l15, d, h, bv,
                cntDH[d][h], aggDow[d].n, sAtDH[d][h], bigDH[d][h], buyDH[d][h]);
       }
    }
@@ -1846,6 +1850,38 @@ bool ProcessSymbol(string sym)
            F(g_rk[i].sumAtr/g_rk[i].n,2)+"</td><td>"+F(100.0*g_rk[i].big/g_rk[i].n,1)+"%</td><td class=\""+
            (pb>=50?"up":"dn")+"\">"+F(pb,1)+"</td><td class=\""+zc+"\">"+F(zz,2)+"</td><td>"+
            F(g_rk[i].score,1)+"</td></tr>");
+      }
+      HtmlTableEnd();
+
+      //--- le migliori ore giorno per giorno
+      // La classifica generale risponde a "qual e' la finestra migliore in
+      // assoluto", e le prime posizioni finiscono per essere quasi tutte dello
+      // stesso paio di giorni. Questa risponde alla domanda operativa vera:
+      // "oggi e' martedi', a che ora guardo il grafico".
+      H("<h2>Le migliori "+IntegerToString(InpRankPerDay)+" ore di ogni giorno</h2><div class=\"note\">"
+        "Stesse colonne, ma la classifica riparte da capo per ogni giorno della settimana. Serve per "
+        "pianificare la settimana: qualunque giorno sia, sai dove sono le sue finestre migliori e quanto "
+        "valgono rispetto a quelle degli altri giorni - lo score resta confrontabile fra tutte le righe. "
+        "Se il primo posto di un giorno ha uno score molto basso, quel giorno non merita di essere operato.</div>");
+      HtmlTableHead("tRg","giorno;#;ora;top 15min;n15;n;freq%;ATR medio;oltre 1 ATR;BUY%;z BUY;score",true);
+      for(int k=0;k<7;k++)
+      {
+         int d=(k+1)%7;                                  // Lun..Dom
+         int shown=0;
+         for(int i=0;i<g_nRk && shown<InpRankPerDay;i++)
+         {
+            if(g_rk[i].dow!=d) continue;
+            shown++;
+            double zz=RkZ(g_rk[i].buy,g_rk[i].n);
+            double pb=100.0*g_rk[i].buy/g_rk[i].n;
+            string zc=(MathAbs(zz)>=3.0 ? (zz>0?"hi":"lo") : "nz");
+            H("<tr><td>"+(shown==1?"<b>"+HE(DowIT(d))+"</b>":"")+"</td><td>"+IntegerToString(shown)+
+              "</td><td><b>"+D2(g_rk[i].hour)+":00</b></td><td>"+HE(g_rk[i].lab15)+"</td><td>"+
+              IntegerToString(g_rk[i].n15)+"</td><td>"+IntegerToString(g_rk[i].n)+"</td><td>"+
+              F(100.0*g_rk[i].n/g_rk[i].denom,1)+"%</td><td>"+F(g_rk[i].sumAtr/g_rk[i].n,2)+"</td><td>"+
+              F(100.0*g_rk[i].big/g_rk[i].n,1)+"%</td><td class=\""+(pb>=50?"up":"dn")+"\">"+F(pb,1)+
+              "</td><td class=\""+zc+"\">"+F(zz,2)+"</td><td>"+F(g_rk[i].score,1)+"</td></tr>");
+         }
       }
       HtmlTableEnd();
 
@@ -1887,12 +1923,15 @@ bool ProcessSymbol(string sym)
       int fR=FileOpen(dir+fn+"_ranking.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
       if(fR!=INVALID_HANDLE)
       {
-         W(fR,"pos;giorno;ora;top_15min;n_15min;n;freq_pct;atr_medio;pct_gt1atr;pct_buy;z_buy;score\r\n");
+         W(fR,"pos;pos_nel_giorno;giorno;ora;top_15min;n_15min;n;freq_pct;atr_medio;"
+               "pct_gt1atr;pct_buy;z_buy;score\r\n");
+         int seen[7]; ArrayInitialize(seen,0);
          for(int i=0;i<g_nRk;i++)
          {
             string lb=g_rk[i].lab;
             StringReplace(lb,"  ",";");
-            W(fR,IntegerToString(i+1)+";"+lb+";"+g_rk[i].lab15+";"+IntegerToString(g_rk[i].n15)+";"+
+            seen[g_rk[i].dow]++;
+            W(fR,IntegerToString(i+1)+";"+IntegerToString(seen[g_rk[i].dow])+";"+lb+";"+g_rk[i].lab15+";"+IntegerToString(g_rk[i].n15)+";"+
                   IntegerToString(g_rk[i].n)+";"+F(100.0*g_rk[i].n/g_rk[i].denom,2)+";"+
                   F(g_rk[i].sumAtr/g_rk[i].n,3)+";"+F(100.0*g_rk[i].big/g_rk[i].n,2)+";"+
                   F(100.0*g_rk[i].buy/g_rk[i].n,2)+";"+F(RkZ(g_rk[i].buy,g_rk[i].n),2)+";"+
@@ -2128,6 +2167,24 @@ bool ProcessSymbol(string sym)
                      PadL(F(RkZ(g_rk[i].buy,g_rk[i].n),2),7)+
                      PadL(F(g_rk[i].score,1),7)+L);
             W(fT,"  anti-overfitting: guarda freq% e n, non lo score isolato."+L);
+
+            W(fT,L+"LE MIGLIORI "+IntegerToString(InpRankPerDay)+" ORE DI OGNI GIORNO"+L);
+            for(int k=0;k<7;k++)
+            {
+               int d=(k+1)%7, shown=0;
+               for(int i=0;i<g_nRk && shown<InpRankPerDay;i++)
+               {
+                  if(g_rk[i].dow!=d) continue;
+                  shown++;
+                  W(fT,"  "+PadR(shown==1?DowIT(d):"",5)+PadR(D2(g_rk[i].hour)+":00",7)+
+                        PadR(g_rk[i].lab15,14)+PadL(IntegerToString(g_rk[i].n),6)+
+                        PadL(F(100.0*g_rk[i].n/g_rk[i].denom,1),7)+
+                        PadL(F(g_rk[i].sumAtr/g_rk[i].n,2),6)+
+                        PadL(F(100.0*g_rk[i].buy/g_rk[i].n,1),6)+
+                        PadL(F(RkZ(g_rk[i].buy,g_rk[i].n),2),7)+
+                        PadL(F(g_rk[i].score,1),7)+L);
+               }
+            }
             W(fT,"  |zBUY| sotto 3 = nessuno sbilanciamento direzionale, e' caso."+L);
          }
 
