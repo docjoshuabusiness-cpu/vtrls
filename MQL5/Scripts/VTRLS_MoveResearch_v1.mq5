@@ -180,11 +180,14 @@ struct SCell
    string key;
    string label;
    int    n;
-   int    hitPt[8];
-   int    hitAtr[8];
+   int    hitPt[8],  hitPtUp[8],  hitPtDn[8];
+   int    hitAtr[8], hitAtrUp[8], hitAtrDn[8];
    double sumMfe;
    double mfe[];
 };
+int    g_basePtUp[8],  g_basePtDn[8];    // baseline direzionali
+int    g_baseAtrUp[8], g_baseAtrDn[8];
+
 string g_top[];            // condizioni rilevanti, per il riassunto testuale
 int    g_nTop=0;
 
@@ -575,6 +578,10 @@ int CellGet(string key,string label)
          g_cell[g_nCell].sumMfe=0.0;
          ArrayInitialize(g_cell[g_nCell].hitPt,0);
          ArrayInitialize(g_cell[g_nCell].hitAtr,0);
+         ArrayInitialize(g_cell[g_nCell].hitPtUp,0);
+         ArrayInitialize(g_cell[g_nCell].hitPtDn,0);
+         ArrayInitialize(g_cell[g_nCell].hitAtrUp,0);
+         ArrayInitialize(g_cell[g_nCell].hitAtrDn,0);
          ArrayResize(g_cell[g_nCell].mfe,0);
          g_slot[at]=g_nCell;
          g_nCell++;
@@ -589,10 +596,22 @@ void CellAdd(string key,string label,const SScan &s)
    int ci=CellGet(key,label);
    if(ci<0) return;
    g_cell[ci].n++;
+   // "hit" combinato = target raggiunto in ALMENO una delle due direzioni.
+   // Non e' la probabilita' di vincita di un trade: nessuno puo' comprare e
+   // vendere contemporaneamente. Serve solo a misurare quanta opportunita'
+   // esiste. Le colonne _up e _dn sono quelle che descrivono un trade reale.
    for(int k=0;k<g_nPt;k++)
+   {
       if(s.hitUpPt[k]>=0 || s.hitDnPt[k]>=0) g_cell[ci].hitPt[k]++;
+      if(s.hitUpPt[k]>=0) g_cell[ci].hitPtUp[k]++;
+      if(s.hitDnPt[k]>=0) g_cell[ci].hitPtDn[k]++;
+   }
    for(int k=0;k<g_nAtr;k++)
+   {
       if(s.hitUpAtr[k]>=0 || s.hitDnAtr[k]>=0) g_cell[ci].hitAtr[k]++;
+      if(s.hitUpAtr[k]>=0) g_cell[ci].hitAtrUp[k]++;
+      if(s.hitDnAtr[k]>=0) g_cell[ci].hitAtrDn[k]++;
+   }
    g_cell[ci].sumMfe += s.mfeMaxAtr;
    int m=ArraySize(g_cell[ci].mfe);
    ArrayResize(g_cell[ci].mfe,m+1,512);
@@ -949,7 +968,7 @@ void HtmlTableEnd(){ H("</tbody></table></div>"); }
 // una cella "probabilita' (lift)" colorata: verde solo se il lift supera 1.20
 // E il limite inferiore di Wilson resta sopra la baseline. Tutto il resto e'
 // grigio, perche' statisticamente non distinguibile dal caso.
-string CondCell(int hits,int n,int base)
+string CondCell(int hits,int n,int base,int hUp=-1,int hDn=-1)
 {
    if(n<=0) return "<td>-</td>";
    double p =(double)hits/n;
@@ -959,7 +978,10 @@ string CondCell(int hits,int n,int base)
    string cls="nz";
    if(bp>0 && lift>1.20 && wl>bp)      cls="hi";
    else if(bp>0 && lift<0.80)          cls="lo";
-   return "<td class=\""+cls+"\">"+F(100.0*p,1)+"% <span class=\"nz\">x"+F(lift,2)+"</span></td>";
+   string dir="";
+   if(hUp>=0 && hDn>=0 && n>0)
+      dir="<br><span class=\"nz\">U"+F(100.0*hUp/n,0)+" D"+F(100.0*hDn/n,0)+"</span>";
+   return "<td class=\""+cls+"\">"+F(100.0*p,1)+"% <span class=\"nz\">x"+F(lift,2)+"</span>"+dir+"</td>";
 }
 
 
@@ -1325,13 +1347,20 @@ bool ProcessSymbol(string sym)
       datetime dStart = d1[di].time;
       datetime dEnd   = dStart + 86400 - 1;
 
+      // Le barre vengono caricate fino a dEnd PIU' l'orizzonte forward.
+      // Senza questa estensione la finestra futura di un punto della griglia
+      // vicino a fine giornata veniva troncata al confine del giorno, e la
+      // probabilita' di raggiungere il target crollava a zero per costruzione:
+      // non era informazione sul mercato, era il bordo del campione.
       MqlRates r[];
-      int n = CopyRates(sym, InpBaseTF, dStart, dEnd, r);
-      if(n<=0)
+      int nAll = CopyRates(sym, InpBaseTF, dStart, dEnd+InpScanHorizonMin*60, r);
+      int n = 0;
+      for(int i=0;i<nAll;i++){ if(r[i].time>dEnd) break; n++; }
+      if(nAll<=0 || n<=0)
       {
          nSkipped++; skNoData++;
          if(skNoData<=3) DBG(2,"["+sym+"] "+DateStr(dStart)+": nessuna barra "+EnumToString(InpBaseTF)+
-                               " (CopyRates="+IntegerToString(n)+", err "+IntegerToString(GetLastError())+")");
+                               " (CopyRates="+IntegerToString(nAll)+", err "+IntegerToString(GetLastError())+")");
          continue;
       }
       if(n<InpMinBarsDay)
@@ -1531,8 +1560,10 @@ bool ProcessSymbol(string sym)
       {
          for(int g=stepBars; g<n-1; g+=stepBars)
          {
-            int endIdx = (int)MathMin(n-1, g+horBars);
-            if(endIdx<=g) break;
+            // richiede l'orizzonte COMPLETO: una finestra parziale abbasserebbe
+            // la probabilita' misurata senza che il mercato c'entri nulla
+            if(g+horBars >= nAll) break;
+            int endIdx = g+horBars;
 
             SScan s;
             s.t=r[g].time;
@@ -2105,10 +2136,22 @@ void BuildConditions(string sym,string dir)
    //--- baseline incondizionata
    int basePt[8], baseAtr[8];
    ArrayInitialize(basePt,0); ArrayInitialize(baseAtr,0);
+   ArrayInitialize(g_basePtUp,0);  ArrayInitialize(g_basePtDn,0);
+   ArrayInitialize(g_baseAtrUp,0); ArrayInitialize(g_baseAtrDn,0);
    for(int i=0;i<g_nScan;i++)
    {
-      for(int k=0;k<g_nPt;k++)  if(g_scan[i].hitUpPt[k]>=0  || g_scan[i].hitDnPt[k]>=0)  basePt[k]++;
-      for(int k=0;k<g_nAtr;k++) if(g_scan[i].hitUpAtr[k]>=0 || g_scan[i].hitDnAtr[k]>=0) baseAtr[k]++;
+      for(int k=0;k<g_nPt;k++)
+      {
+         if(g_scan[i].hitUpPt[k]>=0 || g_scan[i].hitDnPt[k]>=0) basePt[k]++;
+         if(g_scan[i].hitUpPt[k]>=0) g_basePtUp[k]++;
+         if(g_scan[i].hitDnPt[k]>=0) g_basePtDn[k]++;
+      }
+      for(int k=0;k<g_nAtr;k++)
+      {
+         if(g_scan[i].hitUpAtr[k]>=0 || g_scan[i].hitDnAtr[k]>=0) baseAtr[k]++;
+         if(g_scan[i].hitUpAtr[k]>=0) g_baseAtrUp[k]++;
+         if(g_scan[i].hitDnAtr[k]>=0) g_baseAtrDn[k]++;
+      }
    }
 
    //--- 1) tabella incrociata (tutte le dimensioni insieme)
@@ -2175,9 +2218,15 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
 
    string hdr=keyHeader+";n;n_eff";
    for(int k=0;k<g_nPt;k++)
-      hdr+=";n_"+F(g_thrPt[k],0)+"pt;p_"+F(g_thrPt[k],0)+"pt;wlow_"+F(g_thrPt[k],0)+"pt;lift_"+F(g_thrPt[k],0)+"pt";
+   {
+      string t=F(g_thrPt[k],0)+"pt";
+      hdr+=";n_"+t+";p_"+t+";wlow_"+t+";lift_"+t+";pUP_"+t+";liftUP_"+t+";pDN_"+t+";liftDN_"+t;
+   }
    for(int k=0;k<g_nAtr;k++)
-      hdr+=";n_"+F(g_thrAtr[k],2)+"atr;p_"+F(g_thrAtr[k],2)+"atr;wlow_"+F(g_thrAtr[k],2)+"atr;lift_"+F(g_thrAtr[k],2)+"atr";
+   {
+      string t=F(g_thrAtr[k],2)+"atr";
+      hdr+=";n_"+t+";p_"+t+";wlow_"+t+";lift_"+t+";pUP_"+t+";liftUP_"+t+";pDN_"+t+";liftDN_"+t;
+   }
    hdr+=";media_mfe_atr;mediana_mfe_atr";
    W(f,hdr+"\r\n");
 
@@ -2203,16 +2252,22 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
          int hits=g_cell[c].hitPt[k];
          double p=(double)hits/n;
          double bp=(g_nScan>0 ? (double)basePt[k]/g_nScan : 0.0);
+         double pu=(double)g_cell[c].hitPtUp[k]/n, bu=(g_nScan>0?(double)g_basePtUp[k]/g_nScan:0.0);
+         double pd=(double)g_cell[c].hitPtDn[k]/n, bd=(g_nScan>0?(double)g_basePtDn[k]/g_nScan:0.0);
          row+=";"+IntegerToString(hits)+";"+F(100.0*p,2)+";"+F(100.0*WilsonLow(hits,n),2)+";"+
-              (bp>0? F(p/bp,3) : "");
+              (bp>0? F(p/bp,3):"")+";"+F(100.0*pu,2)+";"+(bu>0?F(pu/bu,3):"")+";"+
+              F(100.0*pd,2)+";"+(bd>0?F(pd/bd,3):"");
       }
       for(int k=0;k<g_nAtr;k++)
       {
          int hits=g_cell[c].hitAtr[k];
          double p=(double)hits/n;
          double bp=(g_nScan>0 ? (double)baseAtr[k]/g_nScan : 0.0);
+         double pu=(double)g_cell[c].hitAtrUp[k]/n, bu=(g_nScan>0?(double)g_baseAtrUp[k]/g_nScan:0.0);
+         double pd=(double)g_cell[c].hitAtrDn[k]/n, bd=(g_nScan>0?(double)g_baseAtrDn[k]/g_nScan:0.0);
          row+=";"+IntegerToString(hits)+";"+F(100.0*p,2)+";"+F(100.0*WilsonLow(hits,n),2)+";"+
-              (bp>0? F(p/bp,3) : "");
+              (bp>0? F(p/bp,3):"")+";"+F(100.0*pu,2)+";"+(bu>0?F(pu/bu,3):"")+";"+
+              F(100.0*pd,2)+";"+(bd>0?F(pd/bd,3):"");
       }
       double med[]; ArrayCopy(med,g_cell[c].mfe);
       double mMean=g_cell[c].sumMfe/n, mMed=Median(med);
@@ -2245,8 +2300,10 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
          string lab[]; int nl=StringSplit(g_cell[c].label,StringGetCharacter(";",0),lab);
          for(int i=0;i<nl;i++) h+="<td>"+HE(lab[i])+"</td>";
          h+="<td>"+IntegerToString(n)+"</td><td>"+IntegerToString((int)(n/g_overlap))+"</td>";
-         for(int k=0;k<g_nPt;k++)  h+=CondCell(g_cell[c].hitPt[k], n, basePt[k]);
-         for(int k=0;k<g_nAtr;k++) h+=CondCell(g_cell[c].hitAtr[k],n, baseAtr[k]);
+         for(int k=0;k<g_nPt;k++)
+            h+=CondCell(g_cell[c].hitPt[k],n,basePt[k],g_cell[c].hitPtUp[k],g_cell[c].hitPtDn[k]);
+         for(int k=0;k<g_nAtr;k++)
+            h+=CondCell(g_cell[c].hitAtr[k],n,baseAtr[k],g_cell[c].hitAtrUp[k],g_cell[c].hitAtrDn[k]);
          h+="<td>"+F(mMean,2)+"</td><td>"+F(mMed,2)+"</td></tr>";
          H(h);
       }
@@ -2256,9 +2313,13 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
    string bl[];
    string b="BASELINE (tutte le righe);"+IntegerToString(g_nScan)+";"+IntegerToString((int)(g_nScan/g_overlap));
    for(int k=0;k<g_nPt;k++)
-      b+=";"+IntegerToString(basePt[k])+";"+F(100.0*basePt[k]/MathMax(1,g_nScan),2)+";;1.000";
+      b+=";"+IntegerToString(basePt[k])+";"+F(100.0*basePt[k]/MathMax(1,g_nScan),2)+";;1.000;"+
+         F(100.0*g_basePtUp[k]/MathMax(1,g_nScan),2)+";1.000;"+
+         F(100.0*g_basePtDn[k]/MathMax(1,g_nScan),2)+";1.000";
    for(int k=0;k<g_nAtr;k++)
-      b+=";"+IntegerToString(baseAtr[k])+";"+F(100.0*baseAtr[k]/MathMax(1,g_nScan),2)+";;1.000";
+      b+=";"+IntegerToString(baseAtr[k])+";"+F(100.0*baseAtr[k]/MathMax(1,g_nScan),2)+";;1.000;"+
+         F(100.0*g_baseAtrUp[k]/MathMax(1,g_nScan),2)+";1.000;"+
+         F(100.0*g_baseAtrDn[k]/MathMax(1,g_nScan),2)+";1.000";
    b+=";;";
    W(f,b+"\r\n");
    if(f!=INVALID_HANDLE) FileClose(f);
