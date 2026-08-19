@@ -100,6 +100,19 @@ input int             InpMinSamples     = 30;              // Campioni minimi pe
 input int             InpRankMinN       = 20;              // Movimenti minimi perche' una finestra entri in classifica
 input int             InpRankPerDay     = 5;               // Quante ore migliori mostrare per ciascun giorno
 
+input string          sInd              = "=== INDICATORI (RSI / CCI / Z-SCORE) ===";
+input bool            InpDoIndicators   = true;            // Calcola le statistiche degli indicatori
+input ENUM_TIMEFRAMES InpIndTF          = PERIOD_M15;      // TF su cui calcolare gli indicatori
+input int             InpRsiPeriod      = 14;              // Periodo RSI
+input double          InpRsiHigh        = 70.0;            // Soglia RSI ipercomprato
+input double          InpRsiLow         = 30.0;            // Soglia RSI ipervenduto
+input int             InpCciPeriod      = 14;              // Periodo CCI
+input double          InpCciHigh        = 40.0;            // Soglia CCI superiore
+input double          InpCciLow         = -40.0;           // Soglia CCI inferiore
+input int             InpZsPeriod       = 20;              // Periodo Z-Score
+input double          InpZsHigh         = 2.0;             // Soglia Z-Score superiore
+input double          InpZsLow          = -2.0;            // Soglia Z-Score inferiore
+
 input string          s3                = "=== NEWS ===";
 input bool            InpUseCalendar    = true;            // Usa il calendario economico MQL5
 input int             InpMinImportance  = 2;               // Importanza minima (1=low 2=medium 3=high)
@@ -162,6 +175,9 @@ struct SScan
    double   dToPrevHighAtr, dToPrevLowAtr;
    double   preUpPt, preDnPt, preTotPt, preNetPt;
    int      preMin;
+   // indicatori, letti sull'ultima barra chiusa prima di t
+   double   rsi, cci, zs;
+   bool     indOk;
    // news
    int      newsFlag;             // 1 se evento entro finestra (passato o futuro)
    int      newsAheadMin;         // minuti al prossimo evento (-1 = nessuno/na)
@@ -923,8 +939,9 @@ void HtmlHead(string sym)
    H("<button onclick=\"tab(3)\">Orari</button>");
    H("<button onclick=\"tab(4)\">Aggregati</button>");
    H("<button onclick=\"tab(5)\">Classifica</button>");
-   H("<button onclick=\"tab(6)\">Condizioni incrociate</button>");
-   H("<button onclick=\"tab(7)\">Condizioni marginali</button>");
+   H("<button onclick=\"tab(6)\">Indicatori</button>");
+   H("<button onclick=\"tab(7)\">Condizioni incrociate</button>");
+   H("<button onclick=\"tab(8)\">Condizioni marginali</button>");
    H("</nav><main>");
    H("<section class=\"on\"><div id=\"sum\" class=\"sum\"></div><div id=\"lett\"></div>");
    H("<h2>Come leggere questo report</h2><div class=\"note\">");
@@ -936,7 +953,64 @@ void HtmlHead(string sym)
    H("baseline incondizionata. Una cella e' interessante solo se <b>lift &gt; 1.20</b> E <b>wlow &gt; baseline</b>: le celle ");
    H("che soddisfano entrambe sono in verde, quelle sotto baseline in rosso, il resto in grigio perche' e' rumore. ");
    H("Con centinaia di celle testate qualcuna sembrera' ottima per puro caso: verifica sempre su un secondo periodo e un ");
-   H("secondo simbolo prima di crederci.</div></section>");
+   H("secondo simbolo prima di crederci.</div>");
+
+   //--- LEGENDA: nessuna abbreviazione deve restare da indovinare
+   H("<h2>Legenda</h2><div class=\"note\">Ogni sigla usata nelle tabelle, spiegata una volta sola.</div>");
+   H("<div class=\"wrap\"><table><thead><tr><th>sigla</th><th>significato</th></tr></thead><tbody>");
+   H("<tr><td><b>LM</b></td><td>Largest Move: la massima escursione direzionale della giornata, "
+     "misurata come gamba pulita (si chiude quando ritraccia oltre la soglia impostata)</td></tr>");
+   H("<tr><td><b>ATR</b></td><td>Average True Range giornaliero del giorno PRECEDENTE. Tutte le ampiezze sono "
+     "espresse in suoi multipli: 0.72 ATR significa 72% dell'escursione tipica di una giornata. "
+     "Serve a rendere confrontabili anni e simboli con volatilita' diverse</td></tr>");
+   H("<tr><td><b>punto (pt)</b></td><td>Un tick del simbolo, NON un pip. Su un simbolo a 5 decimali "
+     "1 pip = 10 punti</td></tr>");
+   H("<tr><td><b>D-1</b></td><td>Il giorno precedente. <b>prev_range</b> = suo massimo meno minimo, "
+     "<b>prev_body</b> = corpo della candela, <b>prev_dir</b> = se ha chiuso sopra o sotto la sua apertura</td></tr>");
+   H("<tr><td><b>pre-evento</b> (pre_*)</td><td>Cosa ha fatto il prezzo nella giornata corrente PRIMA che il "
+     "movimento maggiore iniziasse. Nessun dato successivo entra in questi valori</td></tr>");
+   H("<tr><td><b>pre_up / pre_dn</b></td><td>Punti percorsi al rialzo e al ribasso prima dell'evento, "
+     "sommando il percorso di ogni barra</td></tr>");
+   H("<tr><td><b>pre_total</b></td><td>pre_up + pre_dn: quanta strada ha fatto il prezzo in totale. "
+     "Misura l'attivita', non la direzione</td></tr>");
+   H("<tr><td><b>pre_net</b></td><td>pre_up - pre_dn: il movimento netto, cioe' quanto si e' spostato "
+     "davvero. Positivo = giornata in salita fin li'</td></tr>");
+   H("<tr><td><b>n</b></td><td>Numero di osservazioni nella cella</td></tr>");
+   H("<tr><td><b>n eff</b></td><td>Campione efficace. Due istanti distanti meno dell'orizzonte osservano lo "
+     "stesso futuro e non sono indipendenti: n eff = n diviso orizzonte/passo. E' questo, non n, "
+     "a determinare quanto e' affidabile una percentuale</td></tr>");
+   H("<tr><td><b>freq%</b></td><td>Su 100 giornate di quel gruppo, in quante il movimento maggiore "
+     "parte in quella finestra</td></tr>");
+   H("<tr><td><b>score</b></td><td>freq% x ampiezza media = ATR di movimento attesi ogni 100 giornate. "
+     "Premia le finestre che uniscono frequenza e dimensione</td></tr>");
+   H("<tr><td><b>top 15min</b> / <b>n15</b></td><td>La fascia da un quarto d'ora che dentro quell'ora "
+     "concentra piu' movimenti, e quanti ne concentra</td></tr>");
+   H("<tr><td><b>BUY% / SELL%</b></td><td>Ripartizione direzionale del movimento maggiore</td></tr>");
+   H("<tr><td><b>z BUY</b></td><td>Di quante deviazioni standard la ripartizione si discosta dal 50/50. "
+     "Con centinaia di finestre testate |z| oltre 2 capita per caso: la soglia da guardare e' <b>3</b>, "
+     "ed e' l'unica colorata</td></tr>");
+   H("<tr><td><b>p</b></td><td>Probabilita' che il prezzo raggiunga il target PRIMA dello stop, entro "
+     "l'orizzonte. Nella colonna combinata vale per una direzione qualsiasi: non e' un tasso di vincita, "
+     "perche' non si puo' comprare e vendere insieme</td></tr>");
+   H("<tr><td><b>pUP / pDN</b></td><td>Le stesse probabilita' separate per direzione. Sono queste a "
+     "descrivere un trade reale</td></tr>");
+   H("<tr><td><b>baseline</b></td><td>La stessa probabilita' senza alcuna condizione, calcolata dentro la "
+     "stessa sessione. E' il metro di paragone: senza, una percentuale non significa nulla</td></tr>");
+   H("<tr><td><b>lift</b></td><td>p diviso baseline. 1.00 = la condizione non aggiunge niente</td></tr>");
+   H("<tr><td><b>wlow</b></td><td>Limite inferiore di Wilson al 95% sul campione efficace: il valore piu' "
+     "pessimistico compatibile con i dati. Se resta sopra la baseline, l'effetto regge</td></tr>");
+   H("<tr><td><b>MFE</b></td><td>Maximum Favourable Excursion: quanto si e' mosso al massimo a favore "
+     "entro l'orizzonte</td></tr>");
+   H("<tr><td><b>oltre 1 / 2 ATR</b></td><td>Quota di casi in cui il movimento ha superato quella soglia</td></tr>");
+   H("<tr><td><b>Z-Score</b></td><td>Di quante deviazioni standard il prezzo dista dalla sua media a "
+     "<i>"+IntegerToString(InpZsPeriod)+"</i> periodi</td></tr>");
+   H("<tr><td><b>RSI</b></td><td>Relative Strength Index a <i>"+IntegerToString(InpRsiPeriod)+"</i> periodi, "
+     "smoothing di Wilder</td></tr>");
+   H("<tr><td><b>CCI</b></td><td>Commodity Channel Index a <i>"+IntegerToString(InpCciPeriod)+"</i> periodi "
+     "su prezzo tipico</td></tr>");
+   H("<tr><td><b>sessioni</b></td><td>Asia / London / NY-overlap / NY-late, in ora del server del broker. "
+     "Con il cambio di ora legale le fasce slittano di un'ora</td></tr>");
+   H("</tbody></table></div></section>");
 }
 
 void HtmlFoot()
@@ -1085,6 +1159,80 @@ void HtmlHeatM15(string id,const int &cnt[][96],const double &sPt[][96],const do
    H("</tbody></table></div>");
 }
 
+
+
+//==================================================================
+//  INDICATORI - calcolo interno
+//
+//  Riscritti dentro lo script invece di usare iCustom o gli handle:
+//  servono i valori di un TF diverso da quello base, in ogni istante
+//  della griglia, per anni di storia. Passare dagli handle
+//  significherebbe migliaia di chiamate e nessun controllo su quale
+//  barra viene letta - che e' esattamente il punto critico qui.
+//
+//  DISCIPLINA POINT-IN-TIME: al tempo t si legge il valore dell'ultima
+//  barra CHIUSA prima di t. Leggere la barra in formazione userebbe
+//  prezzi non ancora avvenuti: e' il modo piu' comune di costruire un
+//  backtest che funziona nel passato e fallisce in reale.
+//
+//  Le formule seguono gli indicatori standard MetaQuotes: RSI con
+//  smoothing di Wilder, CCI su prezzo tipico con deviazione media e
+//  costante 0.015, Z-Score come (close - media) / deviazione standard.
+//==================================================================
+void CalcRSI(const double &price[], int n, int period, double &out[])
+{
+   ArrayResize(out,n); ArrayInitialize(out,50.0);
+   if(n<=period || period<1) return;
+   double sp=0, sn=0;
+   for(int i=1;i<=period;i++)
+   {
+      double d=price[i]-price[i-1];
+      sp+=(d>0? d:0);
+      sn+=(d<0?-d:0);
+   }
+   double pos=sp/period, neg=sn/period;
+   out[period]=(neg!=0.0? 100.0-100.0/(1.0+pos/neg) : (pos!=0.0?100.0:50.0));
+   for(int i=period+1;i<n;i++)
+   {
+      double d=price[i]-price[i-1];
+      pos=(pos*(period-1)+(d>0.0? d:0.0))/period;
+      neg=(neg*(period-1)+(d<0.0?-d:0.0))/period;
+      out[i]=(neg!=0.0? 100.0-100.0/(1.0+pos/neg) : (pos!=0.0?100.0:50.0));
+   }
+}
+
+void CalcCCI(const double &tp[], int n, int period, double &out[])
+{
+   ArrayResize(out,n); ArrayInitialize(out,0.0);
+   if(n<period || period<1) return;
+   double mult=0.015/period;
+   for(int i=period-1;i<n;i++)
+   {
+      double sma=0;
+      for(int j=i-period+1;j<=i;j++) sma+=tp[j];
+      sma/=period;
+      double dev=0;
+      for(int j=i-period+1;j<=i;j++) dev+=MathAbs(tp[j]-sma);
+      dev*=mult;
+      out[i]=(dev!=0.0 ? (tp[i]-sma)/dev : 0.0);
+   }
+}
+
+void CalcZScore(const double &price[], int n, int period, double &out[])
+{
+   ArrayResize(out,n); ArrayInitialize(out,0.0);
+   if(n<period || period<1) return;
+   for(int i=period-1;i<n;i++)
+   {
+      double m=0;
+      for(int j=i-period+1;j<=i;j++) m+=price[j];
+      m/=period;
+      double v=0;
+      for(int j=i-period+1;j<=i;j++) v+=(price[j]-m)*(price[j]-m);
+      double sd=MathSqrt(v/period);
+      out[i]=(sd!=0.0 ? (price[i]-m)/sd : 0.0);
+   }
+}
 
 //==================================================================
 //  CLASSIFICA DELLE FINESTRE OPERATIVE
@@ -1355,6 +1503,9 @@ bool ProcessSymbol(string sym)
    int    cntDM[7][96];  double sPtDM[7][96],  sAtDM[7][96];
    int    buyDH[7][24],  bigDH[7][24], buyDM[7][96], bigDM[7][96];
    int    cntH[24], buyH[24], bigH[24];  double sAtH[24];
+   // stati degli indicatori contati per finestra giorno x ora
+   int    indN[7][24], zHi[7][24], zLo[7][24], rHi[7][24], rLo[7][24];
+   int    cHi[7][24], cLo[7][24], cPos[7][24];
    int    cntM[96], buyM[96], bigM[96];  double sAtM[96];
    ArrayInitialize(cntDH,0); ArrayInitialize(sPtDH,0.0); ArrayInitialize(sAtDH,0.0);
    ArrayInitialize(cntDM,0); ArrayInitialize(sPtDM,0.0); ArrayInitialize(sAtDM,0.0);
@@ -1362,6 +1513,9 @@ bool ProcessSymbol(string sym)
    ArrayInitialize(buyDM,0); ArrayInitialize(bigDM,0);
    ArrayInitialize(cntH,0);  ArrayInitialize(buyH,0);  ArrayInitialize(bigH,0);  ArrayInitialize(sAtH,0.0);
    ArrayInitialize(cntM,0);  ArrayInitialize(buyM,0);  ArrayInitialize(bigM,0);  ArrayInitialize(sAtM,0.0);
+   ArrayInitialize(indN,0); ArrayInitialize(zHi,0); ArrayInitialize(zLo,0);
+   ArrayInitialize(rHi,0);  ArrayInitialize(rLo,0);
+   ArrayInitialize(cHi,0);  ArrayInitialize(cLo,0); ArrayInitialize(cPos,0);
    g_nRk=0; ArrayResize(g_rk,0);
 
    g_nTop=0; ArrayResize(g_top,0);
@@ -1631,6 +1785,35 @@ bool ProcessSymbol(string sym)
       ArrayResize(lmHourAll,q+1,512); lmHourAll[q]=st.hour;
       nDays++;
 
+      //--- serie degli indicatori sul TF dedicato, con warm-up prima del giorno
+      MqlRates ri[];
+      double rsiB[], cciB[], zsB[];
+      int nInd=0, indTfSec=0, ip=0;
+      if(InpDoIndicators && InpDoScan)
+      {
+         int need=(int)MathMax(InpRsiPeriod,MathMax(InpCciPeriod,InpZsPeriod));
+         indTfSec=TFMinutes(InpIndTF)*60;
+         if(indTfSec<=0) indTfSec=900;
+         // warm-up abbondante: lo smoothing di Wilder dell'RSI e' ricorsivo e
+         // parte male se la serie inizia poco prima della giornata
+         datetime iFrom=dStart-(datetime)((need*20+300)*indTfSec);
+         nInd=CopyRates(sym,InpIndTF,iFrom,dEnd+InpScanHorizonMin*60,ri);
+         if(nInd>need*3)
+         {
+            double cl[], tp[];
+            ArrayResize(cl,nInd); ArrayResize(tp,nInd);
+            for(int i=0;i<nInd;i++)
+            {
+               cl[i]=ri[i].close;
+               tp[i]=(ri[i].high+ri[i].low+ri[i].close)/3.0;
+            }
+            CalcRSI(cl,nInd,InpRsiPeriod,rsiB);
+            CalcCCI(tp,nInd,InpCciPeriod,cciB);
+            CalcZScore(cl,nInd,InpZsPeriod,zsB);
+         }
+         else nInd=0;
+      }
+
       //================= GRIGLIA POINT-IN-TIME =====================
       if(InpDoScan)
       {
@@ -1667,12 +1850,36 @@ bool ProcessSymbol(string sym)
             s.dToPrevHighAtr=((pH-entry)/g_point)/atrPt;
             s.dToPrevLowAtr =((entry-pL)/g_point)/atrPt;
 
+            // ultima barra indicatori CHIUSA prima di t: mai quella in formazione
+            s.indOk=false; s.rsi=50.0; s.cci=0.0; s.zs=0.0;
+            if(nInd>0)
+            {
+               while(ip+1<nInd && ri[ip+1].time+indTfSec<=s.t) ip++;
+               if(ri[ip].time+indTfSec<=s.t && ip>=InpZsPeriod && ip>=InpRsiPeriod && ip>=InpCciPeriod)
+               {
+                  s.rsi=rsiB[ip]; s.cci=cciB[ip]; s.zs=zsB[ip];
+                  s.indOk=true;
+               }
+            }
+
             int nextNews=MinutesToNextNews(s.t);
             s.newsAheadMin=nextNews;
             s.newsFlag=((nextNews>=0 && nextNews<=InpNewsWindowMin)?1:0);
 
             // esito forward (passata unica: MFE + first touch di tutte le soglie)
             ResolveForward(r,g,endIdx,entry,atrPt,s);
+
+            if(s.indOk)
+            {
+               indN[s.dow][s.hour]++;
+               if(s.zs >InpZsHigh)  zHi[s.dow][s.hour]++;
+               if(s.zs <InpZsLow)   zLo[s.dow][s.hour]++;
+               if(s.rsi>InpRsiHigh) rHi[s.dow][s.hour]++;
+               if(s.rsi<InpRsiLow)  rLo[s.dow][s.hour]++;
+               if(s.cci>InpCciHigh) cHi[s.dow][s.hour]++;
+               if(s.cci<InpCciLow)  cLo[s.dow][s.hour]++;
+               if(s.cci>0.0)        cPos[s.dow][s.hour]++;
+            }
 
             ArrayResize(g_scan,g_nScan+1,4096);
             g_scan[g_nScan]=s;
@@ -1916,6 +2123,70 @@ bool ProcessSymbol(string sym)
            "</td><td class=\""+(MathAbs(zz)>=3.0?(zz>0?"hi":"lo"):"nz")+"\">"+F(zz,2)+"</td></tr>");
       }
       HtmlTableEnd(); H("</section>");
+   }
+
+   //=================================================================
+   //  INDICATORI: quanto spesso ogni stato si presenta, finestra per finestra
+   //=================================================================
+   if(g_html!=INVALID_HANDLE)
+   {
+      H("<section><h2>Stati degli indicatori per finestra</h2><div class=\"note\">"
+        "Percentuale di istanti, dentro ogni finestra, in cui l'indicatore si trova oltre la soglia. "
+        "Valori letti sull'ultima barra "+EnumToString(InpIndTF)+" <b>chiusa</b> prima dell'istante osservato: "
+        "mai la barra in formazione.<br><br>"
+        "<b>Attenzione a come si legge.</b> Una percentuale alta dice solo che quello stato e' frequente in "
+        "quell'ora, non che sia utile: se l'RSI supera 70 nel 12% degli istanti ovunque, trovarlo al 12% alle "
+        "15:00 non e' informazione. Cio' che conta e' lo scostamento dalla riga TOTALE in fondo, e soprattutto "
+        "la tabella successiva, che misura se lo stato <b>anticipa</b> un movimento invece di limitarsi ad "
+        "accompagnarlo.</div>");
+      HtmlTableHead("tI","finestra;istanti;Z oltre "+F(InpZsHigh,1)+";Z sotto "+F(InpZsLow,1)+
+                         ";RSI oltre "+F(InpRsiHigh,0)+";RSI sotto "+F(InpRsiLow,0)+
+                         ";CCI oltre "+F(InpCciHigh,0)+";CCI sotto "+F(InpCciLow,0)+";CCI positivo",true);
+      int tN=0,tzH=0,tzL=0,trH=0,trL=0,tcH=0,tcL=0,tcP=0;
+      for(int i=0;i<g_nRk;i++)
+      {
+         int d=g_rk[i].dow, h=g_rk[i].hour;
+         int nn=indN[d][h];
+         if(nn<50) continue;
+         tN+=nn; tzH+=zHi[d][h]; tzL+=zLo[d][h]; trH+=rHi[d][h]; trL+=rLo[d][h];
+         tcH+=cHi[d][h]; tcL+=cLo[d][h]; tcP+=cPos[d][h];
+         H("<tr><td><b>"+HE(g_rk[i].lab)+"</b></td><td>"+IntegerToString(nn)+"</td><td>"+
+           F(100.0*zHi[d][h]/nn,1)+"</td><td>"+F(100.0*zLo[d][h]/nn,1)+"</td><td>"+
+           F(100.0*rHi[d][h]/nn,1)+"</td><td>"+F(100.0*rLo[d][h]/nn,1)+"</td><td>"+
+           F(100.0*cHi[d][h]/nn,1)+"</td><td>"+F(100.0*cLo[d][h]/nn,1)+"</td><td>"+
+           F(100.0*cPos[d][h]/nn,1)+"</td></tr>");
+      }
+      if(tN>0)
+         H("<tr class=\"nz\"><td><b>TOTALE</b></td><td>"+IntegerToString(tN)+"</td><td>"+
+           F(100.0*tzH/tN,1)+"</td><td>"+F(100.0*tzL/tN,1)+"</td><td>"+F(100.0*trH/tN,1)+"</td><td>"+
+           F(100.0*trL/tN,1)+"</td><td>"+F(100.0*tcH/tN,1)+"</td><td>"+F(100.0*tcL/tN,1)+"</td><td>"+
+           F(100.0*tcP/tN,1)+"</td></tr>");
+      HtmlTableEnd();
+      H("<div class=\"note\">La verifica che conta - se questi stati <b>predicono</b> il movimento e la sua "
+        "direzione - e' nella scheda <b>Condizioni marginali</b>: gli stati sono stati aggiunti li' come "
+        "dimensioni, con probabilita', lift e ripartizione UP/DOWN calcolati sulla stessa baseline delle "
+        "altre variabili.</div></section>");
+   }
+
+   if(InpWriteCsv)
+   {
+      int fI=FileOpen(dir+fn+"_indicatori.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
+      if(fI!=INVALID_HANDLE)
+      {
+         W(fI,"giorno;ora;istanti;pct_z_alto;pct_z_basso;pct_rsi_alto;pct_rsi_basso;"
+               "pct_cci_alto;pct_cci_basso;pct_cci_positivo\r\n");
+         for(int d=0;d<7;d++) for(int h=0;h<24;h++)
+         {
+            int nn=indN[d][h];
+            if(nn<50) continue;
+            W(fI,DowIT(d)+";"+D2(h)+":00;"+IntegerToString(nn)+";"+
+                  F(100.0*zHi[d][h]/nn,2)+";"+F(100.0*zLo[d][h]/nn,2)+";"+
+                  F(100.0*rHi[d][h]/nn,2)+";"+F(100.0*rLo[d][h]/nn,2)+";"+
+                  F(100.0*cHi[d][h]/nn,2)+";"+F(100.0*cLo[d][h]/nn,2)+";"+
+                  F(100.0*cPos[d][h]/nn,2)+"\r\n");
+         }
+         FileClose(fI);
+      }
    }
 
    if(InpWriteCsv && g_nRk>0)
@@ -2464,6 +2735,22 @@ void BuildConditions(string sym,string dir)
       CellAdd("G|"+IntegerToString(s.hour),"ora;"+D2(s.hour)+":00",s);
       CellAdd("H|"+IntegerToString(s.hour*4+s.minute/15),"m15;"+M15Label(s.hour,s.minute),s);
       CellAdd("I|"+IntegerToString(s.dow),"giorno;"+DowIT(s.dow),s);
+
+      // Gli stati degli indicatori entrano come dimensioni normali: cosi'
+      // ottengono probabilita', lift, Wilson e ripartizione UP/DOWN calcolati
+      // esattamente come le altre variabili, sulla stessa baseline. Contare
+      // quante volte una soglia viene superata non dice nulla da solo: la
+      // domanda e' se lo stato ANTICIPA il movimento.
+      if(s.indOk)
+      {
+         string zst=(s.zs>InpZsHigh?"oltre "+F(InpZsHigh,1):(s.zs<InpZsLow?"sotto "+F(InpZsLow,1):"neutro"));
+         string rst=(s.rsi>InpRsiHigh?"oltre "+F(InpRsiHigh,0):(s.rsi<InpRsiLow?"sotto "+F(InpRsiLow,0):"neutro"));
+         string cst=(s.cci>InpCciHigh?"oltre "+F(InpCciHigh,0):(s.cci<InpCciLow?"sotto "+F(InpCciLow,0):"neutro"));
+         CellAdd("Z|"+zst,"Z-Score;"+zst,s);
+         CellAdd("R|"+rst,"RSI;"+rst,s);
+         CellAdd("C|"+cst,"CCI;"+cst,s);
+         CellAdd("P|"+(s.cci>0?"1":"0"),"CCI segno;"+(s.cci>0?"positivo":"negativo"),s);
+      }
    }
    WriteCells(dir+fn+"_conditions_marg.csv","dimensione;valore",basePt,baseAtr,
               "Condizioni marginali",
