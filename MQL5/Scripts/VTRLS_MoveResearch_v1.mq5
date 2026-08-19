@@ -179,12 +179,15 @@ struct SCell
 {
    string key;
    string label;
+   int    sess;               // sessione della cella, -1 = trasversale
    int    n;
    int    hitPt[8],  hitPtUp[8],  hitPtDn[8];
    int    hitAtr[8], hitAtrUp[8], hitAtrDn[8];
    double sumMfe;
    double mfe[];
 };
+int    g_basePtS[4][8], g_baseAtrS[4][8];  // baseline per sessione
+int    g_nScanS[4];                        // righe per sessione
 int    g_basePtUp[8],  g_basePtDn[8];    // baseline direzionali
 int    g_baseAtrUp[8], g_baseAtrDn[8];
 
@@ -561,7 +564,7 @@ void CellsInit()
    ArrayResize(g_slot,g_slotMask+1);
    ArrayInitialize(g_slot,-1);
 }
-int CellGet(string key,string label)
+int CellGet(string key,string label,int sess)
 {
    uint h=Hash(key);
    int idx=(int)(h & (uint)g_slotMask);
@@ -574,6 +577,7 @@ int CellGet(string key,string label)
          ArrayResize(g_cell,g_nCell+1,512);
          g_cell[g_nCell].key=key;
          g_cell[g_nCell].label=label;
+         g_cell[g_nCell].sess=sess;
          g_cell[g_nCell].n=0;
          g_cell[g_nCell].sumMfe=0.0;
          ArrayInitialize(g_cell[g_nCell].hitPt,0);
@@ -591,9 +595,9 @@ int CellGet(string key,string label)
    }
    return -1;                              // tabella piena
 }
-void CellAdd(string key,string label,const SScan &s)
+void CellAdd(string key,string label,const SScan &s,int sess=-1)
 {
-   int ci=CellGet(key,label);
+   int ci=CellGet(key,label,sess);
    if(ci<0) return;
    g_cell[ci].n++;
    // "hit" combinato = target raggiunto in ALMENO una delle due direzioni.
@@ -2136,6 +2140,7 @@ void BuildConditions(string sym,string dir)
    //--- baseline incondizionata
    int basePt[8], baseAtr[8];
    ArrayInitialize(basePt,0); ArrayInitialize(baseAtr,0);
+   ArrayInitialize(g_basePtS,0); ArrayInitialize(g_baseAtrS,0); ArrayInitialize(g_nScanS,0);
    ArrayInitialize(g_basePtUp,0);  ArrayInitialize(g_basePtDn,0);
    ArrayInitialize(g_baseAtrUp,0); ArrayInitialize(g_baseAtrDn,0);
    for(int i=0;i<g_nScan;i++)
@@ -2151,6 +2156,19 @@ void BuildConditions(string sym,string dir)
          if(g_scan[i].hitUpAtr[k]>=0 || g_scan[i].hitDnAtr[k]>=0) baseAtr[k]++;
          if(g_scan[i].hitUpAtr[k]>=0) g_baseAtrUp[k]++;
          if(g_scan[i].hitDnAtr[k]>=0) g_baseAtrDn[k]++;
+      }
+      // stessa cosa ma separata per sessione: senza questo, qualunque cella
+      // ristretta alle ore americane batte la baseline globale - che media
+      // anche le 3 di notte - e sembra un edge quando dice solo "di giorno
+      // il mercato si muove di piu'".
+      int sv=g_scan[i].sess;
+      if(sv>=0 && sv<4)
+      {
+         g_nScanS[sv]++;
+         for(int k=0;k<g_nPt;k++)
+            if(g_scan[i].hitUpPt[k]>=0 || g_scan[i].hitDnPt[k]>=0) g_basePtS[sv][k]++;
+         for(int k=0;k<g_nAtr;k++)
+            if(g_scan[i].hitUpAtr[k]>=0 || g_scan[i].hitDnAtr[k]>=0) g_baseAtrS[sv][k]++;
       }
    }
 
@@ -2170,7 +2188,7 @@ void BuildConditions(string sym,string dir)
                  "preTotal "+BinLabel(bT,g_edgePreTotal,"ATR")+";"+
                  "preNet "+BinLabel(bN,g_edgePreNet,"ATR")+";"+
                  SessName(s.sess)+";"+(s.newsFlag>0?"NEWS":"NO-NEWS");
-      CellAdd(key,lab,s);
+      CellAdd(key,lab,s,s.sess);
    }
    WriteCells(dir+fn+"_conditions.csv",
               "prev_range;prev_dir;pre_total;pre_net;sessione;news",
@@ -2247,11 +2265,19 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
       if(g_cell[c].n<InpMinSamples) continue;
       int n=g_cell[c].n;
       string row=g_cell[c].label+";"+IntegerToString(n)+";"+IntegerToString((int)(n/g_overlap));
+      int sv=g_cell[c].sess;
+      // baseline di riferimento: quella della stessa sessione se la cella ne
+      // ha una, altrimenti quella globale
+      int    bN =(sv>=0 && g_nScanS[sv]>0 ? g_nScanS[sv] : g_nScan);
       for(int k=0;k<g_nPt;k++)
       {
          int hits=g_cell[c].hitPt[k];
          double p=(double)hits/n;
-         double bp=(g_nScan>0 ? (double)basePt[k]/g_nScan : 0.0);
+         int bH=(sv>=0 && g_nScanS[sv]>0 ? g_basePtS[sv][k] : basePt[k]);
+         // con meno di 30 successi la baseline e' inaffidabile: un lift
+         // calcolato su un denominatore quasi nullo produce numeri come 75x
+         // che non significano niente
+         double bp=(bH>=30 && bN>0 ? (double)bH/bN : 0.0);
          double pu=(double)g_cell[c].hitPtUp[k]/n, bu=(g_nScan>0?(double)g_basePtUp[k]/g_nScan:0.0);
          double pd=(double)g_cell[c].hitPtDn[k]/n, bd=(g_nScan>0?(double)g_basePtDn[k]/g_nScan:0.0);
          row+=";"+IntegerToString(hits)+";"+F(100.0*p,2)+";"+F(100.0*WilsonLow(hits,n),2)+";"+
@@ -2262,7 +2288,8 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
       {
          int hits=g_cell[c].hitAtr[k];
          double p=(double)hits/n;
-         double bp=(g_nScan>0 ? (double)baseAtr[k]/g_nScan : 0.0);
+         int bH=(sv>=0 && g_nScanS[sv]>0 ? g_baseAtrS[sv][k] : baseAtr[k]);
+         double bp=(bH>=30 && bN>0 ? (double)bH/bN : 0.0);
          double pu=(double)g_cell[c].hitAtrUp[k]/n, bu=(g_nScan>0?(double)g_baseAtrUp[k]/g_nScan:0.0);
          double pd=(double)g_cell[c].hitAtrDn[k]/n, bd=(g_nScan>0?(double)g_baseAtrDn[k]/g_nScan:0.0);
          row+=";"+IntegerToString(hits)+";"+F(100.0*p,2)+";"+F(100.0*WilsonLow(hits,n),2)+";"+
@@ -2280,7 +2307,10 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
       {
          int hits=g_cell[c].hitAtr[k];
          double pp=(double)hits/n;
-         double bb=(g_nScan>0 ? (double)baseAtr[k]/g_nScan : 0.0);
+         int sv2=g_cell[c].sess;
+         int bN2=(sv2>=0 && g_nScanS[sv2]>0 ? g_nScanS[sv2] : g_nScan);
+         int bH2=(sv2>=0 && g_nScanS[sv2]>0 ? g_baseAtrS[sv2][k] : baseAtr[k]);
+         double bb=(bH2>=30 && bN2>0 ? (double)bH2/bN2 : 0.0);
          if(bb<=0) continue;
          if(pp/bb>1.20 && WilsonLow(hits,n)>bb)
          {
@@ -2311,7 +2341,11 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
 
    // riga baseline in coda: serve per leggere il lift in modo onesto
    string bl[];
-   string b="BASELINE (tutte le righe);"+IntegerToString(g_nScan)+";"+IntegerToString((int)(g_nScan/g_overlap));
+   // il label occupa una sola colonna ma keyHeader ne dichiara di piu':
+   // senza riempimento la riga BASELINE risultava sfalsata di N colonne
+   int nkey=StringSplit(keyHeader,StringGetCharacter(";",0),bl);
+   string pad=""; for(int i=1;i<nkey;i++) pad+=";";
+   string b="BASELINE (tutte le righe)"+pad+";"+IntegerToString(g_nScan)+";"+IntegerToString((int)(g_nScan/g_overlap));
    for(int k=0;k<g_nPt;k++)
       b+=";"+IntegerToString(basePt[k])+";"+F(100.0*basePt[k]/MathMax(1,g_nScan),2)+";;1.000;"+
          F(100.0*g_basePtUp[k]/MathMax(1,g_nScan),2)+";1.000;"+
@@ -2327,9 +2361,8 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
    if(g_html!=INVALID_HANDLE)
    {
       string hb="<tr class=\"nz\">";
-      int nk=StringSplit(keyHeader,StringGetCharacter(";",0),bl);
       hb+="<td><b>BASELINE</b></td>";
-      for(int i=1;i<nk;i++) hb+="<td>-</td>";
+      for(int i=1;i<nkey;i++) hb+="<td>-</td>";
       hb+="<td>"+IntegerToString(g_nScan)+"</td><td>"+IntegerToString((int)(g_nScan/g_overlap))+"</td>";
       for(int k=0;k<g_nPt;k++)
          hb+="<td>"+F(100.0*basePt[k]/MathMax(1,g_nScan),1)+"%</td>";
