@@ -867,6 +867,9 @@ void HtmlHead(string sym)
    H("table.mx tr.tot td{border-top:2px solid var(--acc);font-weight:600}");
    H("table.mx td.z{color:#3a424c}");
    H(".note b{color:var(--tx)}");
+   H(".read{background:var(--pan);border:1px solid var(--ln);border-left:3px solid var(--acc);border-radius:8px;padding:14px 18px;margin:14px 0}");
+   H(".read h3{margin:0 0 8px;font-size:14px}.read ul{margin:0;padding-left:18px}.read li{margin:5px 0}");
+   H(".read .w{color:var(--warn)}.read .k{color:var(--acc);font-weight:600}");
    H("</style></head><body>");
    H("<header><h1>VTRLS Move Research - "+HE(sym)+"</h1><div class=\"sub\">TF base "+EnumToString(InpBaseTF)+
      " | periodo "+TimeToString(InpFrom,TIME_DATE)+" - "+TimeToString(InpTo,TIME_DATE)+
@@ -880,7 +883,7 @@ void HtmlHead(string sym)
    H("<button onclick=\"tab(5)\">Condizioni incrociate</button>");
    H("<button onclick=\"tab(6)\">Condizioni marginali</button>");
    H("</nav><main>");
-   H("<section class=\"on\"><div id=\"sum\" class=\"sum\"></div>");
+   H("<section class=\"on\"><div id=\"sum\" class=\"sum\"></div><div id=\"lett\"></div>");
    H("<h2>Come leggere questo report</h2><div class=\"note\">");
    H("<b>Largest Move</b> e' la massima escursione direzionale della giornata. E' nota solo a posteriori: descrive, non predice. ");
    H("Le tabelle <b>Condizioni</b> non la usano come obiettivo: partono da una griglia point-in-time in cui le feature ");
@@ -910,6 +913,7 @@ void HtmlFoot()
    H("function flt(el){var t=document.getElementById(el.getAttribute('t')),q=el.value.toLowerCase(),b=t.tBodies[0];");
    H("for(var k=0;k<b.rows.length;k++){var r=b.rows[k];r.style.display=(r.innerText.toLowerCase().indexOf(q)>=0)?'':'none';}}");
    H("var sc=document.getElementById('sumsrc');if(sc){document.getElementById('sum').appendChild(sc);sc.style.display='contents';}");
+   H("var lt=document.getElementById('lettsrc');if(lt){document.getElementById('lett').appendChild(lt);lt.style.display='block';}");
    H("</script></body></html>");
 }
 
@@ -1740,6 +1744,103 @@ bool ProcessSymbol(string sym)
       H("<div class=\"card\"><span>orizzonte forward</span><b>"+IntegerToString(InpScanHorizonMin)+" min</b></div>");
       H("<div class=\"card\"><span>stop / target</span><b>"+F(InpAdverseRatio,2)+"</b></div>");
       H("</div>");
+
+      //=============================================================
+      // LETTURA GUIDATA
+      // Il report resta illeggibile se l'utente deve dedurre da solo
+      // cosa dicono sei tabelle. Qui lo script scrive a parole cosa ha
+      // trovato, con i numeri dentro la frase, e dichiara apertamente
+      // quando i campioni non bastano per concludere.
+      //=============================================================
+      H("<div id=\"lettsrc\" style=\"display:none\"><div class=\"read\">");
+      H("<h3>Lettura guidata</h3><ul>");
+
+      H("<li>Periodo analizzato: <span class=\"k\">"+IntegerToString(nDays)+" giornate</span>"
+        " di "+EnumToString(InpBaseTF)+".</li>");
+
+      if(nDays>0)
+      {
+         // direzione
+         double pBuy=100.0*aggAll[0].buy/nDays;
+         H("<li>Il movimento maggiore e' stato al <b>rialzo nel "+F(pBuy,0)+"%</b> delle giornate e al ribasso nel "+
+           F(100.0-pBuy,0)+"%. "+
+           (MathAbs(pBuy-50.0)<7.0 ? "Ripartizione sostanzialmente simmetrica: nessun bias direzionale sfruttabile."
+                                   : "Sbilanciamento presente, ma su questo campione va verificato prima di usarlo.")+"</li>");
+
+         // dimensione tipica
+         double cpA[]; ArrayCopy(cpA,lmAtrAll);
+         H("<li>Dimensione tipica del movimento maggiore: <span class=\"k\">"+
+           F(aggAll[0].sLmAtr/nDays,2)+" ATR</span> in media, "+F(Median(cpA),2)+" ATR mediano, pari a circa "+
+           F(aggAll[0].sLmPt/nDays,0)+" punti. Supera 1 ATR nel <b>"+F(100.0*aggAll[0].big1/nDays,0)+
+           "%</b> delle giornate e 2 ATR nel "+F(100.0*aggAll[0].big2/nDays,0)+"%.</li>");
+
+         // durata
+         H("<li>Dura in media <b>"+F(aggAll[0].sDur/nDays,0)+" minuti</b>: e' il tempo in cui si concentra "
+           "la parte utile della giornata.</li>");
+
+         // fascia oraria piu' calda
+         int bh=-1,bhc=0;
+         for(int h=0;h<24;h++) if(cntH1[h]>bhc){ bhc=cntH1[h]; bh=h; }
+         int bm=-1,bmc=0;
+         for(int b=0;b<96;b++) if(cntM15[b]>bmc){ bmc=cntM15[b]; bm=b; }
+         if(bh>=0)
+            H("<li>L'ora in cui il movimento parte piu' spesso e' <span class=\"k\">"+D2(bh)+":00-"+D2((bh+1)%24)+
+              ":00</span>, in "+IntegerToString(bhc)+" giornate su "+IntegerToString(nDays)+" ("+
+              F(100.0*bhc/nDays,0)+"%). Media di quei movimenti: "+F(sumH1[bh]/bhc,0)+" punti.</li>");
+         if(bm>=0)
+            H("<li>A grana fine la finestra piu' densa e' <span class=\"k\">"+M15Label(bm/4,(bm%4)*15)+
+              "</span> con "+IntegerToString(bmc)+" movimenti ("+F(100.0*bmc/nDays,0)+"% delle giornate). "
+              "Se questo numero e' molto piu' alto delle fasce vicine, hai individuato una finestra operativa; "
+              "se e' simile, il movimento e' semplicemente distribuito nella sessione.</li>");
+
+         // giorno piu' e meno mosso
+         int bd=-1,wd=-1; double bv=-1,wv=1e9;
+         for(int i=0;i<7;i++)
+         {
+            if(aggDow[i].n<5) continue;
+            double v=aggDow[i].sLmAtr/aggDow[i].n;
+            if(v>bv){ bv=v; bd=i; }
+            if(v<wv){ wv=v; wd=i; }
+         }
+         if(bd>=0 && wd>=0 && bd!=wd)
+            H("<li>Giorno mediamente piu' mosso: <span class=\"k\">"+DowIT(bd)+"</span> ("+F(bv,2)+
+              " ATR su "+IntegerToString(aggDow[bd].n)+" giornate). Meno mosso: <b>"+DowIT(wd)+"</b> ("+
+              F(wv,2)+" ATR su "+IntegerToString(aggDow[wd].n)+"). Differenza: "+
+              F(100.0*(bv/MathMax(0.0001,wv)-1.0),0)+"%.</li>");
+
+         // sessione dominante
+         int bs=-1,bsc=0;
+         for(int i=0;i<4;i++) if(aggSes[i].n>bsc){ bsc=aggSes[i].n; bs=i; }
+         if(bs>=0)
+            H("<li>Sessione che concentra piu' movimenti: <span class=\"k\">"+SessName(bs)+"</span> con "+
+              IntegerToString(bsc)+" giornate su "+IntegerToString(nDays)+" ("+F(100.0*bsc/nDays,0)+
+              "%), dimensione media "+F(aggSes[bs].sLmAtr/bsc,2)+" ATR.</li>");
+
+         // struttura pre-evento
+         H("<li>Prima che il movimento parta, il prezzo ha gia' percorso in media <span class=\"k\">"+
+           F(aggAll[0].sPrePct/nDays,0)+"%</span> del range del giorno precedente, con "+
+           F(aggAll[0].sPreTot/nDays,0)+" punti totali di percorso e un movimento netto medio di "+
+           F(aggAll[0].sPreNet/nDays,0)+" punti. E' il dato da confrontare fra le condizioni: "
+           "se le giornate esplosive partono da un pre-evento sistematicamente diverso, li' c'e' un segnale.</li>");
+      }
+
+      // avvertenza statistica, sempre
+      int perCell=(int)(nDays*24/MathMax(1,168));
+      H("<li class=\"w\"><b>Attendibilita':</b> ");
+      if(nDays<120)
+         H("con "+IntegerToString(nDays)+" giornate NON si conclude nulla. Ogni cella della matrice giorno x ora "
+           "ha in media "+IntegerToString(perCell)+" osservazioni: e' rumore. Questo report serve solo a verificare "
+           "che i dati e la struttura siano corretti. Per fare ricerca servono almeno 2-3 anni.");
+      else if(nDays<500)
+         H("con "+IntegerToString(nDays)+" giornate le tendenze generali sono indicative, ma le celle incrociate "
+           "restano fragili. Fidati solo delle tabelle marginali e verifica ogni ipotesi su un secondo periodo.");
+      else
+         H("con "+IntegerToString(nDays)+" giornate il campione regge per le analisi marginali. "
+           "Le condizioni incrociate a sei dimensioni restano comunque da validare fuori campione.");
+      H("</li>");
+
+      H("</ul></div></div>");
+
       HtmlFoot();
       FileClose(g_html);
       g_html=INVALID_HANDLE;
