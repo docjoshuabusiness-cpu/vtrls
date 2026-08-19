@@ -108,7 +108,9 @@ input double          InpRsiHigh        = 70.0;            // Soglia RSI ipercom
 input double          InpRsiLow         = 30.0;            // Soglia RSI ipervenduto
 input int             InpCciPeriod      = 14;              // Periodo CCI
 input double          InpCciHigh        = 40.0;            // Soglia CCI superiore
-input double          InpCciLow         = -40.0;           // Soglia CCI inferiore
+input double          InpCciLow         = -40.0;           // Soglia CCI inferiore (stato)
+input double          InpCciCross       = 45.0;            // Soglia di ATTRAVERSAMENTO del CCI (trigger di ingresso)
+input int             InpSetupLookback  = 8;               // Barre indietro in cui cercare l'estremo RSI/Z prima del cross
 input int             InpZsPeriod       = 20;              // Periodo Z-Score
 input double          InpZsHigh         = 2.0;             // Soglia Z-Score superiore
 input double          InpZsLow          = -2.0;            // Soglia Z-Score inferiore
@@ -178,6 +180,13 @@ struct SScan
    // indicatori, letti sull'ultima barra chiusa prima di t
    double   rsi, cci, zs;
    bool     indOk;
+   // trigger: ATTRAVERSAMENTO della soglia CCI sull'ultima barra chiusa.
+   // Lo STATO ("il CCI e' sopra 40") e' vero nel 79% degli istanti e non e' un
+   // evento; l'attraversamento e' puntuale, raro, e ha una direzione - quindi
+   // e' l'unico dei due che possa funzionare da segnale di ingresso.
+   int      cciCross;             // +1 cross verso l'alto, -1 verso il basso, 0 nessuno
+   int      extRecent;            // estremo RSI/Z nelle ultime barre: +1 ipercomprato, -1 ipervenduto
+   int      setup;                // combinazione estremo + cross, vedi SetupName()
    // news
    int      newsFlag;             // 1 se evento entro finestra (passato o futuro)
    int      newsAheadMin;         // minuti al prossimo evento (-1 = nessuno/na)
@@ -1197,6 +1206,24 @@ void HtmlHeatM15(string id,const int &cnt[][96],const double &sPt[][96],const do
 //  smoothing di Wilder, CCI su prezzo tipico con deviazione media e
 //  costante 0.015, Z-Score come (close - media) / deviazione standard.
 //==================================================================
+// Il setup che si vuole misurare: prima un estremo, poi l'attraversamento del
+// CCI come conferma. Codificato per poterlo trattare come una dimensione
+// qualsiasi nella tabella delle condizioni, con probabilita', lift e
+// ripartizione UP/DOWN calcolati come per tutto il resto.
+string SetupName(int c)
+{
+   switch(c)
+   {
+      case 1: return "ipervenduto poi cross UP";     // il caso "compro sul minimo confermato"
+      case 2: return "ipercomprato poi cross DOWN";  // il caso "vendo sul massimo confermato"
+      case 3: return "ipervenduto poi cross DOWN";   // continuazione ribassista
+      case 4: return "ipercomprato poi cross UP";    // continuazione rialzista
+      case 5: return "cross UP senza estremo";
+      case 6: return "cross DOWN senza estremo";
+   }
+   return "nessun setup";
+}
+
 void CalcRSI(const double &price[], int n, int period, double &out[])
 {
    ArrayResize(out,n); ArrayInitialize(out,50.0);
@@ -1877,6 +1904,30 @@ bool ProcessSymbol(string sym)
                {
                   s.rsi=rsiB[ip]; s.cci=cciB[ip]; s.zs=zsB[ip];
                   s.indOk=true;
+
+                  // attraversamento fra la barra precedente e quella corrente
+                  s.cciCross=0;
+                  if(ip>=1)
+                  {
+                     if(cciB[ip]> InpCciCross && cciB[ip-1]<= InpCciCross) s.cciCross=+1;
+                     if(cciB[ip]<-InpCciCross && cciB[ip-1]>=-InpCciCross) s.cciCross=-1;
+                  }
+
+                  // estremo RSI o Z nelle ultime barre, cross escluso
+                  s.extRecent=0;
+                  for(int q=ip; q>ip-InpSetupLookback && q>0; q--)
+                  {
+                     if(rsiB[q]>InpRsiHigh || zsB[q]> InpZsHigh){ s.extRecent=+1; break; }
+                     if(rsiB[q]<InpRsiLow  || zsB[q]< InpZsLow ){ s.extRecent=-1; break; }
+                  }
+
+                  s.setup=0;
+                  if(s.cciCross>0 && s.extRecent<0) s.setup=1;
+                  else if(s.cciCross<0 && s.extRecent>0) s.setup=2;
+                  else if(s.cciCross<0 && s.extRecent<0) s.setup=3;
+                  else if(s.cciCross>0 && s.extRecent>0) s.setup=4;
+                  else if(s.cciCross>0) s.setup=5;
+                  else if(s.cciCross<0) s.setup=6;
                }
             }
 
@@ -2778,6 +2829,11 @@ void BuildConditions(string sym,string dir)
          CellAdd("R|"+rst,"RSI;"+rst,s);
          CellAdd("C|"+cst,"CCI;"+cst,s);
          CellAdd("P|"+(s.cci>0?"1":"0"),"CCI segno;"+(s.cci>0?"positivo":"negativo"),s);
+
+         string xs=(s.cciCross>0?"cross UP "+F(InpCciCross,0):
+                   (s.cciCross<0?"cross DOWN -"+F(InpCciCross,0):"nessun cross"));
+         CellAdd("X|"+xs,"CCI cross;"+xs,s);
+         CellAdd("S|"+IntegerToString(s.setup),"Setup;"+SetupName(s.setup),s);
       }
    }
    WriteCells(dir+fn+"_conditions_marg.csv","dimensione;valore",basePt,baseAtr,
