@@ -862,6 +862,10 @@ void HtmlHead(string sym)
    H(".bw{background:#0c0f13;border-radius:3px;height:9px;width:110px;display:inline-block;vertical-align:middle}");
    H(".bf{background:var(--acc);height:9px;border-radius:3px;display:block}");
    H(".note{color:var(--mut);font-size:12px;margin:6px 0 14px;max-width:95ch}");
+   H("table.mx td,table.mx th{text-align:center;padding:4px 5px;min-width:32px}");
+   H("table.mx td:first-child,table.mx th:first-child{text-align:left;font-weight:600;position:sticky;left:0;background:#1b212a;z-index:2}");
+   H("table.mx tr.tot td{border-top:2px solid var(--acc);font-weight:600}");
+   H("table.mx td.z{color:#3a424c}");
    H(".note b{color:var(--tx)}");
    H("</style></head><body>");
    H("<header><h1>VTRLS Move Research - "+HE(sym)+"</h1><div class=\"sub\">TF base "+EnumToString(InpBaseTF)+
@@ -937,6 +941,94 @@ string CondCell(int hits,int n,int base)
    return "<td class=\""+cls+"\">"+F(100.0*p,1)+"% <span class=\"nz\">x"+F(lift,2)+"</span></td>";
 }
 
+
+
+//------------------------------------------------------------------
+// Matrice giorno della settimana x fascia oraria.
+// Ogni cella e' il numero di Largest Move partiti in quel giorno a
+// quell'ora, sull'intero periodo. L'intensita' del colore e'
+// proporzionale al valore, cosi' le finestre calde si vedono a colpo
+// d'occhio invece di dover leggere 168 numeri. Il tooltip riporta la
+// dimensione media del movimento di quella cella.
+//------------------------------------------------------------------
+void HtmlHeatH1(string id,const int &cnt[][24],const double &sPt[][24],const double &sAtr[][24])
+{
+   int mx=0;
+   for(int d=0;d<7;d++) for(int h=0;h<24;h++) if(cnt[d][h]>mx) mx=cnt[d][h];
+
+   H("<div class=\"wrap\"><table class=\"mx\" id=\""+id+"\"><thead><tr><th>giorno</th>");
+   for(int h=0;h<24;h++) H("<th>"+D2(h)+"</th>");
+   H("<th>TOT</th></tr></thead><tbody>");
+
+   int colTot[24]; ArrayInitialize(colTot,0);
+   int grand=0;
+   for(int k=0;k<7;k++)
+   {
+      int d=(k+1)%7;                                   // Lun..Dom
+      int rowTot=0;
+      for(int h=0;h<24;h++) rowTot+=cnt[d][h];
+      if(rowTot==0) continue;
+      H("<tr><td>"+DowIT(d)+"</td>");
+      for(int h=0;h<24;h++)
+      {
+         int v=cnt[d][h];
+         colTot[h]+=v; grand+=v;
+         if(v==0){ H("<td class=\"z\">.</td>"); continue; }
+         double a=(mx>0? (double)v/mx : 0.0);
+         string tip=IntegerToString(v)+" movimenti | media "+F(sPt[d][h]/v,1)+" pt, "+F(sAtr[d][h]/v,2)+" ATR";
+         H("<td style=\"background:rgba(90,169,230,"+F(0.10+0.75*a,2)+")\" title=\""+tip+"\">"+
+           IntegerToString(v)+"</td>");
+      }
+      H("<td>"+IntegerToString(rowTot)+"</td></tr>");
+   }
+   H("<tr class=\"tot\"><td>TOT</td>");
+   for(int h=0;h<24;h++) H("<td>"+(colTot[h]>0?IntegerToString(colTot[h]):".")+"</td>");
+   H("<td>"+IntegerToString(grand)+"</td></tr>");
+   H("</tbody></table></div>");
+}
+
+//------------------------------------------------------------------
+// Stessa matrice a 15 minuti. Le fasce sempre vuote vengono omesse:
+// su un simbolo che si muove in poche ore al giorno, 96 colonne di cui
+// 70 a zero non aiutano a vedere niente.
+//------------------------------------------------------------------
+void HtmlHeatM15(string id,const int &cnt[][96],const double &sPt[][96],const double &sAtr[][96])
+{
+   int mx=0;
+   int colTot[96];
+   ArrayInitialize(colTot,0);
+   for(int d=0;d<7;d++) for(int b=0;b<96;b++){ if(cnt[d][b]>mx) mx=cnt[d][b]; colTot[b]+=cnt[d][b]; }
+
+   H("<div class=\"wrap\"><table class=\"mx\" id=\""+id+"\"><thead><tr><th>giorno</th>");
+   for(int b=0;b<96;b++) if(colTot[b]>0) H("<th>"+D2(b/4)+":"+D2((b%4)*15)+"</th>");
+   H("<th>TOT</th></tr></thead><tbody>");
+
+   int grand=0;
+   for(int k=0;k<7;k++)
+   {
+      int d=(k+1)%7;
+      int rowTot=0;
+      for(int b=0;b<96;b++) rowTot+=cnt[d][b];
+      if(rowTot==0) continue;
+      H("<tr><td>"+DowIT(d)+"</td>");
+      for(int b=0;b<96;b++)
+      {
+         if(colTot[b]==0) continue;
+         int v=cnt[d][b];
+         grand+=v;
+         if(v==0){ H("<td class=\"z\">.</td>"); continue; }
+         double a=(mx>0? (double)v/mx : 0.0);
+         string tip=IntegerToString(v)+" movimenti | media "+F(sPt[d][b]/v,1)+" pt, "+F(sAtr[d][b]/v,2)+" ATR";
+         H("<td style=\"background:rgba(90,169,230,"+F(0.10+0.75*a,2)+")\" title=\""+tip+"\">"+
+           IntegerToString(v)+"</td>");
+      }
+      H("<td>"+IntegerToString(rowTot)+"</td></tr>");
+   }
+   H("<tr class=\"tot\"><td>TOT</td>");
+   for(int b=0;b<96;b++) if(colTot[b]>0) H("<td>"+(colTot[b]>0?IntegerToString(colTot[b]):".")+"</td>");
+   H("<td>"+IntegerToString(grand)+"</td></tr>");
+   H("</tbody></table></div>");
+}
 
 //==================================================================
 //  AGGREGAZIONI SULL'INTERO PERIODO
@@ -1142,6 +1234,11 @@ bool ProcessSymbol(string sym)
    int c1AtrM15[96];   ArrayInitialize(c1AtrM15,0);
    int c2AtrM15[96];   ArrayInitialize(c2AtrM15,0);
 
+   int    cntDH[7][24];  double sPtDH[7][24],  sAtDH[7][24];
+   int    cntDM[7][96];  double sPtDM[7][96],  sAtDM[7][96];
+   ArrayInitialize(cntDH,0); ArrayInitialize(sPtDH,0.0); ArrayInitialize(sAtDH,0.0);
+   ArrayInitialize(cntDM,0); ArrayInitialize(sPtDM,0.0); ArrayInitialize(sAtDM,0.0);
+
    SAgg aggDow[]; ArrayResize(aggDow,7);
    SAgg aggMon[]; ArrayResize(aggMon,13);
    SAgg aggSes[]; ArrayResize(aggSes,4);
@@ -1344,6 +1441,13 @@ bool ProcessSymbol(string sym)
            (nFlag>0?HE(nName):"-")+"</td><td>"+(ni>=0?IntegerToString(nDist):"")+"</td></tr>";
       }
 
+      cntDH[st.day_of_week][st.hour]++;
+      sPtDH[st.day_of_week][st.hour]+=lmPt;
+      sAtDH[st.day_of_week][st.hour]+=lmAtr;
+      cntDM[st.day_of_week][m15]++;
+      sPtDM[st.day_of_week][m15]+=lmPt;
+      sAtDM[st.day_of_week][m15]+=lmAtr;
+
       AggAdd(aggDow[st.day_of_week],lmPt,lmAtr,lmDur,lmDir,st.hour,pRange,preTot,preNet,prePct);
       AggAdd(aggMon[st.mon],         lmPt,lmAtr,lmDur,lmDir,st.hour,pRange,preTot,preNet,prePct);
       AggAdd(aggSes[sess],           lmPt,lmAtr,lmDur,lmDir,st.hour,pRange,preTot,preNet,prePct);
@@ -1497,6 +1601,18 @@ bool ProcessSymbol(string sym)
       H(AggRowHtml(aggAll[0]));
       HtmlTableEnd();
 
+      H("<h2>Giorno della settimana x ora</h2><div class=\"note\">Quante volte, sull'intero periodo, il movimento "
+        "maggiore e' partito in quel giorno a quell'ora. Piu' la cella e' accesa, piu' quella finestra concentra "
+        "movimenti. Passa il mouse su una cella per vedere la dimensione media di quei movimenti: una cella con "
+        "pochi movimenti ma molto grandi vale piu' di una con tanti movimenti piccoli. L'ultima riga e l'ultima "
+        "colonna sono i totali.</div>");
+      HtmlHeatH1("tX1",cntDH,sPtDH,sAtDH);
+
+      H("<h2>Giorno della settimana x fascia di 15 minuti</h2><div class=\"note\">Stessa matrice a grana fine. "
+        "Le fasce sempre vuote sono omesse. E' qui che si vede se non e' l'intera sessione a produrre il movimento, "
+        "ma una finestra precisa di 15-30 minuti.</div>");
+      HtmlHeatM15("tX2",cntDM,sPtDM,sAtDM);
+
       H("<h2>Per sessione</h2>");
       HtmlTableHead("tA3",aggCols,false);
       for(int i=0;i<4;i++) H(AggRowHtml(aggSes[i]));
@@ -1519,6 +1635,21 @@ bool ProcessSymbol(string sym)
          for(int i=0;i<4;i++)  { string r=AggRowCsv(aggSes[i]); if(r!="") W(fA,"sessione;"+r+"\r\n"); }
          string rt=AggRowCsv(aggAll[0]); if(rt!="") W(fA,"totale;"+rt+"\r\n");
          FileClose(fA);
+      }
+
+      int fX=FileOpen(dir+fn+"_dow_hour.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
+      if(fX!=INVALID_HANDLE)
+      {
+         W(fX,"granularita;giorno;fascia;n_movimenti;media_pt;media_atr\r\n");
+         for(int d=0;d<7;d++) for(int h=0;h<24;h++)
+            if(cntDH[d][h]>0)
+               W(fX,"H1;"+DowIT(d)+";"+D2(h)+":00;"+IntegerToString(cntDH[d][h])+";"+
+                     F(sPtDH[d][h]/cntDH[d][h],1)+";"+F(sAtDH[d][h]/cntDH[d][h],3)+"\r\n");
+         for(int d=0;d<7;d++) for(int b=0;b<96;b++)
+            if(cntDM[d][b]>0)
+               W(fX,"M15;"+DowIT(d)+";"+M15Label(b/4,(b%4)*15)+";"+IntegerToString(cntDM[d][b])+";"+
+                     F(sPtDM[d][b]/cntDM[d][b],1)+";"+F(sAtDM[d][b]/cntDM[d][b],3)+"\r\n");
+         FileClose(fX);
       }
    }
 
