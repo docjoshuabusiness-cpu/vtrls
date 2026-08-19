@@ -955,24 +955,26 @@ string CondCell(int hits,int n,int base)
 // d'occhio invece di dover leggere 168 numeri. Il tooltip riporta la
 // dimensione media del movimento di quella cella.
 //------------------------------------------------------------------
-void HtmlHeatH1(string id,const int &cnt[][24],const double &sPt[][24],const double &sAtr[][24])
+void HtmlHeatH1(string id,const int &cnt[][24],const double &sPt[][24],const double &sAtr[][24],
+                const string &labels[],const int &order[])
 {
+   int nr=ArraySize(order);
    int mx=0;
-   for(int d=0;d<7;d++) for(int h=0;h<24;h++) if(cnt[d][h]>mx) mx=cnt[d][h];
+   for(int k=0;k<nr;k++){ int d=order[k]; for(int h=0;h<24;h++) if(cnt[d][h]>mx) mx=cnt[d][h]; }
 
-   H("<div class=\"wrap\"><table class=\"mx\" id=\""+id+"\"><thead><tr><th>giorno</th>");
+   H("<div class=\"wrap\"><table class=\"mx\" id=\""+id+"\"><thead><tr><th>&nbsp;</th>");
    for(int h=0;h<24;h++) H("<th>"+D2(h)+"</th>");
    H("<th>TOT</th></tr></thead><tbody>");
 
    int colTot[24]; ArrayInitialize(colTot,0);
    int grand=0;
-   for(int k=0;k<7;k++)
+   for(int k=0;k<nr;k++)
    {
-      int d=(k+1)%7;                                   // Lun..Dom
+      int d=order[k];
       int rowTot=0;
       for(int h=0;h<24;h++) rowTot+=cnt[d][h];
       if(rowTot==0) continue;
-      H("<tr><td>"+DowIT(d)+"</td>");
+      H("<tr><td>"+HE(labels[d])+"</td>");
       for(int h=0;h<24;h++)
       {
          int v=cnt[d][h];
@@ -1238,6 +1240,11 @@ bool ProcessSymbol(string sym)
    int c1AtrM15[96];   ArrayInitialize(c1AtrM15,0);
    int c2AtrM15[96];   ArrayInitialize(c2AtrM15,0);
 
+   int    cntYH[60][24]; double sPtYH[60][24], sAtYH[60][24];
+   ArrayInitialize(cntYH,0); ArrayInitialize(sPtYH,0.0); ArrayInitialize(sAtYH,0.0);
+   SAgg aggYear[]; ArrayResize(aggYear,60);
+   for(int i=0;i<60;i++) AggInit(aggYear[i],IntegerToString(2000+i));
+
    int    cntDH[7][24];  double sPtDH[7][24],  sAtDH[7][24];
    int    cntDM[7][96];  double sPtDM[7][96],  sAtDM[7][96];
    ArrayInitialize(cntDH,0); ArrayInitialize(sPtDH,0.0); ArrayInitialize(sAtDH,0.0);
@@ -1445,6 +1452,15 @@ bool ProcessSymbol(string sym)
            (nFlag>0?HE(nName):"-")+"</td><td>"+(ni>=0?IntegerToString(nDist):"")+"</td></tr>";
       }
 
+      int yi=st.year-2000;
+      if(yi>=0 && yi<60)
+      {
+         cntYH[yi][st.hour]++;
+         sPtYH[yi][st.hour]+=lmPt;
+         sAtYH[yi][st.hour]+=lmAtr;
+         AggAdd(aggYear[yi],lmPt,lmAtr,lmDur,lmDir,st.hour,pRange,preTot,preNet,prePct);
+      }
+
       cntDH[st.day_of_week][st.hour]++;
       sPtDH[st.day_of_week][st.hour]+=lmPt;
       sAtDH[st.day_of_week][st.hour]+=lmAtr;
@@ -1599,7 +1615,18 @@ bool ProcessSymbol(string sym)
       H(AggRowHtml(aggAll[0]));
       HtmlTableEnd();
 
-      H("<h2>Per mese</h2>");
+      H("<h2>Per anno</h2><div class=\"note\">La verifica piu' importante di tutte: <b>un effetto che c'e' in "
+        "un anno e sparisce nell'altro non esiste</b>. Confronta le righe: se la dimensione media del movimento, "
+        "la ripartizione BUY/SELL o l'ora piu' frequente cambiano molto da un anno all'altro, quello che vedi "
+        "nelle tabelle aggregate e' la media di regimi diversi, non una regolarita' stabile.</div>");
+      HtmlTableHead("tA4",aggCols,false);
+      for(int i=0;i<60;i++) H(AggRowHtml(aggYear[i]));
+      H(AggRowHtml(aggAll[0]));
+      HtmlTableEnd();
+
+      H("<h2>Per mese <span class=\"nz\">(tutti gli anni accorpati)</span></h2><div class=\"note\">Attenzione: "
+        "questa tabella somma lo stesso mese di anni diversi. Un gennaio anomalo in un singolo anno puo' dominare "
+        "la riga. Leggila insieme alla tabella per anno, mai da sola.</div>");
       HtmlTableHead("tA2",aggCols,false);
       for(int i=1;i<13;i++) H(AggRowHtml(aggMon[i]));
       H(AggRowHtml(aggAll[0]));
@@ -1610,12 +1637,25 @@ bool ProcessSymbol(string sym)
         "movimenti. Passa il mouse su una cella per vedere la dimensione media di quei movimenti: una cella con "
         "pochi movimenti ma molto grandi vale piu' di una con tanti movimenti piccoli. L'ultima riga e l'ultima "
         "colonna sono i totali.</div>");
-      HtmlHeatH1("tX1",cntDH,sPtDH,sAtDH);
+      string dowLab[]; ArrayResize(dowLab,7);
+      for(int i=0;i<7;i++) dowLab[i]=DowIT(i);
+      int dowOrd[]; ArrayResize(dowOrd,7);
+      dowOrd[0]=1; dowOrd[1]=2; dowOrd[2]=3; dowOrd[3]=4; dowOrd[4]=5; dowOrd[5]=6; dowOrd[6]=0;
+      HtmlHeatH1("tX1",cntDH,sPtDH,sAtDH,dowLab,dowOrd);
 
       H("<h2>Giorno della settimana x fascia di 15 minuti</h2><div class=\"note\">Stessa matrice a grana fine. "
         "Le fasce sempre vuote sono omesse. E' qui che si vede se non e' l'intera sessione a produrre il movimento, "
         "ma una finestra precisa di 15-30 minuti.</div>");
       HtmlHeatM15("tX2",cntDM,sPtDM,sAtDM);
+
+      H("<h2>Anno x ora</h2><div class=\"note\">Stabilita' nel tempo della finestra oraria. Se la colonna piu' "
+        "accesa e' la stessa in tutti gli anni, hai una regolarita' strutturale del mercato. Se cambia di anno in "
+        "anno, quella che sembrava un'ora buona era solo il caso di un periodo, e ottimizzarci sopra e' overfitting.</div>");
+      string yLab[]; ArrayResize(yLab,60);
+      for(int i=0;i<60;i++) yLab[i]=IntegerToString(2000+i);
+      int yOrd[]; ArrayResize(yOrd,60);
+      for(int i=0;i<60;i++) yOrd[i]=i;
+      HtmlHeatH1("tX3",cntYH,sPtYH,sAtYH,yLab,yOrd);
 
       H("<h2>Per sessione</h2>");
       HtmlTableHead("tA3",aggCols,false);
@@ -1636,6 +1676,7 @@ bool ProcessSymbol(string sym)
                "pre_total_medio_pt;pre_net_medio_pt;pct_range_d1_percorso\r\n");
          for(int i=0;i<7;i++)  { string r=AggRowCsv(aggDow[i]); if(r!="") W(fA,"dow;"+r+"\r\n"); }
          for(int i=1;i<13;i++) { string r=AggRowCsv(aggMon[i]); if(r!="") W(fA,"mese;"+r+"\r\n"); }
+         for(int i=0;i<60;i++) { string r=AggRowCsv(aggYear[i]); if(r!="") W(fA,"anno;"+r+"\r\n"); }
          for(int i=0;i<4;i++)  { string r=AggRowCsv(aggSes[i]); if(r!="") W(fA,"sessione;"+r+"\r\n"); }
          string rt=AggRowCsv(aggAll[0]); if(rt!="") W(fA,"totale;"+rt+"\r\n");
          FileClose(fA);
@@ -1649,6 +1690,10 @@ bool ProcessSymbol(string sym)
             if(cntDH[d][h]>0)
                W(fX,"H1;"+DowIT(d)+";"+D2(h)+":00;"+IntegerToString(cntDH[d][h])+";"+
                      F(sPtDH[d][h]/cntDH[d][h],1)+";"+F(sAtDH[d][h]/cntDH[d][h],3)+"\r\n");
+         for(int y=0;y<60;y++) for(int h=0;h<24;h++)
+            if(cntYH[y][h]>0)
+               W(fX,"anno_H1;"+IntegerToString(2000+y)+";"+D2(h)+":00;"+IntegerToString(cntYH[y][h])+";"+
+                     F(sPtYH[y][h]/cntYH[y][h],1)+";"+F(sAtYH[y][h]/cntYH[y][h],3)+"\r\n");
          for(int d=0;d<7;d++) for(int b=0;b<96;b++)
             if(cntDM[d][b]>0)
                W(fX,"M15;"+DowIT(d)+";"+M15Label(b/4,(b%4)*15)+";"+IntegerToString(cntDM[d][b])+";"+
@@ -1822,6 +1867,44 @@ bool ProcessSymbol(string sym)
            F(aggAll[0].sPreTot/nDays,0)+" punti totali di percorso e un movimento netto medio di "+
            F(aggAll[0].sPreNet/nDays,0)+" punti. E' il dato da confrontare fra le condizioni: "
            "se le giornate esplosive partono da un pre-evento sistematicamente diverso, li' c'e' un segnale.</li>");
+      }
+
+      // stabilita' fra anni: l'unico controllo che smonta davvero un falso segnale
+      {
+         int nY=0, yFirst=-1, yLast=-1;
+         double vMin=1e9, vMax=-1e9;
+         int hotH=-1; bool hotStable=true;
+         for(int i=0;i<60;i++)
+         {
+            if(aggYear[i].n<20) continue;
+            nY++;
+            if(yFirst<0) yFirst=i;
+            yLast=i;
+            double v=aggYear[i].sLmAtr/aggYear[i].n;
+            if(v<vMin) vMin=v;
+            if(v>vMax) vMax=v;
+            int c=0; string mh=AggModalHour(aggYear[i],c);
+            int hh=(int)StringToInteger(StringSubstr(mh,0,2));
+            if(hotH<0) hotH=hh; else if(hh!=hotH) hotStable=false;
+         }
+         if(nY>=2)
+         {
+            H("<li>Anni con almeno 20 giornate: <span class=\"k\">"+IntegerToString(nY)+"</span> ("+
+              IntegerToString(2000+yFirst)+"-"+IntegerToString(2000+yLast)+"). "
+              "Dimensione media del movimento maggiore per anno: da "+F(vMin,2)+" a "+F(vMax,2)+" ATR, "
+              "una variazione del "+F(100.0*(vMax/MathMax(0.0001,vMin)-1.0),0)+"% fra l'anno piu' calmo e "
+              "il piu' volatile. Se questa forbice e' ampia, le medie complessive mescolano regimi diversi "
+              "e vanno usate con cautela.</li>");
+            H("<li>"+(hotStable
+               ? "L'ora in cui il movimento parte piu' spesso e' <b>la stessa in tutti gli anni</b>: e' una "
+                 "regolarita' strutturale, non un artefatto di un singolo periodo."
+               : "L'ora piu' frequente <b class=\"w\">cambia da un anno all'altro</b>: quella che sembra la "
+                 "fascia migliore nel dato aggregato non e' stabile, e costruirci sopra una strategia e' "
+                 "overfitting. Controlla la matrice Anno x ora.")+"</li>");
+         }
+         else if(nY==1)
+            H("<li class=\"w\">Un solo anno con dati sufficienti: nessun controllo di stabilita' possibile. "
+              "Qualunque regolarita' tu veda potrebbe non esistere l'anno prossimo.</li>");
       }
 
       // avvertenza statistica, sempre

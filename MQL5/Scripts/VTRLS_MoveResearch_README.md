@@ -52,7 +52,8 @@ Puoi disattivare l'uno o l'altro.
 | `<SYM>_scan.csv` | griglia point-in-time grezza (feature a *t* + esito forward) |
 | `<SYM>_conditions.csv` | condizioni incrociate (range D-1 x dir D-1 x punti pre x net x sessione x news) |
 | `<SYM>_conditions_marg.csv` | stesse metriche, una dimensione per volta (piu' campioni, piu' robusto) |
-| `<SYM>_aggregate.csv` | tutte le giornate del periodo raggruppate per giorno della settimana, mese e sessione |
+| `<SYM>_aggregate.csv` | giornate raggruppate per giorno della settimana, anno, mese e sessione |
+| `<SYM>_dow_hour.csv` | matrici giorno x ora, giorno x 15 minuti e anno x ora |
 | `<SYM>_report.html` | tutto quanto sopra (tranne lo scan grezzo) in un report navigabile |
 
 ## Normalizzazione cross-simbolo
