@@ -97,6 +97,7 @@ input double          InpAdverseRatio   = 0.5;             // Stop = ratio * tar
 input string          InpThrPoints      = "50,100,150,200,300,500";  // Soglie in punti
 input string          InpThrATR         = "0.5,1.0,1.5,2.0,3.0";     // Soglie in multipli di ATR(D-1)
 input int             InpMinSamples     = 30;              // Campioni minimi per stampare una cella
+input int             InpRankMinN       = 20;              // Movimenti minimi perche' una finestra entri in classifica
 
 input string          s3                = "=== NEWS ===";
 input bool            InpUseCalendar    = true;            // Usa il calendario economico MQL5
@@ -920,8 +921,9 @@ void HtmlHead(string sym)
    H("<button onclick=\"tab(2)\">Largest Move</button>");
    H("<button onclick=\"tab(3)\">Orari</button>");
    H("<button onclick=\"tab(4)\">Aggregati</button>");
-   H("<button onclick=\"tab(5)\">Condizioni incrociate</button>");
-   H("<button onclick=\"tab(6)\">Condizioni marginali</button>");
+   H("<button onclick=\"tab(5)\">Classifica</button>");
+   H("<button onclick=\"tab(6)\">Condizioni incrociate</button>");
+   H("<button onclick=\"tab(7)\">Condizioni marginali</button>");
    H("</nav><main>");
    H("<section class=\"on\"><div id=\"sum\" class=\"sum\"></div><div id=\"lett\"></div>");
    H("<h2>Come leggere questo report</h2><div class=\"note\">");
@@ -1077,6 +1079,57 @@ void HtmlHeatM15(string id,const int &cnt[][96],const double &sPt[][96],const do
    for(int b=0;b<96;b++) if(colTot[b]>0) H("<td>"+(colTot[b]>0?IntegerToString(colTot[b]):".")+"</td>");
    H("<td>"+IntegerToString(grand)+"</td></tr>");
    H("</tbody></table></div>");
+}
+
+
+//==================================================================
+//  CLASSIFICA DELLE FINESTRE OPERATIVE
+//  Le matrici mostrano la distribuzione; questa tabella la ordina.
+//  Il criterio non e' la sola frequenza: una fascia che concentra
+//  molti movimenti piccoli vale meno di una che ne concentra pochi
+//  ma ampi. Lo score e' il valore atteso:
+//        score = frequenza x ampiezza media  (ATR attesi ogni 100 giornate)
+//  Riporta anche la ripartizione BUY/SELL con lo z-score contro 50/50,
+//  perche' "quando operare" senza "in che direzione" e' meta' risposta.
+//==================================================================
+struct SRank
+{
+   string cat, lab;
+   int    n, denom, big, buy;
+   double sumAtr, score;
+};
+SRank g_rk[];
+int    g_nRk=0;
+
+void RkAdd(string cat,string lab,int n,int denom,double sumAtr,int big,int buy)
+{
+   if(n<=0 || denom<=0) return;
+   ArrayResize(g_rk,g_nRk+1,256);
+   g_rk[g_nRk].cat=cat; g_rk[g_nRk].lab=lab;
+   g_rk[g_nRk].n=n; g_rk[g_nRk].denom=denom;
+   g_rk[g_nRk].sumAtr=sumAtr; g_rk[g_nRk].big=big; g_rk[g_nRk].buy=buy;
+   g_rk[g_nRk].score=((double)n/denom)*(sumAtr/n)*100.0;
+   g_nRk++;
+}
+
+// z-score della ripartizione direzionale contro l'ipotesi 50/50.
+// |z| oltre 3 e' il minimo per guardarlo, considerando quante celle
+// vengono testate: con centinaia di finestre, |z|>2 capita per caso.
+double RkZ(int buy,int n)
+{
+   if(n<=0) return 0.0;
+   return ((double)buy/n-0.5)/MathSqrt(0.25/n);
+}
+
+void RkSort()
+{
+   for(int i=1;i<g_nRk;i++)
+   {
+      SRank k=g_rk[i];
+      int j=i-1;
+      while(j>=0 && g_rk[j].score<k.score){ g_rk[j+1]=g_rk[j]; j--; }
+      g_rk[j+1]=k;
+   }
 }
 
 //==================================================================
@@ -1290,8 +1343,16 @@ bool ProcessSymbol(string sym)
 
    int    cntDH[7][24];  double sPtDH[7][24],  sAtDH[7][24];
    int    cntDM[7][96];  double sPtDM[7][96],  sAtDM[7][96];
+   int    buyDH[7][24],  bigDH[7][24], buyDM[7][96], bigDM[7][96];
+   int    cntH[24], buyH[24], bigH[24];  double sAtH[24];
+   int    cntM[96], buyM[96], bigM[96];  double sAtM[96];
    ArrayInitialize(cntDH,0); ArrayInitialize(sPtDH,0.0); ArrayInitialize(sAtDH,0.0);
    ArrayInitialize(cntDM,0); ArrayInitialize(sPtDM,0.0); ArrayInitialize(sAtDM,0.0);
+   ArrayInitialize(buyDH,0); ArrayInitialize(bigDH,0);
+   ArrayInitialize(buyDM,0); ArrayInitialize(bigDM,0);
+   ArrayInitialize(cntH,0);  ArrayInitialize(buyH,0);  ArrayInitialize(bigH,0);  ArrayInitialize(sAtH,0.0);
+   ArrayInitialize(cntM,0);  ArrayInitialize(buyM,0);  ArrayInitialize(bigM,0);  ArrayInitialize(sAtM,0.0);
+   g_nRk=0; ArrayResize(g_rk,0);
 
    g_nTop=0; ArrayResize(g_top,0);
 
@@ -1528,12 +1589,13 @@ bool ProcessSymbol(string sym)
          AggAdd(aggYear[yi],lmPt,lmAtr,lmDur,lmDir,st.hour,pRange,preTot,preNet,prePct);
       }
 
-      cntDH[st.day_of_week][st.hour]++;
-      sPtDH[st.day_of_week][st.hour]+=lmPt;
-      sAtDH[st.day_of_week][st.hour]+=lmAtr;
-      cntDM[st.day_of_week][m15]++;
-      sPtDM[st.day_of_week][m15]+=lmPt;
-      sAtDM[st.day_of_week][m15]+=lmAtr;
+      int dw=st.day_of_week;
+      cntDH[dw][st.hour]++;  sPtDH[dw][st.hour]+=lmPt;  sAtDH[dw][st.hour]+=lmAtr;
+      cntDM[dw][m15]++;      sPtDM[dw][m15]+=lmPt;      sAtDM[dw][m15]+=lmAtr;
+      if(lmDir>0){ buyDH[dw][st.hour]++; buyDM[dw][m15]++; buyH[st.hour]++; buyM[m15]++; }
+      if(lmAtr>1.0){ bigDH[dw][st.hour]++; bigDM[dw][m15]++; bigH[st.hour]++; bigM[m15]++; }
+      cntH[st.hour]++; sAtH[st.hour]+=lmAtr;
+      cntM[m15]++;     sAtM[m15]+=lmAtr;
 
       AggAdd(aggDow[st.day_of_week],lmPt,lmAtr,lmDur,lmDir,st.hour,pRange,preTot,preNet,prePct);
       AggAdd(aggMon[st.mon],         lmPt,lmAtr,lmDur,lmDir,st.hour,pRange,preTot,preNet,prePct);
@@ -1732,6 +1794,76 @@ bool ProcessSymbol(string sym)
       H(AggRowHtml(aggAll[0]));
       HtmlTableEnd();
       H("</section>");
+   }
+
+   //=================================================================
+   //  CLASSIFICA: ordina tutte le finestre per valore atteso
+   //=================================================================
+   for(int d=0;d<7;d++)
+   {
+      if(aggDow[d].n<=0) continue;
+      for(int h=0;h<24;h++)
+         if(cntDH[d][h]>=InpRankMinN)
+            RkAdd("giorno x ora",DowIT(d)+" "+D2(h)+":00",cntDH[d][h],aggDow[d].n,
+                  sAtDH[d][h],bigDH[d][h],buyDH[d][h]);
+      for(int b=0;b<96;b++)
+         if(cntDM[d][b]>=InpRankMinN)
+            RkAdd("giorno x 15min",DowIT(d)+" "+M15Label(b/4,(b%4)*15),cntDM[d][b],aggDow[d].n,
+                  sAtDM[d][b],bigDM[d][b],buyDM[d][b]);
+   }
+   for(int h=0;h<24;h++)
+      if(cntH[h]>=InpRankMinN)
+         RkAdd("ora",D2(h)+":00",cntH[h],nDays,sAtH[h],bigH[h],buyH[h]);
+   for(int b=0;b<96;b++)
+      if(cntM[b]>=InpRankMinN)
+         RkAdd("15min",M15Label(b/4,(b%4)*15),cntM[b],nDays,sAtM[b],bigM[b],buyM[b]);
+   for(int i=1;i<13;i++)
+      if(aggMon[i].n>=InpRankMinN)
+         RkAdd("mese",aggMon[i].label,aggMon[i].n,aggMon[i].n,
+               aggMon[i].sLmAtr,aggMon[i].big1,aggMon[i].buy);
+   for(int d=0;d<7;d++)
+      if(aggDow[d].n>=InpRankMinN)
+         RkAdd("giorno",aggDow[d].label,aggDow[d].n,aggDow[d].n,
+               aggDow[d].sLmAtr,aggDow[d].big1,aggDow[d].buy);
+   RkSort();
+
+   if(g_html!=INVALID_HANDLE && g_nRk>0)
+   {
+      H("<section><h2>Classifica delle finestre operative</h2><div class=\"note\">"
+        "Le stesse finestre delle matrici, ma <b>ordinate</b>. Il criterio non e' la frequenza: una fascia con "
+        "molti movimenti piccoli vale meno di una con pochi movimenti ampi. Lo <b>score</b> e' il valore atteso, "
+        "<b>frequenza x ampiezza media</b>, cioe' quanti ATR di movimento ti aspetti da quella finestra ogni 100 "
+        "giornate. <b>freq%</b> e' la percentuale di giornate di quel gruppo in cui il movimento maggiore parte li'. "
+        "<b>z BUY</b> misura lo sbilanciamento direzionale contro il 50/50: con centinaia di finestre testate, "
+        "|z| sotto 3 e' caso. Filtra per categoria scrivendo <i>giorno x ora</i>, <i>mese</i>, <i>15min</i>...</div>");
+      HtmlTableHead("tR","#;categoria;finestra;n;freq%;ATR medio;&gt;1 ATR;BUY%;z BUY;score",true);
+      for(int i=0;i<g_nRk && i<400;i++)
+      {
+         double zz=RkZ(g_rk[i].buy,g_rk[i].n);
+         double pb=100.0*g_rk[i].buy/g_rk[i].n;
+         string zc=(MathAbs(zz)>=3.0 ? (zz>0?"hi":"lo") : "nz");
+         H("<tr><td>"+IntegerToString(i+1)+"</td><td>"+HE(g_rk[i].cat)+"</td><td>"+HE(g_rk[i].lab)+
+           "</td><td>"+IntegerToString(g_rk[i].n)+"</td><td>"+F(100.0*g_rk[i].n/g_rk[i].denom,1)+
+           "</td><td>"+F(g_rk[i].sumAtr/g_rk[i].n,2)+"</td><td>"+
+           F(100.0*g_rk[i].big/g_rk[i].n,1)+"%</td><td class=\""+(pb>=50?"up":"dn")+"\">"+F(pb,1)+
+           "</td><td class=\""+zc+"\">"+F(zz,2)+"</td><td>"+F(g_rk[i].score,1)+"</td></tr>");
+      }
+      HtmlTableEnd(); H("</section>");
+   }
+
+   if(InpWriteCsv && g_nRk>0)
+   {
+      int fR=FileOpen(dir+fn+"_ranking.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
+      if(fR!=INVALID_HANDLE)
+      {
+         W(fR,"pos;categoria;finestra;n;freq_pct;atr_medio;pct_gt1atr;pct_buy;z_buy;score\r\n");
+         for(int i=0;i<g_nRk;i++)
+            W(fR,IntegerToString(i+1)+";"+g_rk[i].cat+";"+g_rk[i].lab+";"+IntegerToString(g_rk[i].n)+";"+
+                  F(100.0*g_rk[i].n/g_rk[i].denom,2)+";"+F(g_rk[i].sumAtr/g_rk[i].n,3)+";"+
+                  F(100.0*g_rk[i].big/g_rk[i].n,2)+";"+F(100.0*g_rk[i].buy/g_rk[i].n,2)+";"+
+                  F(RkZ(g_rk[i].buy,g_rk[i].n),2)+";"+F(g_rk[i].score,2)+"\r\n");
+         FileClose(fR);
+      }
    }
 
    //--- stesse aggregazioni in CSV
@@ -1941,6 +2073,23 @@ bool ProcessSymbol(string sym)
             W(fT,"  "+PadR(M15Label(bi/4,(bi%4)*15),13)+PadL(IntegerToString(bv),4)+"  "+
                   PadL(F(100.0*bv/MathMax(1,nDays),1)+"%",7)+"  "+PadL(F(sumM15[bi]/bv,0),7)+L);
             tM15[bi]=0;
+         }
+
+         if(g_nRk>0)
+         {
+            W(fT,L+"CLASSIFICA FINESTRE (score = frequenza x ampiezza media, ATR ogni 100 giornate)"+L);
+            W(fT,PadR("  categoria",18)+PadR("finestra",18)+PadL("n",5)+PadL("freq%",7)+
+                  PadL("ATR",6)+PadL(">1atr",7)+PadL("BUY%",6)+PadL("zBUY",7)+PadL("score",7)+L);
+            for(int i=0;i<g_nRk && i<25;i++)
+               W(fT,"  "+PadR(g_rk[i].cat,16)+PadR(g_rk[i].lab,18)+
+                     PadL(IntegerToString(g_rk[i].n),5)+
+                     PadL(F(100.0*g_rk[i].n/g_rk[i].denom,1),7)+
+                     PadL(F(g_rk[i].sumAtr/g_rk[i].n,2),6)+
+                     PadL(F(100.0*g_rk[i].big/g_rk[i].n,1),7)+
+                     PadL(F(100.0*g_rk[i].buy/g_rk[i].n,1),6)+
+                     PadL(F(RkZ(g_rk[i].buy,g_rk[i].n),2),7)+
+                     PadL(F(g_rk[i].score,1),7)+L);
+            W(fT,"  (|zBUY| sotto 3 = nessuno sbilanciamento direzionale: e' caso)"+L);
          }
 
          W(fT,L+"CONDIZIONI CHE SUPERANO IL FILTRO (lift>1.20 e Wilson-low sopra baseline)"+L);
