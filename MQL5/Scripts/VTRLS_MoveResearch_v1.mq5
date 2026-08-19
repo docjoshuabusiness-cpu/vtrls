@@ -80,10 +80,11 @@ input ENUM_TIMEFRAMES InpBaseTF         = PERIOD_M1;       // TF base del percor
 input datetime        InpFrom           = D'2019.01.01 00:00';  // Data inizio
 input datetime        InpTo             = D'2026.01.01 00:00';  // Data fine
 input int             InpATRPeriod      = 14;              // Periodo ATR (su daily)
-input int             InpMinBarsDay     = 30;              // Barre minime perche' la giornata sia valida
+input int             InpMinBarsDay     = 200;             // Barre minime perche' la giornata sia valida
+input double          InpMinDayRangeAtr = 0.25;            // Range minimo della giornata in ATR (scarta i mezzi-giorni)
 
 input string          s1                = "=== LARGEST MOVE ===";
-input bool            InpCleanLeg       = false;           // true = gamba "pulita" (chiude su ritracciamento)
+input bool            InpCleanLeg       = true;            // Gamba "pulita": OBBLIGATORIO, vedi nota nell'intestazione
 input double          InpMaxRetracePct  = 33.0;            // % ritracciamento che chiude la gamba (se CleanLeg)
 
 input string          s2                = "=== SCAN POINT-IN-TIME ===";
@@ -124,6 +125,7 @@ double   g_thrPt[];        // soglie in punti
 double   g_thrAtr[];       // soglie in ATR
 int      g_nPt=0, g_nAtr=0;
 double   g_point=0.0;
+double   g_overlap=1.0;    // sovrapposizione fra righe dello scan (orizzonte/passo)
 string   g_sym="";
 int      g_tfMin=1;
 
@@ -302,11 +304,14 @@ double Median(double &a[])
 double WilsonLow(int k,int n)
 {
    if(n<=0) return 0.0;
-   double z=1.959964;
    double p=(double)k/(double)n;
-   double den=1.0+z*z/n;
-   double c=(p+z*z/(2.0*n))/den;
-   double m=z*MathSqrt(p*(1.0-p)/n + z*z/(4.0*n*n))/den;
+   // campione efficace: righe che condividono lo stesso futuro non sono
+   // osservazioni indipendenti (vedi g_overlap)
+   double ne=MathMax(1.0,(double)n/g_overlap);
+   double z=1.959964;
+   double den=1.0+z*z/ne;
+   double c=(p+z*z/(2.0*ne))/den;
+   double m=z*MathSqrt(p*(1.0-p)/ne + z*z/(4.0*ne*ne))/den;
    double lo=c-m;
    return (lo<0.0?0.0:lo);
 }
@@ -1272,13 +1277,18 @@ bool ProcessSymbol(string sym)
    int    lmHourAll[]; ArrayResize(lmHourAll,0);
    int    nDays=0;
    int    nSkipped=0;
-   int    skNoData=0, skFewBars=0, skNoAtr=0;   // motivi di scarto, per la diagnostica
+   int    skNoData=0, skFewBars=0, skNoAtr=0, skStub=0;   // motivi di scarto, per la diagnostica
 
    g_nScan=0; ArrayResize(g_scan,0);
 
    int stepMin  = (int)MathMax(InpScanStepMin, g_tfMin);
    int stepBars = (int)MathMax(1, stepMin/g_tfMin);
    int horBars  = (int)MathMax(1, InpScanHorizonMin/g_tfMin);
+   // Due righe distanti meno dell'orizzonte osservano lo stesso futuro: non
+   // sono osservazioni indipendenti. Il campione EFFICACE e' n/(orizzonte/passo).
+   // Senza questa correzione gli intervalli di confidenza sono ~4 volte troppo
+   // stretti e qualunque cella sembra significativa.
+   g_overlap=MathMax(1.0,(double)InpScanHorizonMin/(double)stepMin);
 
    if(g_html!=INVALID_HANDLE)
    {
@@ -1328,6 +1338,15 @@ bool ProcessSymbol(string sym)
 
       double atrPt = atr[di-1]/g_point;             // ATR del giorno PRECEDENTE (point-in-time)
       if(atrPt<=0){ nSkipped++; skNoAtr++; continue; }
+
+      // Scarta le giornate monche: sessione domenicale di apertura, vigilie,
+      // festivi a meta' giornata. Con un range di pochi punti falsano ogni
+      // media e riempiono di rumore la distribuzione oraria.
+      {
+         double dayHi=-DBL_MAX, dayLo=DBL_MAX;
+         for(int i=0;i<n;i++){ if(r[i].high>dayHi) dayHi=r[i].high; if(r[i].low<dayLo) dayLo=r[i].low; }
+         if((dayHi-dayLo)/g_point < InpMinDayRangeAtr*atrPt){ nSkipped++; skStub++; continue; }
+      }
 
       nProc++;
       if(nProc%100==0)
@@ -2057,7 +2076,7 @@ bool ProcessSymbol(string sym)
    }
 
    PrintFormat("[%s] RIEPILOGO: giornate analizzate %d | scartate %d (senza dati %d, poche barre %d, ATR nullo %d) | righe scan %d | TF %s",
-               sym,nDays,nSkipped,skNoData,skFewBars,skNoAtr,g_nScan,EnumToString(InpBaseTF));
+               sym,nDays,nSkipped,skNoData,skFewBars,skNoAtr,skStub,g_nScan,EnumToString(InpBaseTF));
    if(nDays==0)
       PrintFormat("[%s] NESSUNA GIORNATA ANALIZZATA. Cause tipiche: storico %s non scaricato "
                   "(apri il grafico e premi Home), InpFrom/InpTo fuori dalla storia disponibile, "
@@ -2147,7 +2166,7 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
    int f=FileOpen(path,FILE_WRITE|FILE_TXT|FILE_ANSI);
    if(f==INVALID_HANDLE){ PrintFormat("impossibile scrivere %s (err %d)",path,GetLastError()); return; }
 
-   string hdr=keyHeader+";n";
+   string hdr=keyHeader+";n;n_eff";
    for(int k=0;k<g_nPt;k++)
       hdr+=";n_"+F(g_thrPt[k],0)+"pt;p_"+F(g_thrPt[k],0)+"pt;wlow_"+F(g_thrPt[k],0)+"pt;lift_"+F(g_thrPt[k],0)+"pt";
    for(int k=0;k<g_nAtr;k++)
@@ -2160,7 +2179,7 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
    if(g_html!=INVALID_HANDLE)
    {
       H("<section><h2>"+HE(title)+"</h2><div class=\"note\">"+note+"</div>");
-      string hcols=keyHeader+";n";
+      string hcols=keyHeader+";n;n eff";
       for(int k=0;k<g_nPt;k++)  hcols+=";"+F(g_thrPt[k],0)+"pt";
       for(int k=0;k<g_nAtr;k++) hcols+=";"+F(g_thrAtr[k],2)+" ATR";
       hcols+=";MFE medio ATR;MFE mediano ATR";
@@ -2171,7 +2190,7 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
    {
       if(g_cell[c].n<InpMinSamples) continue;
       int n=g_cell[c].n;
-      string row=g_cell[c].label+";"+IntegerToString(n);
+      string row=g_cell[c].label+";"+IntegerToString(n)+";"+IntegerToString((int)(n/g_overlap));
       for(int k=0;k<g_nPt;k++)
       {
          int hits=g_cell[c].hitPt[k];
@@ -2218,7 +2237,7 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
          string h="<tr>";
          string lab[]; int nl=StringSplit(g_cell[c].label,StringGetCharacter(";",0),lab);
          for(int i=0;i<nl;i++) h+="<td>"+HE(lab[i])+"</td>";
-         h+="<td>"+IntegerToString(n)+"</td>";
+         h+="<td>"+IntegerToString(n)+"</td><td>"+IntegerToString((int)(n/g_overlap))+"</td>";
          for(int k=0;k<g_nPt;k++)  h+=CondCell(g_cell[c].hitPt[k], n, basePt[k]);
          for(int k=0;k<g_nAtr;k++) h+=CondCell(g_cell[c].hitAtr[k],n, baseAtr[k]);
          h+="<td>"+F(mMean,2)+"</td><td>"+F(mMed,2)+"</td></tr>";
@@ -2228,7 +2247,7 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
 
    // riga baseline in coda: serve per leggere il lift in modo onesto
    string bl[];
-   string b="BASELINE (tutte le righe);"+IntegerToString(g_nScan);
+   string b="BASELINE (tutte le righe);"+IntegerToString(g_nScan)+";"+IntegerToString((int)(g_nScan/g_overlap));
    for(int k=0;k<g_nPt;k++)
       b+=";"+IntegerToString(basePt[k])+";"+F(100.0*basePt[k]/MathMax(1,g_nScan),2)+";;1.000";
    for(int k=0;k<g_nAtr;k++)
@@ -2243,7 +2262,7 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
       int nk=StringSplit(keyHeader,StringGetCharacter(";",0),bl);
       hb+="<td><b>BASELINE</b></td>";
       for(int i=1;i<nk;i++) hb+="<td>-</td>";
-      hb+="<td>"+IntegerToString(g_nScan)+"</td>";
+      hb+="<td>"+IntegerToString(g_nScan)+"</td><td>"+IntegerToString((int)(g_nScan/g_overlap))+"</td>";
       for(int k=0;k<g_nPt;k++)
          hb+="<td>"+F(100.0*basePt[k]/MathMax(1,g_nScan),1)+"%</td>";
       for(int k=0;k<g_nAtr;k++)
