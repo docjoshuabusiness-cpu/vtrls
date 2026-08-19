@@ -85,7 +85,8 @@ input double          InpMinDayRangeAtr = 0.25;            // Range minimo della
 
 input string          s1                = "=== LARGEST MOVE ===";
 input bool            InpCleanLeg       = true;            // Gamba "pulita": OBBLIGATORIO, vedi nota nell'intestazione
-input double          InpMaxRetracePct  = 33.0;            // % ritracciamento che chiude la gamba (se CleanLeg)
+input double          InpMaxRetracePct  = 33.0;            // % ritracciamento che chiude la gamba
+input double          InpMinRetraceAtr  = 0.15;            // Ritracciamento minimo assoluto in ATR: sotto, il pullback e' rumore
 
 input string          s2                = "=== SCAN POINT-IN-TIME ===";
 input bool            InpDoScan         = true;            // Genera griglia point-in-time + tabelle condizioni
@@ -431,7 +432,7 @@ int MinutesToNextNews(datetime t)
 //  corrente: serve a isolare movimenti "puliti" invece di escursioni
 //  che al loro interno contengono ore di chop.
 //==================================================================
-void MaxRun(const MqlRates &r[], int n, int dir, bool clean, double retrPct,
+void MaxRun(const MqlRates &r[], int n, int dir, bool clean, double retrPct, double minRetr,
             int &sIdx, int &eIdx, double &best)
 {
    sIdx=-1; eIdx=-1; best=0.0;
@@ -452,7 +453,12 @@ void MaxRun(const MqlRates &r[], int n, int dir, bool clean, double retrPct,
          if(run>best){ best=run; sIdx=aIdx; eIdx=pIdx; }
          if(clean)
          {
-            if(run>0 && (peak-r[i].low) > retrPct/100.0*run)
+            // Soglia di rottura: percentuale del movimento in corso MA con un
+            // pavimento assoluto. Senza pavimento la percentuale e' scale-free e
+            // all'inizio di una gamba, quando run vale pochi punti, qualunque
+            // oscillazione di microstruttura la chiude: su M1 si ottengono gambe
+            // di 5-10 minuti che non sono swing ma impulsi.
+            if(run>0 && (peak-r[i].low) > MathMax(retrPct/100.0*run, minRetr))
             { anchor=r[i].low; aIdx=i; peak=r[i].high; pIdx=i; }
             else if(r[i].low<anchor){ anchor=r[i].low; aIdx=i; peak=r[i].high; pIdx=i; }
          }
@@ -465,7 +471,7 @@ void MaxRun(const MqlRates &r[], int n, int dir, bool clean, double retrPct,
          if(run>best){ best=run; sIdx=aIdx; eIdx=pIdx; }
          if(clean)
          {
-            if(run>0 && (r[i].high-peak) > retrPct/100.0*run)
+            if(run>0 && (r[i].high-peak) > MathMax(retrPct/100.0*run, minRetr))
             { anchor=r[i].high; aIdx=i; peak=r[i].low; pIdx=i; }
             else if(r[i].high>anchor){ anchor=r[i].high; aIdx=i; peak=r[i].low; pIdx=i; }
          }
@@ -1381,8 +1387,9 @@ bool ProcessSymbol(string sym)
 
       //--- Largest Move
       int suI,euI,sdI,edI; double bu,bd;
-      MaxRun(r,n,+1,InpCleanLeg,InpMaxRetracePct,suI,euI,bu);
-      MaxRun(r,n,-1,InpCleanLeg,InpMaxRetracePct,sdI,edI,bd);
+      double minRetr = InpMinRetraceAtr*atrPt*g_point;   // pavimento in prezzo
+      MaxRun(r,n,+1,InpCleanLeg,InpMaxRetracePct,minRetr,suI,euI,bu);
+      MaxRun(r,n,-1,InpCleanLeg,InpMaxRetracePct,minRetr,sdI,edI,bd);
       int lmDir, lmS, lmE; double lmRaw;
       if(bu>=bd){ lmDir=1;  lmS=suI; lmE=euI; lmRaw=bu; }
       else      { lmDir=-1; lmS=sdI; lmE=edI; lmRaw=bd; }
