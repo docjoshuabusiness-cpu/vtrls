@@ -111,6 +111,8 @@ input double          InpCciHigh        = 40.0;            // Soglia CCI superio
 input double          InpCciLow         = -40.0;           // Soglia CCI inferiore (stato)
 input double          InpCciCross       = 45.0;            // Soglia di ATTRAVERSAMENTO del CCI (trigger di ingresso)
 input int             InpSetupLookback  = 8;               // Barre indietro in cui cercare l'estremo RSI/Z prima del cross
+input int             InpAccMinBars     = 4;               // Barre minime dentro il range CCI perche' sia accumulazione
+input int             InpAccMaxScan     = 200;             // Limite di risalita nel conteggio dell'accumulazione
 input int             InpZsPeriod       = 20;              // Periodo Z-Score
 input double          InpZsHigh         = 2.0;             // Soglia Z-Score superiore
 input double          InpZsLow          = -2.0;            // Soglia Z-Score inferiore
@@ -185,6 +187,13 @@ struct SScan
    // evento; l'attraversamento e' puntuale, raro, e ha una direzione - quindi
    // e' l'unico dei due che possa funzionare da segnale di ingresso.
    int      cciCross;             // +1 cross verso l'alto, -1 verso il basso, 0 nessuno
+   // ACCUMULAZIONE: da quante barre il CCI e' confinato dentro +/-InpCciCross.
+   // Una compressione lunga e' l'unica premessa che questo dataset ha mostrato
+   // essere davvero predittiva - la volatilita' bassa anticipa quella alta -
+   // quindi la durata va misurata, non solo il momento dell'uscita.
+   int      accLen;               // barre di permanenza nel range (0 se fuori)
+   int      brk;                  // +1 uscita verso l'alto ORA, -1 verso il basso, 0 nessuna
+   int      brkLen;               // durata dell'accumulazione che ha preceduto l'uscita
    int      extRecent;            // estremo RSI/Z nelle ultime barre: +1 ipercomprato, -1 ipervenduto
    int      setup;                // combinazione estremo + cross, vedi SetupName()
    // news
@@ -1210,6 +1219,18 @@ void HtmlHeatM15(string id,const int &cnt[][96],const double &sPt[][96],const do
 // CCI come conferma. Codificato per poterlo trattare come una dimensione
 // qualsiasi nella tabella delle condizioni, con probabilita', lift e
 // ripartizione UP/DOWN calcolati come per tutto il resto.
+// Fasce di durata dell'accumulazione. Bin larghi: la durata esatta non e'
+// informativa e frammentare i campioni peggiora solo l'affidabilita'.
+string AccBin(int n)
+{
+   if(n<=0)  return "fuori dal range";
+   if(n<4)   return "1-3 barre";
+   if(n<8)   return "4-7 barre";
+   if(n<16)  return "8-15 barre";
+   if(n<32)  return "16-31 barre";
+   return "oltre 31 barre";
+}
+
 string SetupName(int c)
 {
    switch(c)
@@ -1549,6 +1570,8 @@ bool ProcessSymbol(string sym)
    int    buyDH[7][24],  bigDH[7][24], buyDM[7][96], bigDM[7][96];
    int    cntH[24], buyH[24], bigH[24];  double sAtH[24];
    // stati degli indicatori contati per finestra giorno x ora
+   // breakout per ora del giorno: 0 = uscita DOWN, 1 = nessuna, 2 = uscita UP
+   int    bkN[24][3], bkHit[24][3], bkUp[24][3], bkDn[24][3];
    int    indN[7][24], zHi[7][24], zLo[7][24], rHi[7][24], rLo[7][24];
    int    cHi[7][24], cLo[7][24], cPos[7][24];
    int    cntM[96], buyM[96], bigM[96];  double sAtM[96];
@@ -1558,6 +1581,7 @@ bool ProcessSymbol(string sym)
    ArrayInitialize(buyDM,0); ArrayInitialize(bigDM,0);
    ArrayInitialize(cntH,0);  ArrayInitialize(buyH,0);  ArrayInitialize(bigH,0);  ArrayInitialize(sAtH,0.0);
    ArrayInitialize(cntM,0);  ArrayInitialize(buyM,0);  ArrayInitialize(bigM,0);  ArrayInitialize(sAtM,0.0);
+   ArrayInitialize(bkN,0); ArrayInitialize(bkHit,0); ArrayInitialize(bkUp,0); ArrayInitialize(bkDn,0);
    ArrayInitialize(indN,0); ArrayInitialize(zHi,0); ArrayInitialize(zLo,0);
    ArrayInitialize(rHi,0);  ArrayInitialize(rLo,0);
    ArrayInitialize(cHi,0);  ArrayInitialize(cLo,0); ArrayInitialize(cPos,0);
@@ -1921,6 +1945,25 @@ bool ProcessSymbol(string sym)
                      if(rsiB[q]<InpRsiLow  || zsB[q]< InpZsLow ){ s.extRecent=-1; break; }
                   }
 
+                  // durata della permanenza dentro il range, e uscita
+                  s.accLen=0; s.brk=0; s.brkLen=0;
+                  if(MathAbs(cciB[ip])<=InpCciCross)
+                  {
+                     int q=ip;
+                     while(q>0 && ip-q<InpAccMaxScan && MathAbs(cciB[q])<=InpCciCross){ s.accLen++; q--; }
+                  }
+                  else if(ip>=1 && MathAbs(cciB[ip-1])<=InpCciCross)
+                  {
+                     // barra di uscita: conta quanto era durata la compressione
+                     int q=ip-1, L=0;
+                     while(q>0 && ip-q<InpAccMaxScan && MathAbs(cciB[q])<=InpCciCross){ L++; q--; }
+                     if(L>=InpAccMinBars)
+                     {
+                        s.brkLen=L;
+                        s.brk=(cciB[ip]>0? +1 : -1);
+                     }
+                  }
+
                   s.setup=0;
                   if(s.cciCross>0 && s.extRecent<0) s.setup=1;
                   else if(s.cciCross<0 && s.extRecent>0) s.setup=2;
@@ -1938,6 +1981,14 @@ bool ProcessSymbol(string sym)
             // esito forward (passata unica: MFE + first touch di tutte le soglie)
             ResolveForward(r,g,endIdx,entry,atrPt,s);
 
+            if(s.indOk && g_nAtr>0)
+            {
+               int bi=(s.brk>0?2:(s.brk<0?0:1));
+               bkN[s.hour][bi]++;
+               if(s.hitUpAtr[0]>=0 || s.hitDnAtr[0]>=0) bkHit[s.hour][bi]++;
+               if(s.hitUpAtr[0]>=0) bkUp[s.hour][bi]++;
+               if(s.hitDnAtr[0]>=0) bkDn[s.hour][bi]++;
+            }
             if(s.indOk)
             {
                indN[s.dow][s.hour]++;
@@ -2231,6 +2282,35 @@ bool ProcessSymbol(string sym)
            F(100.0*trL/tN,1)+"</td><td>"+F(100.0*tcH/tN,1)+"</td><td>"+F(100.0*tcL/tN,1)+"</td><td>"+
            F(100.0*tcP/tN,1)+"</td></tr>");
       HtmlTableEnd();
+      //--- la tabella che unisce le due meta' del lavoro: orari e setup
+      H("<h2>Uscita dall'accumulazione CCI, ora per ora</h2><div class=\"note\">"
+        "L'idea testata: il CCI confinato dentro +/-"+F(InpCciCross,0)+" e' compressione; il segnale e' l'<b>uscita</b> "
+        "dal range dopo almeno "+IntegerToString(InpAccMinBars)+" barre di permanenza. Qui la stessa uscita viene "
+        "misurata ora per ora, cosi' la domanda 'quando conviene cercare il setup' ha una risposta invece di "
+        "un'intuizione.<br><br>"
+        "<b>p</b> = probabilita' di un movimento di "+F(g_nAtr>0?g_thrAtr[0]:0.5,2)+" ATR entro l'orizzonte, in una "
+        "direzione qualsiasi. <b>rif</b> = la stessa probabilita' nella stessa ora <b>senza</b> uscita: e' il "
+        "confronto che conta, perche' toglie di mezzo il fatto che certe ore si muovono comunque di piu'. "
+        "L'uscita aggiunge valore solo dove <b>p supera rif</b>.<br><br>"
+        "<b>pUP e pDN</b> dicono se l'uscita ha una direzione. Se un'uscita verso l'alto non alza pUP sopra pDN, "
+        "il breakout segnala volatilita' ma non il lato: si opera con uno straddle, non con una direzione.</div>");
+      HtmlTableHead("tB","ora;n uscite UP;p;pUP;pDN;n uscite DOWN;p;pUP;pDN;rif senza uscita;n rif",false);
+      for(int h=0;h<24;h++)
+      {
+         int nu=bkN[h][2], nd=bkN[h][0], nr=bkN[h][1];
+         if(nu+nd<40 || nr<100) continue;
+         string cu=(nu>0 && nr>0 && (double)bkHit[h][2]/nu > (double)bkHit[h][1]/nr) ? "hi" : "nz";
+         string cd=(nd>0 && nr>0 && (double)bkHit[h][0]/nd > (double)bkHit[h][1]/nr) ? "hi" : "nz";
+         H("<tr><td><b>"+D2(h)+":00</b></td>"+
+           "<td>"+IntegerToString(nu)+"</td><td class=\""+cu+"\">"+(nu>0?F(100.0*bkHit[h][2]/nu,1):"-")+
+           "</td><td>"+(nu>0?F(100.0*bkUp[h][2]/nu,1):"-")+"</td><td>"+(nu>0?F(100.0*bkDn[h][2]/nu,1):"-")+"</td>"+
+           "<td>"+IntegerToString(nd)+"</td><td class=\""+cd+"\">"+(nd>0?F(100.0*bkHit[h][0]/nd,1):"-")+
+           "</td><td>"+(nd>0?F(100.0*bkUp[h][0]/nd,1):"-")+"</td><td>"+(nd>0?F(100.0*bkDn[h][0]/nd,1):"-")+"</td>"+
+           "<td class=\"nz\">"+(nr>0?F(100.0*bkHit[h][1]/nr,1):"-")+"</td><td class=\"nz\">"+
+           IntegerToString(nr)+"</td></tr>");
+      }
+      HtmlTableEnd();
+
       H("<div class=\"note\">La verifica che conta - se questi stati <b>predicono</b> il movimento e la sua "
         "direzione - e' nella scheda <b>Condizioni marginali</b>: gli stati sono stati aggiunti li' come "
         "dimensioni, con probabilita', lift e ripartizione UP/DOWN calcolati sulla stessa baseline delle "
@@ -2255,6 +2335,24 @@ bool ProcessSymbol(string sym)
                   F(100.0*cPos[d][h]/nn,2)+"\r\n");
          }
          FileClose(fI);
+      }
+
+      int fB=FileOpen(dir+fn+"_cci_breakout.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
+      if(fB!=INVALID_HANDLE)
+      {
+         W(fB,"ora;n_uscite_up;p_up_side;pUP_up;pDN_up;n_uscite_down;p_dn_side;pUP_dn;pDN_dn;"
+               "p_riferimento_senza_uscita;n_riferimento\r\n");
+         for(int h=0;h<24;h++)
+         {
+            int nu=bkN[h][2], nd=bkN[h][0], nr=bkN[h][1];
+            if(nu+nd<20 || nr<50) continue;
+            W(fB,D2(h)+":00;"+IntegerToString(nu)+";"+(nu>0?F(100.0*bkHit[h][2]/nu,2):"")+";"+
+                  (nu>0?F(100.0*bkUp[h][2]/nu,2):"")+";"+(nu>0?F(100.0*bkDn[h][2]/nu,2):"")+";"+
+                  IntegerToString(nd)+";"+(nd>0?F(100.0*bkHit[h][0]/nd,2):"")+";"+
+                  (nd>0?F(100.0*bkUp[h][0]/nd,2):"")+";"+(nd>0?F(100.0*bkDn[h][0]/nd,2):"")+";"+
+                  (nr>0?F(100.0*bkHit[h][1]/nr,2):"")+";"+IntegerToString(nr)+"\r\n");
+         }
+         FileClose(fB);
       }
    }
 
@@ -2834,6 +2932,18 @@ void BuildConditions(string sym,string dir)
                    (s.cciCross<0?"cross DOWN -"+F(InpCciCross,0):"nessun cross"));
          CellAdd("X|"+xs,"CCI cross;"+xs,s);
          CellAdd("S|"+IntegerToString(s.setup),"Setup;"+SetupName(s.setup),s);
+
+         // accumulazione in corso: quanto dura la compressione attuale
+         CellAdd("A|"+AccBin(s.accLen),"CCI accumulazione;"+AccBin(s.accLen),s);
+         // uscita dal range, separata per direzione e per durata della compressione
+         if(s.brk!=0)
+         {
+            string bd=(s.brk>0?"USCITA UP":"USCITA DOWN");
+            CellAdd("B|"+bd,"CCI breakout;"+bd,s);
+            CellAdd("L|"+bd+"|"+AccBin(s.brkLen),"CCI breakout;"+bd+" dopo "+AccBin(s.brkLen),s);
+         }
+         else
+            CellAdd("B|no","CCI breakout;nessuna uscita",s);
       }
    }
    WriteCells(dir+fn+"_conditions_marg.csv","dimensione;valore",basePt,baseAtr,
