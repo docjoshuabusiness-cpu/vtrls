@@ -872,8 +872,9 @@ void HtmlHead(string sym)
    H("<button onclick=\"tab(1)\">Giornaliero</button>");
    H("<button onclick=\"tab(2)\">Largest Move</button>");
    H("<button onclick=\"tab(3)\">Orari</button>");
-   H("<button onclick=\"tab(4)\">Condizioni incrociate</button>");
-   H("<button onclick=\"tab(5)\">Condizioni marginali</button>");
+   H("<button onclick=\"tab(4)\">Aggregati</button>");
+   H("<button onclick=\"tab(5)\">Condizioni incrociate</button>");
+   H("<button onclick=\"tab(6)\">Condizioni marginali</button>");
    H("</nav><main>");
    H("<section class=\"on\"><div id=\"sum\" class=\"sum\"></div>");
    H("<h2>Come leggere questo report</h2><div class=\"note\">");
@@ -934,6 +935,93 @@ string CondCell(int hits,int n,int base)
    if(bp>0 && lift>1.20 && wl>bp)      cls="hi";
    else if(bp>0 && lift<0.80)          cls="lo";
    return "<td class=\""+cls+"\">"+F(100.0*p,1)+"% <span class=\"nz\">x"+F(lift,2)+"</span></td>";
+}
+
+
+//==================================================================
+//  AGGREGAZIONI SULL'INTERO PERIODO
+//  Le tabelle precedenti mostrano le giornate una per una. Questa
+//  raggruppa tutte le giornate del periodo per giorno della settimana,
+//  per mese e per sessione, e riporta per ogni gruppo il quadro
+//  completo: quante giornate, quanto e' stato grande il movimento
+//  maggiore, in che direzione, a che ora, e cosa aveva fatto il prezzo
+//  prima. Serve a rispondere a "il martedi' si muove piu' del giovedi'?"
+//  invece che a "cosa e' successo il 12 marzo".
+//==================================================================
+struct SAgg
+{
+   string label;
+   int    n, buy, big1, big2;
+   double sLmPt, sLmAtr, sDur, sPrevRange, sPreTot, sPreNet, sPrePct;
+   double mLmPt[], mLmAtr[];
+   int    hourHist[24];
+};
+
+void AggInit(SAgg &a, string label)
+{
+   a.label=label; a.n=0; a.buy=0; a.big1=0; a.big2=0;
+   a.sLmPt=0; a.sLmAtr=0; a.sDur=0; a.sPrevRange=0; a.sPreTot=0; a.sPreNet=0; a.sPrePct=0;
+   ArrayResize(a.mLmPt,0); ArrayResize(a.mLmAtr,0);
+   ArrayInitialize(a.hourHist,0);
+}
+
+void AggAdd(SAgg &a, double lmPt, double lmAtr, int dur, int dir, int hour,
+            double prevRange, double preTot, double preNet, double prePct)
+{
+   a.n++;
+   if(dir>0)     a.buy++;
+   if(lmAtr>1.0) a.big1++;
+   if(lmAtr>2.0) a.big2++;
+   a.sLmPt+=lmPt; a.sLmAtr+=lmAtr; a.sDur+=dur;
+   a.sPrevRange+=prevRange; a.sPreTot+=preTot; a.sPreNet+=preNet; a.sPrePct+=prePct;
+   int k=ArraySize(a.mLmPt);
+   ArrayResize(a.mLmPt,k+1,512);  a.mLmPt[k]=lmPt;
+   ArrayResize(a.mLmAtr,k+1,512); a.mLmAtr[k]=lmAtr;
+   if(hour>=0 && hour<24) a.hourHist[hour]++;
+}
+
+// ora in cui il movimento maggiore parte piu' spesso, con quante volte
+string AggModalHour(SAgg &a, int &cnt)
+{
+   int best=-1; cnt=0;
+   for(int h=0;h<24;h++) if(a.hourHist[h]>cnt){ cnt=a.hourHist[h]; best=h; }
+   if(best<0) return "-";
+   return D2(best)+":00";
+}
+
+string AggRowCsv(SAgg &a)
+{
+   if(a.n<=0) return "";
+   double m1[]; ArrayCopy(m1,a.mLmPt);
+   double m2[]; ArrayCopy(m2,a.mLmAtr);
+   int mc=0; string mh=AggModalHour(a,mc);
+   return a.label+";"+IntegerToString(a.n)+";"+
+          F(100.0*a.buy/a.n,1)+";"+
+          F(a.sLmPt/a.n,1)+";"+F(Median(m1),1)+";"+
+          F(a.sLmAtr/a.n,3)+";"+F(Median(m2),3)+";"+
+          F(100.0*a.big1/a.n,1)+";"+F(100.0*a.big2/a.n,1)+";"+
+          F(a.sDur/a.n,0)+";"+mh+";"+IntegerToString(mc)+";"+
+          F(a.sPrevRange/a.n,1)+";"+F(a.sPreTot/a.n,1)+";"+F(a.sPreNet/a.n,1)+";"+
+          F(a.sPrePct/a.n,1);
+}
+
+string AggRowHtml(SAgg &a)
+{
+   if(a.n<=0) return "";
+   double m1[]; ArrayCopy(m1,a.mLmPt);
+   double m2[]; ArrayCopy(m2,a.mLmAtr);
+   int mc=0; string mh=AggModalHour(a,mc);
+   double pb=100.0*a.buy/a.n;
+   double net=a.sPreNet/a.n;
+   return "<tr><td>"+HE(a.label)+"</td><td>"+IntegerToString(a.n)+"</td>"+
+          "<td class=\""+(pb>=50?"up":"dn")+"\">"+F(pb,0)+"% / "+F(100.0-pb,0)+"%</td>"+
+          "<td>"+F(a.sLmPt/a.n,1)+"</td><td>"+F(Median(m1),1)+"</td>"+
+          "<td>"+F(a.sLmAtr/a.n,2)+"</td><td>"+F(Median(m2),2)+"</td>"+
+          "<td>"+F(100.0*a.big1/a.n,1)+"%</td><td>"+F(100.0*a.big2/a.n,1)+"%</td>"+
+          "<td>"+F(a.sDur/a.n,0)+"</td><td>"+mh+" <span class=\"nz\">("+IntegerToString(mc)+")</span></td>"+
+          "<td>"+F(a.sPrevRange/a.n,1)+"</td><td>"+F(a.sPreTot/a.n,1)+"</td>"+
+          "<td class=\""+(net>=0?"up":"dn")+"\">"+F(net,1)+"</td>"+
+          "<td>"+F(a.sPrePct/a.n,1)+"%</td></tr>";
 }
 
 //==================================================================
@@ -1053,6 +1141,15 @@ bool ProcessSymbol(string sym)
    double sumM15[96];  ArrayInitialize(sumM15,0.0);
    int c1AtrM15[96];   ArrayInitialize(c1AtrM15,0);
    int c2AtrM15[96];   ArrayInitialize(c2AtrM15,0);
+
+   SAgg aggDow[]; ArrayResize(aggDow,7);
+   SAgg aggMon[]; ArrayResize(aggMon,13);
+   SAgg aggSes[]; ArrayResize(aggSes,4);
+   for(int i=0;i<7;i++)  AggInit(aggDow[i],DowIT(i));
+   for(int i=1;i<13;i++) AggInit(aggMon[i],MonIT(i));
+   AggInit(aggMon[0],"");
+   for(int i=0;i<4;i++)  AggInit(aggSes[i],SessName(i));
+   SAgg aggAll[]; ArrayResize(aggAll,1); AggInit(aggAll[0],"TUTTE LE GIORNATE");
 
    string htmlLm[];    ArrayResize(htmlLm,0);      // righe della tabella Largest Move (scritte a fine ciclo)
    double lmAtrAll[];  ArrayResize(lmAtrAll,0);
@@ -1247,6 +1344,11 @@ bool ProcessSymbol(string sym)
            (nFlag>0?HE(nName):"-")+"</td><td>"+(ni>=0?IntegerToString(nDist):"")+"</td></tr>";
       }
 
+      AggAdd(aggDow[st.day_of_week],lmPt,lmAtr,lmDur,lmDir,st.hour,pRange,preTot,preNet,prePct);
+      AggAdd(aggMon[st.mon],         lmPt,lmAtr,lmDur,lmDir,st.hour,pRange,preTot,preNet,prePct);
+      AggAdd(aggSes[sess],           lmPt,lmAtr,lmDur,lmDir,st.hour,pRange,preTot,preNet,prePct);
+      AggAdd(aggAll[0],              lmPt,lmAtr,lmDur,lmDir,st.hour,pRange,preTot,preNet,prePct);
+
       cntH1[st.hour]++;  sumH1[st.hour]+=lmPt;
       if(lmAtr>1.0) c1AtrH1[st.hour]++;
       if(lmAtr>2.0) c2AtrH1[st.hour]++;
@@ -1369,6 +1471,55 @@ bool ProcessSymbol(string sym)
            IntegerToString(c1AtrM15[b])+"</td><td>"+IntegerToString(c2AtrM15[b])+"</td></tr>");
       }
       HtmlTableEnd(); H("</section>");
+
+      //--- scheda Aggregati: l'intero periodo raggruppato, non le singole giornate
+      string aggCols="gruppo;giornate;BUY / SELL;LM medio pt;LM mediano pt;LM medio ATR;LM mediano ATR;"
+                     "% &gt;1 ATR;% &gt;2 ATR;durata media min;ora piu' frequente;range D-1 medio pt;"
+                     "pre total medio pt;pre net medio pt;% range D-1 percorso";
+      H("<section><h2>Aggregati sull'intero periodo</h2><div class=\"note\">Tutte le giornate del periodo "
+        "raggruppate. <b>LM</b> = Largest Move. <b>BUY / SELL</b> e' la ripartizione direzionale del movimento "
+        "maggiore. <b>ora piu' frequente</b> e' l'ora in cui il movimento parte piu' spesso, con tra parentesi "
+        "il numero di volte. Le ultime quattro colonne descrivono cosa aveva fatto il prezzo <b>prima</b> che il "
+        "movimento partisse: range del giorno precedente, punti totali percorsi, movimento netto e quanta parte "
+        "del range D-1 era gia' stata percorsa. Confronta le righe fra loro, non i valori assoluti: e' la "
+        "differenza fra gruppi che dice qualcosa.</div>");
+
+      H("<h2>Per giorno della settimana</h2>");
+      HtmlTableHead("tA1",aggCols,false);
+      for(int i=1;i<=5;i++) H(AggRowHtml(aggDow[i]));   // Lun..Ven
+      H(AggRowHtml(aggDow[0])); H(AggRowHtml(aggDow[6]));
+      H(AggRowHtml(aggAll[0]));
+      HtmlTableEnd();
+
+      H("<h2>Per mese</h2>");
+      HtmlTableHead("tA2",aggCols,false);
+      for(int i=1;i<13;i++) H(AggRowHtml(aggMon[i]));
+      H(AggRowHtml(aggAll[0]));
+      HtmlTableEnd();
+
+      H("<h2>Per sessione</h2>");
+      HtmlTableHead("tA3",aggCols,false);
+      for(int i=0;i<4;i++) H(AggRowHtml(aggSes[i]));
+      H(AggRowHtml(aggAll[0]));
+      HtmlTableEnd();
+      H("</section>");
+   }
+
+   //--- stesse aggregazioni in CSV
+   if(InpWriteCsv)
+   {
+      int fA=FileOpen(dir+fn+"_aggregate.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
+      if(fA!=INVALID_HANDLE)
+      {
+         W(fA,"tipo;gruppo;giornate;pct_buy;lm_medio_pt;lm_mediano_pt;lm_medio_atr;lm_mediano_atr;"
+               "pct_gt1atr;pct_gt2atr;durata_media_min;ora_piu_frequente;n_ora;range_d1_medio_pt;"
+               "pre_total_medio_pt;pre_net_medio_pt;pct_range_d1_percorso\r\n");
+         for(int i=0;i<7;i++)  { string r=AggRowCsv(aggDow[i]); if(r!="") W(fA,"dow;"+r+"\r\n"); }
+         for(int i=1;i<13;i++) { string r=AggRowCsv(aggMon[i]); if(r!="") W(fA,"mese;"+r+"\r\n"); }
+         for(int i=0;i<4;i++)  { string r=AggRowCsv(aggSes[i]); if(r!="") W(fA,"sessione;"+r+"\r\n"); }
+         string rt=AggRowCsv(aggAll[0]); if(rt!="") W(fA,"totale;"+rt+"\r\n");
+         FileClose(fA);
+      }
    }
 
    int fTd=(InpWriteCsv? FileOpen(dir+fn+"_timedist.csv",FILE_WRITE|FILE_TXT|FILE_ANSI) : INVALID_HANDLE);
