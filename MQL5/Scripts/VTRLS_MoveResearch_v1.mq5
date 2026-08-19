@@ -202,8 +202,11 @@ struct SCell
    int    hitPt[8],  hitPtUp[8],  hitPtDn[8];
    int    hitAtr[8], hitAtrUp[8], hitAtrDn[8];
    double sumMfe;
+   double expPt[8], expAtr[8];   // successi ATTESI data la composizione oraria della cella
    double mfe[];
 };
+int    g_basePtH[24][8], g_baseAtrH[24][8]; // baseline per ora del giorno
+int    g_nScanH[24];
 int    g_basePtS[4][8], g_baseAtrS[4][8];  // baseline per sessione
 int    g_nScanS[4];                        // righe per sessione
 int    g_basePtUp[8],  g_basePtDn[8];    // baseline direzionali
@@ -598,6 +601,8 @@ int CellGet(string key,string label,int sess)
          g_cell[g_nCell].sess=sess;
          g_cell[g_nCell].n=0;
          g_cell[g_nCell].sumMfe=0.0;
+         ArrayInitialize(g_cell[g_nCell].expPt,0.0);
+         ArrayInitialize(g_cell[g_nCell].expAtr,0.0);
          ArrayInitialize(g_cell[g_nCell].hitPt,0);
          ArrayInitialize(g_cell[g_nCell].hitAtr,0);
          ArrayInitialize(g_cell[g_nCell].hitPtUp,0);
@@ -634,6 +639,19 @@ void CellAdd(string key,string label,const SScan &s,int sess=-1)
       if(s.hitUpAtr[k]>=0) g_cell[ci].hitAtrUp[k]++;
       if(s.hitDnAtr[k]>=0) g_cell[ci].hitAtrDn[k]++;
    }
+   // Somma, osservazione per osservazione, la probabilita' baseline DELL'ORA in
+   // cui quell'osservazione cade. Il rapporto fra successi reali e questa somma
+   // e' il lift depurato dall'orario: risponde a "questa condizione aggiunge
+   // qualcosa OLTRE al fatto di presentarsi nelle ore in cui il mercato si
+   // muove di piu'?". Senza, qualunque stato che si concentra a Londra o a New
+   // York sembra predittivo mentre sta solo seguendo la volatilita' oraria.
+   int hh=s.hour;
+   if(hh>=0 && hh<24 && g_nScanH[hh]>0)
+   {
+      for(int k=0;k<g_nPt;k++)  g_cell[ci].expPt[k] +=(double)g_basePtH[hh][k] /g_nScanH[hh];
+      for(int k=0;k<g_nAtr;k++) g_cell[ci].expAtr[k]+=(double)g_baseAtrH[hh][k]/g_nScanH[hh];
+   }
+
    g_cell[ci].sumMfe += s.mfeMaxAtr;
    int m=ArraySize(g_cell[ci].mfe);
    ArrayResize(g_cell[ci].mfe,m+1,512);
@@ -2657,6 +2675,7 @@ void BuildConditions(string sym,string dir)
    int basePt[8], baseAtr[8];
    ArrayInitialize(basePt,0); ArrayInitialize(baseAtr,0);
    ArrayInitialize(g_basePtS,0); ArrayInitialize(g_baseAtrS,0); ArrayInitialize(g_nScanS,0);
+   ArrayInitialize(g_basePtH,0); ArrayInitialize(g_baseAtrH,0); ArrayInitialize(g_nScanH,0);
    ArrayInitialize(g_basePtUp,0);  ArrayInitialize(g_basePtDn,0);
    ArrayInitialize(g_baseAtrUp,0); ArrayInitialize(g_baseAtrDn,0);
    for(int i=0;i<g_nScan;i++)
@@ -2677,6 +2696,15 @@ void BuildConditions(string sym,string dir)
       // ristretta alle ore americane batte la baseline globale - che media
       // anche le 3 di notte - e sembra un edge quando dice solo "di giorno
       // il mercato si muove di piu'".
+      int hv=g_scan[i].hour;
+      if(hv>=0 && hv<24)
+      {
+         g_nScanH[hv]++;
+         for(int k=0;k<g_nPt;k++)
+            if(g_scan[i].hitUpPt[k]>=0 || g_scan[i].hitDnPt[k]>=0) g_basePtH[hv][k]++;
+         for(int k=0;k<g_nAtr;k++)
+            if(g_scan[i].hitUpAtr[k]>=0 || g_scan[i].hitDnAtr[k]>=0) g_baseAtrH[hv][k]++;
+      }
       int sv=g_scan[i].sess;
       if(sv>=0 && sv<4)
       {
@@ -2770,12 +2798,12 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
    for(int k=0;k<g_nPt;k++)
    {
       string t=F(g_thrPt[k],0)+"pt";
-      hdr+=";n_"+t+";p_"+t+";wlow_"+t+";lift_"+t+";pUP_"+t+";liftUP_"+t+";pDN_"+t+";liftDN_"+t;
+      hdr+=";n_"+t+";p_"+t+";wlow_"+t+";lift_"+t+";liftORA_"+t+";pUP_"+t+";liftUP_"+t+";pDN_"+t+";liftDN_"+t;
    }
    for(int k=0;k<g_nAtr;k++)
    {
       string t=F(g_thrAtr[k],2)+"atr";
-      hdr+=";n_"+t+";p_"+t+";wlow_"+t+";lift_"+t+";pUP_"+t+";liftUP_"+t+";pDN_"+t+";liftDN_"+t;
+      hdr+=";n_"+t+";p_"+t+";wlow_"+t+";lift_"+t+";liftORA_"+t+";pUP_"+t+";liftUP_"+t+";pDN_"+t+";liftDN_"+t;
    }
    hdr+=";media_mfe_atr;mediana_mfe_atr";
    W(f,hdr+"\r\n");
@@ -2812,8 +2840,10 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
          double bp=(bH>=30 && bN>0 ? (double)bH/bN : 0.0);
          double pu=(double)g_cell[c].hitPtUp[k]/n, bu=(g_nScan>0?(double)g_basePtUp[k]/g_nScan:0.0);
          double pd=(double)g_cell[c].hitPtDn[k]/n, bd=(g_nScan>0?(double)g_basePtDn[k]/g_nScan:0.0);
+         double ex=g_cell[c].expPt[k];
          row+=";"+IntegerToString(hits)+";"+F(100.0*p,2)+";"+F(100.0*WilsonLow(hits,n),2)+";"+
-              (bp>0? F(p/bp,3):"")+";"+F(100.0*pu,2)+";"+(bu>0?F(pu/bu,3):"")+";"+
+              (bp>0? F(p/bp,3):"")+";"+(ex>=1.0? F(hits/ex,3):"")+";"+
+              F(100.0*pu,2)+";"+(bu>0?F(pu/bu,3):"")+";"+
               F(100.0*pd,2)+";"+(bd>0?F(pd/bd,3):"");
       }
       for(int k=0;k<g_nAtr;k++)
@@ -2844,7 +2874,10 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
          int bH2=(sv2>=0 && g_nScanS[sv2]>0 ? g_baseAtrS[sv2][k] : baseAtr[k]);
          double bb=(bH2>=30 && bN2>0 ? (double)bH2/bN2 : 0.0);
          if(bb<=0) continue;
-         if(pp/bb>1.20 && WilsonLow(hits,n)>bb)
+         // il filtro usa il lift DEPURATO dall'orario quando disponibile
+         double exA=g_cell[c].expAtr[k];
+         double liftUsed=(exA>=1.0 ? hits/exA : pp/bb);
+         if(liftUsed>1.20 && WilsonLow(hits,n)>bb)
          {
             string lb=g_cell[c].label;
             StringReplace(lb,";"," / ");
@@ -2879,11 +2912,11 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
    string pad=""; for(int i=1;i<nkey;i++) pad+=";";
    string b="BASELINE (tutte le righe)"+pad+";"+IntegerToString(g_nScan)+";"+IntegerToString((int)(g_nScan/g_overlap));
    for(int k=0;k<g_nPt;k++)
-      b+=";"+IntegerToString(basePt[k])+";"+F(100.0*basePt[k]/MathMax(1,g_nScan),2)+";;1.000;"+
+      b+=";"+IntegerToString(basePt[k])+";"+F(100.0*basePt[k]/MathMax(1,g_nScan),2)+";;1.000;1.000;"+
          F(100.0*g_basePtUp[k]/MathMax(1,g_nScan),2)+";1.000;"+
          F(100.0*g_basePtDn[k]/MathMax(1,g_nScan),2)+";1.000";
    for(int k=0;k<g_nAtr;k++)
-      b+=";"+IntegerToString(baseAtr[k])+";"+F(100.0*baseAtr[k]/MathMax(1,g_nScan),2)+";;1.000;"+
+      b+=";"+IntegerToString(baseAtr[k])+";"+F(100.0*baseAtr[k]/MathMax(1,g_nScan),2)+";;1.000;1.000;"+
          F(100.0*g_baseAtrUp[k]/MathMax(1,g_nScan),2)+";1.000;"+
          F(100.0*g_baseAtrDn[k]/MathMax(1,g_nScan),2)+";1.000";
    b+=";;";
