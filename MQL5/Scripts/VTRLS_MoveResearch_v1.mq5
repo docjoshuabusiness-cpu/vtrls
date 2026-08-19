@@ -182,6 +182,9 @@ struct SCell
    double sumMfe;
    double mfe[];
 };
+string g_top[];            // condizioni rilevanti, per il riassunto testuale
+int    g_nTop=0;
+
 SCell g_cell[];
 int   g_nCell=0;
 int   g_slot[];
@@ -263,6 +266,9 @@ string M15Label(int hour,int minute)
    return D2(hour)+":"+D2(q)+"-"+D2(eh)+":"+D2(e);
 }
 string F(double v,int d=2){ return DoubleToString(v,d); }
+// allineamento a larghezza fissa per le tabelle di testo
+string PadR(string x,int w){ while(StringLen(x)<w) x=x+" "; return x; }
+string PadL(string x,int w){ while(StringLen(x)<w) x=" "+x; return x; }
 
 int ParseDoubles(string src, double &out[])
 {
@@ -1250,6 +1256,8 @@ bool ProcessSymbol(string sym)
    ArrayInitialize(cntDH,0); ArrayInitialize(sPtDH,0.0); ArrayInitialize(sAtDH,0.0);
    ArrayInitialize(cntDM,0); ArrayInitialize(sPtDM,0.0); ArrayInitialize(sAtDM,0.0);
 
+   g_nTop=0; ArrayResize(g_top,0);
+
    SAgg aggDow[]; ArrayResize(aggDow,7);
    SAgg aggMon[]; ArrayResize(aggMon,13);
    SAgg aggSes[]; ArrayResize(aggSes,4);
@@ -1769,6 +1777,123 @@ bool ProcessSymbol(string sym)
       H("<section><h2>Condizioni marginali</h2><div class=\"note\">Non generate.</div></section>");
    }
 
+   //=================================================================
+   //  RIASSUNTO TESTUALE
+   //  Un file piccolo, in testo semplice, pensato per essere copiato e
+   //  incollato per intero. Contiene tutti i numeri che servono per
+   //  ragionare sui risultati senza aprire il report HTML.
+   //=================================================================
+   if(InpWriteCsv || InpWriteHtml)
+   {
+      int fT=FileOpen(dir+fn+"_summary.txt",FILE_WRITE|FILE_TXT|FILE_ANSI);
+      if(fT!=INVALID_HANDLE)
+      {
+         string L="\r\n";
+         W(fT,"VTRLS MOVE RESEARCH - "+sym+L);
+         W(fT,"periodo "+TimeToString(effFrom,TIME_DATE)+" - "+TimeToString(effTo,TIME_DATE)+
+               " | TF base "+EnumToString(InpBaseTF)+" | giornate "+IntegerToString(nDays)+
+               " | righe point-in-time "+IntegerToString(g_nScan)+L);
+         W(fT,"orizzonte forward "+IntegerToString(InpScanHorizonMin)+" min | stop/target "+
+               F(InpAdverseRatio,2)+" | ATR daily periodo "+IntegerToString(InpATRPeriod)+L+L);
+
+         if(nDays>0)
+         {
+            double cpS[]; ArrayCopy(cpS,lmAtrAll);
+            W(fT,"MOVIMENTO MAGGIORE (una sola escursione per giornata)"+L);
+            W(fT,"  medio "+F(aggAll[0].sLmAtr/nDays,2)+" ATR ("+F(aggAll[0].sLmPt/nDays,0)+" pt)"+
+                  " | mediano "+F(Median(cpS),2)+" ATR"+
+                  " | >1 ATR "+F(100.0*aggAll[0].big1/nDays,0)+"%"+
+                  " | >2 ATR "+F(100.0*aggAll[0].big2/nDays,0)+"%"+L);
+            W(fT,"  BUY "+F(100.0*aggAll[0].buy/nDays,0)+"% / SELL "+F(100.0-100.0*aggAll[0].buy/nDays,0)+"%"+
+                  " | durata media "+F(aggAll[0].sDur/nDays,0)+" min"+L);
+            W(fT,"  pre-evento: "+F(aggAll[0].sPrePct/nDays,0)+"% del range D-1 gia' percorso, "+
+                  F(aggAll[0].sPreTot/nDays,0)+" pt totali, net "+F(aggAll[0].sPreNet/nDays,0)+" pt"+L+L);
+         }
+
+         string hdr=PadR("gruppo",14)+PadL("n",6)+PadL("BUY%",6)+PadL("LMpt",8)+PadL("LMatr",7)+
+                    PadL(">1atr",7)+PadL(">2atr",7)+PadL("dur",6)+PadL("ora",6)+PadL("preD1%",8);
+         W(fT,"PER ANNO"+L+hdr+L);
+         for(int i=0;i<60;i++)
+         {
+            if(aggYear[i].n<=0) continue;
+            int mc=0; string mh=AggModalHour(aggYear[i],mc);
+            W(fT,PadR(aggYear[i].label,14)+PadL(IntegerToString(aggYear[i].n),6)+
+                  PadL(F(100.0*aggYear[i].buy/aggYear[i].n,0),6)+
+                  PadL(F(aggYear[i].sLmPt/aggYear[i].n,0),8)+
+                  PadL(F(aggYear[i].sLmAtr/aggYear[i].n,2),7)+
+                  PadL(F(100.0*aggYear[i].big1/aggYear[i].n,0),7)+
+                  PadL(F(100.0*aggYear[i].big2/aggYear[i].n,0),7)+
+                  PadL(F(aggYear[i].sDur/aggYear[i].n,0),6)+PadL(mh,6)+
+                  PadL(F(aggYear[i].sPrePct/aggYear[i].n,0),8)+L);
+         }
+         W(fT,L+"PER GIORNO DELLA SETTIMANA"+L+hdr+L);
+         for(int k=0;k<7;k++)
+         {
+            int d=(k+1)%7;
+            if(aggDow[d].n<=0) continue;
+            int mc=0; string mh=AggModalHour(aggDow[d],mc);
+            W(fT,PadR(aggDow[d].label,14)+PadL(IntegerToString(aggDow[d].n),6)+
+                  PadL(F(100.0*aggDow[d].buy/aggDow[d].n,0),6)+
+                  PadL(F(aggDow[d].sLmPt/aggDow[d].n,0),8)+
+                  PadL(F(aggDow[d].sLmAtr/aggDow[d].n,2),7)+
+                  PadL(F(100.0*aggDow[d].big1/aggDow[d].n,0),7)+
+                  PadL(F(100.0*aggDow[d].big2/aggDow[d].n,0),7)+
+                  PadL(F(aggDow[d].sDur/aggDow[d].n,0),6)+PadL(mh,6)+
+                  PadL(F(aggDow[d].sPrePct/aggDow[d].n,0),8)+L);
+         }
+         W(fT,L+"PER SESSIONE"+L+hdr+L);
+         for(int i=0;i<4;i++)
+         {
+            if(aggSes[i].n<=0) continue;
+            int mc=0; string mh=AggModalHour(aggSes[i],mc);
+            W(fT,PadR(aggSes[i].label,14)+PadL(IntegerToString(aggSes[i].n),6)+
+                  PadL(F(100.0*aggSes[i].buy/aggSes[i].n,0),6)+
+                  PadL(F(aggSes[i].sLmPt/aggSes[i].n,0),8)+
+                  PadL(F(aggSes[i].sLmAtr/aggSes[i].n,2),7)+
+                  PadL(F(100.0*aggSes[i].big1/aggSes[i].n,0),7)+
+                  PadL(F(100.0*aggSes[i].big2/aggSes[i].n,0),7)+
+                  PadL(F(aggSes[i].sDur/aggSes[i].n,0),6)+PadL(mh,6)+
+                  PadL(F(aggSes[i].sPrePct/aggSes[i].n,0),8)+L);
+         }
+
+         // migliori 10 fasce orarie: si lavora su COPIE, perche' la selezione
+         // consuma i contatori e gli originali servono ancora alla lettura guidata
+         int tH1[24];  ArrayCopy(tH1,cntH1);
+         int tM15[96]; ArrayCopy(tM15,cntM15);
+
+         W(fT,L+"FASCE H1 PIU' DENSE (movimenti | % giornate | media pt)"+L);
+         for(int r=0;r<10;r++)
+         {
+            int bi=-1,bv=0;
+            for(int h=0;h<24;h++) if(tH1[h]>bv){ bv=tH1[h]; bi=h; }
+            if(bi<0) break;
+            W(fT,"  "+D2(bi)+":00-"+D2((bi+1)%24)+":00  "+PadL(IntegerToString(bv),4)+"  "+
+                  PadL(F(100.0*bv/MathMax(1,nDays),1)+"%",7)+"  "+PadL(F(sumH1[bi]/bv,0),7)+L);
+            tH1[bi]=0;
+         }
+         W(fT,L+"FASCE 15 MIN PIU' DENSE"+L);
+         for(int r=0;r<10;r++)
+         {
+            int bi=-1,bv=0;
+            for(int b=0;b<96;b++) if(tM15[b]>bv){ bv=tM15[b]; bi=b; }
+            if(bi<0) break;
+            W(fT,"  "+PadR(M15Label(bi/4,(bi%4)*15),13)+PadL(IntegerToString(bv),4)+"  "+
+                  PadL(F(100.0*bv/MathMax(1,nDays),1)+"%",7)+"  "+PadL(F(sumM15[bi]/bv,0),7)+L);
+            tM15[bi]=0;
+         }
+
+         W(fT,L+"CONDIZIONI CHE SUPERANO IL FILTRO (lift>1.20 e Wilson-low sopra baseline)"+L);
+         if(g_nTop==0)
+            W(fT,"  nessuna. Nessuna combinazione testata batte la baseline in modo statisticamente"+L+
+                  "  distinguibile: su questo campione non c'e' edge da estrarre."+L);
+         else
+            for(int i=0;i<g_nTop;i++) W(fT,"  "+g_top[i]+L);
+
+         FileClose(fT);
+         PrintFormat("[%s] riassunto testuale: %s_summary.txt (copiabile per intero)",sym,fn);
+      }
+   }
+
    if(g_html!=INVALID_HANDLE)
    {
       double avgLm=0, medLm=0;
@@ -2067,6 +2192,26 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
       double mMean=g_cell[c].sumMfe/n, mMed=Median(med);
       row+=";"+F(mMean,3)+";"+F(mMed,3);
       W(f,row+"\r\n");
+
+      // memorizza le condizioni che superano il filtro di rilevanza, per il
+      // riassunto testuale: sono le uniche righe che meritino di essere lette
+      for(int k=0;k<g_nAtr && g_nTop<20;k++)
+      {
+         int hits=g_cell[c].hitAtr[k];
+         double pp=(double)hits/n;
+         double bb=(g_nScan>0 ? (double)baseAtr[k]/g_nScan : 0.0);
+         if(bb<=0) continue;
+         if(pp/bb>1.20 && WilsonLow(hits,n)>bb)
+         {
+            string lb=g_cell[c].label;
+            StringReplace(lb,";"," / ");
+            ArrayResize(g_top,g_nTop+1,32);
+            g_top[g_nTop]=PadR(lb,52)+" | "+PadL(F(g_thrAtr[k],2)+" ATR",8)+" | n="+PadL(IntegerToString(n),6)+
+                          " | p="+PadL(F(100.0*pp,1)+"%",7)+" | base="+PadL(F(100.0*bb,1)+"%",7)+
+                          " | lift="+F(pp/bb,2);
+            g_nTop++;
+         }
+      }
 
       if(g_html!=INVALID_HANDLE)
       {
