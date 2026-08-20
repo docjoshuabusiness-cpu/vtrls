@@ -134,10 +134,12 @@ input int             InpOrbLastHour    = 21;              // Ultima ora in cui 
 input int             InpOrbStartStep   = 60;              // Passo degli inizi finestra in minuti (30 raddoppia il tempo di run)
 input string          InpOrbDur         = "1,5,15,30,60,90,120"; // Durate della finestra, in minuti (ogni durata in piu' allunga il run)
 input int             InpOrbDeadlineMin = 240;             // Entro quanto dalla chiusura finestra deve avvenire la rottura
-input int             InpOrbTargetMode  = 1;               // 0 = target in ATR fisso, 1 = target come multiplo del range rotto
-input double          InpOrbTargetMult  = 1.00;            // Modo 1: target = questo x l'ampiezza del range
-input double          InpOrbTargetAtr   = 0.20;            // Modo 0: target in ATR(D-1) dal livello rotto
-input double          InpOrbMinTargetAtr= 0.08;            // Target minimo in ATR: sotto, spread e commissioni se lo mangiano
+input int             InpOrbStopMode    = 0;               // Come si misura il RISCHIO: 0 = frazione del range, 1 = multiplo di ATR, 2 = lato opposto del range
+input double          InpOrbStopMult    = 0.50;            // Modo 0: stop = questo x l'ampiezza del range rotto
+input double          InpOrbStopAtr     = 0.15;            // Modo 1: stop = questo x ATR(D-1)
+input string          InpOrbRR          = "0.5,1,2,3,4,5"; // Rapporti rendimento/rischio testati insieme (target = RR x stop)
+input int             InpOrbRRMain      = 3;               // Quale della lista alimenta classifica e filtri (1 = il primo)
+input double          InpOrbMinStopAtr  = 0.05;            // Stop minimo in ATR: sotto, spread e commissioni se lo mangiano
 input double          InpOrbCostPt      = 0.0;             // Costo di andata e ritorno in punti (spread + commissioni)
 input double          InpOrbBufferAtr   = 0.03;            // Margine oltre il livello perche' la rottura conti
 input double          InpOrbMinResolved = 60.0;            // % minima di rotture risolte perche' la finestra entri in classifica
@@ -1153,6 +1155,16 @@ void HtmlHead(string sym)
      "segno della rottura: quanto il prezzo stava gia' spingendo in quel verso</td></tr>");
    H("<tr><td><b>volatilita' pre-rottura</b></td><td>Somma dei range delle stesse barre, in ATR: distingue una "
      "spinta pulita da un'agitazione che percorre molta strada senza andare da nessuna parte</td></tr>");
+   H("<tr><td><b>RR (target/stop)</b></td><td>Quante volte lo stop vale il target. 1:2 significa rischiare "
+     "una unita' per guadagnarne due. Lo stop resta identico fra i rapporti: cambia solo dove si mette il "
+     "target, quindi i rapporti sono confrontabili fra loro</td></tr>");
+   H("<tr><td><b>atteso casuale</b></td><td>1/(1+RR): il win rate di una passeggiata casuale senza deriva a "
+     "quel rapporto. Non e' una stima, e' un teorema. Il 33,3% con target doppio dello stop non e' una "
+     "strategia mediocre, e' esattamente il nulla</td></tr>");
+   H("<tr><td><b>E in R</b></td><td>Valore atteso per operazione in unita' di rischio: quanti stop guadagni "
+     "in media ogni volta che entri. Zero = il gioco e' equo, negativo = paghi per giocare</td></tr>");
+   H("<tr><td><b>E netto</b></td><td>Lo stesso valore atteso in ATR dopo aver tolto spread e commissioni "
+     "(InpOrbCostPt). E' l'unico numero che descrive quello che finisce sul conto</td></tr>");
    H("<tr><td><b>MFE / MAE</b></td><td>Massima escursione a favore e massima escursione contraria dopo "
      "l'ingresso, in ATR. MFE dice se il target poteva essere piu' ambizioso, MAE quanto stop serviva davvero</td></tr>");
    H("</tbody></table></div></section>");
@@ -1559,6 +1571,14 @@ double WilsonLowInd(int k,int n)
    return (lo<0.0?0.0:lo);
 }
 
+// Rapporti rendimento/rischio testati nella stessa passata. Lo stop e' unico
+// e comune a tutti: cambia solo dove si mette il target. Cosi' i rapporti
+// sono confrontabili fra loro e con la curva nulla.
+#define ORB_MAXRR 8
+double g_rr[ORB_MAXRR];
+int    g_nRR=0;
+int    g_rrMain=0;
+
 struct SOrb
 {
    int    startMin, durMin;
@@ -1575,9 +1595,30 @@ struct SOrb
    int    n1, brk1, win1, res1;    // prima meta' del periodo
    int    n2, brk2, win2, res2;    // seconda meta'
    int    dN[7], dBrk[7], dWin[7], dRes[7];
+   // esiti della STESSA rottura letti con rapporti rendimento/rischio diversi
+   int    winR[ORB_MAXRR], lossR[ORB_MAXRR], flatR[ORB_MAXRR];
+   double sPnlR[ORB_MAXRR];
 };
 SOrb g_orb[];
 int  g_nOrb=0;
+
+// probabilita' di vittoria di una passeggiata casuale senza deriva: con un
+// target RR volte lo stop, vincere vale esattamente 1/(1+RR). E' la curva
+// nulla contro cui va confrontato ogni win rate misurato. Se il mercato ci
+// sta sopra a tutti i rapporti, non hai trovato niente: hai ritrovato il
+// teorema.
+double RrNull(double rr){ return (rr>0 ? 1.0/(1.0+rr) : 0.0); }
+
+// rapporto stop/target del rapporto principale: e' il reciproco del suo RR.
+// OrbRatio() resta la soglia della griglia point-in-time e non c'entra.
+double OrbRatio()
+{
+   if(g_nRR>0 && g_rrMain>=0 && g_rrMain<g_nRR && g_rr[g_rrMain]>0.0)
+      return 1.0/g_rr[g_rrMain];
+   return 0.5;
+}
+// win rate minimo per non perdere con il rapporto principale
+double OrbBE(){ double q=OrbRatio(); return 100.0*q/(1.0+q); }
 
 // un breakout memorizzato: serve alla scheda operativa, dove i filtri
 // vengono applicati a posteriori sulla finestra selezionata
@@ -1587,7 +1628,8 @@ struct SBrk
    uchar dow, hour;
    char  dir, res;                 // res +1 target, -1 stop, 0 irrisolto
    int   year;
-   float rangeAtr, mom, vol, cci, rsi, zs, mfe, mae, ttb, tgt, compr, cost;
+   float rangeAtr, mom, vol, cci, rsi, zs, mfe, mae, ttb, tgt, compr, cost, stopAtr;
+   char  resR[ORB_MAXRR];
 };
 SBrk g_bk[];
 int  g_nBk=0;
@@ -1602,6 +1644,14 @@ void OrbInit()
    g_nBk=0;  ArrayResize(g_bk,0);
    g_bkCap=false; g_orbSel=-1;
    if(!InpDoOrb) return;
+
+   double rr[]; int nrr=ParseDoubles(InpOrbRR,rr);
+   g_nRR=0;
+   for(int i=0;i<nrr && g_nRR<ORB_MAXRR;i++)
+      if(rr[i]>0.0){ g_rr[g_nRR]=rr[i]; g_nRR++; }
+   if(g_nRR<=0){ g_rr[0]=2.0; g_nRR=1; }
+   g_rrMain=InpOrbRRMain-1;
+   if(g_rrMain<0 || g_rrMain>=g_nRR) g_rrMain=0;
 
    double dur[]; int nd=ParseDoubles(InpOrbDur,dur);
    if(nd<=0) return;
@@ -1632,6 +1682,10 @@ void OrbInit()
          g_orb[g_nOrb].sMfe=0.0; g_orb[g_nOrb].sMae=0.0; g_orb[g_nOrb].sTtb=0.0;
          g_orb[g_nOrb].sPnl=0.0; g_orb[g_nOrb].sTgt=0.0;
          g_orb[g_nOrb].sCost=0.0; g_orb[g_nOrb].sCompr=0.0;
+         ArrayInitialize(g_orb[g_nOrb].winR,0);
+         ArrayInitialize(g_orb[g_nOrb].lossR,0);
+         ArrayInitialize(g_orb[g_nOrb].flatR,0);
+         ArrayInitialize(g_orb[g_nOrb].sPnlR,0.0);
          g_orb[g_nOrb].n1=0; g_orb[g_nOrb].brk1=0; g_orb[g_nOrb].win1=0; g_orb[g_nOrb].res1=0;
          g_orb[g_nOrb].n2=0; g_orb[g_nOrb].brk2=0; g_orb[g_nOrb].win2=0; g_orb[g_nOrb].res2=0;
          ArrayInitialize(g_orb[g_nOrb].dN,0);   ArrayInitialize(g_orb[g_nOrb].dBrk,0);
@@ -1655,7 +1709,7 @@ double OrbExp(int win,int loss,int flat,double tgt)
 {
    int tot=win+loss+flat;
    if(tot<=0) return 0.0;
-   return (win*tgt - loss*tgt*InpAdverseRatio)/tot;
+   return (win*tgt - loss*tgt*OrbRatio())/tot;
 }
 
 // valore atteso realizzato di una finestra, al netto dei costi
@@ -1688,7 +1742,7 @@ double OrbExpLow(int win,int loss,int flat,double tgt,double costAtr=0.0)
    int res=win+loss, tot=res+flat;
    if(res<=0 || tot<=0) return 0.0;
    double wl=WilsonLowInd(win,res);
-   double e=tgt*(wl-(1.0-wl)*InpAdverseRatio);
+   double e=tgt*(wl-(1.0-wl)*OrbRatio());
    return e*((double)res/(double)tot)-costAtr;
 }
 
@@ -2445,22 +2499,32 @@ bool ProcessSymbol(string sym)
             if(dir>0){ g_orb[w].nUp++; g_orb[w].brkUp++; }
             else     { g_orb[w].nDn++; g_orb[w].brkDn++; }
 
-            // Target: o un multiplo fisso di ATR, o - default - un multiplo
-            // dell'ampiezza del range appena rotto. Il secondo e' l'unico che
-            // scala con la finestra: chiedere 0.5 ATR a una finestra da un
-            // minuto significa chiedere venti volte la sua ampiezza, e infatti
-            // non arriva quasi mai.
-            double tgtAtr=(InpOrbTargetMode==1 ? InpOrbTargetMult*rngAtr : InpOrbTargetAtr);
-            if(tgtAtr<InpOrbMinTargetAtr) continue;   // sotto il costo di transazione
-            double tgtD =tgtAtr*atrPt*g_point;
-            double stpD =tgtD*InpAdverseRatio;
+            // IL RISCHIO E' L'UNITA' DI MISURA, non il target.
+            // Lo stop si ancora alla volatilita' - una frazione del range
+            // appena rotto, un multiplo di ATR, oppure il lato opposto del
+            // range - ed e' lo stesso per tutti i rapporti testati. Poi ogni
+            // rapporto mette il proprio target a RR volte quella distanza.
+            // Cosi' i rapporti differiscono per una cosa sola, e il confronto
+            // con la curva nulla 1/(1+RR) ha un senso.
+            double stopAtr;
+            if(InpOrbStopMode==1)      stopAtr=InpOrbStopAtr;
+            else if(InpOrbStopMode==2) stopAtr=rngAtr;              // lato opposto del range
+            else                       stopAtr=InpOrbStopMult*rngAtr;
+            if(stopAtr<InpOrbMinStopAtr) continue;   // sotto il costo di transazione
 
+            double stpD =stopAtr*atrPt*g_point;
             double entry=(dir>0?lvUp:lvDn);
-            double tgt  =entry+dir*tgtD;
             double stp  =entry-dir*stpD;
+
+            double tgtL[ORB_MAXRR];
+            for(int z=0;z<g_nRR;z++) tgtL[z]=entry+dir*stpD*g_rr[z];
+
             datetime hEnd=r[kb].time+(datetime)(InpScanHorizonMin*60);
 
-            int res=0; bool done=false, rev=false;
+            int  resR[ORB_MAXRR];
+            bool doneR[ORB_MAXRR];
+            for(int z=0;z<g_nRR;z++){ resR[z]=0; doneR[z]=false; }
+            bool rev=false;
             double mfe=0.0, mae=0.0;
             for(int q=kb; q<nAll && r[q].time<=hEnd; q++)
             {
@@ -2476,21 +2540,34 @@ bool ProcessSymbol(string sym)
                }
                if(dir>0){ if(r[q].low<=RL) rev=true; }
                else     { if(r[q].high>=RH) rev=true; }
-               if(!done)
+
+               // lo stop e' comune: quando salta, saltano tutti i rapporti
+               // ancora aperti, nello stesso istante
+               bool hs=(dir>0 ? r[q].low<=stp : r[q].high>=stp);
+               for(int z=0;z<g_nRR;z++)
                {
-                  bool hs=(dir>0 ? r[q].low<=stp  : r[q].high>=stp);
-                  bool ht=(q>kb) && (dir>0 ? r[q].high>=tgt : r[q].low<=tgt);
-                  if(hs){ res=-1; done=true; }
-                  else if(ht){ res=+1; done=true; }
+                  if(doneR[z]) continue;
+                  if(hs){ resR[z]=-1; doneR[z]=true; continue; }
+                  if(q>kb && (dir>0 ? r[q].high>=tgtL[z] : r[q].low<=tgtL[z]))
+                  { resR[z]=+1; doneR[z]=true; }
                }
             }
+            int res=resR[g_rrMain];
+            double tgtAtr=stopAtr*g_rr[g_rrMain];
+
             if(rev) g_orb[w].nRev++;
             if(res>0)      { g_orb[w].win++;  g_orb[w].dWin[dowD]++; if(dir>0) g_orb[w].winUp++; else g_orb[w].winDn++; }
             else if(res<0) g_orb[w].loss++;
             else           g_orb[w].flat++;
             g_orb[w].sTgt +=tgtAtr;
             g_orb[w].sCost+=costAtr;
-            g_orb[w].sPnl +=(res>0? tgtAtr : (res<0? -tgtAtr*InpAdverseRatio : 0.0));
+            g_orb[w].sPnl +=(res>0? tgtAtr : (res<0? -stopAtr : 0.0));
+            for(int z=0;z<g_nRR;z++)
+            {
+               if(resR[z]>0)      { g_orb[w].winR[z]++;  g_orb[w].sPnlR[z]+=stopAtr*g_rr[z]; }
+               else if(resR[z]<0) { g_orb[w].lossR[z]++; g_orb[w].sPnlR[z]-=stopAtr; }
+               else                 g_orb[w].flatR[z]++;
+            }
             if(res!=0)
             {
                g_orb[w].dRes[dowD]++;
@@ -2538,6 +2615,9 @@ bool ProcessSymbol(string sym)
                g_bk[g_nBk].tgt=(float)tgtAtr;
                g_bk[g_nBk].compr=(float)compr;
                g_bk[g_nBk].cost=(float)costAtr;
+               g_bk[g_nBk].stopAtr=(float)stopAtr;
+               for(int z=0;z<ORB_MAXRR;z++)
+                  g_bk[g_nBk].resR[z]=(char)(z<g_nRR ? resR[z] : 0);
                g_nBk++;
             }
          }
@@ -3857,7 +3937,7 @@ bool ProcessSymbol(string sym)
          {
             int i=g_orbSel;
             int rs=g_orb[i].win+g_orb[i].loss, tt=rs+g_orb[i].flat;
-            double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
+            double be=OrbBE();
             double wl=(rs>0?100.0*WilsonLowInd(g_orb[i].win,rs):0.0);
             double h1=(g_orb[i].res1>0?100.0*g_orb[i].win1/g_orb[i].res1:-1.0);
             double h2=(g_orb[i].res2>0?100.0*g_orb[i].win2/g_orb[i].res2:-1.0);
@@ -3872,7 +3952,7 @@ bool ProcessSymbol(string sym)
                   F(100.0*g_orb[i].flat/MathMax(1,tt),1)+"% irrisolti)"+L);
             W(fT,"  win rate               "+(rs>0?F(100.0*g_orb[i].win/rs,2):"-")+"%"+L);
             W(fT,"  Wilson low 95%         "+F(wl,2)+"%   (breakeven richiesto "+F(be,2)+"%)"+L);
-            W(fT,"  target medio           "+F(OrbTgt(i),3)+" ATR  (stop "+F(OrbTgt(i)*InpAdverseRatio,3)+")"+L);
+            W(fT,"  target medio           "+F(OrbTgt(i),3)+" ATR  (stop "+F(OrbTgt(i)*OrbRatio(),3)+")"+L);
             W(fT,"  risolte entro orizzonte"+F(OrbResPct(i),1)+"%"+L);
             W(fT,"  valore atteso          "+F(OrbE(i),4)+" ATR per rottura, al netto dei costi"+L);
             W(fT,"  score                  "+F(OrbScore(i),2)+" ATR ogni 100 giornate"+L);
@@ -3885,6 +3965,23 @@ bool ProcessSymbol(string sym)
                    ? "utilizzabile: Wilson sopra il breakeven e le due meta' del periodo concordano"
                    : (wl<=be ? "NON utilizzabile: il vantaggio non e' distinguibile dal caso"
                              : "da verificare fuori campione: le due meta' del periodo non concordano"))+L);
+            W(fT,L+"  CURVA RISCHIO/RENDIMENTO (stesso stop, target diversi)"+L);
+            W(fT,"    "+PadR("RR",8)+PadL("n",7)+PadL("win%",8)+PadL("casuale%",10)+PadL("delta",8)+
+                  PadL("z",7)+PadL("E in R",9)+L);
+            for(int z=0;z<g_nRR;z++)
+            {
+               int wnz=g_orb[i].winR[z], lsz=g_orb[i].lossR[z], flz=g_orb[i].flatR[z];
+               int totz=wnz+lsz+flz, resz=wnz+lsz;
+               if(totz<50 || resz<30) continue;
+               double wr2=100.0*wnz/resz, nl2=100.0*RrNull(g_rr[z]), de2=wr2-nl2;
+               double se2=100.0*MathSqrt((nl2/100.0)*(1.0-nl2/100.0)/resz);
+               W(fT,"    "+PadR("1:"+F(g_rr[z],2),8)+PadL(IntegerToString(totz),7)+PadL(F(wr2,2),8)+
+                     PadL(F(nl2,2),10)+PadL(F(de2,2),8)+PadL(F(se2>0?de2/se2:0.0,2),7)+
+                     PadL(F((wnz*g_rr[z]-lsz)/(double)totz,3),9)+L);
+            }
+            W(fT,"    'casuale%' = 1/(1+RR): il win rate di una passeggiata casuale. E' un teorema,"+L);
+            W(fT,"    non una stima. Delta vicino a zero a tutti i rapporti = niente da estrarre,"+L);
+            W(fT,"    e cambiare stop o target non lo cambiera'."+L+L);
             W(fT,"  nota                   la finestra e' stata scelta come migliore fra "+IntegerToString(g_nOrb)+L);
             W(fT,"                         candidate sullo stesso campione: parte del vantaggio e'"+L);
             W(fT,"                         selezione, non edge. Rifallo su un altro simbolo o periodo."+L);
@@ -3920,7 +4017,7 @@ bool ProcessSymbol(string sym)
       H("<div class=\"card\"><span>giornate &gt; 1 ATR</span><b>"+
         F(100.0*nBig/MathMax(1,nDays),1)+"%</b></div>");
       H("<div class=\"card\"><span>orizzonte forward</span><b>"+IntegerToString(InpScanHorizonMin)+" min</b></div>");
-      H("<div class=\"card\"><span>stop / target</span><b>"+F(InpAdverseRatio,2)+"</b></div>");
+      H("<div class=\"card\"><span>stop / target griglia</span><b>"+F(InpAdverseRatio,2)+"</b></div>");
       if(InpDoOrb && g_orbSel>=0)
       {
          int rs=g_orb[g_orbSel].win+g_orb[g_orbSel].loss;
@@ -4101,7 +4198,7 @@ bool ProcessSymbol(string sym)
          int    rs=g_orb[i].win+g_orb[i].loss, tt=rs+g_orb[i].flat;
          double wr=(rs>0?100.0*g_orb[i].win/rs:0.0);
          double wl=(rs>0?100.0*WilsonLowInd(g_orb[i].win,rs):0.0);
-         double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
+         double be=OrbBE();
          double h1=(g_orb[i].res1>0?100.0*g_orb[i].win1/g_orb[i].res1:-1.0);
          double h2=(g_orb[i].res2>0?100.0*g_orb[i].win2/g_orb[i].res2:-1.0);
 
@@ -4111,7 +4208,7 @@ bool ProcessSymbol(string sym)
            "nel <b>"+F(100.0*g_orb[i].nBrk/MathMax(1,g_orb[i].n),0)+"%</b> delle giornate, "+
            F(100.0*g_orb[i].nUp/MathMax(1,g_orb[i].nUp+g_orb[i].nDn),0)+"% verso l'alto. "
            "Entrando sulla rottura con target medio "+F(OrbTgt(i),2)+" ATR e stop "+
-           F(OrbTgt(i)*InpAdverseRatio,2)+" ATR: <b>"+F(wr,1)+"%</b> a target su "+
+           F(OrbTgt(i)*OrbRatio(),2)+" ATR: <b>"+F(wr,1)+"%</b> a target su "+
            IntegerToString(rs)+" esiti, "+F(100.0*g_orb[i].flat/MathMax(1,tt),0)+
            "% irrisolti, valore atteso "+F(OrbE(i),3)+" ATR per rottura al netto dei costi.</li>");
 
@@ -4691,22 +4788,21 @@ void BuildOrb(string sym,string dir)
         " finestre</b> diverse (ogni combinazione di ora di inizio e durata), per ognuna costruisce massimo e "
         "minimo <b>solo con le barre dentro la finestra</b>, poi aspetta la rottura di uno dei due estremi entro "+
         IntegerToString(InpOrbDeadlineMin)+" minuti e risolve target e stop a primo tocco. "+
-        (InpOrbTargetMode==1
-         ? "Target = <b>"+F(InpOrbTargetMult,2)+" x l'ampiezza del range rotto</b> (stop meta' del target x "+
-           F(InpAdverseRatio,2)+"), quindi ogni finestra ha il target proporzionato alla propria dimensione."
-         : "Target fisso "+F(InpOrbTargetAtr,2)+" ATR dal livello rotto, stop "+
-           F(InpOrbTargetAtr*InpAdverseRatio,2)+" ATR.")+
+        "Lo <b>stop</b> e' l'unita' di misura: "+
+        (InpOrbStopMode==1 ? F(InpOrbStopAtr,2)+" x ATR(D-1)"
+        :InpOrbStopMode==2 ? "il lato opposto del range"
+                           : F(InpOrbStopMult,2)+" x l'ampiezza del range rotto")+
+        ", e il target sta a <b>"+F(g_rr[g_rrMain],2)+" volte</b> quella distanza."
         " Orizzonte "+IntegerToString(InpScanHorizonMin)+" minuti. Gli orari sono quelli del server del "
         "broker, contati dall'apertura della barra giornaliera.<br><br>"
 
-        "<b>Perche' il target e' relativo al range e non fisso in ATR.</b> Su questo strumento la massima "
-        "escursione media nelle quattro ore dopo una rottura vale circa 0.2 ATR. Chiedere 0.5 ATR significa "
-        "chiedere qualcosa che non arriva quasi mai: il risultato e' che l'80% delle operazioni resta appeso "
-        "senza toccare ne' target ne' stop, il win rate crolla sotto il breakeven per costruzione e la "
-        "classifica finisce per premiare le finestre in cui non succede mai niente. Un target proporzionato "
-        "al range appena rotto elimina il problema alla radice e rende confrontabili durate diverse. "
-        "La colonna <b>irrisolti%</b> e' il controllo: se sale sopra il 40%, il target non e' compatibile con "
-        "l'orizzonte e la finestra viene esclusa dalla classifica.<br><br>"
+        "<b>Perche' l'ancora e' il rischio e non il rendimento.</b> Un target fisso in ATR e' l'errore piu' "
+        "facile: la massima escursione media nelle quattro ore dopo una rottura vale circa 0.2 ATR, quindi "
+        "chiedendone 0.5 l'80% delle operazioni resta appeso senza toccare niente, il win rate finisce sotto "
+        "il breakeven per costruzione, e - contando gli irrisolti a zero - la classifica premia le finestre in "
+        "cui non succede mai niente. Ancorando invece lo stop alla volatilita' e mettendo il target a un "
+        "multiplo di quello, ogni finestra viene misurata sulla propria scala. La colonna <b>irrisolti%</b> e' "
+        "il controllo: sopra il 40% la finestra esce dalla classifica invece di vincerla.<br><br>"
 
         "<b>Sulle durate piu' corte.</b> Massimo e minimo si costruiscono con le barre del timeframe base ("+
         EnumToString(InpBaseTF)+"): una durata inferiore alla barra viene scartata da sola. Attenzione pero' a "
@@ -4745,7 +4841,7 @@ void BuildOrb(string sym,string dir)
          double h1=(g_orb[i].res1>0?100.0*g_orb[i].win1/g_orb[i].res1:-1);
          double h2=(g_orb[i].res2>0?100.0*g_orb[i].win2/g_orb[i].res2:-1);
          // stabile = le due meta' non divergono di piu' di 8 punti e sono entrambe sopra il breakeven
-         double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
+         double be=OrbBE();
          bool stab=(h1>=0 && h2>=0 && MathAbs(h1-h2)<8.0 && h1>be && h2>be);
          string cls=(s>0 ? (stab?"hi":"nz") : "lo");
          H("<tr><td>"+IntegerToString(shown)+(i==g_orbSel?" &#9656;":"")+"</td><td><b>"+OrbLab(i)+
@@ -4936,10 +5032,81 @@ void BuildOrb(string sym,string dir)
         F(OrbE(g_orbSel),3)+" ATR</b></div>");
       H("<div class=\"card\"><span>range mediano</span><b>"+F(q50,2)+" ATR</b></div>");
       H("<div class=\"card\"><span>breakeven richiesto</span><b>"+
-        F(100.0*InpAdverseRatio/(1.0+InpAdverseRatio),1)+"%</b></div>");
+        F(OrbBE(),1)+"%</b></div>");
       H("<div class=\"card\"><span>irrisolti</span><b>"+
         (tot>0?F(100.0*g_orb[g_orbSel].flat/tot,1):"-")+"%</b></div>");
       H("</div>");
+   }
+
+   //=================================================================
+   //  CURVA RISCHIO / RENDIMENTO
+   //  E' il test che decide se il mercato ha una struttura o e' una
+   //  moneta. Lo stop e' identico per tutti i rapporti: cambia solo
+   //  dove sta il target. In una passeggiata casuale senza deriva la
+   //  probabilita' di toccare RR volte lo stop prima dello stop e'
+   //  esattamente 1/(1+RR), a QUALUNQUE rapporto. Se il win rate
+   //  misurato ci sta sopra dappertutto, c'e' momentum; se ci sta
+   //  sotto, c'e' ritorno alla media; se ci coincide, non c'e' niente
+   //  da estrarre e nessuna gestione del trade lo cambiera'.
+   //=================================================================
+   H("<h2>Curva rischio / rendimento</h2><div class=\"note\">"
+     "Stessa rottura, stesso stop, "+IntegerToString(g_nRR)+" target diversi. E' l'unico test che distingue un "
+     "mercato con struttura da uno casuale.<br><br>"
+
+     "<b>La colonna che conta e' 'atteso casuale'.</b> In una passeggiata casuale senza deriva, la probabilita' "
+     "di raggiungere un target grande RR volte lo stop, prima dello stop, vale esattamente <b>1/(1+RR)</b>. "
+     "Non e' un'approssimazione: e' un teorema. Quindi un win rate del 33% con un target doppio dello stop non "
+     "e' una strategia mediocre, e' <b>esattamente il nulla</b>. E un win rate del 17% con target 5:1 e' lo "
+     "stesso identico nulla travestito.<br><br>"
+
+     "<b>Come si legge la curva.</b> Guarda il segno di <b>delta</b> lungo tutta la colonna, non la riga "
+     "migliore. Delta positivo ai rapporti alti = <b>momentum</b>: quando il prezzo parte, tende a continuare, "
+     "e conviene un target lontano. Delta positivo ai rapporti bassi (RR sotto 1, target piu' vicino dello "
+     "stop) = <b>ritorno alla media</b>: il prezzo rientra, e conviene incassare subito. Delta che oscilla "
+     "intorno allo zero senza un andamento = il mercato e' una martingala su questa struttura, e nessun "
+     "rapporto la salva. In quel caso spostare stop e target e' riarredare, non fare ricerca.<br><br>"
+
+     "<b>E netto</b> e' il valore atteso per operazione dopo aver tolto "+F(InpOrbCostPt,1)+" punti di costo "
+     "(InpOrbCostPt). Con uno stop stretto il costo pesa di piu' in proporzione: e' il motivo per cui i "
+     "rapporti bassi, anche quando vincono spesso, spesso non pagano.</div>");
+
+   HtmlTableHead("tO8","RR (target/stop);n;risolte;win%;wlow;atteso casuale;delta;z;E in R;E ATR lordo;E ATR netto",false);
+   {
+      int    sel2=g_orbSel;
+      double stopMed=0.0; int nStop=0;
+      for(int q=0;q<nSel;q++){ stopMed+=g_bk[sel[q]].stopAtr; nStop++; }
+      if(nStop>0) stopMed/=nStop;
+      double costMed=0.0;
+      for(int q=0;q<nSel;q++) costMed+=g_bk[sel[q]].cost;
+      if(nSel>0) costMed/=nSel;
+
+      for(int z=0;z<g_nRR;z++)
+      {
+         int wnz=g_orb[sel2].winR[z], lsz=g_orb[sel2].lossR[z], flz=g_orb[sel2].flatR[z];
+         int totz=wnz+lsz+flz, resz=wnz+lsz;
+         if(totz<50 || resz<30) continue;
+         double wr2=100.0*wnz/resz;
+         double wl2=100.0*WilsonLowInd(wnz,resz);
+         double nl =100.0*RrNull(g_rr[z]);
+         double de =wr2-nl;
+         double se =100.0*MathSqrt((nl/100.0)*(1.0-nl/100.0)/resz);
+         double zz =(se>0? de/se : 0.0);
+         // valore atteso in unita' di rischio: vincere vale RR, perdere vale 1
+         double eR =(wnz*g_rr[z]-lsz)/(double)totz;
+         double eA =g_orb[sel2].sPnlR[z]/totz;
+         string cz =(MathAbs(zz)<2.0?"nz":(de>0?"hi":"lo"));
+         H("<tr><td><b>1 : "+F(g_rr[z],2)+"</b>"+(z==g_rrMain?" &#9656;":"")+"</td><td>"+IntegerToString(totz)+
+           "</td><td class=\"nz\">"+F(100.0*resz/totz,1)+"%</td><td>"+F(wr2,2)+"</td><td>"+F(wl2,2)+
+           "</td><td class=\"nz\"><b>"+F(nl,2)+"</b></td><td class=\""+cz+"\"><b>"+F(de,2)+
+           "</b></td><td class=\""+(MathAbs(zz)>=3.0?(de>0?"hi":"lo"):"nz")+"\">"+F(zz,2)+
+           "</td><td class=\""+(eR>0?"up":"dn")+"\">"+F(eR,3)+"</td><td>"+F(eA,4)+
+           "</td><td class=\""+(eA-costMed>0?"up":"dn")+"\"><b>"+F(eA-costMed,4)+"</b></td></tr>");
+      }
+      HtmlTableEnd();
+      H("<div class=\"note\">Stop medio effettivo <b>"+F(stopMed,3)+" ATR</b>, costo per operazione <b>"+
+        F(costMed,4)+" ATR</b>. Se il costo e' dello stesso ordine di grandezza di <b>E ATR lordo</b>, la "
+        "discussione su quale rapporto usare e' accademica: l'operazione non esiste comunque. Metti il tuo "
+        "spread e la tua commissione reali in InpOrbCostPt prima di trarre conclusioni.</div>");
    }
 
    //--- tabella dei filtri
@@ -4947,7 +5114,7 @@ void BuildOrb(string sym,string dir)
      "Ogni riga applica <b>un solo filtro</b> ai breakout della finestra. <b>delta E</b> e' la differenza di "
      "valore atteso rispetto alla riga senza filtro: e' l'unica colonna che dice se il filtro serve. "
      "<b>wlow</b> e' il limite inferiore di Wilson al 95% sul win rate; se resta sotto il <b>breakeven "
-     "richiesto</b> ("+F(100.0*InpAdverseRatio/(1.0+InpAdverseRatio),1)+"% con questo rapporto stop/target), "
+     "richiesto</b> ("+F(OrbBE(),1)+"% con questo rapporto stop/target), "
      "quel filtro non ha dimostrato nulla, per quanto bello sia il win rate grezzo.<br><br>"
      "I filtri di intensita' e volatilita' guardano le "+IntegerToString(InpOrbMomBars)+
      " barre <b>che precedono</b> la rottura, mai quella in cui avviene: e' l'unico modo di misurare la "
@@ -5021,7 +5188,7 @@ void BuildOrb(string sym,string dir)
          // ogni rottura ha il suo target: si somma il risultato realizzato,
          // non lo si ricostruisce da una media che non e' mai stata usata
          sP+=(g_bk[b].res>0 ? g_bk[b].tgt
-                            : (g_bk[b].res<0 ? -g_bk[b].tgt*InpAdverseRatio : 0.0));
+                            : (g_bk[b].res<0 ? -g_bk[b].tgt*OrbRatio() : 0.0));
          sC+=g_bk[b].cost;
       }
       if(n<20 && f>0) continue;
@@ -5029,7 +5196,7 @@ void BuildOrb(string sym,string dir)
       double e=(n>0 ? (sP-sC)/n : 0.0);
       if(f==0) baseE=e;
       double wl=(res>0?100.0*WilsonLowInd(wn,res):0.0);
-      double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
+      double be=OrbBE();
       double de=e-baseE;
       string cd=(f==0?"nz":(de>=0.01?"hi":(de<=-0.01?"lo":"nz")));
       H("<tr><td>"+(f==0?"<b>":"")+HE(nm)+(f==0?"</b>":"")+"</td><td>"+IntegerToString(n)+"</td><td>"+
@@ -5059,14 +5226,14 @@ void BuildOrb(string sym,string dir)
          if(g_bk[b].res>0) wn++; else if(g_bk[b].res<0) ls++; else fl++;
          sM+=g_bk[b].mfe; sA+=g_bk[b].mae;
          sP+=(g_bk[b].res>0 ? g_bk[b].tgt
-                            : (g_bk[b].res<0 ? -g_bk[b].tgt*InpAdverseRatio : 0.0));
+                            : (g_bk[b].res<0 ? -g_bk[b].tgt*OrbRatio() : 0.0));
          sC+=g_bk[b].cost;
       }
       if(n<20) continue;
       int res=wn+ls;
       double e=(n>0 ? (sP-sC)/n : 0.0);
       double wl=(res>0?100.0*WilsonLowInd(wn,res):0.0);
-      double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
+      double be=OrbBE();
       H("<tr><td><b>"+D2(h)+":00</b></td><td>"+IntegerToString(n)+"</td><td>"+
         F(100.0*n/MathMax(1,nSel),1)+"</td><td>"+F(100.0*up/n,1)+"</td><td>"+
         (res>0?F(100.0*wn/res,1):"-")+"</td><td class=\""+(wl>be?"hi":"lo")+"\">"+F(wl,1)+
@@ -5117,7 +5284,7 @@ void BuildOrb(string sym,string dir)
          }
          rd[j+1]=d1; rh[j+1]=h1; rn[j+1]=n1; rw[j+1]=w1; rl[j+1]=l1; rf[j+1]=f1; ru[j+1]=u1; rs2[j+1]=v1;
       }
-      double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
+      double be=OrbBE();
       for(int a=0;a<nr && a<InpOrbTop;a++)
       {
          int res=rw[a]+rl[a];
@@ -5160,6 +5327,30 @@ void BuildOrb(string sym,string dir)
       HtmlTableEnd();
    }
    H("</section>");
+
+   //--- CSV della curva rischio/rendimento
+   if(InpWriteCsv && g_orbSel>=0)
+   {
+      int fR=FileOpen(dir+fn+"_orb_rr.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+      if(fR!=INVALID_HANDLE)
+      {
+         W(fR,"finestra;rr;n;perc_risolte;win_perc;wlow_perc;atteso_casuale_perc;delta;z;E_in_R;E_atr_lordo\r\n");
+         for(int z=0;z<g_nRR;z++)
+         {
+            int wnz=g_orb[g_orbSel].winR[z], lsz=g_orb[g_orbSel].lossR[z], flz=g_orb[g_orbSel].flatR[z];
+            int totz=wnz+lsz+flz, resz=wnz+lsz;
+            if(totz<50 || resz<30) continue;
+            double wr2=100.0*wnz/resz, nl=100.0*RrNull(g_rr[z]), de=wr2-nl;
+            double se=100.0*MathSqrt((nl/100.0)*(1.0-nl/100.0)/resz);
+            W(fR,OrbLab(g_orbSel)+";"+F(g_rr[z],2)+";"+IntegerToString(totz)+";"+
+                 F(100.0*resz/totz,2)+";"+F(wr2,2)+";"+F(100.0*WilsonLowInd(wnz,resz),2)+";"+
+                 F(nl,2)+";"+F(de,2)+";"+F(se>0?de/se:0.0,2)+";"+
+                 F((wnz*g_rr[z]-lsz)/(double)totz,4)+";"+
+                 F(g_orb[g_orbSel].sPnlR[z]/totz,5)+"\r\n");
+         }
+         FileClose(fR);
+      }
+   }
 
    //--- CSV dei filtri e delle rotture della finestra scelta
    if(InpWriteCsv)

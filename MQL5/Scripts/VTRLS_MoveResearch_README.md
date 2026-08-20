@@ -56,6 +56,7 @@ Puoi disattivare l'uno o l'altro.
 | `<SYM>_dow_hour.csv` | matrici giorno x ora, giorno x 15 minuti e anno x ora |
 | `<SYM>_indicatori_tf.csv` | stessi stati RSI/CCI/Z-Score calcolati sui tre timeframe, con delta sul riferimento |
 | `<SYM>_orb_finestre.csv` | tutte le finestre di osservazione testate, con % di rottura, win rate, Wilson, valore atteso e le due meta' del periodo |
+| `<SYM>_orb_rr.csv` | curva rischio/rendimento della finestra selezionata: per ogni RR, win rate misurato contro l'atteso casuale 1/(1+RR), delta e z |
 | `<SYM>_orb_breakout.csv` | una riga per ogni rottura della finestra selezionata: direzione, esito, range, intensita', volatilita', RSI/CCI/Z al momento della rottura, MFE/MAE |
 | `<SYM>_report.html` | tutto quanto sopra (tranne lo scan grezzo) in un report navigabile |
 
@@ -106,12 +107,44 @@ Ogni durata in piu' allunga il run in proporzione: togli quelle che non ti
 servono.
 
 **Secondo tempo.** Entrata sul livello rotto, esito a primo tocco entro
-`InpScanHorizonMin`. Il target ha due modi:
+`InpScanHorizonMin`.
 
-- `InpOrbTargetMode = 1` (default): target = `InpOrbTargetMult` x l'ampiezza del
-  range appena rotto. Ogni finestra ha il target proporzionato alla propria
-  dimensione, e durate diverse restano confrontabili.
-- `InpOrbTargetMode = 0`: target fisso `InpOrbTargetAtr` ATR.
+**L'ancora e' il rischio, non il rendimento.** Lo stop si misura sulla
+volatilita' via `InpOrbStopMode`:
+
+- `0` (default): stop = `InpOrbStopMult` x l'ampiezza del range rotto
+- `1`: stop = `InpOrbStopAtr` x ATR(D-1)
+- `2`: stop al lato opposto del range (l'ORB classico)
+
+Il target sta a `RR` volte quella distanza, e `InpOrbRR` elenca **tutti i
+rapporti testati nella stessa passata** (default `0.5,1,2,3,4,5`).
+`InpOrbRRMain` sceglie quale alimenta classifica e filtri.
+
+### La curva rischio/rendimento: il test che decide
+
+E' la tabella piu' importante delle due schede. Stessa rottura, stesso stop,
+target diversi. In una passeggiata casuale senza deriva la probabilita' di
+raggiungere un target grande RR volte lo stop **prima** dello stop vale
+esattamente **1/(1+RR)**. Non e' un'approssimazione: e' un teorema.
+
+Quindi un win rate del 33% con target 1:2 non e' una strategia mediocre da
+migliorare — e' **esattamente il nulla**. E il 17% con target 1:5 e' lo stesso
+identico nulla travestito da numero diverso.
+
+Si legge il **segno di delta lungo tutta la colonna**, mai la riga migliore:
+
+- delta positivo ai rapporti **alti** -> **momentum**: quando parte continua,
+  conviene un target lontano
+- delta positivo ai rapporti **bassi** (RR < 1) -> **ritorno alla media**:
+  il prezzo rientra, conviene incassare subito
+- delta che oscilla intorno a zero senza andamento -> il mercato e' una
+  **martingala** su questa struttura, e nessun rapporto la salva. Spostare stop
+  e target a quel punto e' riarredare, non fare ricerca.
+
+Testare solo rapporti con target maggiore dello stop (1:2, 1:3, 1:4, 1:5)
+guarda un lato solo della curva: senza almeno un rapporto sotto 1 non si
+distingue "nessuna struttura" da "ritorno alla media". Per questo il default
+parte da 0,5.
 
 Un target fisso troppo grande e' l'errore piu' facile e il piu' costoso. Su
 EURUSD la massima escursione media nelle quattro ore dopo una rottura vale circa
@@ -123,8 +156,11 @@ questo esiste `InpOrbMinResolved` (default 60%): una finestra che non risolve
 almeno quella quota di rotture esce dalla classifica invece di vincerla.
 
 `InpOrbCostPt` sottrae spread e commissioni dal valore atteso, e
-`InpOrbMinTargetAtr` scarta le finestre il cui target sarebbe piu' piccolo del
-costo di transazione.
+`InpOrbMinStopAtr` scarta le finestre il cui stop sarebbe piu' piccolo del costo
+di transazione. **Mettici i tuoi numeri reali prima di trarre conclusioni**: su
+EURUSD un round trip da 0,7 pip vale circa 0,08 ATR, e su questo dataset il
+valore atteso lordo del breakout e' +0,0016 ATR. Il costo e' cinquanta volte il
+vantaggio lordo, e nessuna scelta di rapporto cambia quell'ordine di grandezza.
 La barra in cui avviene la rottura viene valutata **solo per lo stop, mai per il
 target**: dentro una barra l'ordine dei prezzi non e' noto, e assumere che il
 target sia arrivato prima gonfierebbe il win rate a gratis. I numeri veri sono
