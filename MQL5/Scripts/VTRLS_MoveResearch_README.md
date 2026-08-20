@@ -56,7 +56,7 @@ Puoi disattivare l'uno o l'altro.
 | `<SYM>_dow_hour.csv` | matrici giorno x ora, giorno x 15 minuti e anno x ora |
 | `<SYM>_indicatori_tf.csv` | stessi stati RSI/CCI/Z-Score calcolati sui tre timeframe, con delta sul riferimento |
 | `<SYM>_orb_finestre.csv` | tutte le finestre di osservazione testate, con % di rottura, win rate, Wilson, valore atteso e le due meta' del periodo |
-| `<SYM>_orb_rr.csv` | curva rischio/rendimento della finestra selezionata: per ogni RR, win rate misurato contro l'atteso casuale 1/(1+RR), delta e z |
+| `<SYM>_orb_rr.csv` | curva rischio/rendimento della finestra selezionata: per ogni RR, win rate misurato contro il placebo (ingresso a caso, stesso rischio e stesso orizzonte), delta e z |
 | `<SYM>_orb_breakout.csv` | una riga per ogni rottura della finestra selezionata: direzione, esito, range, intensita', volatilita', RSI/CCI/Z al momento della rottura, MFE/MAE |
 | `<SYM>_report.html` | tutto quanto sopra (tranne lo scan grezzo) in un report navigabile |
 
@@ -131,7 +131,7 @@ Quindi un win rate del 33% con target 1:2 non e' una strategia mediocre da
 migliorare — e' **esattamente il nulla**. E il 17% con target 1:5 e' lo stesso
 identico nulla travestito da numero diverso.
 
-**Prima di interpretare la pendenza, guarda la colonna `risolte`.** La curva
+**La formula 1/(1+RR) non e' il riferimento giusto, e sbaglia di parecchio.** La curva
 nulla 1/(1+RR) vale per orizzonte **infinito**. Con un orizzonte finito un
 target lontano ha bisogno di piu' tempo di uno vicino, quindi ai rapporti alti
 le operazioni che avrebbero vinto scadono irrisolte mentre quelle che perdono -
@@ -140,12 +140,28 @@ risolte finisce sotto la curva nulla ai rapporti alti e sopra a quelli bassi:
 **una curva decrescente e monotona compare anche in un mercato perfettamente
 casuale**. E' un artefatto dell'orologio, non un risultato.
 
-Il test costa un input: alza `InpOrbHorizonMin` (orizzonte del solo breakout,
-indipendente da quello della griglia) finche' `risolte` non e' vicina al 100% a
-tutti i rapporti, e rilancia. Se la pendenza sparisce era troncamento; se
-sopravvive, e' struttura. Finche' `risolte` scende al crescere di RR, gli unici
-rapporti su cui il delta significa qualcosa sono quelli dove e' gia' vicina al
-100%.
+Quanto sbaglia? Simulando una passeggiata casuale con la stessa volatilita' e
+lo stesso orizzonte di 240 minuti, il win rate a RR 1:5 scende a **3,9%** contro
+il 16,67% della formula. Un mercato del tutto casuale, misurato cosi', sembra
+crollare del 12,8% sotto il "nulla teorico". Su questo dataset il valore
+osservato a 1:5 e' 9,21%: sotto la formula, ma **sopra** la passeggiata casuale
+con lo stesso orologio. Il segno della conclusione si ribalta a seconda del
+riferimento che usi.
+
+**Per questo la colonna che conta e' `placebo misurato`** (`InpOrbPlacebo`).
+E' la stessa cosa - stessa giornata, stessa finestra, stesso stop, stessi
+target, stesso orizzonte - ma con ingresso alla **chiusura della finestra** e
+direzione tirata a sorte con una moneta deterministica. Subisce esattamente lo
+stesso troncamento, la stessa volatilita' intraday e le stesse code grasse dei
+dati veri: nessuna simulazione, nessuna assunzione gaussiana. E' quanto vale
+**non avere segnale** in quel momento della giornata.
+
+`delta vs placebo` e' quindi il valore aggiunto della rottura, e il suo `z`
+tiene conto dell'incertezza di entrambe le misure.
+
+`InpOrbHorizonMin` resta disponibile (orizzonte del solo breakout, indipendente
+da quello della griglia) per verificare che le conclusioni non dipendano dalla
+lunghezza della finestra temporale.
 
 Fatto quel controllo, si legge il **segno di delta lungo tutta la colonna**,
 mai la riga migliore:

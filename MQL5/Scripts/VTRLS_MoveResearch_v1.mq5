@@ -141,6 +141,7 @@ input string          InpOrbRR          = "0.5,1,2,3,4,5"; // Rapporti rendiment
 input int             InpOrbRRMain      = 3;               // Quale della lista alimenta classifica e filtri (1 = il primo)
 input double          InpOrbMinStopAtr  = 0.05;            // Stop minimo in ATR: sotto, spread e commissioni se lo mangiano
 input int             InpOrbHorizonMin  = 0;               // Orizzonte del breakout in minuti (0 = usa InpScanHorizonMin)
+input bool            InpOrbPlacebo     = true;            // Calcola il riferimento placebo (ingresso a caso, stesso rischio)
 input double          InpOrbCostPt      = 0.0;             // Costo di andata e ritorno in punti (spread + commissioni)
 input double          InpOrbBufferAtr   = 0.03;            // Margine oltre il livello perche' la rottura conti
 input double          InpOrbMinResolved = 60.0;            // % minima di rotture risolte perche' la finestra entri in classifica
@@ -1163,6 +1164,10 @@ void HtmlHead(string sym)
    H("<tr><td><b>RR (target/stop)</b></td><td>Quante volte lo stop vale il target. 1:2 significa rischiare "
      "una unita' per guadagnarne due. Lo stop resta identico fra i rapporti: cambia solo dove si mette il "
      "target, quindi i rapporti sono confrontabili fra loro</td></tr>");
+   H("<tr><td><b>placebo misurato</b></td><td>Stessa giornata, stessa finestra, stesso stop e stessi "
+     "target, ma ingresso alla chiusura della finestra e direzione a sorte. Subisce lo stesso troncamento "
+     "temporale e la stessa volatilita' dei dati veri: e' quanto vale NON avere segnale, ed e' il "
+     "riferimento contro cui va misurata la rottura</td></tr>");
    H("<tr><td><b>atteso casuale</b></td><td>1/(1+RR): il win rate di una passeggiata casuale senza deriva a "
      "quel rapporto. Non e' una stima, e' un teorema. Il 33,3% con target doppio dello stop non e' una "
      "strategia mediocre, e' esattamente il nulla</td></tr>");
@@ -1603,6 +1608,14 @@ struct SOrb
    // esiti della STESSA rottura letti con rapporti rendimento/rischio diversi
    int    winR[ORB_MAXRR], lossR[ORB_MAXRR], flatR[ORB_MAXRR];
    double sPnlR[ORB_MAXRR];
+   // CONTROLLO PLACEBO: stessa giornata, stessa finestra, stesso stop, stessi
+   // target, stesso orizzonte - ma ingresso alla CHIUSURA della finestra e
+   // direzione tirata a sorte. E' il riferimento giusto, perche' subisce lo
+   // stesso troncamento temporale, la stessa volatilita' intraday e le stesse
+   // code grasse dei dati veri. La formula 1/(1+RR) invece vale per orizzonte
+   // infinito e per una gaussiana: ai rapporti alti sbaglia di parecchio.
+   int    pN;
+   int    pWinR[ORB_MAXRR], pLossR[ORB_MAXRR], pFlatR[ORB_MAXRR];
 };
 SOrb g_orb[];
 int  g_nOrb=0;
@@ -1700,6 +1713,10 @@ void OrbInit()
          ArrayInitialize(g_orb[g_nOrb].lossR,0);
          ArrayInitialize(g_orb[g_nOrb].flatR,0);
          ArrayInitialize(g_orb[g_nOrb].sPnlR,0.0);
+         g_orb[g_nOrb].pN=0;
+         ArrayInitialize(g_orb[g_nOrb].pWinR,0);
+         ArrayInitialize(g_orb[g_nOrb].pLossR,0);
+         ArrayInitialize(g_orb[g_nOrb].pFlatR,0);
          g_orb[g_nOrb].n1=0; g_orb[g_nOrb].brk1=0; g_orb[g_nOrb].win1=0; g_orb[g_nOrb].res1=0;
          g_orb[g_nOrb].n2=0; g_orb[g_nOrb].brk2=0; g_orb[g_nOrb].win2=0; g_orb[g_nOrb].res2=0;
          ArrayInitialize(g_orb[g_nOrb].dN,0);   ArrayInitialize(g_orb[g_nOrb].dBrk,0);
@@ -2516,6 +2533,50 @@ bool ProcessSymbol(string sym)
             g_orb[w].n++; g_orb[w].sRange+=rngAtr; g_orb[w].dN[dowD]++;
             g_orb[w].sCompr+=compr;
             if(secondHalf) g_orb[w].n2++; else g_orb[w].n1++;
+
+            //--- CONTROLLO PLACEBO: ingresso alla chiusura della finestra,
+            // direzione a sorte, stesso stop e stessi target. Serve a
+            // misurare quanto vale NON avere segnale, con lo stesso
+            // troncamento temporale e la stessa volatilita' dei dati veri.
+            if(InpOrbPlacebo)
+            {
+               double pStopAtr;
+               if(InpOrbStopMode==1)      pStopAtr=InpOrbStopAtr;
+               else if(InpOrbStopMode==2) pStopAtr=rngAtr;
+               else                       pStopAtr=InpOrbStopMult*rngAtr;
+               if(pStopAtr>=InpOrbMinStopAtr && ib<n)
+               {
+                  // moneta deterministica: stessa giornata, stessa finestra,
+                  // stesso lancio a ogni run, cosi' il riferimento e' stabile
+                  uint hsh=(uint)((uint)(dStart/86400)*2654435761 + (uint)w*40503);
+                  int  pd =(((hsh>>13)&1)==0 ? +1 : -1);
+                  double pEntry=r[ib].open;
+                  double pStpD =pStopAtr*atrPt*g_point;
+                  double pStp  =pEntry-pd*pStpD;
+                  datetime pEnd=r[ib].time+(datetime)(OrbHorizon()*60);
+                  int  pRes[ORB_MAXRR]; bool pDone[ORB_MAXRR];
+                  for(int z=0;z<g_nRR;z++){ pRes[z]=0; pDone[z]=false; }
+                  for(int q=ib; q<nAll && r[q].time<=pEnd; q++)
+                  {
+                     bool phs=(pd>0 ? r[q].low<=pStp : r[q].high>=pStp);
+                     for(int z=0;z<g_nRR;z++)
+                     {
+                        if(pDone[z]) continue;
+                        if(phs){ pRes[z]=-1; pDone[z]=true; continue; }
+                        double pt=pEntry+pd*pStpD*g_rr[z];
+                        if(q>ib && (pd>0 ? r[q].high>=pt : r[q].low<=pt))
+                        { pRes[z]=+1; pDone[z]=true; }
+                     }
+                  }
+                  g_orb[w].pN++;
+                  for(int z=0;z<g_nRR;z++)
+                  {
+                     if(pRes[z]>0)      g_orb[w].pWinR[z]++;
+                     else if(pRes[z]<0) g_orb[w].pLossR[z]++;
+                     else               g_orb[w].pFlatR[z]++;
+                  }
+               }
+            }
 
             //--- prima rottura di uno dei due estremi, entro la scadenza
             double lvUp=RH+buf, lvDn=RL-buf;
@@ -4004,8 +4065,8 @@ bool ProcessSymbol(string sym)
                    : (wl<=be ? "NON utilizzabile: il vantaggio non e' distinguibile dal caso"
                              : "da verificare fuori campione: le due meta' del periodo non concordano"))+L);
             W(fT,L+"  CURVA RISCHIO/RENDIMENTO (stesso stop, target diversi)"+L);
-            W(fT,"    "+PadR("RR",8)+PadL("n",7)+PadL("risolte%",10)+PadL("win%",8)+PadL("casuale%",10)+
-                  PadL("delta",8)+PadL("z",7)+PadL("E in R",9)+L);
+            W(fT,"    "+PadR("RR",8)+PadL("n",7)+PadL("risolte%",10)+PadL("win%",8)+PadL("formula%",10)+
+                  PadL("placebo%",10)+PadL("delta",8)+PadL("z",7)+PadL("E in R",9)+L);
             for(int z=0;z<g_nRR;z++)
             {
                int wnz=g_orb[i].winR[z], lsz=g_orb[i].lossR[z], flz=g_orb[i].flatR[z];
@@ -4013,18 +4074,25 @@ bool ProcessSymbol(string sym)
                if(totz<50 || resz<30) continue;
                double wr2=100.0*wnz/resz, nl2=100.0*RrNull(g_rr[z]), de2=wr2-nl2;
                double se2=100.0*MathSqrt((nl2/100.0)*(1.0-nl2/100.0)/resz);
+               int pw=g_orb[i].pWinR[z], pl=g_orb[i].pLossR[z], pres=pw+pl;
+               bool hasP=(pres>=100);
+               double pb2=(hasP? 100.0*pw/pres : nl2);
+               de2=wr2-pb2;
+               se2=100.0*MathSqrt((pb2/100.0)*(1.0-pb2/100.0)*(1.0/resz+(hasP?1.0/pres:0.0)));
                W(fT,"    "+PadR("1:"+F(g_rr[z],2),8)+PadL(IntegerToString(totz),7)+
                      PadL(F(100.0*resz/totz,1),10)+PadL(F(wr2,2),8)+
-                     PadL(F(nl2,2),10)+PadL(F(de2,2),8)+PadL(F(se2>0?de2/se2:0.0,2),7)+
+                     PadL(F(nl2,2),10)+PadL(hasP?F(pb2,2):"-",10)+PadL(F(de2,2),8)+
+                     PadL(F(se2>0?de2/se2:0.0,2),7)+
                      PadL(F((wnz*g_rr[z]-lsz)/(double)totz,3),9)+L);
             }
-            W(fT,"    'casuale%' = 1/(1+RR): il win rate di una passeggiata casuale. E' un teorema,"+L);
-            W(fT,"    ma vale per orizzonte INFINITO. Il tuo dura "+IntegerToString(OrbHorizon())+" minuti."+L);
-            W(fT,"    ATTENZIONE: se la colonna 'risolte' scende al crescere di RR, la pendenza della"+L);
-            W(fT,"    curva e' in buona parte troncamento temporale, non struttura di mercato: i target"+L);
-            W(fT,"    lontani scadono irrisolti mentre gli stop vicini fanno in tempo a scattare."+L);
-            W(fT,"    Test: alza InpOrbHorizonMin finche' 'risolte' e' vicina al 100%% ovunque, e rilancia."+L);
-            W(fT,"    Se la pendenza sparisce era l'orologio. Se resta, e' il mercato."+L+L);
+            W(fT,"    'formula%' = 1/(1+RR), valida per orizzonte INFINITO: qui NON e' il riferimento"+L);
+            W(fT,"    giusto, perche' il tuo orizzonte dura "+IntegerToString(OrbHorizon())+" minuti e i target lontani"+L);
+            W(fT,"    scadono irrisolti mentre gli stop vicini fanno in tempo a scattare."+L);
+            W(fT,"    'placebo%' = stessa giornata, stessa finestra, stesso stop e stessi target, ma"+L);
+            W(fT,"    ingresso alla chiusura della finestra e direzione a sorte. Subisce lo stesso"+L);
+            W(fT,"    troncamento e la stessa volatilita': e' il riferimento vero."+L);
+            W(fT,"    'delta' e 'z' sono calcolati sul placebo. Delta zero a tutti i rapporti = la"+L);
+            W(fT,"    rottura non aggiunge niente a un ingresso a caso alla stessa ora."+L+L);
             W(fT,"  nota                   la finestra e' stata scelta come migliore fra "+IntegerToString(g_nOrb)+L);
             W(fT,"                         candidate sullo stesso campione: parte del vantaggio e'"+L);
             W(fT,"                         selezione, non edge. Rifallo su un altro simbolo o periodo."+L);
@@ -5128,22 +5196,28 @@ void BuildOrb(string sym,string dir)
      "(InpOrbCostPt). Con uno stop stretto il costo pesa di piu' in proporzione: e' il motivo per cui i "
      "rapporti bassi, anche quando vincono spesso, spesso non pagano.<br><br>"
 
-     "<b class=\"w\">PRIMA di leggere questa curva come un risultato: guarda la colonna 'risolte'.</b> "
-     "La curva nulla 1/(1+RR) vale per un orizzonte <b>infinito</b>. Il tuo dura "+
-     IntegerToString(OrbHorizon())+" minuti, e un target lontano ha bisogno di piu' tempo per essere "
-     "raggiunto di uno vicino. Quindi ai rapporti alti le operazioni che avrebbero vinto scadono irrisolte "
-     "mentre quelle che perdono - lo stop e' vicino - fanno in tempo a perdere: il win rate calcolato sulle "
-     "sole risolte finisce <b>sotto</b> la curva nulla. Ai rapporti bassi succede l'opposto e finisce "
-     "<b>sopra</b>. Il risultato e' una curva decrescente e monotona <b>anche in un mercato perfettamente "
-     "casuale</b>: e' un artefatto della finestra temporale, non una scoperta.<br><br>"
+     "<b class=\"w\">La formula 1/(1+RR) e' il riferimento sbagliato, e sbaglia in modo enorme.</b> "
+     "Vale per orizzonte <b>infinito</b> e per una gaussiana. Il tuo orizzonte dura "+
+     IntegerToString(OrbHorizon())+" minuti, e un target lontano ha bisogno di piu' tempo di uno vicino: ai "
+     "rapporti alti le operazioni che avrebbero vinto scadono irrisolte, mentre quelle che perdono - lo stop "
+     "e' vicino - fanno in tempo a perdere. Il win rate calcolato sulle sole risolte finisce cosi' <b>sotto</b> "
+     "la formula ai rapporti alti e <b>sopra</b> ai bassi. Una curva decrescente e monotona compare <b>anche "
+     "in un mercato perfettamente casuale</b>: e' l'orologio, non il mercato. La colonna 'risolte' misura "
+     "quanto morde: sotto il 97% e' colorata di rosso.<br><br>"
 
-     "<b>Il test che separa le due cose</b> costa un input: alza <b>InpOrbHorizonMin</b> finche' la colonna "
-     "'risolte' non e' vicina al 100% a <b>tutti</b> i rapporti, e rilancia. Se la pendenza sparisce era "
-     "troncamento. Se sopravvive, hai trovato una struttura vera. Finche' 'risolte' scende al crescere di "
-     "RR, la pendenza della curva <b>non e' interpretabile</b>: i rapporti dove 'risolte' e' gia' vicino al "
-     "100% sono gli unici su cui il delta significa qualcosa.</div>");
+     "<b>Per questo la colonna che conta e' 'placebo misurato'.</b> E' la stessa cosa - stessa giornata, "
+     "stessa finestra, stesso stop, stessi target, stesso orizzonte - ma con ingresso alla <b>chiusura della "
+     "finestra</b> e direzione tirata a sorte. Subisce esattamente lo stesso troncamento, la stessa "
+     "volatilita' intraday, le stesse code grasse. E' quanto vale <b>non avere segnale</b> in quel preciso "
+     "momento della giornata. <b>delta vs placebo</b> e' quindi il valore aggiunto della rottura, e il suo "
+     "<b>z</b> tiene conto dell'incertezza di entrambe le misure.<br><br>"
 
-   HtmlTableHead("tO8","RR (target/stop);n;risolte;win%;wlow;atteso casuale;delta;z;E in R;E ATR lordo;E ATR netto",false);
+     "Con un riferimento corretto la lettura torna semplice: delta positivo ai rapporti alti = momentum, "
+     "positivo sotto 1:1 = ritorno alla media, intorno a zero ovunque = la rottura non aggiunge niente a "
+     "un ingresso a caso alla stessa ora. E se il delta e' zero, spostare stop e target non lo cambiera'.</div>");
+
+   HtmlTableHead("tO8","RR (target/stop);n;risolte;win%;wlow;formula 1/(1+RR);placebo misurato;n placebo;"
+                       "delta vs placebo;z;E in R;E ATR netto",false);
    {
       int    sel2=g_orbSel;
       double stopMed=0.0; int nStop=0;
@@ -5161,8 +5235,17 @@ void BuildOrb(string sym,string dir)
          double wr2=100.0*wnz/resz;
          double wl2=100.0*WilsonLowInd(wnz,resz);
          double nl =100.0*RrNull(g_rr[z]);
-         double de =wr2-nl;
-         double se =100.0*MathSqrt((nl/100.0)*(1.0-nl/100.0)/resz);
+
+         // riferimento vero: il placebo, che subisce lo stesso troncamento
+         int pw=g_orb[sel2].pWinR[z], pl=g_orb[sel2].pLossR[z];
+         int pres=pw+pl;
+         bool hasP=(pres>=100);
+         double pb2=(hasP? 100.0*pw/pres : nl);
+         double de =wr2-pb2;
+         // errore standard della differenza fra due proporzioni indipendenti
+         double v1=(pb2/100.0)*(1.0-pb2/100.0)/resz;
+         double v2=(hasP? (pb2/100.0)*(1.0-pb2/100.0)/pres : 0.0);
+         double se =100.0*MathSqrt(v1+v2);
          double zz =(se>0? de/se : 0.0);
          // valore atteso in unita' di rischio: vincere vale RR, perdere vale 1
          double eR =(wnz*g_rr[z]-lsz)/(double)totz;
@@ -5171,9 +5254,11 @@ void BuildOrb(string sym,string dir)
          H("<tr><td><b>1 : "+F(g_rr[z],2)+"</b>"+(z==g_rrMain?" &#9656;":"")+"</td><td>"+IntegerToString(totz)+
            "</td><td class=\""+(100.0*resz/totz>=97.0?"nz":"lo")+"\">"+F(100.0*resz/totz,1)+
            "%</td><td>"+F(wr2,2)+"</td><td>"+F(wl2,2)+
-           "</td><td class=\"nz\"><b>"+F(nl,2)+"</b></td><td class=\""+cz+"\"><b>"+F(de,2)+
-           "</b></td><td class=\""+(MathAbs(zz)>=3.0?(de>0?"hi":"lo"):"nz")+"\">"+F(zz,2)+
-           "</td><td class=\""+(eR>0?"up":"dn")+"\">"+F(eR,3)+"</td><td>"+F(eA,4)+
+           "</td><td class=\"nz\">"+F(nl,2)+"</td><td class=\"nz\"><b>"+(hasP?F(pb2,2):"-")+
+           "</b></td><td class=\"nz\">"+(hasP?IntegerToString(pres):"-")+
+           "</td><td class=\""+cz+"\"><b>"+(hasP?F(de,2):"-")+
+           "</b></td><td class=\""+(MathAbs(zz)>=3.0?(de>0?"hi":"lo"):"nz")+"\">"+(hasP?F(zz,2):"-")+
+           "</td><td class=\""+(eR>0?"up":"dn")+"\">"+F(eR,3)+
            "</td><td class=\""+(eA-costMed>0?"up":"dn")+"\"><b>"+F(eA-costMed,4)+"</b></td></tr>");
       }
       HtmlTableEnd();
@@ -5408,17 +5493,22 @@ void BuildOrb(string sym,string dir)
       int fR=FileOpen(dir+fn+"_orb_rr.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
       if(fR!=INVALID_HANDLE)
       {
-         W(fR,"finestra;perc_operabili;rr;n;perc_risolte;win_perc;wlow_perc;atteso_casuale_perc;delta;z;E_in_R;E_atr_lordo\r\n");
+         W(fR,"finestra;perc_operabili;rr;n;perc_risolte;win_perc;wlow_perc;formula_perc;placebo_perc;"
+              "n_placebo;delta_vs_placebo;z;E_in_R;E_atr_lordo\r\n");
          for(int z=0;z<g_nRR;z++)
          {
             int wnz=g_orb[g_orbSel].winR[z], lsz=g_orb[g_orbSel].lossR[z], flz=g_orb[g_orbSel].flatR[z];
             int totz=wnz+lsz+flz, resz=wnz+lsz;
             if(totz<50 || resz<30) continue;
-            double wr2=100.0*wnz/resz, nl=100.0*RrNull(g_rr[z]), de=wr2-nl;
-            double se=100.0*MathSqrt((nl/100.0)*(1.0-nl/100.0)/resz);
+            double wr2=100.0*wnz/resz, nl=100.0*RrNull(g_rr[z]);
+            int pw=g_orb[g_orbSel].pWinR[z], pl=g_orb[g_orbSel].pLossR[z], pres=pw+pl;
+            bool hasP=(pres>=100);
+            double pb2=(hasP? 100.0*pw/pres : nl), de=wr2-pb2;
+            double se=100.0*MathSqrt((pb2/100.0)*(1.0-pb2/100.0)*(1.0/resz+(hasP?1.0/pres:0.0)));
             W(fR,OrbLab(g_orbSel)+";"+F(OrbTradePct(g_orbSel),2)+";"+F(g_rr[z],2)+";"+IntegerToString(totz)+";"+
                  F(100.0*resz/totz,2)+";"+F(wr2,2)+";"+F(100.0*WilsonLowInd(wnz,resz),2)+";"+
-                 F(nl,2)+";"+F(de,2)+";"+F(se>0?de/se:0.0,2)+";"+
+                 F(nl,2)+";"+(hasP?F(pb2,2):"")+";"+(hasP?IntegerToString(pres):"")+";"+
+                 (hasP?F(de,2):"")+";"+(hasP?F(se>0?de/se:0.0,2):"")+";"+
                  F((wnz*g_rr[z]-lsz)/(double)totz,4)+";"+
                  F(g_orb[g_orbSel].sPnlR[z]/totz,5)+"\r\n");
          }
