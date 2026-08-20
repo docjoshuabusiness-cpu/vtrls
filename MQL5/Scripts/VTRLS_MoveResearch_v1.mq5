@@ -1648,7 +1648,8 @@ bool ProcessSymbol(string sym)
    // questo, ed e' 1.0 per un movimento perfettamente direzionale.
    int    rnN[24], rnUp[24];  double rnDur[24], rnPt[24], rnAtr[24], rnEff[24], rnVel[24];
    int    rlN[6];             double rlDur[6], rlPt[6], rlAtr[6], rlEff[6];
-   int    rdN[7][24];         double rdAtr[7][24], rdEff[7][24], rdDur[7][24];
+   int    rdN[7][24];         double rdAtr[7][24], rdEff[7][24], rdDur[7][24], rdVel[7][24];
+   int    rmN[7][96];
 
    int    cntDH[7][24];  double sPtDH[7][24],  sAtDH[7][24];
    int    cntDM[7][96];  double sPtDM[7][96],  sAtDM[7][96];
@@ -1677,7 +1678,8 @@ bool ProcessSymbol(string sym)
    ArrayInitialize(rnPt,0.0); ArrayInitialize(rnAtr,0.0); ArrayInitialize(rnEff,0.0); ArrayInitialize(rnVel,0.0);
    ArrayInitialize(rlN,0); ArrayInitialize(rlDur,0.0); ArrayInitialize(rlPt,0.0);
    ArrayInitialize(rlAtr,0.0); ArrayInitialize(rlEff,0.0);
-   ArrayInitialize(rdN,0); ArrayInitialize(rdAtr,0.0); ArrayInitialize(rdEff,0.0); ArrayInitialize(rdDur,0.0);
+   ArrayInitialize(rdN,0); ArrayInitialize(rdAtr,0.0); ArrayInitialize(rdEff,0.0);
+   ArrayInitialize(rdDur,0.0); ArrayInitialize(rdVel,0.0); ArrayInitialize(rmN,0);
    ArrayInitialize(pkN,0); ArrayInitialize(pkHit,0); ArrayInitialize(pkUp,0); ArrayInitialize(pkDn,0);
    g_nRb=0; ArrayResize(g_rb,0);
    ArrayInitialize(indN,0); ArrayInitialize(zHi,0); ArrayInitialize(zLo,0);
@@ -1985,7 +1987,10 @@ bool ProcessSymbol(string sym)
                if(sg>0) rnUp[hh3]++;
                int lb=(len<4?0:(len<5?1:(len<6?2:(len<8?3:(len<12?4:5)))));
                rlN[lb]++; rlDur[lb]+=dMin; rlPt[lb]+=amp; rlAtr[lb]+=aAtr; rlEff[lb]+=eff;
-               rdN[dd3][hh3]++; rdAtr[dd3][hh3]+=aAtr; rdEff[dd3][hh3]+=eff; rdDur[dd3][hh3]+=dMin;
+               rdN[dd3][hh3]++; rdAtr[dd3][hh3]+=aAtr; rdEff[dd3][hh3]+=eff;
+               rdDur[dd3][hh3]+=dMin; rdVel[dd3][hh3]+=vel;
+               int mb3=hh3*4+rt.min/15;
+               if(mb3>=0 && mb3<96) rmN[dd3][mb3]++;
             }
             i0=j0+1;
          }
@@ -2479,7 +2484,8 @@ bool ProcessSymbol(string sym)
       H("<h2>Classifica giorno x ora</h2><div class=\"note\">Ordinata per <b>qualita' = efficienza x ampiezza "
         "media in ATR</b>: premia le finestre dove i movimenti sono insieme ampi e diretti, non quelle dove "
         "sono solo frequenti.</div>");
-      HtmlTableHead("tU3","#;finestra;n;ampiezza ATR;efficienza;durata media min;qualita'",true);
+      HtmlTableHead("tU3","#;finestra;top 15min;n15;n;ampiezza ATR;efficienza;durata media min;"
+                          "velocita' ATR/h;qualita'",true);
       // ordinamento semplice per qualita'
       double qv[168]; int qi[168]; int nq=0;
       for(int d=0;d<7;d++) for(int h=0;h<24;h++)
@@ -2497,9 +2503,39 @@ bool ProcessSymbol(string sym)
       for(int a=0;a<nq;a++)
       {
          int d=qi[a]/24, h=qi[a]%24, nn=rdN[d][h];
+         int qb=-1, qc=0;
+         for(int q=h*4;q<h*4+4;q++) if(rmN[d][q]>qc){ qc=rmN[d][q]; qb=q; }
          H("<tr><td>"+IntegerToString(a+1)+"</td><td><b>"+HE(DowIT(d))+"  "+D2(h)+":00</b></td><td>"+
+           (qb>=0?M15Label(qb/4,(qb%4)*15):"-")+"</td><td>"+IntegerToString(qc)+"</td><td>"+
            IntegerToString(nn)+"</td><td>"+F(rdAtr[d][h]/nn,3)+"</td><td>"+F(rdEff[d][h]/nn,3)+"</td><td>"+
-           F(rdDur[d][h]/nn,0)+"</td><td><b>"+F(qv[a],4)+"</b></td></tr>");
+           F(rdDur[d][h]/nn,0)+"</td><td>"+F(rdVel[d][h]/nn,3)+"</td><td><b>"+F(qv[a],4)+"</b></td></tr>");
+      }
+      HtmlTableEnd();
+
+      //--- stessa classifica ma raggruppata per giorno, come nella scheda Classifica
+      H("<h2>I migliori "+IntegerToString(InpRankPerDay)+" orari di ogni giorno</h2><div class=\"note\">"
+        "La classifica riparte da capo per ogni giorno della settimana, cosi' sai dove guardare qualunque "
+        "giorno sia. La <b>qualita'</b> resta sulla stessa scala fra tutte le righe: se il primo posto di un "
+        "giorno ha una qualita' molto piu' bassa di quella di un altro giorno, i movimenti di quel giorno "
+        "sono meno adatti a essere operati, non semplicemente meno frequenti.</div>");
+      HtmlTableHead("tU4","giorno;#;ora;top 15min;n15;n;ampiezza ATR;efficienza;durata media min;"
+                          "velocita' ATR/h;qualita'",true);
+      for(int k=0;k<7;k++)
+      {
+         int d=(k+1)%7, shown=0;
+         for(int a=0;a<nq && shown<InpRankPerDay;a++)
+         {
+            if(qi[a]/24!=d) continue;
+            int h=qi[a]%24, nn=rdN[d][h];
+            shown++;
+            int qb=-1, qc=0;
+            for(int q=h*4;q<h*4+4;q++) if(rmN[d][q]>qc){ qc=rmN[d][q]; qb=q; }
+            H("<tr><td>"+(shown==1?"<b>"+HE(DowIT(d))+"</b>":"")+"</td><td>"+IntegerToString(shown)+
+              "</td><td><b>"+D2(h)+":00</b></td><td>"+(qb>=0?M15Label(qb/4,(qb%4)*15):"-")+"</td><td>"+
+              IntegerToString(qc)+"</td><td>"+IntegerToString(nn)+"</td><td>"+F(rdAtr[d][h]/nn,3)+"</td><td>"+
+              F(rdEff[d][h]/nn,3)+"</td><td>"+F(rdDur[d][h]/nn,0)+"</td><td>"+F(rdVel[d][h]/nn,3)+
+              "</td><td><b>"+F(qv[a],4)+"</b></td></tr>");
+         }
       }
       HtmlTableEnd(); H("</section>");
    }
@@ -2511,7 +2547,8 @@ bool ProcessSymbol(string sym)
       int fU=FileOpen(dir+fn+"_movimenti_puliti.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
       if(fU!=INVALID_HANDLE)
       {
-         W(fU,"tipo;gruppo;n;durata_media_min;ampiezza_media_pt;ampiezza_media_atr;efficienza;velocita_atr_h;pct_up\r\n");
+         W(fU,"tipo;gruppo;n;durata_media_min;ampiezza_media_pt_o_top15;ampiezza_media_atr;"
+               "efficienza;velocita_atr_h;pct_up_o_qualita\r\n");
          for(int h=0;h<24;h++)
          {
             int nn=rnN[h]; if(nn<10) continue;
@@ -2528,8 +2565,11 @@ bool ProcessSymbol(string sym)
          for(int d=0;d<7;d++) for(int h=0;h<24;h++)
          {
             int nn=rdN[d][h]; if(nn<10) continue;
-            W(fU,"giorno_ora;"+DowIT(d)+" "+D2(h)+":00;"+IntegerToString(nn)+";"+F(rdDur[d][h]/nn,1)+";;"+
-                  F(rdAtr[d][h]/nn,4)+";"+F(rdEff[d][h]/nn,4)+";;\r\n");
+            int qb=-1, qc=0;
+            for(int q=h*4;q<h*4+4;q++) if(rmN[d][q]>qc){ qc=rmN[d][q]; qb=q; }
+            W(fU,"giorno_ora;"+DowIT(d)+" "+D2(h)+":00;"+IntegerToString(nn)+";"+F(rdDur[d][h]/nn,1)+";"+
+                  (qb>=0?M15Label(qb/4,(qb%4)*15):"-")+";"+F(rdAtr[d][h]/nn,4)+";"+F(rdEff[d][h]/nn,4)+";"+
+                  F(rdVel[d][h]/nn,4)+";"+F((rdEff[d][h]/nn)*(rdAtr[d][h]/nn),5)+"\r\n");
          }
          FileClose(fU);
       }
