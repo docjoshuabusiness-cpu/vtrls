@@ -143,6 +143,7 @@ input double          InpOrbMinStopAtr  = 0.05;            // Stop minimo in ATR
 input double          InpOrbCostPt      = 0.0;             // Costo di andata e ritorno in punti (spread + commissioni)
 input double          InpOrbBufferAtr   = 0.03;            // Margine oltre il livello perche' la rottura conti
 input double          InpOrbMinResolved = 60.0;            // % minima di rotture risolte perche' la finestra entri in classifica
+input double          InpOrbMinTradePct = 80.0;            // % minima di giornate realmente operabili (stop sopra il minimo)
 input double          InpOrbMaxRangeAtr = 3.0;             // Scarta finestre con range oltre questo (dati sporchi)
 input int             InpOrbMinN        = 100;             // Giornate minime perche' una finestra entri in classifica
 input int             InpOrbTop         = 40;              // Righe di classifica da mostrare
@@ -1155,6 +1156,9 @@ void HtmlHead(string sym)
      "segno della rottura: quanto il prezzo stava gia' spingendo in quel verso</td></tr>");
    H("<tr><td><b>volatilita' pre-rottura</b></td><td>Somma dei range delle stesse barre, in ATR: distingue una "
      "spinta pulita da un'agitazione che percorre molta strada senza andare da nessuna parte</td></tr>");
+   H("<tr><td><b>% operabili</b></td><td>Quota di giornate in cui la rottura ha davvero prodotto "
+     "un'operazione: esclude le barre che toccano entrambi i lati e le giornate in cui lo stop sarebbe stato "
+     "sotto il costo di transazione. E' questa, non la % di rottura, a entrare nello score</td></tr>");
    H("<tr><td><b>RR (target/stop)</b></td><td>Quante volte lo stop vale il target. 1:2 significa rischiare "
      "una unita' per guadagnarne due. Lo stop resta identico fra i rapporti: cambia solo dove si mette il "
      "target, quindi i rapporti sono confrontabili fra loro</td></tr>");
@@ -1727,6 +1731,14 @@ double OrbTgt(int i)
    return (tot>0 ? g_orb[i].sTgt/tot : 0.0);
 }
 
+// quota di GIORNATE che hanno prodotto un'operazione vera: niente rottura
+// ambigua, stop sopra il minimo, esito misurabile
+double OrbTradePct(int i)
+{
+   if(g_orb[i].n<=0) return 0.0;
+   return 100.0*(g_orb[i].win+g_orb[i].loss+g_orb[i].flat)/(double)g_orb[i].n;
+}
+
 // quota di rotture che entro l'orizzonte hanno toccato target o stop
 double OrbResPct(int i)
 {
@@ -1751,9 +1763,15 @@ double OrbExpLow(int win,int loss,int flat,double tgt,double costAtr=0.0)
 double OrbScore(int i)
 {
    if(g_orb[i].n<=0) return -99.0;
-   // le rotture ambigue - entrambi i livelli toccati nella stessa barra -
-   // non sono operabili: contarle gonfierebbe la frequenza del segnale
-   double pb=(double)(g_orb[i].nBrk-g_orb[i].nAmb)/(double)g_orb[i].n;
+   // Frequenza del segnale = giornate che hanno prodotto un ESITO, non
+   // giornate in cui il livello e' stato toccato. Le due cose divergono
+   // parecchio: le rotture ambigue (entrambi i livelli nella stessa barra)
+   // non sono operabili, e con InpOrbMinStopAtr vengono scartate anche le
+   // giornate in cui lo stop sarebbe sotto il costo di transazione.
+   // Moltiplicare una frequenza di rottura del 99% per un valore atteso
+   // misurato sul 5% delle giornate e' il modo piu' rapido di mettere in
+   // cima alla classifica una finestra che non si puo' operare.
+   double pb=OrbTradePct(i)/100.0;
    int tot=g_orb[i].win+g_orb[i].loss+g_orb[i].flat;
    double cost=(tot>0? g_orb[i].sCost/tot : 0.0);
    return 100.0*pb*OrbExpLow(g_orb[i].win,g_orb[i].loss,g_orb[i].flat,OrbTgt(i),cost);
@@ -3946,6 +3964,7 @@ bool ProcessSymbol(string sym)
             W(fT,"  finestra migliore      "+OrbLab(i)+"  ("+IntegerToString(g_orb[i].durMin)+" min)"+L);
             W(fT,"  giornate valide        "+IntegerToString(g_orb[i].n)+L);
             W(fT,"  range medio            "+F(g_orb[i].sRange/MathMax(1,g_orb[i].n),2)+" ATR"+L);
+            W(fT,"  operabili              "+F(OrbTradePct(i),1)+"% delle giornate"+L);
             W(fT,"  rottura                "+F(100.0*g_orb[i].nBrk/MathMax(1,g_orb[i].n),1)+"% delle giornate, "+
                   F(100.0*g_orb[i].nUp/MathMax(1,g_orb[i].nUp+g_orb[i].nDn),1)+"% verso l'alto"+L);
             W(fT,"  esiti risolti          "+IntegerToString(rs)+" ("+
@@ -4722,6 +4741,11 @@ void BuildOrb(string sym,string dir)
       // a zero, chi non risolve mai avrebbe valore atteso quasi nullo e
       // batterebbe chi perde davvero. Fuori dalla classifica.
       if(OrbResPct(i)<InpOrbMinResolved) continue;
+      // Una finestra operabile solo in una manciata di giornate non e' una
+      // finestra: e' un sottocampione scelto sulla volatilita'. Il suo stop
+      // supera il minimo solo quando quella fascia oraria e' stata insolita,
+      // e misurarla li' significa misurare le eccezioni.
+      if(OrbTradePct(i)<InpOrbMinTradePct) continue;
       ord[nOk]=i; sc[nOk]=OrbScore(i); nOk++;
    }
    for(int i=1;i<nOk;i++)
@@ -4747,7 +4771,7 @@ void BuildOrb(string sym,string dir)
       int fO=FileOpen(dir+fn+"_orb_finestre.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
       if(fO!=INVALID_HANDLE)
       {
-         W(fO,"inizio;durata_min;finestra;giornate;range_medio_atr;compressione;target_medio_atr;perc_rottura;perc_up;"
+         W(fO,"inizio;durata_min;finestra;giornate;range_medio_atr;compressione;target_medio_atr;perc_rottura;perc_operabili;perc_up;"
               "n_esiti;win_perc;wlow_perc;irrisolti_perc;E_atr;E_low_atr;score_atr_100gg;"
               "win_perc_meta1;win_perc_meta2;ritorni_perc;ambigue_perc;min_alla_rottura;mfe_medio_atr;mae_medio_atr\r\n");
          for(int k=0;k<nOk;k++)
@@ -4758,7 +4782,7 @@ void BuildOrb(string sym,string dir)
                  IntegerToString(g_orb[i].durMin)+";"+OrbLab(i)+";"+
                  IntegerToString(g_orb[i].n)+";"+F(g_orb[i].sRange/g_orb[i].n,4)+";"+
                  F(g_orb[i].sCompr/g_orb[i].n,4)+";"+F(OrbTgt(i),4)+";"+
-                 F(100.0*g_orb[i].nBrk/g_orb[i].n,2)+";"+
+                 F(100.0*g_orb[i].nBrk/g_orb[i].n,2)+";"+F(OrbTradePct(i),2)+";"+
                  (g_orb[i].nUp+g_orb[i].nDn>0?F(100.0*g_orb[i].nUp/(g_orb[i].nUp+g_orb[i].nDn),2):"")+";"+
                  IntegerToString(res)+";"+(res>0?F(100.0*g_orb[i].win/res,2):"")+";"+
                  (res>0?F(100.0*WilsonLowInd(g_orb[i].win,res),2):"")+";"+
@@ -4804,6 +4828,15 @@ void BuildOrb(string sym,string dir)
         "multiplo di quello, ogni finestra viene misurata sulla propria scala. La colonna <b>irrisolti%</b> e' "
         "il controllo: sopra il 40% la finestra esce dalla classifica invece di vincerla.<br><br>"
 
+        "<b>% rottura e % operabili sono due cose diverse, e la seconda e' quella vera.</b> Il livello puo' "
+        "essere toccato quasi ogni giorno e l'operazione essere impossibile lo stesso: perche' i due estremi "
+        "cadono nella stessa barra e non si sa in che ordine, o perche' lo stop sarebbe sotto il costo di "
+        "transazione (InpOrbMinStopAtr). Una finestra di cinque minuti alle 03:00 ha un range cosi' stretto "
+        "che lo stop supera il minimo solo nelle giornate in cui quella fascia si e' mossa in modo anomalo: "
+        "misurarla li' significa misurare le eccezioni, non la finestra. Per questo la frequenza che entra "
+        "nello <b>score</b> e' <b>% operabili</b>, e sotto "+F(InpOrbMinTradePct,0)+"% la finestra e' fuori "
+        "classifica.<br><br>"
+
         "<b>Sulle durate piu' corte.</b> Massimo e minimo si costruiscono con le barre del timeframe base ("+
         EnumToString(InpBaseTF)+"): una durata inferiore alla barra viene scartata da sola. Attenzione pero' a "
         "cosa significa una finestra di 1 minuto su M1: il 'range' e' una singola candela, viene rotto quasi "
@@ -4824,7 +4857,7 @@ void BuildOrb(string sym,string dir)
         "cima alla lista. Fidati solo delle righe in cui le due meta' si somigliano, e guarda la matrice "
         "sotto: un effetto vero forma un <b>altopiano</b> di celle vicine tutte decenti, non un picco isolato.</div>");
 
-      HtmlTableHead("tO1","#;finestra;durata min;giornate;range medio ATR;compress;% rottura;% UP;n esiti;"
+      HtmlTableHead("tO1","#;finestra;durata min;giornate;range medio ATR;compress;% rottura;% operabili;% UP;n esiti;"
                           "win%;wlow;irrisolti%;target ATR;E ATR;score;win% 1a meta;win% 2a meta;ritorni%;"
                           "min alla rottura;MFE medio;MAE medio",true);
       int shown=0;
@@ -4849,6 +4882,7 @@ void BuildOrb(string sym,string dir)
            "</td><td>"+F(g_orb[i].sRange/g_orb[i].n,2)+"</td><td class=\""+
            (g_orb[i].sCompr/g_orb[i].n<=0.85?"hi":"nz")+"\">"+F(g_orb[i].sCompr/g_orb[i].n,2)+
            "</td><td>"+F(100.0*g_orb[i].nBrk/g_orb[i].n,1)+
+           "</td><td class=\""+(OrbTradePct(i)>=InpOrbMinTradePct?"hi":"lo")+"\">"+F(OrbTradePct(i),1)+
            "</td><td>"+(g_orb[i].nUp+g_orb[i].nDn>0?F(100.0*g_orb[i].nUp/(g_orb[i].nUp+g_orb[i].nDn),1):"-")+
            "</td><td>"+IntegerToString(res)+"</td><td>"+F(wr,1)+"</td><td class=\""+cls+"\">"+F(wl,1)+
            "</td><td class=\"nz\">"+(tot>0?F(100.0*g_orb[i].flat/tot,1):"-")+"</td><td class=\"nz\">"+
@@ -5334,7 +5368,7 @@ void BuildOrb(string sym,string dir)
       int fR=FileOpen(dir+fn+"_orb_rr.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
       if(fR!=INVALID_HANDLE)
       {
-         W(fR,"finestra;rr;n;perc_risolte;win_perc;wlow_perc;atteso_casuale_perc;delta;z;E_in_R;E_atr_lordo\r\n");
+         W(fR,"finestra;perc_operabili;rr;n;perc_risolte;win_perc;wlow_perc;atteso_casuale_perc;delta;z;E_in_R;E_atr_lordo\r\n");
          for(int z=0;z<g_nRR;z++)
          {
             int wnz=g_orb[g_orbSel].winR[z], lsz=g_orb[g_orbSel].lossR[z], flz=g_orb[g_orbSel].flatR[z];
@@ -5342,7 +5376,7 @@ void BuildOrb(string sym,string dir)
             if(totz<50 || resz<30) continue;
             double wr2=100.0*wnz/resz, nl=100.0*RrNull(g_rr[z]), de=wr2-nl;
             double se=100.0*MathSqrt((nl/100.0)*(1.0-nl/100.0)/resz);
-            W(fR,OrbLab(g_orbSel)+";"+F(g_rr[z],2)+";"+IntegerToString(totz)+";"+
+            W(fR,OrbLab(g_orbSel)+";"+F(OrbTradePct(g_orbSel),2)+";"+F(g_rr[z],2)+";"+IntegerToString(totz)+";"+
                  F(100.0*resz/totz,2)+";"+F(wr2,2)+";"+F(100.0*WilsonLowInd(wnz,resz),2)+";"+
                  F(nl,2)+";"+F(de,2)+";"+F(se>0?de/se:0.0,2)+";"+
                  F((wnz*g_rr[z]-lsz)/(double)totz,4)+";"+

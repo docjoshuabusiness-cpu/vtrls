@@ -182,7 +182,16 @@ Tre controlli, in ordine di importanza:
    la finestra non e' un edge: e' rumore finito in cima alla lista.
 2. **La matrice inizio x durata.** Un effetto vero forma un *altopiano* di celle
    vicine tutte decenti. Un picco isolato circondato da celle mediocri e' fortuna.
-3. **wlow contro il breakeven richiesto.** Con stop meta' del target servono il
+3. **% operabili.** La percentuale di rottura e la percentuale di giornate
+   realmente operabili sono due cose diverse, e conta la seconda. Il livello
+   puo' essere toccato quasi ogni giorno e l'operazione essere impossibile lo
+   stesso: i due estremi cadono nella stessa barra e non si sa in che ordine,
+   oppure lo stop sarebbe sotto il costo di transazione. Una finestra di cinque
+   minuti alle 03:00 ha un range cosi' stretto che lo stop supera il minimo solo
+   nelle giornate in cui quella fascia si e' mossa in modo anomalo: misurarla
+   li' significa misurare le eccezioni. `InpOrbMinTradePct` (default 80%) la
+   tiene fuori dalla classifica.
+4. **wlow contro il breakeven richiesto.** Con stop meta' del target servono il
    33,3% per non perdere. Se il limite inferiore di Wilson resta sotto, quel
    segnale non ha dimostrato nulla, per quanto bello sia il win rate grezzo.
 
