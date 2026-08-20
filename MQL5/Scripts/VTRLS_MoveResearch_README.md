@@ -55,6 +55,8 @@ Puoi disattivare l'uno o l'altro.
 | `<SYM>_aggregate.csv` | giornate raggruppate per giorno della settimana, anno, mese e sessione |
 | `<SYM>_dow_hour.csv` | matrici giorno x ora, giorno x 15 minuti e anno x ora |
 | `<SYM>_indicatori_tf.csv` | stessi stati RSI/CCI/Z-Score calcolati sui tre timeframe, con delta sul riferimento |
+| `<SYM>_orb_finestre.csv` | tutte le finestre di osservazione testate, con % di rottura, win rate, Wilson, valore atteso e le due meta' del periodo |
+| `<SYM>_orb_breakout.csv` | una riga per ogni rottura della finestra selezionata: direzione, esito, range, intensita', volatilita', RSI/CCI/Z al momento della rottura, MFE/MAE |
 | `<SYM>_report.html` | tutto quanto sopra (tranne lo scan grezzo) in un report navigabile |
 
 ## Indicatori: tre timeframe nella stessa passata
@@ -76,6 +78,69 @@ stesse. Se cambia segno, non hai tre conferme: hai tre rumori.
 
 `InpIndTfCompare = false` calcola solo il timeframe principale: il confronto su
 M1 su periodi storici lunghi allunga sensibilmente il run.
+
+## Range di osservazione e breakout
+
+Due schede del report (`Range e breakout`, `Breakout operativo`) rispondono a una
+domanda in due tempi: **dove** si forma l'accumulazione dentro la giornata, e
+**cosa** succede quando quel range viene rotto.
+
+**Primo tempo.** Lo script non decide a priori quale sia la fascia buona: prova
+ogni combinazione di ora di inizio (`InpOrbFirstHour` -> `InpOrbLastHour`, passo
+`InpOrbStartStep`) e durata (`InpOrbDur`), tipicamente qualche centinaio di
+finestre. Per ognuna costruisce massimo e minimo **solo con le barre dentro la
+finestra**, poi aspetta la rottura di un estremo entro `InpOrbDeadlineMin` minuti.
+
+**Secondo tempo.** Entrata sul livello rotto, target `InpOrbTargetAtr` ATR, stop
+`InpAdverseRatio` x target, esito a primo tocco entro `InpScanHorizonMin`.
+La barra in cui avviene la rottura viene valutata **solo per lo stop, mai per il
+target**: dentro una barra l'ordine dei prezzi non e' noto, e assumere che il
+target sia arrivato prima gonfierebbe il win rate a gratis. I numeri veri sono
+uguali o migliori, mai peggiori.
+
+Le rotture che toccano **entrambi** i livelli nella stessa barra sono contate a
+parte come *ambigue* e non entrano nel win rate: non sono operabili.
+
+### Come si legge senza prendere fischi per fiaschi
+
+La classifica **non** e' ordinata sul win rate. E' ordinata su `score` = ATR
+attesi ogni 100 giornate, calcolato sul **limite inferiore di Wilson** invece che
+sulla percentuale grezza: cosi' un 70% con dodici operazioni finisce sotto un 56%
+con duecento, che e' l'ordine giusto.
+
+Tre controlli, in ordine di importanza:
+
+1. **1a meta' / 2a meta'.** Il win rate nelle due meta' del periodo. Se divergono,
+   la finestra non e' un edge: e' rumore finito in cima alla lista.
+2. **La matrice inizio x durata.** Un effetto vero forma un *altopiano* di celle
+   vicine tutte decenti. Un picco isolato circondato da celle mediocri e' fortuna.
+3. **wlow contro il breakeven richiesto.** Con stop meta' del target servono il
+   33,3% per non perdere. Se il limite inferiore di Wilson resta sotto, quel
+   segnale non ha dimostrato nulla, per quanto bello sia il win rate grezzo.
+
+### Sui filtri, e sul "100% di sicurezza"
+
+Non esiste, e nessun indicatore lo produce. Ogni filtro che alza il win rate lo fa
+**riducendo il numero di operazioni**, e oltre un certo punto sta solo selezionando
+il rumore che gli e' piaciuto in questo campione. Nella scheda `Breakout operativo`
+la colonna che conta e' **delta E** letta insieme a **n**: un filtro serve se
+migliora il valore atteso senza ridurre il campione a poche decine di operazioni
+in dieci anni. Un segnale filtrato fino al 90% con venti occorrenze non e' forte:
+e' morto.
+
+I filtri di intensita' e volatilita' leggono le `InpOrbMomBars` barre **che
+precedono** la rottura, mai quella in cui avviene.
+
+### In-sample, dichiarato
+
+Se `InpOrbFixStartMin` resta a -1, la finestra della scheda operativa e' quella
+che ha vinto la classifica **sullo stesso campione** su cui viene poi misurata.
+E' selezione in-sample e una parte del vantaggio e' fortuna per costruzione: le
+colonne sulle due meta' servono a quantificarla. Per un numero onesto, fissa la
+finestra con `InpOrbFixStartMin` / `InpOrbFixDurMin` e rilancia su un altro
+periodo o un altro simbolo.
+
+`InpDoOrb = false` salta entrambe le schede.
 
 ## Normalizzazione cross-simbolo
 Le soglie in punti non sono confrontabili tra XAUUSD, US30 ed EURUSD. Ogni

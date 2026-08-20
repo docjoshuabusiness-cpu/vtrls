@@ -127,6 +127,24 @@ input string          sRun              = "=== MOVIMENTI PULITI ===";
 input bool            InpDoRuns         = true;            // Analizza le sequenze di barre consecutive
 input int             InpRunMinBars     = 3;               // Barre consecutive minime perche' sia un movimento
 
+input string          sOrb              = "=== RANGE DI OSSERVAZIONE -> BREAKOUT ===";
+input bool            InpDoOrb          = true;            // Cerca la finestra di accumulazione e testa la rottura
+input int             InpOrbFirstHour   = 0;               // Prima ora in cui puo' iniziare la finestra
+input int             InpOrbLastHour    = 21;              // Ultima ora in cui puo' iniziare la finestra
+input int             InpOrbStartStep   = 60;              // Passo degli inizi finestra in minuti (30 raddoppia il tempo di run)
+input string          InpOrbDur         = "15,30,60,90,120"; // Durate della finestra da testare, in minuti
+input int             InpOrbDeadlineMin = 240;             // Entro quanto dalla chiusura finestra deve avvenire la rottura
+input double          InpOrbTargetAtr   = 0.50;            // Target in ATR(D-1) misurato dal livello rotto
+input double          InpOrbBufferAtr   = 0.00;            // Margine oltre il livello perche' la rottura conti
+input double          InpOrbMaxRangeAtr = 3.0;             // Scarta finestre con range oltre questo (dati sporchi)
+input int             InpOrbMinN        = 100;             // Giornate minime perche' una finestra entri in classifica
+input int             InpOrbTop         = 40;              // Righe di classifica da mostrare
+input int             InpOrbMomBars     = 10;              // Barre PRIMA della rottura per intensita' e volatilita'
+input double          InpOrbMomMinAtr   = 0.10;            // Intensita' minima in ATR perche' il filtro sia attivo
+input int             InpOrbFixStartMin = -1;              // Finestra da usare nella scheda operativa (-1 = la migliore)
+input int             InpOrbFixDurMin   = -1;              // Durata da usare nella scheda operativa (-1 = la migliore)
+input int             InpOrbMaxRec      = 1000000;         // Tetto ai breakout memorizzati (circa 48 byte l'uno)
+
 input string          sec3                = "=== NEWS ===";
 input bool            InpUseCalendar    = true;            // Usa il calendario economico MQL5
 input int             InpMinImportance  = 2;               // Importanza minima (1=low 2=medium 3=high)
@@ -722,6 +740,7 @@ string BinLabel(int b, const double &edges[], string unit)
 
 //--- prototipi (le definizioni sono piu' avanti nel file)
 void   BuildConditions(string sym,string dir);
+void   BuildOrb(string sym,string dir);
 void   WriteCells(string path,string keyHeader,const int &basePt[],const int &baseAtr[],
                   string title,string note,string tid);
 
@@ -1009,6 +1028,8 @@ void HtmlHead(string sym)
    H("<button onclick=\"tab(7)\">Indicatori</button>");
    H("<button onclick=\"tab(8)\">Condizioni incrociate</button>");
    H("<button onclick=\"tab(9)\">Condizioni marginali</button>");
+   H("<button onclick=\"tab(10)\">Range e breakout</button>");
+   H("<button onclick=\"tab(11)\">Breakout operativo</button>");
    H("</nav><main>");
    H("<section class=\"on\"><div id=\"sum\" class=\"sum\"></div><div id=\"lett\"></div>");
    H("<h2>Come leggere questo report</h2><div class=\"note\">");
@@ -1100,6 +1121,35 @@ void HtmlHead(string sym)
      "toglie di mezzo il fatto che certe ore si muovono comunque di piu'</td></tr>");
    H("<tr><td><b>sessioni</b></td><td>Asia / London / NY-overlap / NY-late, in ora del server del broker. "
      "Con il cambio di ora legale le fasce slittano di un'ora</td></tr>");
+   H("<tr><td><b>finestra (range e breakout)</b></td><td>La fascia oraria dentro cui si costruiscono il massimo "
+     "e il minimo da rompere. Scritta come inizio-fine, es. 08:00-09:00</td></tr>");
+   H("<tr><td><b>% rottura</b></td><td>Quante giornate, in percentuale, hanno visto rompere uno dei due estremi "
+     "della finestra entro la scadenza. E' la frequenza del segnale, non la sua bonta'</td></tr>");
+   H("<tr><td><b>n esiti</b></td><td>Rotture arrivate a target o a stop. Esclude le irrisolte e le ambigue: "
+     "e' il denominatore vero del win rate</td></tr>");
+   H("<tr><td><b>win%</b></td><td>Rotture chiuse a target sul totale delle rotture risolte. Da solo non basta: "
+     "va sempre letto insieme a n e a wlow</td></tr>");
+   H("<tr><td><b>irrisolti%</b></td><td>Rotture che entro l'orizzonte non hanno toccato ne' target ne' stop. "
+     "Nel valore atteso valgono zero, che e' l'ipotesi piu' vicina a un'uscita a mercato</td></tr>");
+   H("<tr><td><b>ambigue</b></td><td>Barre che hanno toccato entrambi gli estremi: dentro una barra non si sa "
+     "in che ordine, quindi non vengono contate come operazioni</td></tr>");
+   H("<tr><td><b>E ATR</b></td><td>Valore atteso per rottura, in ATR: win x target meno perdite x stop, diviso "
+     "tutte le rotture. E' il numero che dice se l'idea guadagna, non il win rate</td></tr>");
+   H("<tr><td><b>score (breakout)</b></td><td>ATR attesi ogni 100 giornate, calcolati sul limite inferiore di "
+     "Wilson invece che sul win rate grezzo: unisce quanto spesso arriva il segnale e quanto vale, e "
+     "penalizza da solo i campioni piccoli</td></tr>");
+   H("<tr><td><b>1a meta' / 2a meta'</b></td><td>Win rate nella prima e nella seconda meta' del periodo. "
+     "Se le due divergono, la finestra non e' un edge: e' rumore che si e' seduto in cima alla classifica</td></tr>");
+   H("<tr><td><b>breakeven richiesto</b></td><td>Win rate minimo per non perdere, dato il rapporto stop/target. "
+     "Con stop meta' del target servono il 33,3%: sotto quella soglia il segnale distrugge capitale</td></tr>");
+   H("<tr><td><b>ritorni%</b></td><td>Rotture in cui il prezzo e' poi tornato oltre l'estremo opposto del range. "
+     "E' la misura dei falsi breakout</td></tr>");
+   H("<tr><td><b>intensita'</b></td><td>Movimento netto delle barre che PRECEDONO la rottura, in ATR e con il "
+     "segno della rottura: quanto il prezzo stava gia' spingendo in quel verso</td></tr>");
+   H("<tr><td><b>volatilita' pre-rottura</b></td><td>Somma dei range delle stesse barre, in ATR: distingue una "
+     "spinta pulita da un'agitazione che percorre molta strada senza andare da nessuna parte</td></tr>");
+   H("<tr><td><b>MFE / MAE</b></td><td>Massima escursione a favore e massima escursione contraria dopo "
+     "l'ingresso, in ATR. MFE dice se il target poteva essere piu' ambizioso, MAE quanto stop serviva davvero</td></tr>");
    H("</tbody></table></div></section>");
 }
 
@@ -1468,6 +1518,168 @@ void RbSort()
 }
 
 //==================================================================
+//  RANGE DI OSSERVAZIONE -> BREAKOUT
+//
+//  L'idea: dentro la giornata esiste una fascia oraria in cui il prezzo
+//  costruisce un massimo e un minimo (accumulazione), e la rottura di
+//  uno dei due estremi avvia il movimento utile. Lo script non decide
+//  a priori quale sia quella fascia: prova TUTTE le combinazioni di
+//  inizio e durata, misura ciascuna e le mette in classifica.
+//
+//  Due avvertenze che vanno tenute a mente leggendo i risultati.
+//
+//  1) Le finestre testate sono centinaia e si sovrappongono fra loro.
+//     La migliore di duecento e' quasi sempre fortunata, non brava.
+//     Per questo la classifica ordina sul limite inferiore di Wilson e
+//     mostra la prima e la seconda meta' del campione separate: una
+//     finestra che funziona solo in una delle due non e' un edge.
+//
+//  2) La barra in cui avviene la rottura viene valutata SOLO per lo
+//     stop, mai per il target. Dentro quella barra non si sa in che
+//     ordine sono stati toccati i prezzi, e assumere che il target sia
+//     arrivato prima gonfierebbe il win rate senza alcun fondamento.
+//==================================================================
+
+// Wilson al 95% su osservazioni indipendenti: qui ogni riga e' una
+// giornata diversa, non ci sono orizzonti sovrapposti da scontare.
+double WilsonLowInd(int k,int n)
+{
+   if(n<=0) return 0.0;
+   double p=(double)k/(double)n;
+   double z=1.959964;
+   double den=1.0+z*z/n;
+   double c=(p+z*z/(2.0*n))/den;
+   double m=z*MathSqrt(p*(1.0-p)/n + z*z/(4.0*n*n))/den;
+   double lo=c-m;
+   return (lo<0.0?0.0:lo);
+}
+
+struct SOrb
+{
+   int    startMin, durMin;
+   int    n;                       // giornate con finestra valida
+   double sRange;                  // somma del range in ATR
+   int    nBrk, nUp, nDn, nAmb, nRev;
+   int    win, loss, flat;
+   int    brkUp, winUp, brkDn, winDn;
+   double sMfe, sMae, sTtb;
+   int    n1, brk1, win1, res1;    // prima meta' del periodo
+   int    n2, brk2, win2, res2;    // seconda meta'
+   int    dN[7], dBrk[7], dWin[7], dRes[7];
+};
+SOrb g_orb[];
+int  g_nOrb=0;
+
+// un breakout memorizzato: serve alla scheda operativa, dove i filtri
+// vengono applicati a posteriori sulla finestra selezionata
+struct SBrk
+{
+   int   w;
+   uchar dow, hour;
+   char  dir, res;                 // res +1 target, -1 stop, 0 irrisolto
+   int   year;
+   float rangeAtr, mom, vol, cci, rsi, zs, mfe, mae, ttb;
+};
+SBrk g_bk[];
+int  g_nBk=0;
+bool g_bkCap=false;             // tetto ai record raggiunto: campione troncato
+int  g_orbSel=-1;               // finestra portata nella scheda operativa
+
+// Costruisce la griglia delle finestre candidate. Viene chiamata una
+// volta per simbolo, prima del ciclo sui giorni.
+void OrbInit()
+{
+   g_nOrb=0; ArrayResize(g_orb,0);
+   g_nBk=0;  ArrayResize(g_bk,0);
+   g_bkCap=false; g_orbSel=-1;
+   if(!InpDoOrb) return;
+
+   double dur[]; int nd=ParseDoubles(InpOrbDur,dur);
+   if(nd<=0) return;
+   int step=(InpOrbStartStep>0?InpOrbStartStep:30);
+   int h0=(int)MathMax(0,MathMin(23,InpOrbFirstHour));
+   int h1=(int)MathMax(h0,MathMin(23,InpOrbLastHour));
+
+   for(int m=h0*60; m<=h1*60; m+=step)
+      for(int k=0;k<nd;k++)
+      {
+         int d=(int)dur[k];
+         if(d<=0) continue;
+         if(d<g_tfMin) continue;             // finestra piu' corta della barra base
+         if(m+d>=1440) continue;             // deve chiudersi dentro la giornata
+         ArrayResize(g_orb,g_nOrb+1,256);
+         g_orb[g_nOrb].startMin=m;
+         g_orb[g_nOrb].durMin  =d;
+         g_orb[g_nOrb].n=0; g_orb[g_nOrb].sRange=0.0;
+         g_orb[g_nOrb].nBrk=0; g_orb[g_nOrb].nUp=0; g_orb[g_nOrb].nDn=0;
+         g_orb[g_nOrb].nAmb=0; g_orb[g_nOrb].nRev=0;
+         g_orb[g_nOrb].win=0; g_orb[g_nOrb].loss=0; g_orb[g_nOrb].flat=0;
+         g_orb[g_nOrb].brkUp=0; g_orb[g_nOrb].winUp=0;
+         g_orb[g_nOrb].brkDn=0; g_orb[g_nOrb].winDn=0;
+         g_orb[g_nOrb].sMfe=0.0; g_orb[g_nOrb].sMae=0.0; g_orb[g_nOrb].sTtb=0.0;
+         g_orb[g_nOrb].n1=0; g_orb[g_nOrb].brk1=0; g_orb[g_nOrb].win1=0; g_orb[g_nOrb].res1=0;
+         g_orb[g_nOrb].n2=0; g_orb[g_nOrb].brk2=0; g_orb[g_nOrb].win2=0; g_orb[g_nOrb].res2=0;
+         ArrayInitialize(g_orb[g_nOrb].dN,0);   ArrayInitialize(g_orb[g_nOrb].dBrk,0);
+         ArrayInitialize(g_orb[g_nOrb].dWin,0); ArrayInitialize(g_orb[g_nOrb].dRes,0);
+         g_nOrb++;
+      }
+}
+
+// etichetta leggibile di una finestra
+string OrbLab(int i)
+{
+   int a=g_orb[i].startMin, b=a+g_orb[i].durMin;
+   return D2(a/60)+":"+D2(a%60)+"-"+D2((b/60)%24)+":"+D2(b%60);
+}
+
+// Valore atteso per rottura, in ATR, con gli irrisolti contati come zero.
+// Contarli come vincite sarebbe una bugia, escluderli gonfierebbe il
+// win rate: valgono zero, che e' l'ipotesi piu' vicina a un'uscita a
+// mercato alla scadenza dell'orizzonte.
+double OrbExp(int win,int loss,int flat)
+{
+   int tot=win+loss+flat;
+   if(tot<=0) return 0.0;
+   return (win*InpOrbTargetAtr - loss*InpOrbTargetAtr*InpAdverseRatio)/tot;
+}
+
+// La stessa cosa calcolata sul limite inferiore di Wilson invece che sul
+// win rate grezzo: e' il numero su cui vale la pena ordinare, perche'
+// penalizza da solo i campioni piccoli.
+double OrbExpLow(int win,int loss,int flat)
+{
+   int res=win+loss, tot=res+flat;
+   if(res<=0 || tot<=0) return 0.0;
+   double wl=WilsonLowInd(win,res);
+   double e=InpOrbTargetAtr*(wl-(1.0-wl)*InpAdverseRatio);
+   return e*((double)res/(double)tot);
+}
+
+// ATR attesi ogni 100 giornate: unisce quanto spesso la finestra da' un
+// segnale e quanto vale il segnale. E' il criterio della classifica.
+double OrbScore(int i)
+{
+   if(g_orb[i].n<=0) return -99.0;
+   // le rotture ambigue - entrambi i livelli toccati nella stessa barra -
+   // non sono operabili: contarle gonfierebbe la frequenza del segnale
+   double pb=(double)(g_orb[i].nBrk-g_orb[i].nAmb)/(double)g_orb[i].n;
+   return 100.0*pb*OrbExpLow(g_orb[i].win,g_orb[i].loss,g_orb[i].flat);
+}
+
+// indice dell'ultima barra indicatore CHIUSA prima di t
+int IndIdxAt(const datetime &bt[][3],int tf,int cnt,int sec,datetime t)
+{
+   int lo=0, hi=cnt-1, res=-1;
+   while(lo<=hi)
+   {
+      int mid=(lo+hi)/2;
+      if(bt[mid][tf]+sec<=t){ res=mid; lo=mid+1; }
+      else hi=mid-1;
+   }
+   return res;
+}
+
+//==================================================================
 //  AGGREGAZIONI SULL'INTERO PERIODO
 //  Le tabelle precedenti mostrano le giornate una per una. Questa
 //  raggruppa tutte le giornate del periodo per giorno della settimana,
@@ -1748,6 +1960,7 @@ bool ProcessSymbol(string sym)
    int    skNoData=0, skFewBars=0, skNoAtr=0, skStub=0;   // motivi di scarto, per la diagnostica
 
    g_nScan=0; ArrayResize(g_scan,0);
+   OrbInit();
 
    int stepMin  = (int)MathMax(InpScanStepMin, g_tfMin);
    int stepBars = (int)MathMax(1, stepMin/g_tfMin);
@@ -2050,7 +2263,9 @@ bool ProcessSymbol(string sym)
       // CCI 2 e 3 compresi, altrimenti quei due partono male
       int need=(int)MathMax(InpRsiPeriod,MathMax(InpZsPeriod,
                MathMax(InpCciPeriod,MathMax(InpCciPeriod2,InpCciPeriod3))));
-      if(InpDoIndicators && InpDoScan)
+      // servono anche alla scheda breakout, che filtra le rotture con RSI,
+      // CCI e Z-Score: senza questo la griglia disattivata le azzererebbe
+      if(InpDoIndicators && (InpDoScan || InpDoOrb))
       {
          MqlRates ri[];
          double cl[], tp[], bR[], bC[], bZ[], bC2[], bC3[];
@@ -2100,6 +2315,163 @@ bool ProcessSymbol(string sym)
                iCci2[i][t]=bC2[i]; iCci3[i][t]=bC3[i];
             }
             nIndT[t]=cnt;
+         }
+      }
+
+      //============ RANGE DI OSSERVAZIONE -> BREAKOUT ==============
+      // Per ogni finestra candidata: massimo e minimo costruiti dentro la
+      // finestra, poi si aspetta la rottura di uno dei due estremi e si
+      // risolve target/stop a primo tocco. Nessun dato successivo alla
+      // rottura entra nella decisione di entrare.
+      if(InpDoOrb && g_nOrb>0)
+      {
+         // mappa minuto del giorno -> primo indice di barra
+         int minIdx[1442];
+         {
+            int i=0;
+            for(int m=0;m<=1441;m++)
+            {
+               while(i<nAll && (int)((r[i].time-dStart)/60) < m) i++;
+               minIdx[m]=i;
+            }
+         }
+         datetime lastBar = r[nAll-1].time;
+         bool secondHalf  = (dStart >= (datetime)(effFrom + (effTo-effFrom)/2));
+         int  mainIx      = IndMain();
+         MqlDateTime dt0; TimeToStruct(dStart,dt0);
+         int  dowD        = dt0.day_of_week;
+         int  yearD       = dt0.year;
+         double buf       = InpOrbBufferAtr*atrPt*g_point;
+         double tgtD      = InpOrbTargetAtr*atrPt*g_point;
+         double stpD      = tgtD*InpAdverseRatio;
+
+         for(int w=0; w<g_nOrb; w++)
+         {
+            int a0=g_orb[w].startMin, b0=a0+g_orb[w].durMin;
+            int ia=minIdx[a0], ib=minIdx[b0];
+            if(ib<=ia) continue;                        // finestra senza barre
+
+            // la giornata deve coprire finestra + attesa + orizzonte, altrimenti
+            // la finestra sembrerebbe sterile solo perche' i dati finiscono li'
+            int endWait = (int)MathMin(1440, b0+InpOrbDeadlineMin);
+            datetime reqEnd = dStart + (datetime)((endWait+InpScanHorizonMin)*60);
+            if(lastBar < reqEnd) continue;
+
+            // servono abbastanza barre dentro la finestra: se il broker ha un
+            // buco proprio li', il range e' finto
+            int expBars=(int)MathMax(1,g_orb[w].durMin/g_tfMin);
+            if(ib-ia < (int)MathMax(1,expBars*0.6)) continue;
+
+            double RH=-DBL_MAX, RL=DBL_MAX;
+            for(int q=ia;q<ib;q++)
+            {
+               if(r[q].high>RH) RH=r[q].high;
+               if(r[q].low <RL) RL=r[q].low;
+            }
+            double rngAtr=((RH-RL)/g_point)/atrPt;
+            if(rngAtr<=0.0 || rngAtr>InpOrbMaxRangeAtr) continue;
+
+            g_orb[w].n++; g_orb[w].sRange+=rngAtr; g_orb[w].dN[dowD]++;
+            if(secondHalf) g_orb[w].n2++; else g_orb[w].n1++;
+
+            //--- prima rottura di uno dei due estremi, entro la scadenza
+            double lvUp=RH+buf, lvDn=RL-buf;
+            datetime dlTime=dStart+(datetime)(endWait*60);
+            int kb=-1, dir=0;
+            for(int q=ib; q<n && r[q].time<dlTime; q++)
+            {
+               bool hu=(r[q].high>=lvUp), hd=(r[q].low<=lvDn);
+               if(hu && hd){ kb=q; dir=0; break; }       // stessa barra: ordine ignoto
+               if(hu){ kb=q; dir=+1; break; }
+               if(hd){ kb=q; dir=-1; break; }
+            }
+            if(kb<0) continue;                            // nessuna rottura
+
+            g_orb[w].nBrk++; g_orb[w].dBrk[dowD]++;
+            if(secondHalf) g_orb[w].brk2++; else g_orb[w].brk1++;
+            if(dir==0){ g_orb[w].nAmb++; continue; }
+            if(dir>0){ g_orb[w].nUp++; g_orb[w].brkUp++; }
+            else     { g_orb[w].nDn++; g_orb[w].brkDn++; }
+
+            double entry=(dir>0?lvUp:lvDn);
+            double tgt  =entry+dir*tgtD;
+            double stp  =entry-dir*stpD;
+            datetime hEnd=r[kb].time+(datetime)(InpScanHorizonMin*60);
+
+            int res=0; bool done=false, rev=false;
+            double mfe=0.0, mae=0.0;
+            for(int q=kb; q<nAll && r[q].time<=hEnd; q++)
+            {
+               // La barra della rottura conta solo contro di noi: dentro una
+               // barra non si conosce l'ordine dei prezzi, e regalarsi il
+               // target su quella barra gonfierebbe il win rate a gratis.
+               double adv=(dir>0 ? entry-r[q].low : r[q].high-entry)/g_point/atrPt;
+               if(adv>mae) mae=adv;
+               if(q>kb)
+               {
+                  double fav=(dir>0 ? r[q].high-entry : entry-r[q].low)/g_point/atrPt;
+                  if(fav>mfe) mfe=fav;
+               }
+               if(dir>0){ if(r[q].low<=RL) rev=true; }
+               else     { if(r[q].high>=RH) rev=true; }
+               if(!done)
+               {
+                  bool hs=(dir>0 ? r[q].low<=stp  : r[q].high>=stp);
+                  bool ht=(q>kb) && (dir>0 ? r[q].high>=tgt : r[q].low<=tgt);
+                  if(hs){ res=-1; done=true; }
+                  else if(ht){ res=+1; done=true; }
+               }
+            }
+            if(rev) g_orb[w].nRev++;
+            if(res>0)      { g_orb[w].win++;  g_orb[w].dWin[dowD]++; if(dir>0) g_orb[w].winUp++; else g_orb[w].winDn++; }
+            else if(res<0) g_orb[w].loss++;
+            else           g_orb[w].flat++;
+            if(res!=0)
+            {
+               g_orb[w].dRes[dowD]++;
+               if(secondHalf){ g_orb[w].res2++; if(res>0) g_orb[w].win2++; }
+               else          { g_orb[w].res1++; if(res>0) g_orb[w].win1++; }
+            }
+            double ttb=(double)(r[kb].time-(dStart+(datetime)(b0*60)))/60.0;
+            g_orb[w].sMfe+=mfe; g_orb[w].sMae+=mae; g_orb[w].sTtb+=ttb;
+
+            //--- record del singolo breakout, per la scheda operativa
+            if(g_nBk>=InpOrbMaxRec) g_bkCap=true;
+            else
+            {
+               double mom=0.0, vol=0.0;
+               int m0=kb-InpOrbMomBars;
+               if(m0<0) m0=0;
+               if(kb-1>=m0)
+               {
+                  mom=((r[kb-1].close-r[m0].open)/g_point)/atrPt*dir;
+                  for(int q=m0;q<=kb-1;q++) vol+=((r[q].high-r[q].low)/g_point)/atrPt;
+               }
+               double vC=0.0, vR=50.0, vZ=0.0;
+               if(nIndT[mainIx]>0)
+               {
+                  int ii=IndIdxAt(iTime,mainIx,nIndT[mainIx],indSec[mainIx],r[kb].time);
+                  if(ii>=need){ vC=iCci[ii][mainIx]; vR=iRsi[ii][mainIx]; vZ=iZs[ii][mainIx]; }
+               }
+               MqlDateTime bt2; TimeToStruct(r[kb].time,bt2);
+               ArrayResize(g_bk,g_nBk+1,65536);
+               g_bk[g_nBk].w=w;
+               g_bk[g_nBk].dow=(uchar)dowD;
+               g_bk[g_nBk].hour=(uchar)bt2.hour;
+               g_bk[g_nBk].dir=(char)dir;
+               g_bk[g_nBk].res=(char)res;
+               g_bk[g_nBk].year=yearD;
+               g_bk[g_nBk].rangeAtr=(float)rngAtr;
+               g_bk[g_nBk].mom=(float)mom;
+               g_bk[g_nBk].vol=(float)vol;
+               g_bk[g_nBk].cci=(float)vC;
+               g_bk[g_nBk].rsi=(float)vR;
+               g_bk[g_nBk].zs=(float)vZ;
+               g_bk[g_nBk].mfe=(float)mfe;
+               g_bk[g_nBk].mae=(float)mae;
+               g_bk[g_nBk].ttb=(float)ttb;
+               g_nBk++;
+            }
          }
       }
 
@@ -3213,6 +3585,9 @@ bool ProcessSymbol(string sym)
       H("<section><h2>Condizioni marginali</h2><div class=\"note\">Non generate.</div></section>");
    }
 
+   //--- range di osservazione e breakout (schede 10 e 11)
+   BuildOrb(sym,dir);
+
    //=================================================================
    //  RIASSUNTO TESTUALE
    //  Un file piccolo, in testo semplice, pensato per essere copiato e
@@ -3356,6 +3731,41 @@ bool ProcessSymbol(string sym)
             W(fT,"  |zBUY| sotto 3 = nessuno sbilanciamento direzionale, e' caso."+L);
          }
 
+         if(InpDoOrb && g_orbSel>=0)
+         {
+            int i=g_orbSel;
+            int rs=g_orb[i].win+g_orb[i].loss, tt=rs+g_orb[i].flat;
+            double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
+            double wl=(rs>0?100.0*WilsonLowInd(g_orb[i].win,rs):0.0);
+            double h1=(g_orb[i].res1>0?100.0*g_orb[i].win1/g_orb[i].res1:-1.0);
+            double h2=(g_orb[i].res2>0?100.0*g_orb[i].win2/g_orb[i].res2:-1.0);
+            W(fT,L+"RANGE DI OSSERVAZIONE -> BREAKOUT"+L);
+            W(fT,"  finestre testate       "+IntegerToString(g_nOrb)+L);
+            W(fT,"  finestra migliore      "+OrbLab(i)+"  ("+IntegerToString(g_orb[i].durMin)+" min)"+L);
+            W(fT,"  giornate valide        "+IntegerToString(g_orb[i].n)+L);
+            W(fT,"  range medio            "+F(g_orb[i].sRange/MathMax(1,g_orb[i].n),2)+" ATR"+L);
+            W(fT,"  rottura                "+F(100.0*g_orb[i].nBrk/MathMax(1,g_orb[i].n),1)+"% delle giornate, "+
+                  F(100.0*g_orb[i].nUp/MathMax(1,g_orb[i].nUp+g_orb[i].nDn),1)+"% verso l'alto"+L);
+            W(fT,"  esiti risolti          "+IntegerToString(rs)+" ("+
+                  F(100.0*g_orb[i].flat/MathMax(1,tt),1)+"% irrisolti)"+L);
+            W(fT,"  win rate               "+(rs>0?F(100.0*g_orb[i].win/rs,2):"-")+"%"+L);
+            W(fT,"  Wilson low 95%         "+F(wl,2)+"%   (breakeven richiesto "+F(be,2)+"%)"+L);
+            W(fT,"  valore atteso          "+F(OrbExp(g_orb[i].win,g_orb[i].loss,g_orb[i].flat),4)+" ATR per rottura"+L);
+            W(fT,"  score                  "+F(OrbScore(i),2)+" ATR ogni 100 giornate"+L);
+            W(fT,"  win 1a meta / 2a meta  "+(h1>=0?F(h1,1):"-")+"% / "+(h2>=0?F(h2,1):"-")+"%"+L);
+            W(fT,"  falsi breakout         "+F(100.0*g_orb[i].nRev/MathMax(1,g_orb[i].nBrk),1)+"%"+L);
+            W(fT,"  MFE / MAE medie        "+F(g_orb[i].sMfe/MathMax(1,tt),2)+" / "+
+                  F(g_orb[i].sMae/MathMax(1,tt),2)+" ATR"+L);
+            W(fT,"  verdetto               "+
+                  (wl>be && h1>=0 && h2>=0 && MathAbs(h1-h2)<8.0 && h1>be && h2>be
+                   ? "utilizzabile: Wilson sopra il breakeven e le due meta' del periodo concordano"
+                   : (wl<=be ? "NON utilizzabile: il vantaggio non e' distinguibile dal caso"
+                             : "da verificare fuori campione: le due meta' del periodo non concordano"))+L);
+            W(fT,"  nota                   la finestra e' stata scelta come migliore fra "+IntegerToString(g_nOrb)+L);
+            W(fT,"                         candidate sullo stesso campione: parte del vantaggio e'"+L);
+            W(fT,"                         selezione, non edge. Rifallo su un altro simbolo o periodo."+L);
+         }
+
          W(fT,L+"CONDIZIONI CHE SUPERANO IL FILTRO (lift>1.20 e Wilson-low sopra baseline)"+L);
          if(g_nTop==0)
             W(fT,"  nessuna. Nessuna combinazione testata batte la baseline in modo statisticamente"+L+
@@ -3387,6 +3797,28 @@ bool ProcessSymbol(string sym)
         F(100.0*nBig/MathMax(1,nDays),1)+"%</b></div>");
       H("<div class=\"card\"><span>orizzonte forward</span><b>"+IntegerToString(InpScanHorizonMin)+" min</b></div>");
       H("<div class=\"card\"><span>stop / target</span><b>"+F(InpAdverseRatio,2)+"</b></div>");
+      if(InpDoOrb && g_orbSel>=0)
+      {
+         int rs=g_orb[g_orbSel].win+g_orb[g_orbSel].loss;
+         H("<div class=\"card\"><span>finestra breakout</span><b>"+OrbLab(g_orbSel)+"</b></div>");
+         H("<div class=\"card\"><span>rotture</span><b>"+
+           F(100.0*g_orb[g_orbSel].nBrk/MathMax(1,g_orb[g_orbSel].n),0)+"% delle giornate</b></div>");
+         H("<div class=\"card\"><span>win rate breakout</span><b>"+
+           (rs>0?F(100.0*g_orb[g_orbSel].win/rs,1):"-")+"%</b></div>");
+         H("<div class=\"card\"><span>atteso per rottura</span><b>"+
+           F(OrbExp(g_orb[g_orbSel].win,g_orb[g_orbSel].loss,g_orb[g_orbSel].flat),3)+" ATR</b></div>");
+      }
+      if(InpDoRuns)
+      {
+         int rTot=0; double rDur=0.0, rAtr=0.0;
+         for(int h=0;h<24;h++){ rTot+=rnN[h]; rDur+=rnDur[h]; rAtr+=rnAtr[h]; }
+         if(rTot>0)
+         {
+            H("<div class=\"card\"><span>movimenti puliti</span><b>"+IntegerToString(rTot)+"</b></div>");
+            H("<div class=\"card\"><span>durata media pulita</span><b>"+F(rDur/rTot,0)+" min</b></div>");
+            H("<div class=\"card\"><span>ampiezza media pulita</span><b>"+F(rAtr/rTot,2)+" ATR</b></div>");
+         }
+      }
       H("</div>");
 
       //=============================================================
@@ -3466,6 +3898,125 @@ bool ProcessSymbol(string sym)
            F(aggAll[0].sPreTot/nDays,0)+" punti totali di percorso e un movimento netto medio di "+
            F(aggAll[0].sPreNet/nDays,0)+" punti. E' il dato da confrontare fra le condizioni: "
            "se le giornate esplosive partono da un pre-evento sistematicamente diverso, li' c'e' un segnale.</li>");
+      }
+
+      // classifica delle finestre operative: la riga che l'utente guarda per prima
+      if(g_nRk>0)
+      {
+         H("<li>Finestra operativa in testa alla <b>Classifica</b>: <span class=\"k\">"+HE(g_rk[0].lab)+
+           "</span> (fascia fine "+HE(g_rk[0].lab15)+"), "+IntegerToString(g_rk[0].n)+" movimenti su "+
+           IntegerToString(g_rk[0].denom)+" giornate, "+F(100.0*g_rk[0].n/MathMax(1,g_rk[0].denom),0)+
+           "% di frequenza, ampiezza media "+F(g_rk[0].sumAtr/MathMax(1,g_rk[0].n),2)+" ATR, BUY "+
+           F(100.0*g_rk[0].buy/MathMax(1,g_rk[0].n),0)+"%. E' la finestra con il miglior compromesso fra "
+           "quanto spesso si presenta e quanto e' grande, non semplicemente la piu' frequente.</li>");
+      }
+
+      // movimenti puliti
+      if(InpDoRuns)
+      {
+         int rTot=0; double rDur=0.0, rAtr=0.0, rEff=0.0;
+         int bh=-1; double bq=-1.0;
+         for(int h=0;h<24;h++)
+         {
+            rTot+=rnN[h]; rDur+=rnDur[h]; rAtr+=rnAtr[h]; rEff+=rnEff[h];
+            if(rnN[h]>=30)
+            {
+               double q=(rnEff[h]/rnN[h])*(rnAtr[h]/rnN[h]);
+               if(q>bq){ bq=q; bh=h; }
+            }
+         }
+         if(rTot>0)
+            H("<li>Movimenti puliti (barre consecutive nello stesso verso, almeno "+
+              IntegerToString(InpRunMinBars)+"): <span class=\"k\">"+IntegerToString(rTot)+"</span> in tutto "
+              "il periodo, durata media "+F(rDur/rTot,0)+" minuti, ampiezza media "+F(rAtr/rTot,2)+
+              " ATR, efficienza media "+F(rEff/rTot,2)+" (quota del percorso che finisce in movimento netto "
+              "invece che in andirivieni)."+
+              (bh>=0 ? " L'ora con la qualita' piu' alta e' <b>"+D2(bh)+":00</b>, dove i movimenti sono insieme "
+                       "ampi e diretti: e' li' che un trend intraday ha piu' probabilita' di non tornare indietro."
+                     : "")+"</li>");
+      }
+
+      // indicatori: che cosa dicono davvero i tre timeframe
+      if(InpDoIndicators && InpDoScan && tfN[IndMain()][0]>0)
+      {
+         double pr=100.0*tfHit[IndMain()][0]/tfN[IndMain()][0];
+         H("<li>Riferimento indicatori: in un istante qualsiasi la probabilita' di un movimento di "+
+           F(g_nAtr>0?g_thrAtr[0]:0.5,2)+" ATR entro "+IntegerToString(InpScanHorizonMin)+
+           " minuti e' <span class=\"k\">"+F(pr,1)+"%</span>. Ogni stato di RSI, CCI o Z-Score va confrontato "
+           "con questo numero: se non lo supera, quello stato descrive il presente e non anticipa niente.</li>");
+
+         if(InpIndTfCompare)
+         {
+            int nAgree=0, nMeas=0;
+            string det="";
+            for(int t=0;t<3;t++)
+            {
+               if(tfN[t][0]<50 || tfN[t][5]<50) continue;
+               double d5=100.0*tfHit[t][5]/tfN[t][5]-100.0*tfHit[t][0]/tfN[t][0];
+               if(d5>0) nAgree++;
+               nMeas++;
+               det+=(det==""?"":", ")+IndTfName(t)+" "+F(d5,2);
+            }
+            if(nMeas>0)
+               H("<li>Uscita dall'accumulazione CCI, vantaggio sul riferimento misurato sui tre timeframe ("+
+                 det+" punti percentuali): "+
+                 (nAgree==nMeas ? "<b>tutti e tre concordi in positivo</b>, ed e' il caso in cui vale la pena "
+                                  "insistere: l'effetto non dipende dal timeframe scelto."
+                 : nAgree==0    ? "<b class=\"w\">tutti e tre negativi</b>. Non e' un problema di taratura: "
+                                  "su questo simbolo la compressione del CCI non anticipa il movimento, e "
+                                  "cambiare periodo o timeframe non salvera' l'idea."
+                                : "<b class=\"w\">discordi</b>. Un timeframe che funziona e gli altri no non "
+                                  "e' un edge: e' il campione che ha scelto per te. Non costruirci sopra.")+"</li>");
+         }
+      }
+
+      // range di osservazione -> breakout
+      if(InpDoOrb && g_orbSel>=0)
+      {
+         int    i=g_orbSel;
+         int    rs=g_orb[i].win+g_orb[i].loss, tt=rs+g_orb[i].flat;
+         double wr=(rs>0?100.0*g_orb[i].win/rs:0.0);
+         double wl=(rs>0?100.0*WilsonLowInd(g_orb[i].win,rs):0.0);
+         double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
+         double h1=(g_orb[i].res1>0?100.0*g_orb[i].win1/g_orb[i].res1:-1.0);
+         double h2=(g_orb[i].res2>0?100.0*g_orb[i].win2/g_orb[i].res2:-1.0);
+
+         H("<li>Finestra di accumulazione scelta dallo script fra "+IntegerToString(g_nOrb)+
+           " candidate: <span class=\"k\">"+OrbLab(i)+"</span> ("+IntegerToString(g_orb[i].durMin)+
+           " minuti, range medio "+F(g_orb[i].sRange/MathMax(1,g_orb[i].n),2)+" ATR). Un estremo viene rotto "
+           "nel <b>"+F(100.0*g_orb[i].nBrk/MathMax(1,g_orb[i].n),0)+"%</b> delle giornate, "+
+           F(100.0*g_orb[i].nUp/MathMax(1,g_orb[i].nUp+g_orb[i].nDn),0)+"% verso l'alto. "
+           "Entrando sulla rottura con target "+F(InpOrbTargetAtr,2)+" ATR e stop "+
+           F(InpOrbTargetAtr*InpAdverseRatio,2)+" ATR: <b>"+F(wr,1)+"%</b> a target su "+
+           IntegerToString(rs)+" esiti, "+F(100.0*g_orb[i].flat/MathMax(1,tt),0)+
+           "% irrisolti, valore atteso "+F(OrbExp(g_orb[i].win,g_orb[i].loss,g_orb[i].flat),3)+" ATR per rottura.</li>");
+
+         H("<li>"+(wl>be
+            ? "Il limite inferiore di Wilson e' <b>"+F(wl,1)+"%</b>, sopra il breakeven richiesto ("+F(be,1)+
+              "%): il vantaggio sopravvive all'incertezza del campione."
+            : "<b class=\"w\">Il limite inferiore di Wilson e' "+F(wl,1)+"%, sotto il breakeven richiesto ("+
+              F(be,1)+"%)</b>: il win rate grezzo puo' anche sembrare buono, ma con questo campione non e' "
+              "distinguibile dal caso. Non e' un segnale.")+
+           (h1>=0 && h2>=0
+            ? " Prima meta' del periodo "+F(h1,1)+"%, seconda meta' "+F(h2,1)+"%: "+
+              (MathAbs(h1-h2)<8.0 && h1>be && h2>be
+               ? "<b>coerenti</b>, ed e' il controllo che conta piu' di ogni altro in questa pagina."
+               : "<b class=\"w\">divergenti</b>. La finestra e' stata scelta come migliore sullo stesso "
+                 "campione su cui e' misurata: quando le due meta' non si somigliano, quello che vedi in "
+                 "cima alla classifica e' selezione, non edge.")
+            : "")+"</li>");
+
+         H("<li>Falsi breakout (il prezzo torna oltre l'estremo opposto del range) nel <b>"+
+           F(100.0*g_orb[i].nRev/MathMax(1,g_orb[i].nBrk),0)+"%</b> dei casi; MFE media "+
+           F(g_orb[i].sMfe/MathMax(1,tt),2)+" ATR contro MAE media "+F(g_orb[i].sMae/MathMax(1,tt),2)+
+           " ATR. Se la MFE e' molto sopra il target, il target e' troppo timido; se la MAE e' vicina allo "
+           "stop, lo stop e' troppo stretto per il rumore di questa finestra.</li>");
+
+         H("<li class=\"w\"><b>Sul 100% di sicurezza:</b> non esiste, e nessun filtro lo produce. Ogni filtro "
+           "che alza il win rate lo fa riducendo il numero di operazioni, e oltre un certo punto seleziona il "
+           "rumore che gli e' piaciuto in questo campione. Nella scheda <b>Breakout operativo</b> guarda "
+           "<b>delta E</b> insieme a <b>n</b>: un filtro serve solo se migliora il valore atteso senza "
+           "ridurre il campione a poche decine di operazioni in dieci anni.</li>");
       }
 
       // stabilita' fra anni: l'unico controllo che smonta davvero un falso segnale
@@ -3913,3 +4464,563 @@ void OnStart()
                (GetTickCount()-t0)/1000.0, InpOutDir);
 }
 //+------------------------------------------------------------------+
+
+//==================================================================
+//  SCHEDE "RANGE E BREAKOUT" E "BREAKOUT OPERATIVO"
+//
+//  La prima risponde a: in che fascia oraria conviene osservare il
+//  massimo e il minimo? La seconda: una volta rotto quel livello,
+//  quali filtri migliorano davvero l'esito e quali si limitano a
+//  ridurre il campione?
+//==================================================================
+void BuildOrb(string sym,string dir)
+{
+   string fn=SafeName(sym);
+
+   if(!InpDoOrb || g_nOrb<=0)
+   {
+      if(g_html!=INVALID_HANDLE)
+      {
+         H("<section><h2>Range e breakout</h2><div class=\"note\">Non generata: "
+           "InpDoOrb e' disattivato oppure nessuna finestra candidata e' compatibile con il timeframe base "
+           "(una finestra piu' corta della barra non ha senso).</div></section>");
+         H("<section><h2>Breakout operativo</h2><div class=\"note\">Non generata.</div></section>");
+      }
+      return;
+   }
+
+   //--- finestre ordinate per score (ATR attesi ogni 100 giornate, prudenziale)
+   int    ord[]; ArrayResize(ord,g_nOrb);
+   double sc[];  ArrayResize(sc,g_nOrb);
+   int nOk=0;
+   for(int i=0;i<g_nOrb;i++)
+   {
+      if(g_orb[i].n<InpOrbMinN) continue;
+      ord[nOk]=i; sc[nOk]=OrbScore(i); nOk++;
+   }
+   for(int i=1;i<nOk;i++)
+   {
+      int ki=ord[i]; double kv=sc[i]; int j=i-1;
+      while(j>=0 && sc[j]<kv){ ord[j+1]=ord[j]; sc[j+1]=sc[j]; j--; }
+      ord[j+1]=ki; sc[j+1]=kv;
+   }
+
+   //--- finestra da portare nella scheda operativa
+   g_orbSel=-1;
+   if(InpOrbFixStartMin>=0 && InpOrbFixDurMin>0)
+      for(int i=0;i<g_nOrb;i++)
+         if(g_orb[i].startMin==InpOrbFixStartMin && g_orb[i].durMin==InpOrbFixDurMin){ g_orbSel=i; break; }
+   bool selAuto=(g_orbSel<0);
+   if(g_orbSel<0 && nOk>0) g_orbSel=ord[0];
+
+   //=================================================================
+   //  CSV delle finestre
+   //=================================================================
+   if(InpWriteCsv)
+   {
+      int fO=FileOpen(dir+fn+"_orb_finestre.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+      if(fO!=INVALID_HANDLE)
+      {
+         W(fO,"inizio;durata_min;finestra;giornate;range_medio_atr;perc_rottura;perc_up;"
+              "n_esiti;win_perc;wlow_perc;irrisolti_perc;E_atr;E_low_atr;score_atr_100gg;"
+              "win_perc_meta1;win_perc_meta2;ritorni_perc;ambigue_perc;min_alla_rottura;mfe_medio_atr;mae_medio_atr\r\n");
+         for(int k=0;k<nOk;k++)
+         {
+            int i=ord[k];
+            int res=g_orb[i].win+g_orb[i].loss, tot=res+g_orb[i].flat;
+            W(fO,D2(g_orb[i].startMin/60)+":"+D2(g_orb[i].startMin%60)+";"+
+                 IntegerToString(g_orb[i].durMin)+";"+OrbLab(i)+";"+
+                 IntegerToString(g_orb[i].n)+";"+F(g_orb[i].sRange/g_orb[i].n,4)+";"+
+                 F(100.0*g_orb[i].nBrk/g_orb[i].n,2)+";"+
+                 (g_orb[i].nUp+g_orb[i].nDn>0?F(100.0*g_orb[i].nUp/(g_orb[i].nUp+g_orb[i].nDn),2):"")+";"+
+                 IntegerToString(res)+";"+(res>0?F(100.0*g_orb[i].win/res,2):"")+";"+
+                 (res>0?F(100.0*WilsonLowInd(g_orb[i].win,res),2):"")+";"+
+                 (tot>0?F(100.0*g_orb[i].flat/tot,2):"")+";"+
+                 F(OrbExp(g_orb[i].win,g_orb[i].loss,g_orb[i].flat),5)+";"+
+                 F(OrbExpLow(g_orb[i].win,g_orb[i].loss,g_orb[i].flat),5)+";"+
+                 F(OrbScore(i),4)+";"+
+                 (g_orb[i].res1>0?F(100.0*g_orb[i].win1/g_orb[i].res1,2):"")+";"+
+                 (g_orb[i].res2>0?F(100.0*g_orb[i].win2/g_orb[i].res2,2):"")+";"+
+                 (g_orb[i].nBrk>0?F(100.0*g_orb[i].nRev/g_orb[i].nBrk,2):"")+";"+
+                 (g_orb[i].nBrk>0?F(100.0*g_orb[i].nAmb/g_orb[i].nBrk,2):"")+";"+
+                 (tot>0?F(g_orb[i].sTtb/tot,1):"")+";"+
+                 (tot>0?F(g_orb[i].sMfe/tot,4):"")+";"+
+                 (tot>0?F(g_orb[i].sMae/tot,4):"")+"\r\n");
+         }
+         FileClose(fO);
+      }
+   }
+
+   //=================================================================
+   //  SCHEDA 1: RANGE E BREAKOUT
+   //=================================================================
+   if(g_html!=INVALID_HANDLE)
+   {
+      H("<section><h2>Dove si forma il range, e quanto vale romperlo</h2><div class=\"note\">"
+        "Lo script non decide a priori quale sia la fascia di accumulazione: prova <b>"+IntegerToString(g_nOrb)+
+        " finestre</b> diverse (ogni combinazione di ora di inizio e durata), per ognuna costruisce massimo e "
+        "minimo <b>solo con le barre dentro la finestra</b>, poi aspetta la rottura di uno dei due estremi entro "+
+        IntegerToString(InpOrbDeadlineMin)+" minuti e risolve target e stop a primo tocco. Target "+
+        F(InpOrbTargetAtr,2)+" ATR dal livello rotto, stop "+F(InpOrbTargetAtr*InpAdverseRatio,2)+
+        " ATR, orizzonte "+IntegerToString(InpScanHorizonMin)+" minuti. Gli orari sono quelli del server del "
+        "broker, contati dall'apertura della barra giornaliera.<br><br>"
+
+        "<b>Nessun dato successivo alla rottura entra nella decisione di entrare.</b> Anzi: la barra in cui il "
+        "livello viene rotto viene valutata <b>solo per lo stop, mai per il target</b>. Dentro una barra non si "
+        "conosce l'ordine dei prezzi, e regalarsi il target li' gonfierebbe il win rate senza motivo. E' una "
+        "scelta pessimistica: i numeri veri sono uguali o migliori di questi, mai peggiori.<br><br>"
+
+        "<b>Come si legge, per non prendere fischi per fiaschi.</b> Sono centinaia di finestre sovrapposte: la "
+        "prima della lista e' quasi sempre <i>fortunata</i>, non brava. Per questo la classifica NON e' ordinata "
+        "sul win rate ma su <b>score</b>, che parte dal limite inferiore di Wilson e quindi punisce da solo i "
+        "campioni piccoli. E per questo ci sono due colonne separate, <b>1a meta'</b> e <b>2a meta'</b> del "
+        "periodo: se una finestra funziona in una sola delle due, non e' un edge, e' rumore che si e' seduto in "
+        "cima alla lista. Fidati solo delle righe in cui le due meta' si somigliano, e guarda la matrice "
+        "sotto: un effetto vero forma un <b>altopiano</b> di celle vicine tutte decenti, non un picco isolato.</div>");
+
+      HtmlTableHead("tO1","#;finestra;durata min;giornate;range medio ATR;% rottura;% UP;n esiti;win%;wlow;"
+                          "irrisolti%;E ATR;score;win% 1a meta;win% 2a meta;ritorni%;min alla rottura;"
+                          "MFE medio;MAE medio",true);
+      int shown=0;
+      for(int k=0;k<nOk && shown<InpOrbTop;k++)
+      {
+         int i=ord[k];
+         int res=g_orb[i].win+g_orb[i].loss, tot=res+g_orb[i].flat;
+         if(res<=0) continue;
+         shown++;
+         double wr=100.0*g_orb[i].win/res;
+         double wl=100.0*WilsonLowInd(g_orb[i].win,res);
+         double e =OrbExp(g_orb[i].win,g_orb[i].loss,g_orb[i].flat);
+         double s =OrbScore(i);
+         double h1=(g_orb[i].res1>0?100.0*g_orb[i].win1/g_orb[i].res1:-1);
+         double h2=(g_orb[i].res2>0?100.0*g_orb[i].win2/g_orb[i].res2:-1);
+         // stabile = le due meta' non divergono di piu' di 8 punti e sono entrambe sopra il breakeven
+         double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
+         bool stab=(h1>=0 && h2>=0 && MathAbs(h1-h2)<8.0 && h1>be && h2>be);
+         string cls=(s>0 ? (stab?"hi":"nz") : "lo");
+         H("<tr><td>"+IntegerToString(shown)+(i==g_orbSel?" &#9656;":"")+"</td><td><b>"+OrbLab(i)+
+           "</b></td><td>"+IntegerToString(g_orb[i].durMin)+"</td><td>"+IntegerToString(g_orb[i].n)+
+           "</td><td>"+F(g_orb[i].sRange/g_orb[i].n,2)+"</td><td>"+F(100.0*g_orb[i].nBrk/g_orb[i].n,1)+
+           "</td><td>"+(g_orb[i].nUp+g_orb[i].nDn>0?F(100.0*g_orb[i].nUp/(g_orb[i].nUp+g_orb[i].nDn),1):"-")+
+           "</td><td>"+IntegerToString(res)+"</td><td>"+F(wr,1)+"</td><td class=\""+cls+"\">"+F(wl,1)+
+           "</td><td class=\"nz\">"+(tot>0?F(100.0*g_orb[i].flat/tot,1):"-")+"</td><td class=\""+
+           (e>0?"up":"dn")+"\">"+F(e,3)+"</td><td class=\""+cls+"\"><b>"+F(s,2)+"</b></td><td>"+
+           (h1>=0?F(h1,1):"-")+"</td><td>"+(h2>=0?F(h2,1):"-")+"</td><td class=\"nz\">"+
+           (g_orb[i].nBrk>0?F(100.0*g_orb[i].nRev/g_orb[i].nBrk,1):"-")+"</td><td>"+
+           (tot>0?F(g_orb[i].sTtb/tot,0):"-")+"</td><td>"+(tot>0?F(g_orb[i].sMfe/tot,2):"-")+
+           "</td><td>"+(tot>0?F(g_orb[i].sMae/tot,2):"-")+"</td></tr>");
+      }
+      HtmlTableEnd();
+      if(nOk==0)
+         H("<div class=\"note\">Nessuna finestra raggiunge <b>"+IntegerToString(InpOrbMinN)+
+           "</b> giornate valide: allunga il periodo o abbassa InpOrbMinN.</div>");
+
+      //--- matrice inizio x durata: serve a vedere l'altopiano, non il picco
+      H("<h2>Matrice inizio finestra x durata</h2><div class=\"note\">"
+        "Lo stesso <b>score</b> della classifica, disposto per ora di inizio (righe) e durata (colonne). "
+        "E' il grafico che smonta l'overfitting meglio di qualunque test: se il valore alto e' <b>isolato</b>, "
+        "circondato da celle mediocri, e' fortuna del campione; se forma una <b>macchia continua</b>, la fascia "
+        "oraria conta davvero e la durata esatta e' un dettaglio. Le celle sotto "+IntegerToString(InpOrbMinN)+
+        " giornate sono lasciate vuote.</div>");
+      {
+         // durate distinte, nell'ordine in cui compaiono
+         int du[]; int nDu=0; ArrayResize(du,0);
+         for(int i=0;i<g_nOrb;i++)
+         {
+            bool seen=false;
+            for(int q=0;q<nDu;q++) if(du[q]==g_orb[i].durMin){ seen=true; break; }
+            if(!seen){ ArrayResize(du,nDu+1); du[nDu]=g_orb[i].durMin; nDu++; }
+         }
+         for(int a=1;a<nDu;a++){ int kk=du[a]; int j=a-1; while(j>=0 && du[j]>kk){ du[j+1]=du[j]; j--; } du[j+1]=kk; }
+
+         double best=0.0, worst=0.0;
+         for(int i=0;i<g_nOrb;i++)
+         {
+            if(g_orb[i].n<InpOrbMinN) continue;
+            double v=OrbScore(i);
+            if(v>best) best=v;
+            if(v<worst) worst=v;
+         }
+
+         H("<div class=\"wrap\"><table class=\"mx\" id=\"tO2\"><thead><tr><th>inizio</th>");
+         for(int q=0;q<nDu;q++) H("<th>"+IntegerToString(du[q])+"m</th>");
+         H("</tr></thead><tbody>");
+         int prevStart=-1;
+         for(int i=0;i<g_nOrb;i++)
+         {
+            if(g_orb[i].startMin==prevStart) continue;
+            prevStart=g_orb[i].startMin;
+            H("<tr><td>"+D2(prevStart/60)+":"+D2(prevStart%60)+"</td>");
+            for(int q=0;q<nDu;q++)
+            {
+               int hit=-1;
+               for(int z=0;z<g_nOrb;z++)
+                  if(g_orb[z].startMin==prevStart && g_orb[z].durMin==du[q]){ hit=z; break; }
+               if(hit<0 || g_orb[hit].n<InpOrbMinN){ H("<td class=\"z\">.</td>"); continue; }
+               double v=OrbScore(hit);
+               string bg;
+               if(v>0 && best>0)      bg="rgba(78,190,120,"+F(0.10+0.75*(v/best),2)+")";
+               else if(v<0 && worst<0) bg="rgba(226,90,90,"+F(0.10+0.75*(v/worst),2)+")";
+               else                    bg="transparent";
+               int rs=g_orb[hit].win+g_orb[hit].loss;
+               string tip=OrbLab(hit)+" | "+IntegerToString(g_orb[hit].n)+" giornate, "+
+                          IntegerToString(rs)+" esiti | win "+(rs>0?F(100.0*g_orb[hit].win/rs,1):"-")+"%";
+               H("<td style=\"background:"+bg+"\" title=\""+tip+"\">"+F(v,2)+"</td>");
+            }
+            H("</tr>");
+         }
+         H("</tbody></table></div>");
+      }
+
+      //--- la finestra migliore per ciascun giorno della settimana
+      H("<h2>La finestra migliore per ogni giorno della settimana</h2><div class=\"note\">"
+        "Stessa misura, ristretta a un giorno alla volta. Serve a rispondere a una domanda diversa dalla "
+        "classifica generale: <b>non</b> quale finestra e' la migliore in assoluto, ma se il lunedi' vada "
+        "osservato in un momento diverso dal giovedi'. Attenzione: dividendo per sette il campione, ogni riga "
+        "ha un settimo dei dati e la probabilita' che il primo posto sia casuale sale di conseguenza. Se la "
+        "finestra vincente e' <b>la stessa o quasi</b> in tutti i giorni, la divisione per giorno non serve: "
+        "usa la classifica generale e risparmia campione.</div>");
+      HtmlTableHead("tO3","giorno;finestra migliore;durata min;giornate;% rottura;n esiti;win%;wlow;E ATR;score",false);
+      for(int d=1;d<=5;d++)
+      {
+         int bi=-1; double bv=-1e9;
+         for(int i=0;i<g_nOrb;i++)
+         {
+            if(g_orb[i].dN[d]<InpOrbMinN/3) continue;
+            int rs=g_orb[i].dRes[d];
+            if(rs<20) continue;
+            double pb=(double)g_orb[i].dBrk[d]/(double)g_orb[i].dN[d];
+            int wn=g_orb[i].dWin[d], ls=rs-wn;
+            int fl=g_orb[i].dBrk[d]-rs;
+            double v=100.0*pb*OrbExpLow(wn,ls,fl);
+            if(v>bv){ bv=v; bi=i; }
+         }
+         if(bi<0){ H("<tr><td><b>"+DowIT(d)+"</b></td><td colspan=\"9\">campione insufficiente</td></tr>"); continue; }
+         int rs=g_orb[bi].dRes[d], wn=g_orb[bi].dWin[d];
+         H("<tr><td><b>"+DowIT(d)+"</b></td><td>"+OrbLab(bi)+"</td><td>"+IntegerToString(g_orb[bi].durMin)+
+           "</td><td>"+IntegerToString(g_orb[bi].dN[d])+"</td><td>"+
+           F(100.0*g_orb[bi].dBrk[d]/g_orb[bi].dN[d],1)+"</td><td>"+IntegerToString(rs)+"</td><td>"+
+           F(100.0*wn/rs,1)+"</td><td>"+F(100.0*WilsonLowInd(wn,rs),1)+"</td><td class=\""+
+           (OrbExp(wn,rs-wn,g_orb[bi].dBrk[d]-rs)>0?"up":"dn")+"\">"+
+           F(OrbExp(wn,rs-wn,g_orb[bi].dBrk[d]-rs),3)+"</td><td class=\""+(bv>0?"hi":"lo")+"\"><b>"+
+           F(bv,2)+"</b></td></tr>");
+      }
+      HtmlTableEnd();
+      H("</section>");
+   }
+
+   //=================================================================
+   //  SCHEDA 2: BREAKOUT OPERATIVO
+   //  H() e' inerte quando l'HTML non e' richiesto, quindi il blocco
+   //  gira comunque: il CSV dei breakout deve uscire in ogni caso.
+   //=================================================================
+   if(g_orbSel<0 || g_nBk<=0)
+   {
+      H("<section><h2>Breakout operativo</h2><div class=\"note\">Nessuna finestra selezionabile: "
+        "nessuna raggiunge InpOrbMinN giornate, oppure non e' stato registrato alcun breakout.</div></section>");
+      return;
+   }
+
+   // indici dei breakout della finestra selezionata
+   int sel[]; int nSel=0; ArrayResize(sel,0);
+   for(int i=0;i<g_nBk;i++)
+      if(g_bk[i].w==g_orbSel){ ArrayResize(sel,nSel+1,4096); sel[nSel]=i; nSel++; }
+
+   H("<section><h2>Breakout operativo sulla finestra "+OrbLab(g_orbSel)+"</h2><div class=\"note\">");
+   H("Finestra di osservazione <b>"+OrbLab(g_orbSel)+"</b> ("+IntegerToString(g_orb[g_orbSel].durMin)+
+     " minuti), scelta "+(selAuto?"<b>dallo script</b>, come prima della classifica accanto"
+                                 :"<b>a mano</b> con InpOrbFixStartMin / InpOrbFixDurMin")+
+     ". Qui si entra allo stop sul livello rotto e si testa cosa succede applicando un filtro alla volta: "
+     "tutti i filtri leggono <b>solo dati chiusi prima della barra della rottura</b>.<br><br>");
+
+   if(g_bkCap)
+      H("<b class=\"w\">Campione troncato.</b> E' stato raggiunto il tetto di "+
+        IntegerToString(InpOrbMaxRec)+" breakout memorizzati (InpOrbMaxRec): le rotture registrate si fermano "
+        "a meta' periodo e le tabelle qui sotto descrivono solo la prima parte della storia. Alza InpOrbMaxRec "
+        "oppure restringi la griglia delle finestre.<br><br>");
+
+   if(selAuto)
+      H("<b class=\"w\">Avvertenza che conta piu' di ogni numero in questa pagina.</b> La finestra e' stata "
+        "scelta come migliore sullo stesso campione su cui viene ora misurata. E' selezione in-sample: una "
+        "parte del vantaggio che leggi qui e' fortuna, per costruzione. Le colonne <b>1a meta'</b> e "
+        "<b>2a meta'</b> nella scheda accanto servono esattamente a quantificare quanta. Se vuoi un numero "
+        "onesto, fissa la finestra con InpOrbFixStartMin e rilancia lo script su un periodo o un simbolo "
+        "diversi.<br><br>");
+
+   H("<b>E qui la risposta secca alla domanda 'per essere sicuri al 100%'.</b> Non esiste, e non e' pessimismo: "
+     "e' come sono fatti i dati. Un filtro che alza il win rate lo fa <b>sempre</b> riducendo il numero di "
+     "operazioni, e oltre un certo punto sta solo selezionando il rumore che gli e' piaciuto in questo "
+     "campione. Il segnale che filtri sei o sette variabili fino ad arrivare al 90% non e' un segnale forte: "
+     "e' un segnale morto, con venti operazioni in dieci anni. Guarda la colonna <b>delta E</b> insieme a "
+     "<b>n</b>: un filtro serve solo se migliora il valore atteso <b>senza</b> tagliare il campione a "
+     "fettine. Se nessun filtro produce un delta positivo stabile, la lettura corretta e' che la direzione "
+     "della rottura non e' prevedibile con questi strumenti, e allora la si tratta come un'operazione a "
+     "rischio definito, non come una certezza.</div>");
+
+   //--- soglie derivate dalla distribuzione: mediane e quartile
+   double aR[], aV[], aT[];
+   ArrayResize(aR,nSel); ArrayResize(aV,nSel); ArrayResize(aT,nSel);
+   for(int q=0;q<nSel;q++)
+   {
+      aR[q]=g_bk[sel[q]].rangeAtr;
+      aV[q]=g_bk[sel[q]].vol;
+      aT[q]=g_bk[sel[q]].ttb;
+   }
+   double cR[]; ArrayCopy(cR,aR); ArraySort(cR);
+   double q25=(nSel>0?cR[(int)(nSel*0.25)]:0.0);
+   double q50=Median(aR);
+   double v50=Median(aV);
+   double t50=Median(aT);
+
+   //--- riepilogo della finestra
+   {
+      int res=g_orb[g_orbSel].win+g_orb[g_orbSel].loss, tot=res+g_orb[g_orbSel].flat;
+      H("<div class=\"sum\">");
+      H("<div class=\"card\"><span>finestra</span><b>"+OrbLab(g_orbSel)+"</b></div>");
+      H("<div class=\"card\"><span>giornate</span><b>"+IntegerToString(g_orb[g_orbSel].n)+"</b></div>");
+      H("<div class=\"card\"><span>rotture</span><b>"+IntegerToString(g_orb[g_orbSel].nBrk)+" ("+
+        F(100.0*g_orb[g_orbSel].nBrk/MathMax(1,g_orb[g_orbSel].n),0)+"%)</b></div>");
+      H("<div class=\"card\"><span>win rate</span><b>"+(res>0?F(100.0*g_orb[g_orbSel].win/res,1):"-")+"%</b></div>");
+      H("<div class=\"card\"><span>valore atteso</span><b>"+
+        F(OrbExp(g_orb[g_orbSel].win,g_orb[g_orbSel].loss,g_orb[g_orbSel].flat),3)+" ATR</b></div>");
+      H("<div class=\"card\"><span>range mediano</span><b>"+F(q50,2)+" ATR</b></div>");
+      H("<div class=\"card\"><span>breakeven richiesto</span><b>"+
+        F(100.0*InpAdverseRatio/(1.0+InpAdverseRatio),1)+"%</b></div>");
+      H("<div class=\"card\"><span>irrisolti</span><b>"+
+        (tot>0?F(100.0*g_orb[g_orbSel].flat/tot,1):"-")+"%</b></div>");
+      H("</div>");
+   }
+
+   //--- tabella dei filtri
+   H("<h2>Effetto dei filtri sulla rottura</h2><div class=\"note\">"
+     "Ogni riga applica <b>un solo filtro</b> ai breakout della finestra. <b>delta E</b> e' la differenza di "
+     "valore atteso rispetto alla riga senza filtro: e' l'unica colonna che dice se il filtro serve. "
+     "<b>wlow</b> e' il limite inferiore di Wilson al 95% sul win rate; se resta sotto il <b>breakeven "
+     "richiesto</b> ("+F(100.0*InpAdverseRatio/(1.0+InpAdverseRatio),1)+"% con questo rapporto stop/target), "
+     "quel filtro non ha dimostrato nulla, per quanto bello sia il win rate grezzo.<br><br>"
+     "I filtri di intensita' e volatilita' guardano le "+IntegerToString(InpOrbMomBars)+
+     " barre <b>che precedono</b> la rottura, mai quella in cui avviene: e' l'unico modo di misurare la "
+     "forza senza barare.</div>");
+
+   HtmlTableHead("tO4","filtro;n;% dei breakout;win%;wlow;irrisolti%;E ATR;delta E;MFE medio;MAE medio",true);
+
+   // I nomi si costruiscono una volta sola: dentro il ciclo sui breakout
+   // sarebbero decine di migliaia di concatenazioni di stringa per niente.
+   string fName[20];
+   fName[0] ="nessun filtro (tutte le rotture)";
+   fName[1] ="CCI concorde oltre "+F(InpCciCross,0);
+   fName[2] ="CCI concorde (solo segno)";
+   fName[3] ="CCI contrario alla rottura";
+   fName[4] ="RSI non contrario (oltre 50 nel verso)";
+   fName[5] ="RSI estremo concorde ("+F(InpRsiHigh,0)+"/"+F(InpRsiLow,0)+")";
+   fName[6] ="RSI estremo contrario";
+   fName[7] ="Z-Score concorde";
+   fName[8] ="Z-Score oltre "+F(InpZsHigh,1)+" nel verso";
+   fName[9] ="intensita' concorde (oltre "+F(InpOrbMomMinAtr,2)+" ATR)";
+   fName[10]="intensita' contraria";
+   fName[11]="compressione forte (range entro "+F(q25,2)+" ATR)";
+   fName[12]="compressione media (range entro "+F(q50,2)+" ATR)";
+   fName[13]="range largo (oltre "+F(q50,2)+" ATR)";
+   fName[14]="volatilita' pre-rottura bassa (entro "+F(v50,2)+" ATR)";
+   fName[15]="volatilita' pre-rottura alta";
+   fName[16]="rottura veloce (entro "+F(t50,0)+" min)";
+   fName[17]="rottura lenta";
+   fName[18]="CCI concorde + compressione entro mediana";
+   fName[19]="CCI concorde + intensita' concorde";
+
+   double baseE=0.0;
+   for(int f=0; f<20; f++)
+   {
+      string nm=fName[f];
+      int n=0, wn=0, ls=0, fl=0; double sM=0.0, sA=0.0;
+      for(int q=0;q<nSel;q++)
+      {
+         int b=sel[q];
+         int    dr=(int)g_bk[b].dir;
+         double cc=g_bk[b].cci, rs=g_bk[b].rsi, zz=g_bk[b].zs;
+         double rg=g_bk[b].rangeAtr, mo=g_bk[b].mom, vo=g_bk[b].vol, tt=g_bk[b].ttb;
+         bool ok=false;
+         switch(f)
+         {
+            case 0:  ok=true; break;
+            case 1:  ok=(dr*cc> InpCciCross); break;
+            case 2:  ok=(dr*cc> 0.0); break;
+            case 3:  ok=(dr*cc< 0.0); break;
+            case 4:  ok=(dr>0? rs>50.0 : rs<50.0); break;
+            case 5:  ok=(dr>0? rs>InpRsiHigh : rs<InpRsiLow); break;
+            case 6:  ok=(dr>0? rs<InpRsiLow  : rs>InpRsiHigh); break;
+            case 7:  ok=(dr*zz> 0.0); break;
+            case 8:  ok=(dr*zz> InpZsHigh); break;
+            case 9:  ok=(mo> InpOrbMomMinAtr); break;
+            case 10: ok=(mo< -InpOrbMomMinAtr); break;
+            case 11: ok=(rg<=q25); break;
+            case 12: ok=(rg<=q50); break;
+            case 13: ok=(rg> q50); break;
+            case 14: ok=(vo<=v50); break;
+            case 15: ok=(vo> v50); break;
+            case 16: ok=(tt<=t50); break;
+            case 17: ok=(tt> t50); break;
+            case 18: ok=(dr*cc>InpCciCross && rg<=q50); break;
+            case 19: ok=(dr*cc>InpCciCross && mo>InpOrbMomMinAtr); break;
+         }
+         if(!ok) continue;
+         n++;
+         if(g_bk[b].res>0) wn++; else if(g_bk[b].res<0) ls++; else fl++;
+         sM+=g_bk[b].mfe; sA+=g_bk[b].mae;
+      }
+      if(n<20 && f>0) continue;
+      int res=wn+ls;
+      double e=OrbExp(wn,ls,fl);
+      if(f==0) baseE=e;
+      double wl=(res>0?100.0*WilsonLowInd(wn,res):0.0);
+      double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
+      double de=e-baseE;
+      string cd=(f==0?"nz":(de>=0.01?"hi":(de<=-0.01?"lo":"nz")));
+      H("<tr><td>"+(f==0?"<b>":"")+HE(nm)+(f==0?"</b>":"")+"</td><td>"+IntegerToString(n)+"</td><td>"+
+        F(100.0*n/MathMax(1,nSel),1)+"</td><td>"+(res>0?F(100.0*wn/res,1):"-")+"</td><td class=\""+
+        (wl>be?"hi":"lo")+"\">"+F(wl,1)+"</td><td class=\"nz\">"+
+        (n>0?F(100.0*fl/n,1):"-")+"</td><td class=\""+(e>0?"up":"dn")+"\">"+F(e,3)+"</td><td class=\""+cd+
+        "\"><b>"+(f==0?"-":F(de,3))+"</b></td><td>"+(n>0?F(sM/n,2):"-")+"</td><td>"+
+        (n>0?F(sA/n,2):"-")+"</td></tr>");
+   }
+   HtmlTableEnd();
+
+   //--- ora della rottura
+   H("<h2>A che ora avviene la rottura</h2><div class=\"note\">"
+     "La finestra dice <b>dove guardare</b>, questa tabella dice <b>quando arriva</b> il segnale e se l'ora "
+     "in cui arriva cambia l'esito. Una rottura che avviene alle 15:30 e una che avviene alle 21:00 partono "
+     "dallo stesso livello ma non incontrano lo stesso mercato.</div>");
+   HtmlTableHead("tO5","ora della rottura;n;% dei breakout;% UP;win%;wlow;E ATR;MFE medio;MAE medio",false);
+   for(int h=0;h<24;h++)
+   {
+      int n=0, wn=0, ls=0, fl=0, up=0; double sM=0.0, sA=0.0;
+      for(int q=0;q<nSel;q++)
+      {
+         int b=sel[q];
+         if((int)g_bk[b].hour!=h) continue;
+         n++;
+         if(g_bk[b].dir>0) up++;
+         if(g_bk[b].res>0) wn++; else if(g_bk[b].res<0) ls++; else fl++;
+         sM+=g_bk[b].mfe; sA+=g_bk[b].mae;
+      }
+      if(n<20) continue;
+      int res=wn+ls;
+      double e=OrbExp(wn,ls,fl);
+      double wl=(res>0?100.0*WilsonLowInd(wn,res):0.0);
+      double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
+      H("<tr><td><b>"+D2(h)+":00</b></td><td>"+IntegerToString(n)+"</td><td>"+
+        F(100.0*n/MathMax(1,nSel),1)+"</td><td>"+F(100.0*up/n,1)+"</td><td>"+
+        (res>0?F(100.0*wn/res,1):"-")+"</td><td class=\""+(wl>be?"hi":"lo")+"\">"+F(wl,1)+
+        "</td><td class=\""+(e>0?"up":"dn")+"\">"+F(e,3)+"</td><td>"+F(sM/n,2)+"</td><td>"+
+        F(sA/n,2)+"</td></tr>");
+   }
+   HtmlTableEnd();
+
+   //--- classifica giorno x ora della rottura, stessa forma della scheda Classifica
+   H("<h2>Classifica delle rotture per giorno e ora</h2><div class=\"note\">"
+     "Stessa struttura della Classifica delle finestre operative, applicata pero' alle rotture di questa "
+     "finestra: ogni riga e' un giorno della settimana a una certa ora. Ordinata per <b>score</b> (valore "
+     "atteso prudenziale moltiplicato per quante rotture porta), non per win rate: una cella al 70% con "
+     "dodici operazioni non vale una al 56% con duecento.</div>");
+   HtmlTableHead("tO6","#;giorno;ora rottura;n;% UP;win%;wlow;E ATR;score",true);
+   {
+      int    rd[], rh[], rn[], rw[], rl[], rf[], ru[];
+      double rs2[];
+      int nr=0;
+      ArrayResize(rd,7*24); ArrayResize(rh,7*24); ArrayResize(rn,7*24);
+      ArrayResize(rw,7*24); ArrayResize(rl,7*24); ArrayResize(rf,7*24);
+      ArrayResize(ru,7*24); ArrayResize(rs2,7*24);
+      for(int d=0;d<7;d++)
+         for(int h=0;h<24;h++)
+         {
+            int n=0, wn=0, ls=0, fl=0, up=0;
+            for(int q=0;q<nSel;q++)
+            {
+               int b=sel[q];
+               if((int)g_bk[b].dow!=d || (int)g_bk[b].hour!=h) continue;
+               n++;
+               if(g_bk[b].dir>0) up++;
+               if(g_bk[b].res>0) wn++; else if(g_bk[b].res<0) ls++; else fl++;
+            }
+            if(n<InpRankMinN) continue;
+            rd[nr]=d; rh[nr]=h; rn[nr]=n; rw[nr]=wn; rl[nr]=ls; rf[nr]=fl; ru[nr]=up;
+            rs2[nr]=100.0*((double)n/MathMax(1,g_orb[g_orbSel].n))*OrbExpLow(wn,ls,fl);
+            nr++;
+         }
+      for(int a=1;a<nr;a++)
+      {
+         int d1=rd[a],h1=rh[a],n1=rn[a],w1=rw[a],l1=rl[a],f1=rf[a],u1=ru[a]; double v1=rs2[a];
+         int j=a-1;
+         while(j>=0 && rs2[j]<v1)
+         {
+            rd[j+1]=rd[j]; rh[j+1]=rh[j]; rn[j+1]=rn[j]; rw[j+1]=rw[j];
+            rl[j+1]=rl[j]; rf[j+1]=rf[j]; ru[j+1]=ru[j]; rs2[j+1]=rs2[j]; j--;
+         }
+         rd[j+1]=d1; rh[j+1]=h1; rn[j+1]=n1; rw[j+1]=w1; rl[j+1]=l1; rf[j+1]=f1; ru[j+1]=u1; rs2[j+1]=v1;
+      }
+      double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
+      for(int a=0;a<nr && a<InpOrbTop;a++)
+      {
+         int res=rw[a]+rl[a];
+         double wl=(res>0?100.0*WilsonLowInd(rw[a],res):0.0);
+         H("<tr><td>"+IntegerToString(a+1)+"</td><td><b>"+DowIT(rd[a])+"</b></td><td>"+D2(rh[a])+
+           ":00</td><td>"+IntegerToString(rn[a])+"</td><td>"+F(100.0*ru[a]/rn[a],1)+"</td><td>"+
+           (res>0?F(100.0*rw[a]/res,1):"-")+"</td><td class=\""+(wl>be?"hi":"lo")+"\">"+F(wl,1)+
+           "</td><td class=\""+(OrbExp(rw[a],rl[a],rf[a])>0?"up":"dn")+"\">"+
+           F(OrbExp(rw[a],rl[a],rf[a]),3)+"</td><td class=\""+(rs2[a]>0?"hi":"lo")+"\"><b>"+
+           F(rs2[a],2)+"</b></td></tr>");
+      }
+      HtmlTableEnd();
+
+      //--- le migliori ore di ciascun giorno, numerazione che riparte
+      H("<h2>Le "+IntegerToString(InpRankPerDay)+" ore migliori di ogni giorno</h2><div class=\"note\">"
+        "La stessa classifica spezzata per giorno, con la numerazione che riparte da 1. Lo <b>score</b> resta "
+        "sulla scala comune: se il primo posto di un giorno ha uno score basso, quel giorno non va operato, "
+        "anche se in quella riga e' primo.</div>");
+      HtmlTableHead("tO7","giorno;#;ora rottura;n;% UP;win%;wlow;E ATR;score",true);
+      for(int d=1;d<=5;d++)
+      {
+         int cnt=0;
+         for(int a=0;a<nr && cnt<InpRankPerDay;a++)
+         {
+            if(rd[a]!=d) continue;
+            cnt++;
+            int res=rw[a]+rl[a];
+            double wl=(res>0?100.0*WilsonLowInd(rw[a],res):0.0);
+            H("<tr><td><b>"+DowIT(d)+"</b></td><td>"+IntegerToString(cnt)+"</td><td>"+D2(rh[a])+
+              ":00</td><td>"+IntegerToString(rn[a])+"</td><td>"+F(100.0*ru[a]/rn[a],1)+"</td><td>"+
+              (res>0?F(100.0*rw[a]/res,1):"-")+"</td><td class=\""+(wl>be?"hi":"lo")+"\">"+F(wl,1)+
+              "</td><td class=\""+(OrbExp(rw[a],rl[a],rf[a])>0?"up":"dn")+"\">"+
+              F(OrbExp(rw[a],rl[a],rf[a]),3)+"</td><td class=\""+(rs2[a]>0?"hi":"lo")+"\"><b>"+
+              F(rs2[a],2)+"</b></td></tr>");
+         }
+         if(cnt==0)
+            H("<tr><td><b>"+DowIT(d)+"</b></td><td colspan=\"8\">nessuna cella con almeno "+
+              IntegerToString(InpRankMinN)+" rotture</td></tr>");
+      }
+      HtmlTableEnd();
+   }
+   H("</section>");
+
+   //--- CSV dei filtri e delle rotture della finestra scelta
+   if(InpWriteCsv)
+   {
+      int fF=FileOpen(dir+fn+"_orb_breakout.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+      if(fF!=INVALID_HANDLE)
+      {
+         W(fF,"finestra;giorno;ora;direzione;esito;anno;range_atr;intensita_atr;volatilita_atr;"
+              "cci;rsi;zscore;mfe_atr;mae_atr;min_alla_rottura\r\n");
+         for(int q=0;q<nSel;q++)
+         {
+            int b=sel[q];
+            W(fF,OrbLab(g_orbSel)+";"+DowIT((int)g_bk[b].dow)+";"+D2((int)g_bk[b].hour)+":00;"+
+                 (g_bk[b].dir>0?"UP":"DOWN")+";"+
+                 (g_bk[b].res>0?"TARGET":(g_bk[b].res<0?"STOP":"IRRISOLTO"))+";"+
+                 IntegerToString(g_bk[b].year)+";"+F(g_bk[b].rangeAtr,4)+";"+F(g_bk[b].mom,4)+";"+
+                 F(g_bk[b].vol,4)+";"+F(g_bk[b].cci,2)+";"+F(g_bk[b].rsi,2)+";"+F(g_bk[b].zs,3)+";"+
+                 F(g_bk[b].mfe,4)+";"+F(g_bk[b].mae,4)+";"+F(g_bk[b].ttb,1)+"\r\n");
+         }
+         FileClose(fF);
+      }
+   }
+}
