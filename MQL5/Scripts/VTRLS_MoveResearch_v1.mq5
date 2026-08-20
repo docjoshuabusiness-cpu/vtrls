@@ -102,7 +102,11 @@ input int             InpRankPerDay     = 5;               // Quante ore miglior
 
 input string          sInd              = "=== INDICATORI (RSI / CCI / Z-SCORE) ===";
 input bool            InpDoIndicators   = true;            // Calcola le statistiche degli indicatori
-input ENUM_TIMEFRAMES InpIndTF          = PERIOD_M15;      // TF su cui calcolare gli indicatori
+input ENUM_TIMEFRAMES InpIndTF1         = PERIOD_M15;      // TF indicatori 1
+input ENUM_TIMEFRAMES InpIndTF2         = PERIOD_M5;       // TF indicatori 2
+input ENUM_TIMEFRAMES InpIndTF3         = PERIOD_M1;       // TF indicatori 3
+input int             InpIndTfMain      = 1;               // Quale dei tre guida condizioni e classifiche (1/2/3)
+input bool            InpIndTfCompare   = true;            // Calcola anche gli altri due TF (a false gira solo il principale, piu' veloce)
 input int             InpRsiPeriod      = 14;              // Periodo RSI
 input double          InpRsiHigh        = 70.0;            // Soglia RSI ipercomprato
 input double          InpRsiLow         = 30.0;            // Soglia RSI ipervenduto
@@ -250,6 +254,26 @@ int   g_slotMask=0;
 // log a livelli: 1=normale, 2=verboso, 3=dump per giornata
 void DBG(int lvl, string msg){ if(InpDebug>=lvl) Print(msg); }
 string MS(uint t0){ return "["+DoubleToString((GetTickCount()-t0)/1000.0,2)+"s]"; }
+
+// I tre timeframe su cui girano gli indicatori. Lo stesso RSI/CCI/Z-Score
+// cambia completamente significato col timeframe: su M1 un'uscita dal range
+// del CCI e' quasi sempre rumore, su M15 e' una fase di mercato. Calcolarli
+// tutti e tre nella stessa passata e' l'unico modo per distinguere le due
+// cose senza confrontare run diversi (e quindi campioni diversi).
+ENUM_TIMEFRAMES IndTF(int t)
+{
+   if(t==1) return InpIndTF2;
+   if(t==2) return InpIndTF3;
+   return InpIndTF1;
+}
+// indice 0..2 del timeframe che alimenta condizioni, setup e classifiche
+int IndMain(){ int k=InpIndTfMain-1; return (k<0||k>2 ? 0 : k); }
+string IndTfName(int t)
+{
+   string x=EnumToString(IndTF(t));      // "PERIOD_M15"
+   int u=StringFind(x,"_");
+   return (u>=0 ? StringSubstr(x,u+1) : x);
+}
 
 int TFMinutes(ENUM_TIMEFRAMES tf)
 {
@@ -1051,6 +1075,16 @@ void HtmlHead(string sym)
      "smoothing di Wilder</td></tr>");
    H("<tr><td><b>CCI</b></td><td>Commodity Channel Index a <i>"+IntegerToString(InpCciPeriod)+"</i> periodi "
      "su prezzo tipico</td></tr>");
+   H("<tr><td><b>TF indicatori</b></td><td>Il timeframe su cui RSI, CCI e Z-Score vengono calcolati: "
+     +IndTfName(0)+", "+IndTfName(1)+" e "+IndTfName(2)+". Gli istanti osservati e l'esito forward sono gli "
+     "stessi per tutti e tre, cambia solo la barra su cui si legge il valore. Condizioni e classifiche usano "
+     "il solo <b>"+IndTfName(IndMain())+"</b>: mescolare timeframe dentro un segnale lo renderebbe "
+     "irreplicabile a mercato</td></tr>");
+   H("<tr><td><b>%ist</b></td><td>Quota di istanti che si trovano in quello stato. Alta non vuol dire utile: "
+     "uno stato presente nel 79% del tempo non e' un filtro</td></tr>");
+   H("<tr><td><b>concordi</b></td><td>Nel confronto fra timeframe: i tre TF danno delta dello stesso segno in "
+     "quell'ora. E' l'unica forma di conferma che vale, perche' l'alternativa - scegliere il TF col numero "
+     "migliore - e' overfitting con tre tentativi</td></tr>");
    H("<tr><td><b>movimento pulito</b></td><td>Sequenza di barre consecutive nella stessa direzione: il prezzo "
      "avanza invece di oscillare sul posto</td></tr>");
    H("<tr><td><b>efficienza</b></td><td>Ampiezza netta diviso la somma dei range percorsi. 1.00 = movimento "
@@ -1662,6 +1696,12 @@ bool ProcessSymbol(string sym)
    int    bmN[7][96][3];
    // confronto fra periodi CCI: [periodo][ora][stato]
    int    pkN[3][24][3], pkHit[3][24][3], pkUp[3][24][3], pkDn[3][24][3];
+   // confronto fra i tre TF degli indicatori
+   // stati: 0=tutti gli istanti (riferimento), 1=RSI alto, 2=RSI basso,
+   //        3=Z alto, 4=Z basso, 5=uscita CCI UP, 6=uscita CCI DOWN
+   int    tfN[3][7], tfHit[3][7], tfUp[3][7], tfDn[3][7];
+   // uscita CCI per TF e per ora: [tf][ora][0=DOWN,1=nessuna,2=UP]
+   int    thN[3][24][3], thHit[3][24][3];
    int    indN[7][24], zHi[7][24], zLo[7][24], rHi[7][24], rLo[7][24];
    int    cHi[7][24], cLo[7][24], cPos[7][24];
    int    cntM[96], buyM[96], bigM[96];  double sAtM[96];
@@ -1681,6 +1721,8 @@ bool ProcessSymbol(string sym)
    ArrayInitialize(rdN,0); ArrayInitialize(rdAtr,0.0); ArrayInitialize(rdEff,0.0);
    ArrayInitialize(rdDur,0.0); ArrayInitialize(rdVel,0.0); ArrayInitialize(rmN,0);
    ArrayInitialize(pkN,0); ArrayInitialize(pkHit,0); ArrayInitialize(pkUp,0); ArrayInitialize(pkDn,0);
+   ArrayInitialize(tfN,0); ArrayInitialize(tfHit,0); ArrayInitialize(tfUp,0); ArrayInitialize(tfDn,0);
+   ArrayInitialize(thN,0); ArrayInitialize(thHit,0);
    g_nRb=0; ArrayResize(g_rb,0);
    ArrayInitialize(indN,0); ArrayInitialize(zHi,0); ArrayInitialize(zLo,0);
    ArrayInitialize(rHi,0);  ArrayInitialize(rLo,0);
@@ -1996,41 +2038,69 @@ bool ProcessSymbol(string sym)
          }
       }
 
-      //--- serie degli indicatori sul TF dedicato, con warm-up prima del giorno
-      MqlRates ri[];
-      double rsiB[], cciB[], zsB[], cciB2[], cciB3[];
-      int nInd=0, indTfSec=0, ip=0;
+      //--- serie degli indicatori sui TRE TF, con warm-up prima del giorno.
+      // Le tre serie sono tenute in array a due dimensioni [barra][tf]: solo la
+      // prima dimensione e' ridimensionabile in MQL5, quindi il tf sta in coda.
+      datetime iTime[][3];
+      double   iRsi[][3], iCci[][3], iZs[][3], iCci2[][3], iCci3[][3];
+      int      nIndT[3];  ArrayInitialize(nIndT,0);
+      int      indSec[3]; ArrayInitialize(indSec,0);
+      int      ipT[3];    ArrayInitialize(ipT,0);
+      // il warm-up deve coprire il periodo piu' lungo di tutti gli indicatori,
+      // CCI 2 e 3 compresi, altrimenti quei due partono male
+      int need=(int)MathMax(InpRsiPeriod,MathMax(InpZsPeriod,
+               MathMax(InpCciPeriod,MathMax(InpCciPeriod2,InpCciPeriod3))));
       if(InpDoIndicators && InpDoScan)
       {
-         int need=(int)MathMax(InpRsiPeriod,MathMax(InpCciPeriod,InpZsPeriod));
-         indTfSec=TFMinutes(InpIndTF)*60;
-         if(indTfSec<=0) indTfSec=900;
-         // warm-up abbondante: lo smoothing di Wilder dell'RSI e' ricorsivo e
-         // parte male se la serie inizia poco prima della giornata
-         datetime iFrom=dStart-(datetime)((need*20+300)*indTfSec);
-         nInd=CopyRates(sym,InpIndTF,iFrom,dEnd+InpScanHorizonMin*60,ri);
-         if(nInd>need*3)
+         MqlRates ri[];
+         double cl[], tp[], bR[], bC[], bZ[], bC2[], bC3[];
+         int alloc=0;
+         for(int t=0;t<3;t++)
          {
-            double cl[], tp[];
-            ArrayResize(cl,nInd); ArrayResize(tp,nInd);
-            for(int i=0;i<nInd;i++)
+            // il confronto costa: su M1 la serie giornaliera e' venti volte
+            // quella su M15 e i tre periodi di CCI vanno ricalcolati su tutta
+            if(!InpIndTfCompare && t!=IndMain()) continue;
+            int sec=TFMinutes(IndTF(t))*60;
+            if(sec<=0) sec=900;
+            indSec[t]=sec;
+            // warm-up abbondante: lo smoothing di Wilder dell'RSI e' ricorsivo e
+            // parte male se la serie inizia poco prima della giornata
+            datetime iFrom=dStart-(datetime)((need*20+300)*sec);
+            int cnt=CopyRates(sym,IndTF(t),iFrom,dEnd+InpScanHorizonMin*60,ri);
+            if(cnt<=need*3){ nIndT[t]=0; continue; }
+            if(cnt>alloc)
+            {
+               // ArrayResize conserva le righe gia' scritte: i TF caricati prima
+               // restano validi anche quando un TF piu' fitto allarga l'array
+               ArrayResize(iTime,cnt); ArrayResize(iRsi,cnt); ArrayResize(iCci,cnt);
+               ArrayResize(iZs,cnt);   ArrayResize(iCci2,cnt); ArrayResize(iCci3,cnt);
+               alloc=cnt;
+            }
+            ArrayResize(cl,cnt); ArrayResize(tp,cnt);
+            for(int i=0;i<cnt;i++)
             {
                cl[i]=ri[i].close;
                tp[i]=(ri[i].high+ri[i].low+ri[i].close)/3.0;
             }
-            CalcRSI(cl,nInd,InpRsiPeriod,rsiB);
-            CalcCCI(tp,nInd,InpCciPeriod,cciB);
-            CalcZScore(cl,nInd,InpZsPeriod,zsB);
+            CalcRSI(cl,cnt,InpRsiPeriod,bR);
+            CalcCCI(tp,cnt,InpCciPeriod,bC);
+            CalcZScore(cl,cnt,InpZsPeriod,bZ);
             // Stesso indicatore su tre periodi. Il periodo cambia radicalmente
             // il significato della compressione: con 14 barre su M15 dura
             // pochissimo ed e' rumore, con 50 diventa una vera fase di
             // accumulazione. Testarli insieme mostra se l'effetto dipende
             // dall'idea o soltanto dalla taratura - e tenere il migliore dei
             // tre senza guardare la coerenza fra loro sarebbe overfitting.
-            CalcCCI(tp,nInd,InpCciPeriod2,cciB2);
-            CalcCCI(tp,nInd,InpCciPeriod3,cciB3);
+            CalcCCI(tp,cnt,InpCciPeriod2,bC2);
+            CalcCCI(tp,cnt,InpCciPeriod3,bC3);
+            for(int i=0;i<cnt;i++)
+            {
+               iTime[i][t]=ri[i].time;
+               iRsi[i][t]=bR[i]; iCci[i][t]=bC[i]; iZs[i][t]=bZ[i];
+               iCci2[i][t]=bC2[i]; iCci3[i][t]=bC3[i];
+            }
+            nIndT[t]=cnt;
          }
-         else nInd=0;
       }
 
       //================= GRIGLIA POINT-IN-TIME =====================
@@ -2069,59 +2139,75 @@ bool ProcessSymbol(string sym)
             s.dToPrevHighAtr=((pH-entry)/g_point)/atrPt;
             s.dToPrevLowAtr =((entry-pL)/g_point)/atrPt;
 
-            // ultima barra indicatori CHIUSA prima di t: mai quella in formazione
+            // ultima barra indicatori CHIUSA prima di t: mai quella in formazione.
+            // Il puntatore avanza per ciascun TF in modo indipendente e non
+            // torna mai indietro: la griglia e' ordinata nel tempo, quindi la
+            // scansione resta lineare anche con tre serie.
             s.indOk=false; s.rsi=50.0; s.cci=0.0; s.zs=0.0;
-            if(nInd>0)
+            bool   okT[3];  double rsiT[3], cciT[3], zsT[3];
+            int    biT[3];  // 0 = uscita DOWN, 1 = nessuna, 2 = uscita UP
+            for(int t=0;t<3;t++){ okT[t]=false; biT[t]=1; rsiT[t]=50.0; cciT[t]=0.0; zsT[t]=0.0; }
+            int    mainIx=IndMain(), ip=0;
+            for(int t=0;t<3;t++)
             {
-               while(ip+1<nInd && ri[ip+1].time+indTfSec<=s.t) ip++;
-               if(ri[ip].time+indTfSec<=s.t && ip>=InpZsPeriod && ip>=InpRsiPeriod && ip>=InpCciPeriod)
+               if(nIndT[t]<=0) continue;
+               int pb=ipT[t];
+               while(pb+1<nIndT[t] && iTime[pb+1][t]+indSec[t]<=s.t) pb++;
+               ipT[t]=pb;
+               if(pb<1 || pb<need || iTime[pb][t]+indSec[t]>s.t) continue;
+               okT[t]=true;
+               rsiT[t]=iRsi[pb][t]; cciT[t]=iCci[pb][t]; zsT[t]=iZs[pb][t];
+               // uscita dal range del CCI dopo una compressione abbastanza lunga
+               if(MathAbs(iCci[pb][t])>InpCciCross && MathAbs(iCci[pb-1][t])<=InpCciCross)
                {
-                  s.rsi=rsiB[ip]; s.cci=cciB[ip]; s.zs=zsB[ip];
-                  s.indOk=true;
-
-                  // attraversamento fra la barra precedente e quella corrente
-                  s.cciCross=0;
-                  if(ip>=1)
-                  {
-                     if(cciB[ip]> InpCciCross && cciB[ip-1]<= InpCciCross) s.cciCross=+1;
-                     if(cciB[ip]<-InpCciCross && cciB[ip-1]>=-InpCciCross) s.cciCross=-1;
-                  }
-
-                  // estremo RSI o Z nelle ultime barre, cross escluso
-                  s.extRecent=0;
-                  for(int q=ip; q>ip-InpSetupLookback && q>0; q--)
-                  {
-                     if(rsiB[q]>InpRsiHigh || zsB[q]> InpZsHigh){ s.extRecent=+1; break; }
-                     if(rsiB[q]<InpRsiLow  || zsB[q]< InpZsLow ){ s.extRecent=-1; break; }
-                  }
-
-                  // durata della permanenza dentro il range, e uscita
-                  s.accLen=0; s.brk=0; s.brkLen=0;
-                  if(MathAbs(cciB[ip])<=InpCciCross)
-                  {
-                     int q=ip;
-                     while(q>0 && ip-q<InpAccMaxScan && MathAbs(cciB[q])<=InpCciCross){ s.accLen++; q--; }
-                  }
-                  else if(ip>=1 && MathAbs(cciB[ip-1])<=InpCciCross)
-                  {
-                     // barra di uscita: conta quanto era durata la compressione
-                     int q=ip-1, L=0;
-                     while(q>0 && ip-q<InpAccMaxScan && MathAbs(cciB[q])<=InpCciCross){ L++; q--; }
-                     if(L>=InpAccMinBars)
-                     {
-                        s.brkLen=L;
-                        s.brk=(cciB[ip]>0? +1 : -1);
-                     }
-                  }
-
-                  s.setup=0;
-                  if(s.cciCross>0 && s.extRecent<0) s.setup=1;
-                  else if(s.cciCross<0 && s.extRecent>0) s.setup=2;
-                  else if(s.cciCross<0 && s.extRecent<0) s.setup=3;
-                  else if(s.cciCross>0 && s.extRecent>0) s.setup=4;
-                  else if(s.cciCross>0) s.setup=5;
-                  else if(s.cciCross<0) s.setup=6;
+                  int q=pb-1, L=0;
+                  while(q>0 && pb-q<InpAccMaxScan && MathAbs(iCci[q][t])<=InpCciCross){ L++; q--; }
+                  if(L>=InpAccMinBars) biT[t]=(iCci[pb][t]>0 ? 2 : 0);
                }
+            }
+            ip=ipT[mainIx];
+            // condizioni, setup e classifiche restano legate a UN solo TF:
+            // mescolarli farebbe un segnale che non si puo' replicare a mercato
+            if(okT[mainIx])
+            {
+               s.rsi=rsiT[mainIx]; s.cci=cciT[mainIx]; s.zs=zsT[mainIx];
+               s.indOk=true;
+
+               // attraversamento fra la barra precedente e quella corrente
+               s.cciCross=0;
+               if(iCci[ip][mainIx]> InpCciCross && iCci[ip-1][mainIx]<= InpCciCross) s.cciCross=+1;
+               if(iCci[ip][mainIx]<-InpCciCross && iCci[ip-1][mainIx]>=-InpCciCross) s.cciCross=-1;
+
+               // estremo RSI o Z nelle ultime barre, cross escluso
+               s.extRecent=0;
+               for(int q=ip; q>ip-InpSetupLookback && q>0; q--)
+               {
+                  if(iRsi[q][mainIx]>InpRsiHigh || iZs[q][mainIx]> InpZsHigh){ s.extRecent=+1; break; }
+                  if(iRsi[q][mainIx]<InpRsiLow  || iZs[q][mainIx]< InpZsLow ){ s.extRecent=-1; break; }
+               }
+
+               // durata della permanenza dentro il range, e uscita
+               s.accLen=0; s.brkLen=0;
+               s.brk=(biT[mainIx]==2 ? +1 : (biT[mainIx]==0 ? -1 : 0));
+               if(MathAbs(iCci[ip][mainIx])<=InpCciCross)
+               {
+                  int q=ip;
+                  while(q>0 && ip-q<InpAccMaxScan && MathAbs(iCci[q][mainIx])<=InpCciCross){ s.accLen++; q--; }
+               }
+               else if(s.brk!=0)
+               {
+                  // barra di uscita: conta quanto era durata la compressione
+                  int q=ip-1;
+                  while(q>0 && ip-q<InpAccMaxScan && MathAbs(iCci[q][mainIx])<=InpCciCross){ s.brkLen++; q--; }
+               }
+
+               s.setup=0;
+               if(s.cciCross>0 && s.extRecent<0) s.setup=1;
+               else if(s.cciCross<0 && s.extRecent>0) s.setup=2;
+               else if(s.cciCross<0 && s.extRecent<0) s.setup=3;
+               else if(s.cciCross>0 && s.extRecent>0) s.setup=4;
+               else if(s.cciCross>0) s.setup=5;
+               else if(s.cciCross<0) s.setup=6;
             }
 
             int nextNews=MinutesToNextNews(s.t);
@@ -2136,8 +2222,8 @@ bool ProcessSymbol(string sym)
             {
                for(int pz=0;pz<3;pz++)
                {
-                  double cNow=(pz==0?cciB[ip]:(pz==1?cciB2[ip]:cciB3[ip]));
-                  double cPrv=(pz==0?cciB[ip-1]:(pz==1?cciB2[ip-1]:cciB3[ip-1]));
+                  double cNow=(pz==0?iCci[ip][mainIx]:(pz==1?iCci2[ip][mainIx]:iCci3[ip][mainIx]));
+                  double cPrv=(pz==0?iCci[ip-1][mainIx]:(pz==1?iCci2[ip-1][mainIx]:iCci3[ip-1][mainIx]));
                   int st=1;
                   if(MathAbs(cNow)>InpCciCross && MathAbs(cPrv)<=InpCciCross)
                   {
@@ -2145,7 +2231,7 @@ bool ProcessSymbol(string sym)
                      int q=ip-1, L=0;
                      while(q>0 && ip-q<InpAccMaxScan)
                      {
-                        double cq=(pz==0?cciB[q]:(pz==1?cciB2[q]:cciB3[q]));
+                        double cq=(pz==0?iCci[q][mainIx]:(pz==1?iCci2[q][mainIx]:iCci3[q][mainIx]));
                         if(MathAbs(cq)>InpCciCross) break;
                         L++; q--;
                      }
@@ -2155,6 +2241,36 @@ bool ProcessSymbol(string sym)
                   if(s.hitUpAtr[0]>=0 || s.hitDnAtr[0]>=0) pkHit[pz][s.hour][st]++;
                   if(s.hitUpAtr[0]>=0) pkUp[pz][s.hour][st]++;
                   if(s.hitDnAtr[0]>=0) pkDn[pz][s.hour][st]++;
+               }
+            }
+
+            // confronto fra i tre TF: stesso istante, stesso esito forward,
+            // solo la barra su cui si legge l'indicatore cambia. E' l'unico
+            // modo di attribuire una differenza al timeframe e non al campione.
+            if(g_nAtr>0)
+            {
+               int hAny=((s.hitUpAtr[0]>=0 || s.hitDnAtr[0]>=0)?1:0);
+               int hUp =((s.hitUpAtr[0]>=0)?1:0), hDn=((s.hitDnAtr[0]>=0)?1:0);
+               for(int t=0;t<3;t++)
+               {
+                  if(!okT[t]) continue;
+                  int st7[7];
+                  for(int k=1;k<7;k++) st7[k]=0;
+                  st7[0]=1;                                  // riferimento: tutti gli istanti
+                  if(rsiT[t]>InpRsiHigh) st7[1]=1;
+                  if(rsiT[t]<InpRsiLow)  st7[2]=1;
+                  if(zsT[t] >InpZsHigh)  st7[3]=1;
+                  if(zsT[t] <InpZsLow)   st7[4]=1;
+                  if(biT[t]==2) st7[5]=1;
+                  if(biT[t]==0) st7[6]=1;
+                  for(int k=0;k<7;k++)
+                  {
+                     if(st7[k]==0) continue;
+                     tfN[t][k]++;
+                     tfHit[t][k]+=hAny; tfUp[t][k]+=hUp; tfDn[t][k]+=hDn;
+                  }
+                  thN[t][s.hour][biT[t]]++;
+                  thHit[t][s.hour][biT[t]]+=hAny;
                }
             }
 
@@ -2582,7 +2698,7 @@ bool ProcessSymbol(string sym)
    {
       H("<section><h2>Stati degli indicatori per finestra</h2><div class=\"note\">"
         "Percentuale di istanti, dentro ogni finestra, in cui l'indicatore si trova oltre la soglia. "
-        "Valori letti sull'ultima barra "+EnumToString(InpIndTF)+" <b>chiusa</b> prima dell'istante osservato: "
+        "Valori letti sull'ultima barra "+IndTfName(IndMain())+" <b>chiusa</b> prima dell'istante osservato: "
         "mai la barra in formazione.<br><br>"
         "<b>Attenzione a come si legge.</b> Una percentuale alta dice solo che quello stato e' frequente in "
         "quell'ora, non che sia utile: se l'RSI supera 70 nel 12% degli istanti ovunque, trovarlo al 12% alle "
@@ -2670,6 +2786,90 @@ bool ProcessSymbol(string sym)
               (de>=1.0?"hi":(de<=-1.0?"lo":"nz"))+"\"><b>"+F(de,2)+"</b></td><td>"+
               F(100.0*uu/nn,2)+"</td><td>"+F(100.0*dd2/nn,2)+"</td></tr>");
          }
+      }
+      HtmlTableEnd();
+
+      //--- confronto fra i TRE TIMEFRAME degli indicatori
+      H("<h2>Confronto fra i timeframe degli indicatori</h2><div class=\"note\">"
+        "Gli stessi identici istanti, lo stesso esito forward, la stessa soglia: cambia solo la barra su cui "
+        "l'indicatore viene letto - "+IndTfName(0)+", "+IndTfName(1)+" e "+IndTfName(2)+". Ogni differenza qui "
+        "dentro e' quindi attribuibile al <b>timeframe</b> e non a un campione diverso.<br><br>"
+        "<b>n</b> = istanti in quello stato, <b>%ist</b> la loro quota sul totale, <b>p</b> la probabilita' di un "
+        "movimento di "+F(g_nAtr>0?g_thrAtr[0]:0.5,2)+" ATR entro l'orizzonte, <b>rif</b> la stessa probabilita' "
+        "su tutti gli istanti dello stesso TF, <b>delta = p - rif</b>. Il riferimento cambia da TF a TF perche' "
+        "cambia il numero di istanti validi: confrontare un delta con un p di un altro TF non ha senso, "
+        "confrontare i delta fra loro si'.<br><br>"
+        "<b>Come si legge, per non ingannarsi.</b> Scendendo di timeframe il numero di eventi esplode e le barre "
+        "di errore si stringono, ma non perche' il segnale sia migliore: gli istanti restano gli stessi e "
+        "diventano solo piu' correlati fra loro. Un delta piccolo su M1 con n enorme non e' piu' affidabile di un "
+        "delta grande su M15. La domanda giusta e' <b>se il segno del delta e' lo stesso sui tre TF</b>: se lo e', "
+        "l'effetto sopravvive alla scala e vale la pena guardarlo; se cambia segno, non hai tre conferme, hai tre "
+        "rumori diversi e il TF che ti piace di piu' e' solo il piu' fortunato.</div>");
+      HtmlTableHead("tT","stato;"+IndTfName(0)+" n;"+IndTfName(0)+" %ist;"+IndTfName(0)+" p;"+IndTfName(0)+" delta;"+
+                         IndTfName(1)+" n;"+IndTfName(1)+" %ist;"+IndTfName(1)+" p;"+IndTfName(1)+" delta;"+
+                         IndTfName(2)+" n;"+IndTfName(2)+" %ist;"+IndTfName(2)+" p;"+IndTfName(2)+" delta",false);
+      string stNames[7];
+      stNames[0]="TUTTI GLI ISTANTI (rif)";
+      stNames[1]="RSI oltre "+F(InpRsiHigh,0);
+      stNames[2]="RSI sotto "+F(InpRsiLow,0);
+      stNames[3]="Z oltre "+F(InpZsHigh,1);
+      stNames[4]="Z sotto "+F(InpZsLow,1);
+      stNames[5]="uscita CCI UP da +/-"+F(InpCciCross,0);
+      stNames[6]="uscita CCI DOWN da +/-"+F(InpCciCross,0);
+      for(int k=0;k<7;k++)
+      {
+         string row="<tr"+(k==0?" class=\"nz\"":"")+"><td><b>"+HE(stNames[k])+"</b></td>";
+         bool any=false;
+         for(int t=0;t<3;t++)
+         {
+            int nn=tfN[t][k], nr=tfN[t][0];
+            if(nn<50 || nr<1){ row+="<td>-</td><td>-</td><td>-</td><td>-</td>"; continue; }
+            any=true;
+            double pp=100.0*tfHit[t][k]/nn, pr=100.0*tfHit[t][0]/nr, de=pp-pr;
+            row+="<td>"+IntegerToString(nn)+"</td><td>"+F(100.0*nn/nr,1)+"</td><td>"+F(pp,2)+"</td>"+
+                 (k==0 ? "<td class=\"nz\">-</td>"
+                       : "<td class=\""+(de>=1.0?"hi":(de<=-1.0?"lo":"nz"))+"\"><b>"+F(de,2)+"</b></td>");
+         }
+         if(any) H(row+"</tr>");
+      }
+      HtmlTableEnd();
+
+      //--- uscita CCI ora per ora sui tre TF: la verifica di coerenza che conta
+      H("<h2>Uscita dall'accumulazione CCI: le stesse ore sui tre timeframe</h2><div class=\"note\">"
+        "La tabella precedente aggrega tutta la giornata e puo' nascondere il caso peggiore: un TF che funziona "
+        "solo di notte e uno che funziona solo in apertura, con delta medi identici. Qui il <b>delta</b> "
+        "(uscita meno riferimento nella stessa ora e sullo stesso TF) e' spezzato ora per ora.<br><br>"
+        "Serve a una cosa sola: vedere se le ore buone sono <b>le stesse</b> sui tre TF. Se una finestra e' "
+        "positiva su tutti e tre, quella e' una finestra oraria vera. Se e' positiva su uno solo, e' rumore, per "
+        "quanto grande sia il numero.</div>");
+      HtmlTableHead("tTH","ora;"+IndTfName(0)+" n;"+IndTfName(0)+" dUP;"+IndTfName(0)+" dDN;"+
+                          IndTfName(1)+" n;"+IndTfName(1)+" dUP;"+IndTfName(1)+" dDN;"+
+                          IndTfName(2)+" n;"+IndTfName(2)+" dUP;"+IndTfName(2)+" dDN;concordi",false);
+      for(int h=0;h<24;h++)
+      {
+         string row=""; bool any=false;
+         int sgUp=0, sgDn=0, cnt=0;
+         for(int t=0;t<3;t++)
+         {
+            int nu=thN[t][h][2], nd=thN[t][h][0], nr=thN[t][h][1];
+            if(nu+nd<40 || nr<100){ row+="<td>-</td><td>-</td><td>-</td>"; continue; }
+            any=true; cnt++;
+            double pr=100.0*thHit[t][h][1]/nr;
+            double du=(nu>0 ? 100.0*thHit[t][h][2]/nu-pr : 0.0);
+            double dd3=(nd>0 ? 100.0*thHit[t][h][0]/nd-pr : 0.0);
+            if(nu>0) sgUp+=(du>0?1:-1);
+            if(nd>0) sgDn+=(dd3>0?1:-1);
+            row+="<td>"+IntegerToString(nu+nd)+"</td>"+
+                 "<td class=\""+(du>=1.0?"hi":(du<=-1.0?"lo":"nz"))+"\">"+(nu>0?F(du,2):"-")+"</td>"+
+                 "<td class=\""+(dd3>=1.0?"hi":(dd3<=-1.0?"lo":"nz"))+"\">"+(nd>0?F(dd3,2):"-")+"</td>";
+         }
+         if(!any) continue;
+         // concordi solo se tutti e tre i TF disponibili puntano nello stesso verso
+         string cc2="nz", ctx="misto";
+         if(cnt==3 && (sgUp==3 || sgUp==-3) && (sgDn==3 || sgDn==-3))
+         { ctx=(sgUp==3?"UP+":"UP-"); ctx+=(sgDn==3?" DN+":" DN-"); cc2=((sgUp==3||sgDn==3)?"hi":"lo"); }
+         else if(cnt==3 && (sgUp==3 || sgUp==-3)) { ctx=(sgUp==3?"solo UP+":"solo UP-"); cc2="nz"; }
+         H("<tr><td><b>"+D2(h)+":00</b></td>"+row+"<td class=\""+cc2+"\">"+ctx+"</td></tr>");
       }
       HtmlTableEnd();
 
@@ -2822,6 +3022,49 @@ bool ProcessSymbol(string sym)
             }
          }
          FileClose(fP);
+      }
+
+      int fT=FileOpen(dir+fn+"_indicatori_tf.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
+      if(fT!=INVALID_HANDLE)
+      {
+         W(fT,"timeframe;stato;ora;n;pct_istanti;p;rif;delta;pUP;pDN\r\n");
+         string stN[7];
+         stN[0]="TUTTI"; stN[1]="RSI_ALTO"; stN[2]="RSI_BASSO";
+         stN[3]="Z_ALTO"; stN[4]="Z_BASSO"; stN[5]="CCI_USCITA_UP"; stN[6]="CCI_USCITA_DOWN";
+         for(int t=0;t<3;t++)
+         {
+            string tn=IndTfName(t);
+            int nr=tfN[t][0];
+            if(nr<1) continue;
+            double pr=100.0*tfHit[t][0]/nr;
+            for(int k=0;k<7;k++)
+            {
+               int nn=tfN[t][k];
+               if(nn<20) continue;
+               double pp=100.0*tfHit[t][k]/nn;
+               W(fT,tn+";"+stN[k]+";TUTTE;"+IntegerToString(nn)+";"+F(100.0*nn/nr,2)+";"+
+                    F(pp,2)+";"+F(pr,2)+";"+F(k==0?0.0:pp-pr,2)+";"+
+                    F(100.0*tfUp[t][k]/nn,2)+";"+F(100.0*tfDn[t][k]/nn,2)+"\r\n");
+            }
+            // dettaglio orario della sola uscita dal range: il resto dei filtri
+            // ora per ora e' gia' nelle altre tabelle
+            for(int h=0;h<24;h++)
+            {
+               int nrh=thN[t][h][1];
+               if(nrh<50) continue;
+               double prh=100.0*thHit[t][h][1]/nrh;
+               for(int k2=0;k2<2;k2++)
+               {
+                  int bi=(k2==0?2:0), nn=thN[t][h][bi];
+                  if(nn<20) continue;
+                  double pp=100.0*thHit[t][h][bi]/nn;
+                  W(fT,tn+";"+(k2==0?"CCI_USCITA_UP":"CCI_USCITA_DOWN")+";"+D2(h)+":00;"+
+                       IntegerToString(nn)+";"+F(100.0*nn/nrh,2)+";"+F(pp,2)+";"+F(prh,2)+";"+
+                       F(pp-prh,2)+";;\r\n");
+               }
+            }
+         }
+         FileClose(fT);
       }
 
       int fB=FileOpen(dir+fn+"_cci_breakout.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);

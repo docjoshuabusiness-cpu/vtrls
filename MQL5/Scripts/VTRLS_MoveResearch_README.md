@@ -54,7 +54,28 @@ Puoi disattivare l'uno o l'altro.
 | `<SYM>_conditions_marg.csv` | stesse metriche, una dimensione per volta (piu' campioni, piu' robusto) |
 | `<SYM>_aggregate.csv` | giornate raggruppate per giorno della settimana, anno, mese e sessione |
 | `<SYM>_dow_hour.csv` | matrici giorno x ora, giorno x 15 minuti e anno x ora |
+| `<SYM>_indicatori_tf.csv` | stessi stati RSI/CCI/Z-Score calcolati sui tre timeframe, con delta sul riferimento |
 | `<SYM>_report.html` | tutto quanto sopra (tranne lo scan grezzo) in un report navigabile |
+
+## Indicatori: tre timeframe nella stessa passata
+`InpIndTF1` / `InpIndTF2` / `InpIndTF3` (default M15, M5, M1) sono i timeframe su
+cui vengono calcolati RSI, CCI e Z-Score. Gli istanti osservati e l'esito forward
+sono **gli stessi** per tutti e tre: cambia solo la barra su cui l'indicatore
+viene letto, sempre l'ultima **chiusa** prima dell'istante.
+
+`InpIndTfMain` (1/2/3) sceglie quale dei tre alimenta condizioni, setup e
+classifiche. Gli altri due servono solo al confronto, nella scheda *Indicatori*:
+questo evita di mescolare timeframe dentro lo stesso segnale, che a mercato non
+sarebbe replicabile.
+
+Come si legge: **non** prendere il timeframe col delta migliore. Scendendo di
+timeframe il numero di eventi esplode, ma gli istanti restano gli stessi e
+diventano solo piu' correlati: un `n` piu' grande su M1 non e' piu' informazione.
+Conta se il **segno del delta** e' lo stesso sui tre, e se le ore buone sono le
+stesse. Se cambia segno, non hai tre conferme: hai tre rumori.
+
+`InpIndTfCompare = false` calcola solo il timeframe principale: il confronto su
+M1 su periodi storici lunghi allunga sensibilmente il run.
 
 ## Normalizzazione cross-simbolo
 Le soglie in punti non sono confrontabili tra XAUUSD, US30 ed EURUSD. Ogni
