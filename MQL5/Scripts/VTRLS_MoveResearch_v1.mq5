@@ -77,7 +77,7 @@
 //==================================================================
 input string          InpSymbols        = "";              // Simboli separati da virgola ("" = grafico, "*" = Market Watch)
 input ENUM_TIMEFRAMES InpBaseTF         = PERIOD_M1;       // TF base del percorso intraday (M1..H1)
-input datetime        InpFrom           = D'2019.01.01 00:00';  // Data inizio
+input datetime        InpFrom           = D'2010.01.01 00:00';  // Data inizio (controlla il grafico anno x anno: i primi anni di storia dei broker sono spesso sporchi)
 input datetime        InpTo             = D'2026.01.01 00:00';  // Data fine
 input int             InpATRPeriod      = 14;              // Periodo ATR (su daily)
 input int             InpMinBarsDay     = 200;             // Barre minime perche' la giornata sia valida
@@ -110,12 +110,12 @@ input bool            InpIndTfCompare   = true;            // Calcola anche gli 
 input int             InpRsiPeriod      = 14;              // Periodo RSI
 input double          InpRsiHigh        = 70.0;            // Soglia RSI ipercomprato
 input double          InpRsiLow         = 30.0;            // Soglia RSI ipervenduto
-input int             InpCciPeriod      = 14;              // Periodo CCI (principale, usato nelle condizioni)
-input int             InpCciPeriod2     = 30;              // Secondo periodo CCI, solo per il confronto
+input int             InpCciPeriod      = 8;               // Periodo CCI (principale, usato nelle condizioni)
+input int             InpCciPeriod2     = 20;              // Secondo periodo CCI, solo per il confronto
 input int             InpCciPeriod3     = 50;              // Terzo periodo CCI, solo per il confronto
 input double          InpCciHigh        = 40.0;            // Soglia CCI superiore
 input double          InpCciLow         = -40.0;           // Soglia CCI inferiore (stato)
-input double          InpCciCross       = 45.0;            // Soglia di ATTRAVERSAMENTO del CCI (trigger di ingresso)
+input double          InpCciCross       = 40.0;            // Soglia del range CCI: dentro = accumulazione, uscita = segnale
 input int             InpSetupLookback  = 8;               // Barre indietro in cui cercare l'estremo RSI/Z prima del cross
 input int             InpAccMinBars     = 4;               // Barre minime dentro il range CCI perche' sia accumulazione
 input int             InpAccMaxScan     = 200;             // Limite di risalita nel conteggio dell'accumulazione
@@ -134,8 +134,13 @@ input int             InpOrbLastHour    = 21;              // Ultima ora in cui 
 input int             InpOrbStartStep   = 60;              // Passo degli inizi finestra in minuti (30 raddoppia il tempo di run)
 input string          InpOrbDur         = "1,5,15,30,60,90,120"; // Durate della finestra, in minuti (ogni durata in piu' allunga il run)
 input int             InpOrbDeadlineMin = 240;             // Entro quanto dalla chiusura finestra deve avvenire la rottura
-input double          InpOrbTargetAtr   = 0.50;            // Target in ATR(D-1) misurato dal livello rotto
-input double          InpOrbBufferAtr   = 0.00;            // Margine oltre il livello perche' la rottura conti
+input int             InpOrbTargetMode  = 1;               // 0 = target in ATR fisso, 1 = target come multiplo del range rotto
+input double          InpOrbTargetMult  = 1.00;            // Modo 1: target = questo x l'ampiezza del range
+input double          InpOrbTargetAtr   = 0.20;            // Modo 0: target in ATR(D-1) dal livello rotto
+input double          InpOrbMinTargetAtr= 0.08;            // Target minimo in ATR: sotto, spread e commissioni se lo mangiano
+input double          InpOrbCostPt      = 0.0;             // Costo di andata e ritorno in punti (spread + commissioni)
+input double          InpOrbBufferAtr   = 0.03;            // Margine oltre il livello perche' la rottura conti
+input double          InpOrbMinResolved = 60.0;            // % minima di rotture risolte perche' la finestra entri in classifica
 input double          InpOrbMaxRangeAtr = 3.0;             // Scarta finestre con range oltre questo (dati sporchi)
 input int             InpOrbMinN        = 100;             // Giornate minime perche' una finestra entri in classifica
 input int             InpOrbTop         = 40;              // Righe di classifica da mostrare
@@ -1563,6 +1568,10 @@ struct SOrb
    int    win, loss, flat;
    int    brkUp, winUp, brkDn, winDn;
    double sMfe, sMae, sTtb;
+   // Con il target espresso in multipli del range, ogni giornata ha il suo:
+   // il risultato va sommato in ATR mentre accade, non ricostruito dopo da
+   // un target medio che non e' mai stato quello di nessuna operazione.
+   double sPnl, sTgt, sCost, sCompr;
    int    n1, brk1, win1, res1;    // prima meta' del periodo
    int    n2, brk2, win2, res2;    // seconda meta'
    int    dN[7], dBrk[7], dWin[7], dRes[7];
@@ -1578,7 +1587,7 @@ struct SBrk
    uchar dow, hour;
    char  dir, res;                 // res +1 target, -1 stop, 0 irrisolto
    int   year;
-   float rangeAtr, mom, vol, cci, rsi, zs, mfe, mae, ttb;
+   float rangeAtr, mom, vol, cci, rsi, zs, mfe, mae, ttb, tgt, compr, cost;
 };
 SBrk g_bk[];
 int  g_nBk=0;
@@ -1621,6 +1630,8 @@ void OrbInit()
          g_orb[g_nOrb].brkUp=0; g_orb[g_nOrb].winUp=0;
          g_orb[g_nOrb].brkDn=0; g_orb[g_nOrb].winDn=0;
          g_orb[g_nOrb].sMfe=0.0; g_orb[g_nOrb].sMae=0.0; g_orb[g_nOrb].sTtb=0.0;
+         g_orb[g_nOrb].sPnl=0.0; g_orb[g_nOrb].sTgt=0.0;
+         g_orb[g_nOrb].sCost=0.0; g_orb[g_nOrb].sCompr=0.0;
          g_orb[g_nOrb].n1=0; g_orb[g_nOrb].brk1=0; g_orb[g_nOrb].win1=0; g_orb[g_nOrb].res1=0;
          g_orb[g_nOrb].n2=0; g_orb[g_nOrb].brk2=0; g_orb[g_nOrb].win2=0; g_orb[g_nOrb].res2=0;
          ArrayInitialize(g_orb[g_nOrb].dN,0);   ArrayInitialize(g_orb[g_nOrb].dBrk,0);
@@ -1640,23 +1651,45 @@ string OrbLab(int i)
 // Contarli come vincite sarebbe una bugia, escluderli gonfierebbe il
 // win rate: valgono zero, che e' l'ipotesi piu' vicina a un'uscita a
 // mercato alla scadenza dell'orizzonte.
-double OrbExp(int win,int loss,int flat)
+double OrbExp(int win,int loss,int flat,double tgt)
 {
    int tot=win+loss+flat;
    if(tot<=0) return 0.0;
-   return (win*InpOrbTargetAtr - loss*InpOrbTargetAtr*InpAdverseRatio)/tot;
+   return (win*tgt - loss*tgt*InpAdverseRatio)/tot;
+}
+
+// valore atteso realizzato di una finestra, al netto dei costi
+double OrbE(int i)
+{
+   int tot=g_orb[i].win+g_orb[i].loss+g_orb[i].flat;
+   if(tot<=0) return 0.0;
+   return (g_orb[i].sPnl-g_orb[i].sCost)/tot;
+}
+
+// target medio effettivamente usato dalla finestra
+double OrbTgt(int i)
+{
+   int tot=g_orb[i].win+g_orb[i].loss+g_orb[i].flat;
+   return (tot>0 ? g_orb[i].sTgt/tot : 0.0);
+}
+
+// quota di rotture che entro l'orizzonte hanno toccato target o stop
+double OrbResPct(int i)
+{
+   int tot=g_orb[i].win+g_orb[i].loss+g_orb[i].flat;
+   return (tot>0 ? 100.0*(g_orb[i].win+g_orb[i].loss)/tot : 0.0);
 }
 
 // La stessa cosa calcolata sul limite inferiore di Wilson invece che sul
 // win rate grezzo: e' il numero su cui vale la pena ordinare, perche'
 // penalizza da solo i campioni piccoli.
-double OrbExpLow(int win,int loss,int flat)
+double OrbExpLow(int win,int loss,int flat,double tgt,double costAtr=0.0)
 {
    int res=win+loss, tot=res+flat;
    if(res<=0 || tot<=0) return 0.0;
    double wl=WilsonLowInd(win,res);
-   double e=InpOrbTargetAtr*(wl-(1.0-wl)*InpAdverseRatio);
-   return e*((double)res/(double)tot);
+   double e=tgt*(wl-(1.0-wl)*InpAdverseRatio);
+   return e*((double)res/(double)tot)-costAtr;
 }
 
 // ATR attesi ogni 100 giornate: unisce quanto spesso la finestra da' un
@@ -1667,7 +1700,9 @@ double OrbScore(int i)
    // le rotture ambigue - entrambi i livelli toccati nella stessa barra -
    // non sono operabili: contarle gonfierebbe la frequenza del segnale
    double pb=(double)(g_orb[i].nBrk-g_orb[i].nAmb)/(double)g_orb[i].n;
-   return 100.0*pb*OrbExpLow(g_orb[i].win,g_orb[i].loss,g_orb[i].flat);
+   int tot=g_orb[i].win+g_orb[i].loss+g_orb[i].flat;
+   double cost=(tot>0? g_orb[i].sCost/tot : 0.0);
+   return 100.0*pb*OrbExpLow(g_orb[i].win,g_orb[i].loss,g_orb[i].flat,OrbTgt(i),cost);
 }
 
 // indice dell'ultima barra indicatore CHIUSA prima di t
@@ -1916,6 +1951,11 @@ bool ProcessSymbol(string sym)
    // stati: 0=tutti gli istanti (riferimento), 1=RSI alto, 2=RSI basso,
    //        3=Z alto, 4=Z basso, 5=uscita CCI UP, 6=uscita CCI DOWN
    int    tfN[3][7], tfHit[3][7], tfUp[3][7], tfDn[3][7];
+   // gli stessi conteggi spezzati per ora: senza questi il riferimento
+   // aggregato e' quello di TUTTI gli istanti, e uno stato che si presenta
+   // solo nelle ore morte sembra battere - o perdere contro - una baseline
+   // che non e' la sua. Vedi ExpByHour().
+   int    tfNh[3][7][24], tfHh[3][7][24];
    // uscita CCI per TF e per ora: [tf][ora][0=DOWN,1=nessuna,2=UP]
    int    thN[3][24][3], thHit[3][24][3];
    int    indN[7][24], zHi[7][24], zLo[7][24], rHi[7][24], rLo[7][24];
@@ -1938,6 +1978,7 @@ bool ProcessSymbol(string sym)
    ArrayInitialize(rdDur,0.0); ArrayInitialize(rdVel,0.0); ArrayInitialize(rmN,0);
    ArrayInitialize(pkN,0); ArrayInitialize(pkHit,0); ArrayInitialize(pkUp,0); ArrayInitialize(pkDn,0);
    ArrayInitialize(tfN,0); ArrayInitialize(tfHit,0); ArrayInitialize(tfUp,0); ArrayInitialize(tfDn,0);
+   ArrayInitialize(tfNh,0); ArrayInitialize(tfHh,0);
    ArrayInitialize(thN,0); ArrayInitialize(thHit,0);
    g_nRb=0; ArrayResize(g_rb,0);
    ArrayInitialize(indN,0); ArrayInitialize(zHi,0); ArrayInitialize(zLo,0);
@@ -2346,8 +2387,7 @@ bool ProcessSymbol(string sym)
          int  dowD        = dt0.day_of_week;
          int  yearD       = dt0.year;
          double buf       = InpOrbBufferAtr*atrPt*g_point;
-         double tgtD      = InpOrbTargetAtr*atrPt*g_point;
-         double stpD      = tgtD*InpAdverseRatio;
+         double costAtr   = (atrPt>0 ? InpOrbCostPt/atrPt : 0.0);
 
          for(int w=0; w<g_nOrb; w++)
          {
@@ -2375,7 +2415,15 @@ bool ProcessSymbol(string sym)
             double rngAtr=((RH-RL)/g_point)/atrPt;
             if(rngAtr<=0.0 || rngAtr>InpOrbMaxRangeAtr) continue;
 
+            // Compressione: il range osservato diviso quello che ci si
+            // aspetterebbe da una passeggiata casuale della stessa durata
+            // (ATR x radice del tempo). Sotto 1 = la finestra e' stata piu'
+            // ferma del normale, ed e' l'unica definizione di accumulazione
+            // che regge il confronto fra durate diverse.
+            double compr=rngAtr/MathMax(1e-9,MathSqrt((double)g_orb[w].durMin/1440.0));
+
             g_orb[w].n++; g_orb[w].sRange+=rngAtr; g_orb[w].dN[dowD]++;
+            g_orb[w].sCompr+=compr;
             if(secondHalf) g_orb[w].n2++; else g_orb[w].n1++;
 
             //--- prima rottura di uno dei due estremi, entro la scadenza
@@ -2396,6 +2444,16 @@ bool ProcessSymbol(string sym)
             if(dir==0){ g_orb[w].nAmb++; continue; }
             if(dir>0){ g_orb[w].nUp++; g_orb[w].brkUp++; }
             else     { g_orb[w].nDn++; g_orb[w].brkDn++; }
+
+            // Target: o un multiplo fisso di ATR, o - default - un multiplo
+            // dell'ampiezza del range appena rotto. Il secondo e' l'unico che
+            // scala con la finestra: chiedere 0.5 ATR a una finestra da un
+            // minuto significa chiedere venti volte la sua ampiezza, e infatti
+            // non arriva quasi mai.
+            double tgtAtr=(InpOrbTargetMode==1 ? InpOrbTargetMult*rngAtr : InpOrbTargetAtr);
+            if(tgtAtr<InpOrbMinTargetAtr) continue;   // sotto il costo di transazione
+            double tgtD =tgtAtr*atrPt*g_point;
+            double stpD =tgtD*InpAdverseRatio;
 
             double entry=(dir>0?lvUp:lvDn);
             double tgt  =entry+dir*tgtD;
@@ -2430,6 +2488,9 @@ bool ProcessSymbol(string sym)
             if(res>0)      { g_orb[w].win++;  g_orb[w].dWin[dowD]++; if(dir>0) g_orb[w].winUp++; else g_orb[w].winDn++; }
             else if(res<0) g_orb[w].loss++;
             else           g_orb[w].flat++;
+            g_orb[w].sTgt +=tgtAtr;
+            g_orb[w].sCost+=costAtr;
+            g_orb[w].sPnl +=(res>0? tgtAtr : (res<0? -tgtAtr*InpAdverseRatio : 0.0));
             if(res!=0)
             {
                g_orb[w].dRes[dowD]++;
@@ -2474,6 +2535,9 @@ bool ProcessSymbol(string sym)
                g_bk[g_nBk].mfe=(float)mfe;
                g_bk[g_nBk].mae=(float)mae;
                g_bk[g_nBk].ttb=(float)ttb;
+               g_bk[g_nBk].tgt=(float)tgtAtr;
+               g_bk[g_nBk].compr=(float)compr;
+               g_bk[g_nBk].cost=(float)costAtr;
                g_nBk++;
             }
          }
@@ -2644,6 +2708,7 @@ bool ProcessSymbol(string sym)
                      if(st7[k]==0) continue;
                      tfN[t][k]++;
                      tfHit[t][k]+=hAny; tfUp[t][k]+=hUp; tfDn[t][k]+=hDn;
+                     tfNh[t][k][s.hour]++; tfHh[t][k][s.hour]+=hAny;
                   }
                   thN[t][s.hour][biT[t]]++;
                   thHit[t][s.hour][biT[t]]+=hAny;
@@ -3142,7 +3207,7 @@ bool ProcessSymbol(string sym)
         "sono <b>coerenti</b>. Se uno solo funziona e gli altri no, non hai trovato un effetto: hai trovato una "
         "taratura fortunata, e fuori campione svanira'. Se invece il delta cresce in modo ordinato col periodo, "
         "l'idea ha un fondo e la direzione in cui cercare e' chiara.</div>");
-      HtmlTableHead("tP","periodo CCI;direzione;n uscite;p;rif;delta;pUP;pDN",false);
+      HtmlTableHead("tP","periodo CCI;direzione;n uscite;p;rif globale;rif ora per ora;delta;z;pUP;pDN",false);
       for(int pz=0;pz<3;pz++)
       {
          int per=(pz==0?InpCciPeriod:(pz==1?InpCciPeriod2:InpCciPeriod3));
@@ -3153,17 +3218,39 @@ bool ProcessSymbol(string sym)
          {
             int bi=(k==0?2:0);
             int nn=0, hh2=0, uu=0, dd2=0;
-            for(int h=0;h<24;h++){ nn+=pkN[pz][h][bi]; hh2+=pkHit[pz][h][bi]; uu+=pkUp[pz][h][bi]; dd2+=pkDn[pz][h][bi]; }
+            // Riferimento pesato ora per ora. Sommare i riferimenti grezzi
+            // sarebbe un errore di composizione: le uscite dal range del CCI
+            // si concentrano nelle ore morte, dove la baseline e' del 2-3%,
+            // e confrontarle con il 13% di TUTTI gli istanti fa sembrare
+            // dannoso un segnale che e' semplicemente notturno.
+            double exp2=0.0;
+            for(int h=0;h<24;h++)
+            {
+               nn+=pkN[pz][h][bi]; hh2+=pkHit[pz][h][bi];
+               uu+=pkUp[pz][h][bi]; dd2+=pkDn[pz][h][bi];
+               if(pkN[pz][h][1]>0) exp2+=pkN[pz][h][bi]*((double)pkHit[pz][h][1]/pkN[pz][h][1]);
+            }
             if(nn<50) continue;
-            double pp=100.0*hh2/nn, de=pp-pr;
+            double pp=100.0*hh2/nn;
+            double pe=100.0*exp2/nn;
+            double de=pp-pe;
+            double se=100.0*MathSqrt((pe/100.0)*(1.0-pe/100.0)/nn);
+            double zz=(se>0? de/se : 0.0);
             H("<tr><td><b>"+IntegerToString(per)+"</b></td><td class=\""+(k==0?"up":"dn")+"\">"+
               (k==0?"USCITA UP":"USCITA DOWN")+"</td><td>"+IntegerToString(nn)+"</td><td>"+F(pp,2)+
-              "%</td><td class=\"nz\">"+F(pr,2)+"%</td><td class=\""+
-              (de>=1.0?"hi":(de<=-1.0?"lo":"nz"))+"\"><b>"+F(de,2)+"</b></td><td>"+
+              "%</td><td class=\"nz\">"+F(pr,2)+"%</td><td class=\"nz\"><b>"+F(pe,2)+"%</b></td><td class=\""+
+              (MathAbs(zz)<2.0?"nz":(de>0?"hi":"lo"))+"\"><b>"+F(de,2)+"</b></td><td class=\""+
+              (MathAbs(zz)>=3.0?(de>0?"hi":"lo"):"nz")+"\">"+F(zz,2)+"</td><td>"+
               F(100.0*uu/nn,2)+"</td><td>"+F(100.0*dd2/nn,2)+"</td></tr>");
          }
       }
       HtmlTableEnd();
+      H("<div class=\"note\"><b>rif globale</b> e' la probabilita' su tutti gli istanti, <b>rif ora per ora</b> "
+        "e' la stessa cosa ma pesata con le ore in cui il segnale si presenta davvero. <b>Il delta si legge "
+        "sul secondo</b>: le uscite dal range del CCI si concentrano nelle ore morte, dove la baseline e' del "
+        "2-3%, e confrontarle con il 13% medio di tutta la giornata fa sembrare dannoso un segnale che e' "
+        "soltanto notturno. <b>z</b> sotto 2 in valore assoluto significa che il delta e' rumore, e con sei "
+        "combinazioni testate qui serve almeno 3.</div>");
 
       //--- confronto fra i TRE TIMEFRAME degli indicatori
       H("<h2>Confronto fra i timeframe degli indicatori</h2><div class=\"note\">"
@@ -3172,9 +3259,16 @@ bool ProcessSymbol(string sym)
         "dentro e' quindi attribuibile al <b>timeframe</b> e non a un campione diverso.<br><br>"
         "<b>n</b> = istanti in quello stato, <b>%ist</b> la loro quota sul totale, <b>p</b> la probabilita' di un "
         "movimento di "+F(g_nAtr>0?g_thrAtr[0]:0.5,2)+" ATR entro l'orizzonte, <b>rif</b> la stessa probabilita' "
-        "su tutti gli istanti dello stesso TF, <b>delta = p - rif</b>. Il riferimento cambia da TF a TF perche' "
-        "cambia il numero di istanti validi: confrontare un delta con un p di un altro TF non ha senso, "
+        "di riferimento, <b>delta = p - rif</b> con accanto il suo <b>z</b>. Il riferimento cambia da TF a TF "
+        "perche' cambia il numero di istanti validi: confrontare un delta con un p di un altro TF non ha senso, "
         "confrontare i delta fra loro si'.<br><br>"
+
+        "<b>Il riferimento e' pesato ora per ora</b>, non preso su tutti gli istanti. E' una differenza che "
+        "ribalta le conclusioni: le uscite dal range del CCI si concentrano nelle ore morte, dove la "
+        "probabilita' di base e' del 2-3% invece del 13% medio. Confrontarle con la media di tutta la giornata "
+        "le fa sembrare dannose quando sono soltanto notturne. Qui ogni stato viene confrontato con la baseline "
+        "delle ore in cui quello stato si presenta davvero, e <b>z</b> dice se il delta e' distinguibile dal "
+        "rumore: sotto 2 non lo e', e con ventuno combinazioni in tabella serve almeno 3.<br><br>"
         "<b>Come si legge, per non ingannarsi.</b> Scendendo di timeframe il numero di eventi esplode e le barre "
         "di errore si stringono, ma non perche' il segnale sia migliore: gli istanti restano gli stessi e "
         "diventano solo piu' correlati fra loro. Un delta piccolo su M1 con n enorme non e' piu' affidabile di un "
@@ -3201,10 +3295,20 @@ bool ProcessSymbol(string sym)
             int nn=tfN[t][k], nr=tfN[t][0];
             if(nn<50 || nr<1){ row+="<td>-</td><td>-</td><td>-</td><td>-</td>"; continue; }
             any=true;
-            double pp=100.0*tfHit[t][k]/nn, pr=100.0*tfHit[t][0]/nr, de=pp-pr;
+            // riferimento pesato con le ore in cui lo stato si presenta:
+            // vedi la nota sotto la tabella, il rif globale inganna
+            double ex=0.0;
+            for(int h=0;h<24;h++)
+               if(tfNh[t][0][h]>0) ex+=tfNh[t][k][h]*((double)tfHh[t][0][h]/tfNh[t][0][h]);
+            double pp=100.0*tfHit[t][k]/nn;
+            double pe=100.0*ex/nn;
+            double de=pp-pe;
+            double se=100.0*MathSqrt((pe/100.0)*(1.0-pe/100.0)/nn);
+            double zz=(se>0? de/se : 0.0);
             row+="<td>"+IntegerToString(nn)+"</td><td>"+F(100.0*nn/nr,1)+"</td><td>"+F(pp,2)+"</td>"+
                  (k==0 ? "<td class=\"nz\">-</td>"
-                       : "<td class=\""+(de>=1.0?"hi":(de<=-1.0?"lo":"nz"))+"\"><b>"+F(de,2)+"</b></td>");
+                       : "<td class=\""+(MathAbs(zz)<2.0?"nz":(de>0?"hi":"lo"))+"\"><b>"+F(de,2)+
+                         "</b> <span class=\"nz\">z"+F(zz,1)+"</span></td>");
          }
          if(any) H(row+"</tr>");
       }
@@ -3368,7 +3472,7 @@ bool ProcessSymbol(string sym)
       int fP=FileOpen(dir+fn+"_cci_periodi.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
       if(fP!=INVALID_HANDLE)
       {
-         W(fP,"periodo;direzione;ora;n_uscite;p;rif;delta;pUP;pDN\r\n");
+         W(fP,"periodo;direzione;ora;n_uscite;p;rif;delta;pUP;pDN;z\r\n");
          for(int pz=0;pz<3;pz++)
          {
             int per=(pz==0?InpCciPeriod:(pz==1?InpCciPeriod2:InpCciPeriod3));
@@ -3377,11 +3481,13 @@ bool ProcessSymbol(string sym)
                int bi=(k==0?2:0);
                string dl=(k==0?"USCITA_UP":"USCITA_DOWN");
                int nnT=0,hhT=0,uuT=0,ddT=0,nrT=0,hrT=0;
+               double expT=0.0;
                for(int h=0;h<24;h++)
                {
                   int nn=pkN[pz][h][bi], nr=pkN[pz][h][1];
                   nnT+=nn; hhT+=pkHit[pz][h][bi]; uuT+=pkUp[pz][h][bi]; ddT+=pkDn[pz][h][bi];
                   nrT+=nr; hrT+=pkHit[pz][h][1];
+                  if(nr>0) expT+=nn*((double)pkHit[pz][h][1]/nr);
                   if(nn<20 || nr<50) continue;
                   double pp=100.0*pkHit[pz][h][bi]/nn, pr=100.0*pkHit[pz][h][1]/nr;
                   W(fP,IntegerToString(per)+";"+dl+";"+D2(h)+":00;"+IntegerToString(nn)+";"+
@@ -3390,10 +3496,15 @@ bool ProcessSymbol(string sym)
                }
                if(nnT>=50 && nrT>0)
                {
-                  double pp=100.0*hhT/nnT, pr=100.0*hrT/nrT;
+                  // il riferimento della riga TUTTE e' pesato ora per ora:
+                  // sommare i riferimenti grezzi confronterebbe un segnale
+                  // notturno con la media dell'intera giornata
+                  double pp=100.0*hhT/nnT, pe=100.0*expT/nnT;
+                  double se=100.0*MathSqrt((pe/100.0)*(1.0-pe/100.0)/nnT);
                   W(fP,IntegerToString(per)+";"+dl+";TUTTE;"+IntegerToString(nnT)+";"+
-                        F(pp,2)+";"+F(pr,2)+";"+F(pp-pr,2)+";"+
-                        F(100.0*uuT/nnT,2)+";"+F(100.0*ddT/nnT,2)+"\r\n");
+                        F(pp,2)+";"+F(pe,2)+";"+F(pp-pe,2)+";"+
+                        F(100.0*uuT/nnT,2)+";"+F(100.0*ddT/nnT,2)+";"+
+                        F(se>0?(pp-pe)/se:0.0,2)+"\r\n");
                }
             }
          }
@@ -3403,7 +3514,7 @@ bool ProcessSymbol(string sym)
       int fT=FileOpen(dir+fn+"_indicatori_tf.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
       if(fT!=INVALID_HANDLE)
       {
-         W(fT,"timeframe;stato;ora;n;pct_istanti;p;rif;delta;pUP;pDN\r\n");
+         W(fT,"timeframe;stato;ora;n;pct_istanti;p;rif;delta;pUP;pDN;z\r\n");
          string stN[7];
          stN[0]="TUTTI"; stN[1]="RSI_ALTO"; stN[2]="RSI_BASSO";
          stN[3]="Z_ALTO"; stN[4]="Z_BASSO"; stN[5]="CCI_USCITA_UP"; stN[6]="CCI_USCITA_DOWN";
@@ -3417,10 +3528,17 @@ bool ProcessSymbol(string sym)
             {
                int nn=tfN[t][k];
                if(nn<20) continue;
+               // riferimento pesato con le ore in cui lo stato esiste davvero
+               double ex=0.0;
+               for(int h=0;h<24;h++)
+                  if(tfNh[t][0][h]>0) ex+=tfNh[t][k][h]*((double)tfHh[t][0][h]/tfNh[t][0][h]);
                double pp=100.0*tfHit[t][k]/nn;
+               double pe=(k==0? pr : 100.0*ex/nn);
+               double se=100.0*MathSqrt((pe/100.0)*(1.0-pe/100.0)/nn);
                W(fT,tn+";"+stN[k]+";TUTTE;"+IntegerToString(nn)+";"+F(100.0*nn/nr,2)+";"+
-                    F(pp,2)+";"+F(pr,2)+";"+F(k==0?0.0:pp-pr,2)+";"+
-                    F(100.0*tfUp[t][k]/nn,2)+";"+F(100.0*tfDn[t][k]/nn,2)+"\r\n");
+                    F(pp,2)+";"+F(pe,2)+";"+F(k==0?0.0:pp-pe,2)+";"+
+                    F(100.0*tfUp[t][k]/nn,2)+";"+F(100.0*tfDn[t][k]/nn,2)+";"+
+                    F(k==0||se<=0?0.0:(pp-pe)/se,2)+"\r\n");
             }
             // dettaglio orario della sola uscita dal range: il resto dei filtri
             // ora per ora e' gia' nelle altre tabelle
@@ -3754,7 +3872,9 @@ bool ProcessSymbol(string sym)
                   F(100.0*g_orb[i].flat/MathMax(1,tt),1)+"% irrisolti)"+L);
             W(fT,"  win rate               "+(rs>0?F(100.0*g_orb[i].win/rs,2):"-")+"%"+L);
             W(fT,"  Wilson low 95%         "+F(wl,2)+"%   (breakeven richiesto "+F(be,2)+"%)"+L);
-            W(fT,"  valore atteso          "+F(OrbExp(g_orb[i].win,g_orb[i].loss,g_orb[i].flat),4)+" ATR per rottura"+L);
+            W(fT,"  target medio           "+F(OrbTgt(i),3)+" ATR  (stop "+F(OrbTgt(i)*InpAdverseRatio,3)+")"+L);
+            W(fT,"  risolte entro orizzonte"+F(OrbResPct(i),1)+"%"+L);
+            W(fT,"  valore atteso          "+F(OrbE(i),4)+" ATR per rottura, al netto dei costi"+L);
             W(fT,"  score                  "+F(OrbScore(i),2)+" ATR ogni 100 giornate"+L);
             W(fT,"  win 1a meta / 2a meta  "+(h1>=0?F(h1,1):"-")+"% / "+(h2>=0?F(h2,1):"-")+"%"+L);
             W(fT,"  falsi breakout         "+F(100.0*g_orb[i].nRev/MathMax(1,g_orb[i].nBrk),1)+"%"+L);
@@ -3810,7 +3930,7 @@ bool ProcessSymbol(string sym)
          H("<div class=\"card\"><span>win rate breakout</span><b>"+
            (rs>0?F(100.0*g_orb[g_orbSel].win/rs,1):"-")+"%</b></div>");
          H("<div class=\"card\"><span>atteso per rottura</span><b>"+
-           F(OrbExp(g_orb[g_orbSel].win,g_orb[g_orbSel].loss,g_orb[g_orbSel].flat),3)+" ATR</b></div>");
+           F(OrbE(g_orbSel),3)+" ATR</b></div>");
       }
       if(InpDoRuns)
       {
@@ -3990,10 +4110,10 @@ bool ProcessSymbol(string sym)
            " minuti, range medio "+F(g_orb[i].sRange/MathMax(1,g_orb[i].n),2)+" ATR). Un estremo viene rotto "
            "nel <b>"+F(100.0*g_orb[i].nBrk/MathMax(1,g_orb[i].n),0)+"%</b> delle giornate, "+
            F(100.0*g_orb[i].nUp/MathMax(1,g_orb[i].nUp+g_orb[i].nDn),0)+"% verso l'alto. "
-           "Entrando sulla rottura con target "+F(InpOrbTargetAtr,2)+" ATR e stop "+
-           F(InpOrbTargetAtr*InpAdverseRatio,2)+" ATR: <b>"+F(wr,1)+"%</b> a target su "+
+           "Entrando sulla rottura con target medio "+F(OrbTgt(i),2)+" ATR e stop "+
+           F(OrbTgt(i)*InpAdverseRatio,2)+" ATR: <b>"+F(wr,1)+"%</b> a target su "+
            IntegerToString(rs)+" esiti, "+F(100.0*g_orb[i].flat/MathMax(1,tt),0)+
-           "% irrisolti, valore atteso "+F(OrbExp(g_orb[i].win,g_orb[i].loss,g_orb[i].flat),3)+" ATR per rottura.</li>");
+           "% irrisolti, valore atteso "+F(OrbE(i),3)+" ATR per rottura al netto dei costi.</li>");
 
          H("<li>"+(wl>be
             ? "Il limite inferiore di Wilson e' <b>"+F(wl,1)+"%</b>, sopra il breakeven richiesto ("+F(be,1)+
@@ -4500,6 +4620,11 @@ void BuildOrb(string sym,string dir)
    for(int i=0;i<g_nOrb;i++)
    {
       if(g_orb[i].n<InpOrbMinN) continue;
+      // Una finestra dove quasi nulla arriva a target o a stop non e' buona:
+      // e' semplicemente incompatibile con l'orizzonte. Contando gli irrisolti
+      // a zero, chi non risolve mai avrebbe valore atteso quasi nullo e
+      // batterebbe chi perde davvero. Fuori dalla classifica.
+      if(OrbResPct(i)<InpOrbMinResolved) continue;
       ord[nOk]=i; sc[nOk]=OrbScore(i); nOk++;
    }
    for(int i=1;i<nOk;i++)
@@ -4525,7 +4650,7 @@ void BuildOrb(string sym,string dir)
       int fO=FileOpen(dir+fn+"_orb_finestre.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
       if(fO!=INVALID_HANDLE)
       {
-         W(fO,"inizio;durata_min;finestra;giornate;range_medio_atr;perc_rottura;perc_up;"
+         W(fO,"inizio;durata_min;finestra;giornate;range_medio_atr;compressione;target_medio_atr;perc_rottura;perc_up;"
               "n_esiti;win_perc;wlow_perc;irrisolti_perc;E_atr;E_low_atr;score_atr_100gg;"
               "win_perc_meta1;win_perc_meta2;ritorni_perc;ambigue_perc;min_alla_rottura;mfe_medio_atr;mae_medio_atr\r\n");
          for(int k=0;k<nOk;k++)
@@ -4535,13 +4660,14 @@ void BuildOrb(string sym,string dir)
             W(fO,D2(g_orb[i].startMin/60)+":"+D2(g_orb[i].startMin%60)+";"+
                  IntegerToString(g_orb[i].durMin)+";"+OrbLab(i)+";"+
                  IntegerToString(g_orb[i].n)+";"+F(g_orb[i].sRange/g_orb[i].n,4)+";"+
+                 F(g_orb[i].sCompr/g_orb[i].n,4)+";"+F(OrbTgt(i),4)+";"+
                  F(100.0*g_orb[i].nBrk/g_orb[i].n,2)+";"+
                  (g_orb[i].nUp+g_orb[i].nDn>0?F(100.0*g_orb[i].nUp/(g_orb[i].nUp+g_orb[i].nDn),2):"")+";"+
                  IntegerToString(res)+";"+(res>0?F(100.0*g_orb[i].win/res,2):"")+";"+
                  (res>0?F(100.0*WilsonLowInd(g_orb[i].win,res),2):"")+";"+
                  (tot>0?F(100.0*g_orb[i].flat/tot,2):"")+";"+
-                 F(OrbExp(g_orb[i].win,g_orb[i].loss,g_orb[i].flat),5)+";"+
-                 F(OrbExpLow(g_orb[i].win,g_orb[i].loss,g_orb[i].flat),5)+";"+
+                 F(OrbE(i),5)+";"+
+                 F(OrbExpLow(g_orb[i].win,g_orb[i].loss,g_orb[i].flat,OrbTgt(i),g_orb[i].sCost/MathMax(1,g_orb[i].win+g_orb[i].loss+g_orb[i].flat)),5)+";"+
                  F(OrbScore(i),4)+";"+
                  (g_orb[i].res1>0?F(100.0*g_orb[i].win1/g_orb[i].res1,2):"")+";"+
                  (g_orb[i].res2>0?F(100.0*g_orb[i].win2/g_orb[i].res2,2):"")+";"+
@@ -4564,10 +4690,23 @@ void BuildOrb(string sym,string dir)
         "Lo script non decide a priori quale sia la fascia di accumulazione: prova <b>"+IntegerToString(g_nOrb)+
         " finestre</b> diverse (ogni combinazione di ora di inizio e durata), per ognuna costruisce massimo e "
         "minimo <b>solo con le barre dentro la finestra</b>, poi aspetta la rottura di uno dei due estremi entro "+
-        IntegerToString(InpOrbDeadlineMin)+" minuti e risolve target e stop a primo tocco. Target "+
-        F(InpOrbTargetAtr,2)+" ATR dal livello rotto, stop "+F(InpOrbTargetAtr*InpAdverseRatio,2)+
-        " ATR, orizzonte "+IntegerToString(InpScanHorizonMin)+" minuti. Gli orari sono quelli del server del "
+        IntegerToString(InpOrbDeadlineMin)+" minuti e risolve target e stop a primo tocco. "+
+        (InpOrbTargetMode==1
+         ? "Target = <b>"+F(InpOrbTargetMult,2)+" x l'ampiezza del range rotto</b> (stop meta' del target x "+
+           F(InpAdverseRatio,2)+"), quindi ogni finestra ha il target proporzionato alla propria dimensione."
+         : "Target fisso "+F(InpOrbTargetAtr,2)+" ATR dal livello rotto, stop "+
+           F(InpOrbTargetAtr*InpAdverseRatio,2)+" ATR.")+
+        " Orizzonte "+IntegerToString(InpScanHorizonMin)+" minuti. Gli orari sono quelli del server del "
         "broker, contati dall'apertura della barra giornaliera.<br><br>"
+
+        "<b>Perche' il target e' relativo al range e non fisso in ATR.</b> Su questo strumento la massima "
+        "escursione media nelle quattro ore dopo una rottura vale circa 0.2 ATR. Chiedere 0.5 ATR significa "
+        "chiedere qualcosa che non arriva quasi mai: il risultato e' che l'80% delle operazioni resta appeso "
+        "senza toccare ne' target ne' stop, il win rate crolla sotto il breakeven per costruzione e la "
+        "classifica finisce per premiare le finestre in cui non succede mai niente. Un target proporzionato "
+        "al range appena rotto elimina il problema alla radice e rende confrontabili durate diverse. "
+        "La colonna <b>irrisolti%</b> e' il controllo: se sale sopra il 40%, il target non e' compatibile con "
+        "l'orizzonte e la finestra viene esclusa dalla classifica.<br><br>"
 
         "<b>Sulle durate piu' corte.</b> Massimo e minimo si costruiscono con le barre del timeframe base ("+
         EnumToString(InpBaseTF)+"): una durata inferiore alla barra viene scartata da sola. Attenzione pero' a "
@@ -4589,9 +4728,9 @@ void BuildOrb(string sym,string dir)
         "cima alla lista. Fidati solo delle righe in cui le due meta' si somigliano, e guarda la matrice "
         "sotto: un effetto vero forma un <b>altopiano</b> di celle vicine tutte decenti, non un picco isolato.</div>");
 
-      HtmlTableHead("tO1","#;finestra;durata min;giornate;range medio ATR;% rottura;% UP;n esiti;win%;wlow;"
-                          "irrisolti%;E ATR;score;win% 1a meta;win% 2a meta;ritorni%;min alla rottura;"
-                          "MFE medio;MAE medio",true);
+      HtmlTableHead("tO1","#;finestra;durata min;giornate;range medio ATR;compress;% rottura;% UP;n esiti;"
+                          "win%;wlow;irrisolti%;target ATR;E ATR;score;win% 1a meta;win% 2a meta;ritorni%;"
+                          "min alla rottura;MFE medio;MAE medio",true);
       int shown=0;
       for(int k=0;k<nOk && shown<InpOrbTop;k++)
       {
@@ -4601,7 +4740,7 @@ void BuildOrb(string sym,string dir)
          shown++;
          double wr=100.0*g_orb[i].win/res;
          double wl=100.0*WilsonLowInd(g_orb[i].win,res);
-         double e =OrbExp(g_orb[i].win,g_orb[i].loss,g_orb[i].flat);
+         double e =OrbE(i);
          double s =OrbScore(i);
          double h1=(g_orb[i].res1>0?100.0*g_orb[i].win1/g_orb[i].res1:-1);
          double h2=(g_orb[i].res2>0?100.0*g_orb[i].win2/g_orb[i].res2:-1);
@@ -4611,10 +4750,13 @@ void BuildOrb(string sym,string dir)
          string cls=(s>0 ? (stab?"hi":"nz") : "lo");
          H("<tr><td>"+IntegerToString(shown)+(i==g_orbSel?" &#9656;":"")+"</td><td><b>"+OrbLab(i)+
            "</b></td><td>"+IntegerToString(g_orb[i].durMin)+"</td><td>"+IntegerToString(g_orb[i].n)+
-           "</td><td>"+F(g_orb[i].sRange/g_orb[i].n,2)+"</td><td>"+F(100.0*g_orb[i].nBrk/g_orb[i].n,1)+
+           "</td><td>"+F(g_orb[i].sRange/g_orb[i].n,2)+"</td><td class=\""+
+           (g_orb[i].sCompr/g_orb[i].n<=0.85?"hi":"nz")+"\">"+F(g_orb[i].sCompr/g_orb[i].n,2)+
+           "</td><td>"+F(100.0*g_orb[i].nBrk/g_orb[i].n,1)+
            "</td><td>"+(g_orb[i].nUp+g_orb[i].nDn>0?F(100.0*g_orb[i].nUp/(g_orb[i].nUp+g_orb[i].nDn),1):"-")+
            "</td><td>"+IntegerToString(res)+"</td><td>"+F(wr,1)+"</td><td class=\""+cls+"\">"+F(wl,1)+
-           "</td><td class=\"nz\">"+(tot>0?F(100.0*g_orb[i].flat/tot,1):"-")+"</td><td class=\""+
+           "</td><td class=\"nz\">"+(tot>0?F(100.0*g_orb[i].flat/tot,1):"-")+"</td><td class=\"nz\">"+
+           F(OrbTgt(i),3)+"</td><td class=\""+
            (e>0?"up":"dn")+"\">"+F(e,3)+"</td><td class=\""+cls+"\"><b>"+F(s,2)+"</b></td><td>"+
            (h1>=0?F(h1,1):"-")+"</td><td>"+(h2>=0?F(h2,1):"-")+"</td><td class=\"nz\">"+
            (g_orb[i].nBrk>0?F(100.0*g_orb[i].nRev/g_orb[i].nBrk,1):"-")+"</td><td>"+
@@ -4703,7 +4845,7 @@ void BuildOrb(string sym,string dir)
             double pb=(double)g_orb[i].dBrk[d]/(double)g_orb[i].dN[d];
             int wn=g_orb[i].dWin[d], ls=rs-wn;
             int fl=g_orb[i].dBrk[d]-rs;
-            double v=100.0*pb*OrbExpLow(wn,ls,fl);
+            double v=100.0*pb*OrbExpLow(wn,ls,fl,OrbTgt(i));
             if(v>bv){ bv=v; bi=i; }
          }
          if(bi<0){ H("<tr><td><b>"+DowIT(d)+"</b></td><td colspan=\"9\">campione insufficiente</td></tr>"); continue; }
@@ -4712,8 +4854,8 @@ void BuildOrb(string sym,string dir)
            "</td><td>"+IntegerToString(g_orb[bi].dN[d])+"</td><td>"+
            F(100.0*g_orb[bi].dBrk[d]/g_orb[bi].dN[d],1)+"</td><td>"+IntegerToString(rs)+"</td><td>"+
            F(100.0*wn/rs,1)+"</td><td>"+F(100.0*WilsonLowInd(wn,rs),1)+"</td><td class=\""+
-           (OrbExp(wn,rs-wn,g_orb[bi].dBrk[d]-rs)>0?"up":"dn")+"\">"+
-           F(OrbExp(wn,rs-wn,g_orb[bi].dBrk[d]-rs),3)+"</td><td class=\""+(bv>0?"hi":"lo")+"\"><b>"+
+           (OrbExp(wn,rs-wn,g_orb[bi].dBrk[d]-rs,OrbTgt(bi))>0?"up":"dn")+"\">"+
+           F(OrbExp(wn,rs-wn,g_orb[bi].dBrk[d]-rs,OrbTgt(bi)),3)+"</td><td class=\""+(bv>0?"hi":"lo")+"\"><b>"+
            F(bv,2)+"</b></td></tr>");
       }
       HtmlTableEnd();
@@ -4769,18 +4911,16 @@ void BuildOrb(string sym,string dir)
      "rischio definito, non come una certezza.</div>");
 
    //--- soglie derivate dalla distribuzione: mediane e quartile
-   double aR[], aV[], aT[];
-   ArrayResize(aR,nSel); ArrayResize(aV,nSel); ArrayResize(aT,nSel);
+   double aR[], aT[];
+   ArrayResize(aR,nSel); ArrayResize(aT,nSel);
    for(int q=0;q<nSel;q++)
    {
       aR[q]=g_bk[sel[q]].rangeAtr;
-      aV[q]=g_bk[sel[q]].vol;
       aT[q]=g_bk[sel[q]].ttb;
    }
    double cR[]; ArrayCopy(cR,aR); ArraySort(cR);
    double q25=(nSel>0?cR[(int)(nSel*0.25)]:0.0);
    double q50=Median(aR);
-   double v50=Median(aV);
    double t50=Median(aT);
 
    //--- riepilogo della finestra
@@ -4793,7 +4933,7 @@ void BuildOrb(string sym,string dir)
         F(100.0*g_orb[g_orbSel].nBrk/MathMax(1,g_orb[g_orbSel].n),0)+"%)</b></div>");
       H("<div class=\"card\"><span>win rate</span><b>"+(res>0?F(100.0*g_orb[g_orbSel].win/res,1):"-")+"%</b></div>");
       H("<div class=\"card\"><span>valore atteso</span><b>"+
-        F(OrbExp(g_orb[g_orbSel].win,g_orb[g_orbSel].loss,g_orb[g_orbSel].flat),3)+" ATR</b></div>");
+        F(OrbE(g_orbSel),3)+" ATR</b></div>");
       H("<div class=\"card\"><span>range mediano</span><b>"+F(q50,2)+" ATR</b></div>");
       H("<div class=\"card\"><span>breakeven richiesto</span><b>"+
         F(100.0*InpAdverseRatio/(1.0+InpAdverseRatio),1)+"%</b></div>");
@@ -4832,8 +4972,8 @@ void BuildOrb(string sym,string dir)
    fName[11]="compressione forte (range entro "+F(q25,2)+" ATR)";
    fName[12]="compressione media (range entro "+F(q50,2)+" ATR)";
    fName[13]="range largo (oltre "+F(q50,2)+" ATR)";
-   fName[14]="volatilita' pre-rottura bassa (entro "+F(v50,2)+" ATR)";
-   fName[15]="volatilita' pre-rottura alta";
+   fName[14]="compressione sotto 1 (finestra piu' ferma del normale)";
+   fName[15]="compressione sotto 0.70 (accumulazione stretta)";
    fName[16]="rottura veloce (entro "+F(t50,0)+" min)";
    fName[17]="rottura lenta";
    fName[18]="CCI concorde + compressione entro mediana";
@@ -4843,13 +4983,13 @@ void BuildOrb(string sym,string dir)
    for(int f=0; f<20; f++)
    {
       string nm=fName[f];
-      int n=0, wn=0, ls=0, fl=0; double sM=0.0, sA=0.0;
+      int n=0, wn=0, ls=0, fl=0; double sM=0.0, sA=0.0, sP=0.0, sC=0.0;
       for(int q=0;q<nSel;q++)
       {
          int b=sel[q];
          int    dr=(int)g_bk[b].dir;
          double cc=g_bk[b].cci, rs=g_bk[b].rsi, zz=g_bk[b].zs;
-         double rg=g_bk[b].rangeAtr, mo=g_bk[b].mom, vo=g_bk[b].vol, tt=g_bk[b].ttb;
+         double rg=g_bk[b].rangeAtr, mo=g_bk[b].mom, tt=g_bk[b].ttb, cp=g_bk[b].compr;
          bool ok=false;
          switch(f)
          {
@@ -4867,8 +5007,8 @@ void BuildOrb(string sym,string dir)
             case 11: ok=(rg<=q25); break;
             case 12: ok=(rg<=q50); break;
             case 13: ok=(rg> q50); break;
-            case 14: ok=(vo<=v50); break;
-            case 15: ok=(vo> v50); break;
+            case 14: ok=(cp<=1.00); break;
+            case 15: ok=(cp<=0.70); break;
             case 16: ok=(tt<=t50); break;
             case 17: ok=(tt> t50); break;
             case 18: ok=(dr*cc>InpCciCross && rg<=q50); break;
@@ -4878,10 +5018,15 @@ void BuildOrb(string sym,string dir)
          n++;
          if(g_bk[b].res>0) wn++; else if(g_bk[b].res<0) ls++; else fl++;
          sM+=g_bk[b].mfe; sA+=g_bk[b].mae;
+         // ogni rottura ha il suo target: si somma il risultato realizzato,
+         // non lo si ricostruisce da una media che non e' mai stata usata
+         sP+=(g_bk[b].res>0 ? g_bk[b].tgt
+                            : (g_bk[b].res<0 ? -g_bk[b].tgt*InpAdverseRatio : 0.0));
+         sC+=g_bk[b].cost;
       }
       if(n<20 && f>0) continue;
       int res=wn+ls;
-      double e=OrbExp(wn,ls,fl);
+      double e=(n>0 ? (sP-sC)/n : 0.0);
       if(f==0) baseE=e;
       double wl=(res>0?100.0*WilsonLowInd(wn,res):0.0);
       double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
@@ -4904,7 +5049,7 @@ void BuildOrb(string sym,string dir)
    HtmlTableHead("tO5","ora della rottura;n;% dei breakout;% UP;win%;wlow;E ATR;MFE medio;MAE medio",false);
    for(int h=0;h<24;h++)
    {
-      int n=0, wn=0, ls=0, fl=0, up=0; double sM=0.0, sA=0.0;
+      int n=0, wn=0, ls=0, fl=0, up=0; double sM=0.0, sA=0.0, sP=0.0, sC=0.0;
       for(int q=0;q<nSel;q++)
       {
          int b=sel[q];
@@ -4913,10 +5058,13 @@ void BuildOrb(string sym,string dir)
          if(g_bk[b].dir>0) up++;
          if(g_bk[b].res>0) wn++; else if(g_bk[b].res<0) ls++; else fl++;
          sM+=g_bk[b].mfe; sA+=g_bk[b].mae;
+         sP+=(g_bk[b].res>0 ? g_bk[b].tgt
+                            : (g_bk[b].res<0 ? -g_bk[b].tgt*InpAdverseRatio : 0.0));
+         sC+=g_bk[b].cost;
       }
       if(n<20) continue;
       int res=wn+ls;
-      double e=OrbExp(wn,ls,fl);
+      double e=(n>0 ? (sP-sC)/n : 0.0);
       double wl=(res>0?100.0*WilsonLowInd(wn,res):0.0);
       double be=100.0*InpAdverseRatio/(1.0+InpAdverseRatio);
       H("<tr><td><b>"+D2(h)+":00</b></td><td>"+IntegerToString(n)+"</td><td>"+
@@ -4955,7 +5103,7 @@ void BuildOrb(string sym,string dir)
             }
             if(n<InpRankMinN) continue;
             rd[nr]=d; rh[nr]=h; rn[nr]=n; rw[nr]=wn; rl[nr]=ls; rf[nr]=fl; ru[nr]=up;
-            rs2[nr]=100.0*((double)n/MathMax(1,g_orb[g_orbSel].n))*OrbExpLow(wn,ls,fl);
+            rs2[nr]=100.0*((double)n/MathMax(1,g_orb[g_orbSel].n))*OrbExpLow(wn,ls,fl,OrbTgt(g_orbSel));
             nr++;
          }
       for(int a=1;a<nr;a++)
@@ -4977,8 +5125,8 @@ void BuildOrb(string sym,string dir)
          H("<tr><td>"+IntegerToString(a+1)+"</td><td><b>"+DowIT(rd[a])+"</b></td><td>"+D2(rh[a])+
            ":00</td><td>"+IntegerToString(rn[a])+"</td><td>"+F(100.0*ru[a]/rn[a],1)+"</td><td>"+
            (res>0?F(100.0*rw[a]/res,1):"-")+"</td><td class=\""+(wl>be?"hi":"lo")+"\">"+F(wl,1)+
-           "</td><td class=\""+(OrbExp(rw[a],rl[a],rf[a])>0?"up":"dn")+"\">"+
-           F(OrbExp(rw[a],rl[a],rf[a]),3)+"</td><td class=\""+(rs2[a]>0?"hi":"lo")+"\"><b>"+
+           "</td><td class=\""+(OrbExp(rw[a],rl[a],rf[a],OrbTgt(g_orbSel))>0?"up":"dn")+"\">"+
+           F(OrbExp(rw[a],rl[a],rf[a],OrbTgt(g_orbSel)),3)+"</td><td class=\""+(rs2[a]>0?"hi":"lo")+"\"><b>"+
            F(rs2[a],2)+"</b></td></tr>");
       }
       HtmlTableEnd();
@@ -5001,8 +5149,8 @@ void BuildOrb(string sym,string dir)
             H("<tr><td><b>"+DowIT(d)+"</b></td><td>"+IntegerToString(cnt)+"</td><td>"+D2(rh[a])+
               ":00</td><td>"+IntegerToString(rn[a])+"</td><td>"+F(100.0*ru[a]/rn[a],1)+"</td><td>"+
               (res>0?F(100.0*rw[a]/res,1):"-")+"</td><td class=\""+(wl>be?"hi":"lo")+"\">"+F(wl,1)+
-              "</td><td class=\""+(OrbExp(rw[a],rl[a],rf[a])>0?"up":"dn")+"\">"+
-              F(OrbExp(rw[a],rl[a],rf[a]),3)+"</td><td class=\""+(rs2[a]>0?"hi":"lo")+"\"><b>"+
+              "</td><td class=\""+(OrbExp(rw[a],rl[a],rf[a],OrbTgt(g_orbSel))>0?"up":"dn")+"\">"+
+              F(OrbExp(rw[a],rl[a],rf[a],OrbTgt(g_orbSel)),3)+"</td><td class=\""+(rs2[a]>0?"hi":"lo")+"\"><b>"+
               F(rs2[a],2)+"</b></td></tr>");
          }
          if(cnt==0)
@@ -5019,15 +5167,16 @@ void BuildOrb(string sym,string dir)
       int fF=FileOpen(dir+fn+"_orb_breakout.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
       if(fF!=INVALID_HANDLE)
       {
-         W(fF,"finestra;giorno;ora;direzione;esito;anno;range_atr;intensita_atr;volatilita_atr;"
-              "cci;rsi;zscore;mfe_atr;mae_atr;min_alla_rottura\r\n");
+         W(fF,"finestra;giorno;ora;direzione;esito;anno;range_atr;compressione;target_atr;intensita_atr;"
+              "volatilita_atr;cci;rsi;zscore;mfe_atr;mae_atr;min_alla_rottura\r\n");
          for(int q=0;q<nSel;q++)
          {
             int b=sel[q];
             W(fF,OrbLab(g_orbSel)+";"+DowIT((int)g_bk[b].dow)+";"+D2((int)g_bk[b].hour)+":00;"+
                  (g_bk[b].dir>0?"UP":"DOWN")+";"+
                  (g_bk[b].res>0?"TARGET":(g_bk[b].res<0?"STOP":"IRRISOLTO"))+";"+
-                 IntegerToString(g_bk[b].year)+";"+F(g_bk[b].rangeAtr,4)+";"+F(g_bk[b].mom,4)+";"+
+                 IntegerToString(g_bk[b].year)+";"+F(g_bk[b].rangeAtr,4)+";"+F(g_bk[b].compr,4)+";"+
+                 F(g_bk[b].tgt,4)+";"+F(g_bk[b].mom,4)+";"+
                  F(g_bk[b].vol,4)+";"+F(g_bk[b].cci,2)+";"+F(g_bk[b].rsi,2)+";"+F(g_bk[b].zs,3)+";"+
                  F(g_bk[b].mfe,4)+";"+F(g_bk[b].mae,4)+";"+F(g_bk[b].ttb,1)+"\r\n");
          }

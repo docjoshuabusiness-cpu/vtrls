@@ -105,8 +105,26 @@ se e' una frazione minima di ATR, quella riga descrive rumore, non compressione.
 Ogni durata in piu' allunga il run in proporzione: togli quelle che non ti
 servono.
 
-**Secondo tempo.** Entrata sul livello rotto, target `InpOrbTargetAtr` ATR, stop
-`InpAdverseRatio` x target, esito a primo tocco entro `InpScanHorizonMin`.
+**Secondo tempo.** Entrata sul livello rotto, esito a primo tocco entro
+`InpScanHorizonMin`. Il target ha due modi:
+
+- `InpOrbTargetMode = 1` (default): target = `InpOrbTargetMult` x l'ampiezza del
+  range appena rotto. Ogni finestra ha il target proporzionato alla propria
+  dimensione, e durate diverse restano confrontabili.
+- `InpOrbTargetMode = 0`: target fisso `InpOrbTargetAtr` ATR.
+
+Un target fisso troppo grande e' l'errore piu' facile e il piu' costoso. Su
+EURUSD la massima escursione media nelle quattro ore dopo una rottura vale circa
+0,2 ATR: chiedendone 0,5, l'80% delle operazioni resta appeso senza toccare ne'
+target ne' stop, il win rate scende sotto il breakeven **per costruzione**, e la
+classifica finisce per premiare le finestre in cui non succede mai niente,
+perche' contando gli irrisolti a zero chi non risolve mai batte chi perde. Per
+questo esiste `InpOrbMinResolved` (default 60%): una finestra che non risolve
+almeno quella quota di rotture esce dalla classifica invece di vincerla.
+
+`InpOrbCostPt` sottrae spread e commissioni dal valore atteso, e
+`InpOrbMinTargetAtr` scarta le finestre il cui target sarebbe piu' piccolo del
+costo di transazione.
 La barra in cui avviene la rottura viene valutata **solo per lo stop, mai per il
 target**: dentro una barra l'ordine dei prezzi non e' noto, e assumere che il
 target sia arrivato prima gonfierebbe il win rate a gratis. I numeri veri sono
@@ -131,6 +149,18 @@ Tre controlli, in ordine di importanza:
 3. **wlow contro il breakeven richiesto.** Con stop meta' del target servono il
    33,3% per non perdere. Se il limite inferiore di Wilson resta sotto, quel
    segnale non ha dimostrato nulla, per quanto bello sia il win rate grezzo.
+
+### Compressione
+
+La colonna `compress` e' l'ampiezza del range diviso quella attesa da una
+passeggiata casuale della stessa durata (ATR x radice del tempo). **Sotto 1 = la
+finestra e' stata piu' ferma del normale**, ed e' l'unica definizione di
+accumulazione che regge il confronto fra durate diverse: un range di 0,15 ATR
+vuol dire cose opposte se si e' formato in 15 minuti o in due ore.
+
+Nella scheda operativa due filtri usano questa misura (`compressione sotto 1` e
+`sotto 0,70`). Se il vantaggio compare solo li', il meccanismo e' reale: si opera
+la rottura di una compressione, non una rottura qualsiasi.
 
 ### Sui filtri, e sul "100% di sicurezza"
 
