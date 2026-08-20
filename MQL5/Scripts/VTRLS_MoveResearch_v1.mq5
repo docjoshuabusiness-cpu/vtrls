@@ -77,8 +77,8 @@
 //==================================================================
 input string          InpSymbols        = "";              // Simboli separati da virgola ("" = grafico, "*" = Market Watch)
 input ENUM_TIMEFRAMES InpBaseTF         = PERIOD_M1;       // TF base del percorso intraday (M1..H1)
-input datetime        InpFrom           = D'2010.01.01 00:00';  // Data inizio (controlla il grafico anno x anno: i primi anni di storia dei broker sono spesso sporchi)
-input datetime        InpTo             = D'2026.01.01 00:00';  // Data fine
+input datetime        InpFrom           = D'2010.01.04 00:00';  // Data inizio (controlla il grafico anno x anno: i primi anni di storia dei broker sono spesso sporchi)
+input datetime        InpTo             = D'2026.07.15 00:00';  // Data fine
 input int             InpATRPeriod      = 14;              // Periodo ATR (su daily)
 input int             InpMinBarsDay     = 200;             // Barre minime perche' la giornata sia valida
 input double          InpMinDayRangeAtr = 0.25;            // Range minimo della giornata in ATR (scarta i mezzi-giorni)
