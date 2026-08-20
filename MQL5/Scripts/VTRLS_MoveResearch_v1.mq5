@@ -106,7 +106,9 @@ input ENUM_TIMEFRAMES InpIndTF          = PERIOD_M15;      // TF su cui calcolar
 input int             InpRsiPeriod      = 14;              // Periodo RSI
 input double          InpRsiHigh        = 70.0;            // Soglia RSI ipercomprato
 input double          InpRsiLow         = 30.0;            // Soglia RSI ipervenduto
-input int             InpCciPeriod      = 14;              // Periodo CCI
+input int             InpCciPeriod      = 14;              // Periodo CCI (principale, usato nelle condizioni)
+input int             InpCciPeriod2     = 30;              // Secondo periodo CCI, solo per il confronto
+input int             InpCciPeriod3     = 50;              // Terzo periodo CCI, solo per il confronto
 input double          InpCciHigh        = 40.0;            // Soglia CCI superiore
 input double          InpCciLow         = -40.0;           // Soglia CCI inferiore (stato)
 input double          InpCciCross       = 45.0;            // Soglia di ATTRAVERSAMENTO del CCI (trigger di ingresso)
@@ -116,6 +118,10 @@ input int             InpAccMaxScan     = 200;             // Limite di risalita
 input int             InpZsPeriod       = 20;              // Periodo Z-Score
 input double          InpZsHigh         = 2.0;             // Soglia Z-Score superiore
 input double          InpZsLow          = -2.0;            // Soglia Z-Score inferiore
+
+input string          sRun              = "=== MOVIMENTI PULITI ===";
+input bool            InpDoRuns         = true;            // Analizza le sequenze di barre consecutive
+input int             InpRunMinBars     = 3;               // Barre consecutive minime perche' sia un movimento
 
 input string          s3                = "=== NEWS ===";
 input bool            InpUseCalendar    = true;            // Usa il calendario economico MQL5
@@ -975,9 +981,10 @@ void HtmlHead(string sym)
    H("<button onclick=\"tab(3)\">Orari</button>");
    H("<button onclick=\"tab(4)\">Aggregati</button>");
    H("<button onclick=\"tab(5)\">Classifica</button>");
-   H("<button onclick=\"tab(6)\">Indicatori</button>");
-   H("<button onclick=\"tab(7)\">Condizioni incrociate</button>");
-   H("<button onclick=\"tab(8)\">Condizioni marginali</button>");
+   H("<button onclick=\"tab(6)\">Movimenti puliti</button>");
+   H("<button onclick=\"tab(7)\">Indicatori</button>");
+   H("<button onclick=\"tab(8)\">Condizioni incrociate</button>");
+   H("<button onclick=\"tab(9)\">Condizioni marginali</button>");
    H("</nav><main>");
    H("<section class=\"on\"><div id=\"sum\" class=\"sum\"></div><div id=\"lett\"></div>");
    H("<h2>Come leggere questo report</h2><div class=\"note\">");
@@ -1044,6 +1051,19 @@ void HtmlHead(string sym)
      "smoothing di Wilder</td></tr>");
    H("<tr><td><b>CCI</b></td><td>Commodity Channel Index a <i>"+IntegerToString(InpCciPeriod)+"</i> periodi "
      "su prezzo tipico</td></tr>");
+   H("<tr><td><b>movimento pulito</b></td><td>Sequenza di barre consecutive nella stessa direzione: il prezzo "
+     "avanza invece di oscillare sul posto</td></tr>");
+   H("<tr><td><b>efficienza</b></td><td>Ampiezza netta diviso la somma dei range percorsi. 1.00 = movimento "
+     "perfettamente direzionale. Ampiezza grande con efficienza bassa significa uno stop colpito prima "
+     "del target</td></tr>");
+   H("<tr><td><b>velocita'</b></td><td>ATR di movimento per ora: distingue un movimento ampio ma lento da uno "
+     "che copre la stessa distanza in un terzo del tempo</td></tr>");
+   H("<tr><td><b>qualita'</b></td><td>efficienza x ampiezza media in ATR: premia le finestre dove i movimenti "
+     "sono insieme ampi e diretti, non solo frequenti</td></tr>");
+   H("<tr><td><b>delta</b></td><td>Nelle tabelle CCI: p meno rif, cioe' quanto il breakout aggiunge rispetto "
+     "alla stessa ora senza breakout. Solo un delta positivo significa qualcosa</td></tr>");
+   H("<tr><td><b>rif</b></td><td>La stessa probabilita' misurata nella stessa finestra ma senza il segnale: "
+     "toglie di mezzo il fatto che certe ore si muovono comunque di piu'</td></tr>");
    H("<tr><td><b>sessioni</b></td><td>Asia / London / NY-overlap / NY-late, in ora del server del broker. "
      "Con il cambio di ora legale le fasce slittano di un'ora</td></tr>");
    H("</tbody></table></div></section>");
@@ -1221,6 +1241,17 @@ void HtmlHeatM15(string id,const int &cnt[][96],const double &sPt[][96],const do
 // ripartizione UP/DOWN calcolati come per tutto il resto.
 // Fasce di durata dell'accumulazione. Bin larghi: la durata esatta non e'
 // informativa e frammentare i campioni peggiora solo l'affidabilita'.
+// Fasce di lunghezza dei movimenti puliti, in barre consecutive.
+string RunBin(int n)
+{
+   if(n<4)  return "3 barre";
+   if(n<5)  return "4 barre";
+   if(n<6)  return "5 barre";
+   if(n<8)  return "6-7 barre";
+   if(n<12) return "8-11 barre";
+   return "12+ barre";
+}
+
 string AccBin(int n)
 {
    if(n<=0)  return "fuori dal range";
@@ -1611,6 +1642,14 @@ bool ProcessSymbol(string sym)
    SAgg aggYear[]; ArrayResize(aggYear,60);
    for(int i=0;i<60;i++) AggInit(aggYear[i],IntegerToString(2000+i));
 
+   // MOVIMENTI PULITI: sequenze di barre consecutive dello stesso segno.
+   // "Pulito" significa che il prezzo avanza invece di oscillare sul posto:
+   // l'efficienza (ampiezza netta / somma dei range percorsi) misura proprio
+   // questo, ed e' 1.0 per un movimento perfettamente direzionale.
+   int    rnN[24], rnUp[24];  double rnDur[24], rnPt[24], rnAtr[24], rnEff[24], rnVel[24];
+   int    rlN[6];             double rlDur[6], rlPt[6], rlAtr[6], rlEff[6];
+   int    rdN[7][24];         double rdAtr[7][24], rdEff[7][24], rdDur[7][24];
+
    int    cntDH[7][24];  double sPtDH[7][24],  sAtDH[7][24];
    int    cntDM[7][96];  double sPtDM[7][96],  sAtDM[7][96];
    int    buyDH[7][24],  bigDH[7][24], buyDM[7][96], bigDM[7][96];
@@ -1620,6 +1659,8 @@ bool ProcessSymbol(string sym)
    int    bkN[24][3], bkHit[24][3], bkUp[24][3], bkDn[24][3];
    int    bdN[7][24][3], bdHit[7][24][3], bdUp[7][24][3], bdDn[7][24][3];
    int    bmN[7][96][3];
+   // confronto fra periodi CCI: [periodo][ora][stato]
+   int    pkN[3][24][3], pkHit[3][24][3], pkUp[3][24][3], pkDn[3][24][3];
    int    indN[7][24], zHi[7][24], zLo[7][24], rHi[7][24], rLo[7][24];
    int    cHi[7][24], cLo[7][24], cPos[7][24];
    int    cntM[96], buyM[96], bigM[96];  double sAtM[96];
@@ -1632,6 +1673,12 @@ bool ProcessSymbol(string sym)
    ArrayInitialize(bkN,0); ArrayInitialize(bkHit,0); ArrayInitialize(bkUp,0); ArrayInitialize(bkDn,0);
    ArrayInitialize(bdN,0); ArrayInitialize(bdHit,0); ArrayInitialize(bdUp,0); ArrayInitialize(bdDn,0);
    ArrayInitialize(bmN,0);
+   ArrayInitialize(rnN,0); ArrayInitialize(rnUp,0); ArrayInitialize(rnDur,0.0);
+   ArrayInitialize(rnPt,0.0); ArrayInitialize(rnAtr,0.0); ArrayInitialize(rnEff,0.0); ArrayInitialize(rnVel,0.0);
+   ArrayInitialize(rlN,0); ArrayInitialize(rlDur,0.0); ArrayInitialize(rlPt,0.0);
+   ArrayInitialize(rlAtr,0.0); ArrayInitialize(rlEff,0.0);
+   ArrayInitialize(rdN,0); ArrayInitialize(rdAtr,0.0); ArrayInitialize(rdEff,0.0); ArrayInitialize(rdDur,0.0);
+   ArrayInitialize(pkN,0); ArrayInitialize(pkHit,0); ArrayInitialize(pkUp,0); ArrayInitialize(pkDn,0);
    g_nRb=0; ArrayResize(g_rb,0);
    ArrayInitialize(indN,0); ArrayInitialize(zHi,0); ArrayInitialize(zLo,0);
    ArrayInitialize(rHi,0);  ArrayInitialize(rLo,0);
@@ -1905,9 +1952,47 @@ bool ProcessSymbol(string sym)
       ArrayResize(lmHourAll,q+1,512); lmHourAll[q]=st.hour;
       nDays++;
 
+      //--- MOVIMENTI PULITI della giornata
+      if(InpDoRuns)
+      {
+         int i0=0;
+         while(i0<n)
+         {
+            int sg=(r[i0].close>r[i0].open?1:(r[i0].close<r[i0].open?-1:0));
+            if(sg==0){ i0++; continue; }
+            int j0=i0;
+            while(j0+1<n)
+            {
+               int s2=(r[j0+1].close>r[j0+1].open?1:(r[j0+1].close<r[j0+1].open?-1:0));
+               if(s2!=sg) break;
+               j0++;
+            }
+            int len=j0-i0+1;
+            if(len>=InpRunMinBars)
+            {
+               double amp=MathAbs(r[j0].close-r[i0].open)/g_point;
+               double path=0;
+               for(int q=i0;q<=j0;q++) path+=(r[q].high-r[q].low)/g_point;
+               double eff=(path>0 ? amp/path : 0.0);      // 1.0 = perfettamente direzionale
+               double aAtr=amp/atrPt;
+               int    dMin=len*g_tfMin;
+               double vel=(dMin>0 ? aAtr/(dMin/60.0) : 0.0);   // ATR per ora
+               MqlDateTime rt; TimeToStruct(r[i0].time,rt);
+               int hh3=rt.hour, dd3=rt.day_of_week;
+               rnN[hh3]++; rnDur[hh3]+=dMin; rnPt[hh3]+=amp; rnAtr[hh3]+=aAtr;
+               rnEff[hh3]+=eff; rnVel[hh3]+=vel;
+               if(sg>0) rnUp[hh3]++;
+               int lb=(len<4?0:(len<5?1:(len<6?2:(len<8?3:(len<12?4:5)))));
+               rlN[lb]++; rlDur[lb]+=dMin; rlPt[lb]+=amp; rlAtr[lb]+=aAtr; rlEff[lb]+=eff;
+               rdN[dd3][hh3]++; rdAtr[dd3][hh3]+=aAtr; rdEff[dd3][hh3]+=eff; rdDur[dd3][hh3]+=dMin;
+            }
+            i0=j0+1;
+         }
+      }
+
       //--- serie degli indicatori sul TF dedicato, con warm-up prima del giorno
       MqlRates ri[];
-      double rsiB[], cciB[], zsB[];
+      double rsiB[], cciB[], zsB[], cciB2[], cciB3[];
       int nInd=0, indTfSec=0, ip=0;
       if(InpDoIndicators && InpDoScan)
       {
@@ -1930,6 +2015,14 @@ bool ProcessSymbol(string sym)
             CalcRSI(cl,nInd,InpRsiPeriod,rsiB);
             CalcCCI(tp,nInd,InpCciPeriod,cciB);
             CalcZScore(cl,nInd,InpZsPeriod,zsB);
+            // Stesso indicatore su tre periodi. Il periodo cambia radicalmente
+            // il significato della compressione: con 14 barre su M15 dura
+            // pochissimo ed e' rumore, con 50 diventa una vera fase di
+            // accumulazione. Testarli insieme mostra se l'effetto dipende
+            // dall'idea o soltanto dalla taratura - e tenere il migliore dei
+            // tre senza guardare la coerenza fra loro sarebbe overfitting.
+            CalcCCI(tp,nInd,InpCciPeriod2,cciB2);
+            CalcCCI(tp,nInd,InpCciPeriod3,cciB3);
          }
          else nInd=0;
       }
@@ -2031,6 +2124,33 @@ bool ProcessSymbol(string sym)
 
             // esito forward (passata unica: MFE + first touch di tutte le soglie)
             ResolveForward(r,g,endIdx,entry,atrPt,s);
+
+            // stesso rilevamento di compressione/uscita sui tre periodi
+            if(s.indOk && g_nAtr>0 && ip>=1)
+            {
+               for(int pz=0;pz<3;pz++)
+               {
+                  double cNow=(pz==0?cciB[ip]:(pz==1?cciB2[ip]:cciB3[ip]));
+                  double cPrv=(pz==0?cciB[ip-1]:(pz==1?cciB2[ip-1]:cciB3[ip-1]));
+                  int st=1;
+                  if(MathAbs(cNow)>InpCciCross && MathAbs(cPrv)<=InpCciCross)
+                  {
+                     // conta la compressione che ha preceduto l'uscita
+                     int q=ip-1, L=0;
+                     while(q>0 && ip-q<InpAccMaxScan)
+                     {
+                        double cq=(pz==0?cciB[q]:(pz==1?cciB2[q]:cciB3[q]));
+                        if(MathAbs(cq)>InpCciCross) break;
+                        L++; q--;
+                     }
+                     if(L>=InpAccMinBars) st=(cNow>0?2:0);
+                  }
+                  pkN[pz][s.hour][st]++;
+                  if(s.hitUpAtr[0]>=0 || s.hitDnAtr[0]>=0) pkHit[pz][s.hour][st]++;
+                  if(s.hitUpAtr[0]>=0) pkUp[pz][s.hour][st]++;
+                  if(s.hitDnAtr[0]>=0) pkDn[pz][s.hour][st]++;
+               }
+            }
 
             if(s.indOk && g_nAtr>0)
             {
@@ -2300,6 +2420,121 @@ bool ProcessSymbol(string sym)
    }
 
    //=================================================================
+   //  MOVIMENTI PULITI
+   //=================================================================
+   if(g_html!=INVALID_HANDLE && InpDoRuns)
+   {
+      int tN=0, tUp=0; double tD=0,tP=0,tA=0,tE=0,tV=0;
+      for(int h=0;h<24;h++){ tN+=rnN[h]; tUp+=rnUp[h]; tD+=rnDur[h]; tP+=rnPt[h]; tA+=rnAtr[h]; tE+=rnEff[h]; tV+=rnVel[h]; }
+
+      H("<section><h2>Movimenti puliti</h2><div class=\"note\">"
+        "Un <b>movimento pulito</b> e' una sequenza di almeno "+IntegerToString(InpRunMinBars)+" barre "+
+        EnumToString(InpBaseTF)+" consecutive nella stessa direzione: il prezzo avanza invece di oscillare "
+        "sul posto ad accumulare.<br><br>"
+        "<b>efficienza</b> = ampiezza netta diviso la somma dei range percorsi. Vale 1.00 per un movimento "
+        "perfettamente direzionale e scende quanto piu' il prezzo va avanti e indietro dentro la sequenza. "
+        "E' la misura di quanto un movimento e' <b>pulito</b>, ed e' la colonna piu' importante di questa "
+        "scheda: un'ampiezza grande con efficienza bassa e' un movimento che ti fa uscire dallo stop prima "
+        "di arrivare al target.<br><br>"
+        "<b>velocita'</b> = ATR di movimento per ora. Distingue un movimento ampio ma lento da uno che "
+        "percorre la stessa distanza in un terzo del tempo: a parita' di target, il secondo tiene il capitale "
+        "impegnato molto meno e sopporta meglio lo spread.</div>");
+
+      H("<h2>Per ora del giorno</h2>");
+      HtmlTableHead("tU1","ora;n movimenti;% del totale;durata media min;ampiezza media pt;ampiezza media ATR;"
+                          "efficienza;velocita' ATR/h;% UP",false);
+      for(int h=0;h<24;h++)
+      {
+         int nn=rnN[h];
+         if(nn<20) continue;
+         H("<tr><td><b>"+D2(h)+":00</b></td><td>"+IntegerToString(nn)+"</td><td>"+
+           F(100.0*nn/MathMax(1,tN),1)+"%</td><td>"+F(rnDur[h]/nn,0)+"</td><td>"+F(rnPt[h]/nn,0)+"</td><td>"+
+           F(rnAtr[h]/nn,3)+"</td><td>"+F(rnEff[h]/nn,3)+"</td><td>"+F(rnVel[h]/nn,3)+"</td><td class=\""+
+           (100.0*rnUp[h]/nn>=50?"up":"dn")+"\">"+F(100.0*rnUp[h]/nn,1)+"</td></tr>");
+      }
+      if(tN>0)
+         H("<tr class=\"tot\"><td><b>MEDIA</b></td><td>"+IntegerToString(tN)+"</td><td>100%</td><td>"+
+           F(tD/tN,0)+"</td><td>"+F(tP/tN,0)+"</td><td>"+F(tA/tN,3)+"</td><td>"+F(tE/tN,3)+"</td><td>"+
+           F(tV/tN,3)+"</td><td>"+F(100.0*tUp/tN,1)+"</td></tr>");
+      HtmlTableEnd();
+
+      H("<h2>Per lunghezza del movimento</h2><div class=\"note\">Quanto durano e quanto valgono. Se "
+        "l'ampiezza per barra cresce con la lunghezza, i movimenti lunghi accelerano; se resta piatta, "
+        "avanzano semplicemente piu' a lungo allo stesso ritmo - e cambia come si imposta il target.</div>");
+      HtmlTableHead("tU2","lunghezza;n;% del totale;durata media min;ampiezza media pt;ampiezza media ATR;"
+                          "efficienza;ampiezza per barra pt",false);
+      for(int b=0;b<6;b++)
+      {
+         int nn=rlN[b];
+         if(nn<10) continue;
+         double bars=(b==0?3:(b==1?4:(b==2?5:(b==3?6.5:(b==4?9.5:14)))));
+         H("<tr><td><b>"+RunBin(b==0?3:(b==1?4:(b==2?5:(b==3?6:(b==4?8:12)))))+"</b></td><td>"+
+           IntegerToString(nn)+"</td><td>"+F(100.0*nn/MathMax(1,tN),1)+"%</td><td>"+F(rlDur[b]/nn,0)+
+           "</td><td>"+F(rlPt[b]/nn,0)+"</td><td>"+F(rlAtr[b]/nn,3)+"</td><td>"+F(rlEff[b]/nn,3)+
+           "</td><td>"+F(rlPt[b]/nn/bars,1)+"</td></tr>");
+      }
+      HtmlTableEnd();
+
+      H("<h2>Classifica giorno x ora</h2><div class=\"note\">Ordinata per <b>qualita' = efficienza x ampiezza "
+        "media in ATR</b>: premia le finestre dove i movimenti sono insieme ampi e diretti, non quelle dove "
+        "sono solo frequenti.</div>");
+      HtmlTableHead("tU3","#;finestra;n;ampiezza ATR;efficienza;durata media min;qualita'",true);
+      // ordinamento semplice per qualita'
+      double qv[168]; int qi[168]; int nq=0;
+      for(int d=0;d<7;d++) for(int h=0;h<24;h++)
+      {
+         if(rdN[d][h]<15) continue;
+         qv[nq]=(rdEff[d][h]/rdN[d][h])*(rdAtr[d][h]/rdN[d][h]);
+         qi[nq]=d*24+h; nq++;
+      }
+      for(int a=1;a<nq;a++)
+      {
+         double kv=qv[a]; int ki=qi[a]; int b2=a-1;
+         while(b2>=0 && qv[b2]<kv){ qv[b2+1]=qv[b2]; qi[b2+1]=qi[b2]; b2--; }
+         qv[b2+1]=kv; qi[b2+1]=ki;
+      }
+      for(int a=0;a<nq;a++)
+      {
+         int d=qi[a]/24, h=qi[a]%24, nn=rdN[d][h];
+         H("<tr><td>"+IntegerToString(a+1)+"</td><td><b>"+HE(DowIT(d))+"  "+D2(h)+":00</b></td><td>"+
+           IntegerToString(nn)+"</td><td>"+F(rdAtr[d][h]/nn,3)+"</td><td>"+F(rdEff[d][h]/nn,3)+"</td><td>"+
+           F(rdDur[d][h]/nn,0)+"</td><td><b>"+F(qv[a],4)+"</b></td></tr>");
+      }
+      HtmlTableEnd(); H("</section>");
+   }
+   else if(g_html!=INVALID_HANDLE)
+      H("<section><h2>Movimenti puliti</h2><div class=\"note\">Non generati: InpDoRuns disattivato.</div></section>");
+
+   if(InpWriteCsv && InpDoRuns)
+   {
+      int fU=FileOpen(dir+fn+"_movimenti_puliti.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
+      if(fU!=INVALID_HANDLE)
+      {
+         W(fU,"tipo;gruppo;n;durata_media_min;ampiezza_media_pt;ampiezza_media_atr;efficienza;velocita_atr_h;pct_up\r\n");
+         for(int h=0;h<24;h++)
+         {
+            int nn=rnN[h]; if(nn<10) continue;
+            W(fU,"ora;"+D2(h)+":00;"+IntegerToString(nn)+";"+F(rnDur[h]/nn,1)+";"+F(rnPt[h]/nn,1)+";"+
+                  F(rnAtr[h]/nn,4)+";"+F(rnEff[h]/nn,4)+";"+F(rnVel[h]/nn,4)+";"+
+                  F(100.0*rnUp[h]/nn,2)+"\r\n");
+         }
+         for(int b=0;b<6;b++)
+         {
+            int nn=rlN[b]; if(nn<10) continue;
+            W(fU,"lunghezza;"+RunBin(b==0?3:(b==1?4:(b==2?5:(b==3?6:(b==4?8:12)))))+";"+IntegerToString(nn)+";"+
+                  F(rlDur[b]/nn,1)+";"+F(rlPt[b]/nn,1)+";"+F(rlAtr[b]/nn,4)+";"+F(rlEff[b]/nn,4)+";;\r\n");
+         }
+         for(int d=0;d<7;d++) for(int h=0;h<24;h++)
+         {
+            int nn=rdN[d][h]; if(nn<10) continue;
+            W(fU,"giorno_ora;"+DowIT(d)+" "+D2(h)+":00;"+IntegerToString(nn)+";"+F(rdDur[d][h]/nn,1)+";;"+
+                  F(rdAtr[d][h]/nn,4)+";"+F(rdEff[d][h]/nn,4)+";;\r\n");
+         }
+         FileClose(fU);
+      }
+   }
+
+   //=================================================================
    //  INDICATORI: quanto spesso ogni stato si presenta, finestra per finestra
    //=================================================================
    if(g_html!=INVALID_HANDLE)
@@ -2362,6 +2597,38 @@ bool ProcessSymbol(string sym)
            "</td><td>"+(nd>0?F(100.0*bkUp[h][0]/nd,1):"-")+"</td><td>"+(nd>0?F(100.0*bkDn[h][0]/nd,1):"-")+"</td>"+
            "<td class=\"nz\">"+(nr>0?F(100.0*bkHit[h][1]/nr,1):"-")+"</td><td class=\"nz\">"+
            IntegerToString(nr)+"</td></tr>");
+      }
+      HtmlTableEnd();
+
+      //--- confronto fra i tre periodi CCI
+      H("<h2>Confronto fra periodi del CCI</h2><div class=\"note\">"
+        "La stessa idea - compressione dentro +/-"+F(InpCciCross,0)+" e uscita - misurata su tre periodi. "
+        "<b>delta</b> e' il vantaggio sul riferimento, cioe' sulla stessa ora senza uscita: e' l'unico numero "
+        "che dice se il segnale aggiunge qualcosa.<br><br>"
+        "<b>Come si legge, per non ingannarsi</b>: non prendere il periodo col delta migliore. Guarda se i tre "
+        "sono <b>coerenti</b>. Se uno solo funziona e gli altri no, non hai trovato un effetto: hai trovato una "
+        "taratura fortunata, e fuori campione svanira'. Se invece il delta cresce in modo ordinato col periodo, "
+        "l'idea ha un fondo e la direzione in cui cercare e' chiara.</div>");
+      HtmlTableHead("tP","periodo CCI;direzione;n uscite;p;rif;delta;pUP;pDN",false);
+      for(int pz=0;pz<3;pz++)
+      {
+         int per=(pz==0?InpCciPeriod:(pz==1?InpCciPeriod2:InpCciPeriod3));
+         int nr=0, hr=0;
+         for(int h=0;h<24;h++){ nr+=pkN[pz][h][1]; hr+=pkHit[pz][h][1]; }
+         double pr=(nr>0?100.0*hr/nr:0.0);
+         for(int k=0;k<2;k++)
+         {
+            int bi=(k==0?2:0);
+            int nn=0, hh2=0, uu=0, dd2=0;
+            for(int h=0;h<24;h++){ nn+=pkN[pz][h][bi]; hh2+=pkHit[pz][h][bi]; uu+=pkUp[pz][h][bi]; dd2+=pkDn[pz][h][bi]; }
+            if(nn<50) continue;
+            double pp=100.0*hh2/nn, de=pp-pr;
+            H("<tr><td><b>"+IntegerToString(per)+"</b></td><td class=\""+(k==0?"up":"dn")+"\">"+
+              (k==0?"USCITA UP":"USCITA DOWN")+"</td><td>"+IntegerToString(nn)+"</td><td>"+F(pp,2)+
+              "%</td><td class=\"nz\">"+F(pr,2)+"%</td><td class=\""+
+              (de>=1.0?"hi":(de<=-1.0?"lo":"nz"))+"\"><b>"+F(de,2)+"</b></td><td>"+
+              F(100.0*uu/nn,2)+"</td><td>"+F(100.0*dd2/nn,2)+"</td></tr>");
+         }
       }
       HtmlTableEnd();
 
@@ -2479,6 +2746,41 @@ bool ProcessSymbol(string sym)
             }
             FileClose(fRB);
          }
+      }
+
+      int fP=FileOpen(dir+fn+"_cci_periodi.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
+      if(fP!=INVALID_HANDLE)
+      {
+         W(fP,"periodo;direzione;ora;n_uscite;p;rif;delta;pUP;pDN\r\n");
+         for(int pz=0;pz<3;pz++)
+         {
+            int per=(pz==0?InpCciPeriod:(pz==1?InpCciPeriod2:InpCciPeriod3));
+            for(int k=0;k<2;k++)
+            {
+               int bi=(k==0?2:0);
+               string dl=(k==0?"USCITA_UP":"USCITA_DOWN");
+               int nnT=0,hhT=0,uuT=0,ddT=0,nrT=0,hrT=0;
+               for(int h=0;h<24;h++)
+               {
+                  int nn=pkN[pz][h][bi], nr=pkN[pz][h][1];
+                  nnT+=nn; hhT+=pkHit[pz][h][bi]; uuT+=pkUp[pz][h][bi]; ddT+=pkDn[pz][h][bi];
+                  nrT+=nr; hrT+=pkHit[pz][h][1];
+                  if(nn<20 || nr<50) continue;
+                  double pp=100.0*pkHit[pz][h][bi]/nn, pr=100.0*pkHit[pz][h][1]/nr;
+                  W(fP,IntegerToString(per)+";"+dl+";"+D2(h)+":00;"+IntegerToString(nn)+";"+
+                        F(pp,2)+";"+F(pr,2)+";"+F(pp-pr,2)+";"+
+                        F(100.0*pkUp[pz][h][bi]/nn,2)+";"+F(100.0*pkDn[pz][h][bi]/nn,2)+"\r\n");
+               }
+               if(nnT>=50 && nrT>0)
+               {
+                  double pp=100.0*hhT/nnT, pr=100.0*hrT/nrT;
+                  W(fP,IntegerToString(per)+";"+dl+";TUTTE;"+IntegerToString(nnT)+";"+
+                        F(pp,2)+";"+F(pr,2)+";"+F(pp-pr,2)+";"+
+                        F(100.0*uuT/nnT,2)+";"+F(100.0*ddT/nnT,2)+"\r\n");
+               }
+            }
+         }
+         FileClose(fP);
       }
 
       int fB=FileOpen(dir+fn+"_cci_breakout.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
