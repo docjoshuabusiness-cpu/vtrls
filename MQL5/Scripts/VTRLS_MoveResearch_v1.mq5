@@ -1612,6 +1612,26 @@ double WilsonLowInd(int k,int n)
    return (lo<0.0?0.0:lo);
 }
 
+// Percentuali di Value Area testate nella stessa passata. L'istogramma si
+// costruisce UNA volta - e' la parte cara - e poi si espande dal POC piu'
+// volte, una per percentuale. Costo aggiuntivo trascurabile, e si scopre se
+// una condizione dipende dall'idea o solo dalla soglia scelta.
+#define VP_MAXVA 5
+double g_vaPct[VP_MAXVA];
+int    g_nVa=0;
+int    g_vaMain=0;
+
+void VpInitVa()
+{
+   double v[]; int nv=ParseDoubles(InpVpVaList,v);
+   g_nVa=0;
+   for(int i=0;i<nv && g_nVa<VP_MAXVA;i++)
+      if(v[i]>10.0 && v[i]<100.0){ g_vaPct[g_nVa]=v[i]; g_nVa++; }
+   if(g_nVa<=0){ g_vaPct[0]=70.0; g_nVa=1; }
+   g_vaMain=InpVpVaMain-1;
+   if(g_vaMain<0 || g_vaMain>=g_nVa) g_vaMain=0;
+}
+
 // Rapporti rendimento/rischio testati nella stessa passata. Lo stop e' unico
 // e comune a tutti: cambia solo dove si mette il target. Cosi' i rapporti
 // sono confrontabili fra loro e con la curva nulla.
@@ -1826,9 +1846,13 @@ void OrbInit()
          ArrayInitialize(g_orb[g_nOrb].pcfN,0);
          ArrayInitialize(g_orb[g_nOrb].pcfWin,0);
          ArrayInitialize(g_orb[g_nOrb].pcfLoss,0);
-         ArrayInitialize(g_orb[g_nOrb].pvpN,0);
-         ArrayInitialize(g_orb[g_nOrb].pvpWin,0);
-         ArrayInitialize(g_orb[g_nOrb].pvpLoss,0);   // array 2D: azzerato per intero
+         for(int z=0;z<VP_MAXVA;z++)
+            for(int k=0;k<5;k++)
+            {
+               g_orb[g_nOrb].pvpN[z][k]=0;
+               g_orb[g_nOrb].pvpWin[z][k]=0;
+               g_orb[g_nOrb].pvpLoss[z][k]=0;
+            }
          g_orb[g_nOrb].n1=0; g_orb[g_nOrb].brk1=0; g_orb[g_nOrb].win1=0; g_orb[g_nOrb].res1=0;
          g_orb[g_nOrb].n2=0; g_orb[g_nOrb].brk2=0; g_orb[g_nOrb].win2=0; g_orb[g_nOrb].res2=0;
          ArrayInitialize(g_orb[g_nOrb].dN,0);   ArrayInitialize(g_orb[g_nOrb].dBrk,0);
@@ -1929,26 +1953,6 @@ double OrbScore(int i)
 //  tick per prezzo non si puo' fare di meglio, e su un profilo
 //  giornaliero l'errore si media via.
 //==================================================================
-// Percentuali di Value Area testate nella stessa passata. L'istogramma si
-// costruisce UNA volta - e' la parte cara - e poi si espande dal POC piu'
-// volte, una per percentuale. Costo aggiuntivo trascurabile, e si scopre se
-// una condizione dipende dall'idea o solo dalla soglia scelta.
-#define VP_MAXVA 5
-double g_vaPct[VP_MAXVA];
-int    g_nVa=0;
-int    g_vaMain=0;
-
-void VpInitVa()
-{
-   double v[]; int nv=ParseDoubles(InpVpVaList,v);
-   g_nVa=0;
-   for(int i=0;i<nv && g_nVa<VP_MAXVA;i++)
-      if(v[i]>10.0 && v[i]<100.0){ g_vaPct[g_nVa]=v[i]; g_nVa++; }
-   if(g_nVa<=0){ g_vaPct[0]=70.0; g_nVa=1; }
-   g_vaMain=InpVpVaMain-1;
-   if(g_vaMain<0 || g_vaMain>=g_nVa) g_vaMain=0;
-}
-
 void VolProfile(const MqlRates &rr[],int a,int b,int levels,bool useReal,
                 double &poc,double &vah[],double &val[],double &tot)
 {
