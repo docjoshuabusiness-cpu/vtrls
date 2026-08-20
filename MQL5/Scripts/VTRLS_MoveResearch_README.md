@@ -131,7 +131,24 @@ Quindi un win rate del 33% con target 1:2 non e' una strategia mediocre da
 migliorare — e' **esattamente il nulla**. E il 17% con target 1:5 e' lo stesso
 identico nulla travestito da numero diverso.
 
-Si legge il **segno di delta lungo tutta la colonna**, mai la riga migliore:
+**Prima di interpretare la pendenza, guarda la colonna `risolte`.** La curva
+nulla 1/(1+RR) vale per orizzonte **infinito**. Con un orizzonte finito un
+target lontano ha bisogno di piu' tempo di uno vicino, quindi ai rapporti alti
+le operazioni che avrebbero vinto scadono irrisolte mentre quelle che perdono -
+lo stop e' vicino - fanno in tempo a perdere. Il win rate calcolato sulle sole
+risolte finisce sotto la curva nulla ai rapporti alti e sopra a quelli bassi:
+**una curva decrescente e monotona compare anche in un mercato perfettamente
+casuale**. E' un artefatto dell'orologio, non un risultato.
+
+Il test costa un input: alza `InpOrbHorizonMin` (orizzonte del solo breakout,
+indipendente da quello della griglia) finche' `risolte` non e' vicina al 100% a
+tutti i rapporti, e rilancia. Se la pendenza sparisce era troncamento; se
+sopravvive, e' struttura. Finche' `risolte` scende al crescere di RR, gli unici
+rapporti su cui il delta significa qualcosa sono quelli dove e' gia' vicina al
+100%.
+
+Fatto quel controllo, si legge il **segno di delta lungo tutta la colonna**,
+mai la riga migliore:
 
 - delta positivo ai rapporti **alti** -> **momentum**: quando parte continua,
   conviene un target lontano

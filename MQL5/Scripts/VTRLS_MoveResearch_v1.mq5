@@ -140,6 +140,7 @@ input double          InpOrbStopAtr     = 0.15;            // Modo 1: stop = que
 input string          InpOrbRR          = "0.5,1,2,3,4,5"; // Rapporti rendimento/rischio testati insieme (target = RR x stop)
 input int             InpOrbRRMain      = 3;               // Quale della lista alimenta classifica e filtri (1 = il primo)
 input double          InpOrbMinStopAtr  = 0.05;            // Stop minimo in ATR: sotto, spread e commissioni se lo mangiano
+input int             InpOrbHorizonMin  = 0;               // Orizzonte del breakout in minuti (0 = usa InpScanHorizonMin)
 input double          InpOrbCostPt      = 0.0;             // Costo di andata e ritorno in punti (spread + commissioni)
 input double          InpOrbBufferAtr   = 0.03;            // Margine oltre il livello perche' la rottura conti
 input double          InpOrbMinResolved = 60.0;            // % minima di rotture risolte perche' la finestra entri in classifica
@@ -1613,6 +1614,15 @@ int  g_nOrb=0;
 // teorema.
 double RrNull(double rr){ return (rr>0 ? 1.0/(1.0+rr) : 0.0); }
 
+// Orizzonte del breakout, indipendente da quello della griglia.
+// Serve per il test di troncamento: un target lontano ha bisogno di piu'
+// tempo per essere raggiunto, e con una finestra temporale corta le
+// operazioni che avrebbero vinto scadono irrisolte mentre quelle che
+// perdono fanno in tempo a perdere. Il risultato e' un win rate che scende
+// sotto la curva nulla ai rapporti alti anche in un mercato perfettamente
+// casuale. Allungando l'orizzonte, se l'effetto era troncamento sparisce.
+int OrbHorizon(){ return (InpOrbHorizonMin>0 ? InpOrbHorizonMin : InpScanHorizonMin); }
+
 // rapporto stop/target del rapporto principale: e' il reciproco del suo RR.
 // OrbRatio() resta la soglia della griglia point-in-time e non c'entra.
 double OrbRatio()
@@ -2123,9 +2133,18 @@ bool ProcessSymbol(string sym)
       // probabilita' di raggiungere il target crollava a zero per costruzione:
       // non era informazione sul mercato, era il bordo del campione.
       MqlRates r[];
-      int nAll = CopyRates(sym, InpBaseTF, dStart, dEnd+InpScanHorizonMin*60, r);
+      int loadMin = (int)MathMax(InpScanHorizonMin, InpDoOrb?OrbHorizon():0);
+      int nAll = CopyRates(sym, InpBaseTF, dStart, dEnd+loadMin*60, r);
       int n = 0;
       for(int i=0;i<nAll;i++){ if(r[i].time>dEnd) break; n++; }
+      // La griglia point-in-time deve vedere esattamente le barre di prima,
+      // altrimenti allungare l'orizzonte del solo breakout ne cambierebbe il
+      // campione di riflesso: nScanEnd la ferma dove si fermava.
+      int nScanEnd = 0;
+      {
+         datetime sEnd = dEnd + (datetime)(InpScanHorizonMin*60);
+         for(int i=0;i<nAll;i++){ if(r[i].time>sEnd) break; nScanEnd++; }
+      }
       if(nAll<=0 || n<=0)
       {
          nSkipped++; skNoData++;
@@ -2470,7 +2489,7 @@ bool ProcessSymbol(string sym)
             // la giornata deve coprire finestra + attesa + orizzonte, altrimenti
             // la finestra sembrerebbe sterile solo perche' i dati finiscono li'
             int endWait = (int)MathMin(1440, b0+InpOrbDeadlineMin);
-            datetime reqEnd = dStart + (datetime)((endWait+InpScanHorizonMin)*60);
+            datetime reqEnd = dStart + (datetime)((endWait+OrbHorizon())*60);
             if(lastBar < reqEnd) continue;
 
             // servono abbastanza barre dentro la finestra: se il broker ha un
@@ -2537,7 +2556,7 @@ bool ProcessSymbol(string sym)
             double tgtL[ORB_MAXRR];
             for(int z=0;z<g_nRR;z++) tgtL[z]=entry+dir*stpD*g_rr[z];
 
-            datetime hEnd=r[kb].time+(datetime)(InpScanHorizonMin*60);
+            datetime hEnd=r[kb].time+(datetime)(OrbHorizon()*60);
 
             int  resR[ORB_MAXRR];
             bool doneR[ORB_MAXRR];
@@ -2648,7 +2667,7 @@ bool ProcessSymbol(string sym)
          {
             // richiede l'orizzonte COMPLETO: una finestra parziale abbasserebbe
             // la probabilita' misurata senza che il mercato c'entri nulla
-            if(g+horBars >= nAll) break;
+            if(g+horBars >= nScanEnd) break;
             int endIdx = g+horBars;
 
             SScan s;
@@ -3985,8 +4004,8 @@ bool ProcessSymbol(string sym)
                    : (wl<=be ? "NON utilizzabile: il vantaggio non e' distinguibile dal caso"
                              : "da verificare fuori campione: le due meta' del periodo non concordano"))+L);
             W(fT,L+"  CURVA RISCHIO/RENDIMENTO (stesso stop, target diversi)"+L);
-            W(fT,"    "+PadR("RR",8)+PadL("n",7)+PadL("win%",8)+PadL("casuale%",10)+PadL("delta",8)+
-                  PadL("z",7)+PadL("E in R",9)+L);
+            W(fT,"    "+PadR("RR",8)+PadL("n",7)+PadL("risolte%",10)+PadL("win%",8)+PadL("casuale%",10)+
+                  PadL("delta",8)+PadL("z",7)+PadL("E in R",9)+L);
             for(int z=0;z<g_nRR;z++)
             {
                int wnz=g_orb[i].winR[z], lsz=g_orb[i].lossR[z], flz=g_orb[i].flatR[z];
@@ -3994,13 +4013,18 @@ bool ProcessSymbol(string sym)
                if(totz<50 || resz<30) continue;
                double wr2=100.0*wnz/resz, nl2=100.0*RrNull(g_rr[z]), de2=wr2-nl2;
                double se2=100.0*MathSqrt((nl2/100.0)*(1.0-nl2/100.0)/resz);
-               W(fT,"    "+PadR("1:"+F(g_rr[z],2),8)+PadL(IntegerToString(totz),7)+PadL(F(wr2,2),8)+
+               W(fT,"    "+PadR("1:"+F(g_rr[z],2),8)+PadL(IntegerToString(totz),7)+
+                     PadL(F(100.0*resz/totz,1),10)+PadL(F(wr2,2),8)+
                      PadL(F(nl2,2),10)+PadL(F(de2,2),8)+PadL(F(se2>0?de2/se2:0.0,2),7)+
                      PadL(F((wnz*g_rr[z]-lsz)/(double)totz,3),9)+L);
             }
             W(fT,"    'casuale%' = 1/(1+RR): il win rate di una passeggiata casuale. E' un teorema,"+L);
-            W(fT,"    non una stima. Delta vicino a zero a tutti i rapporti = niente da estrarre,"+L);
-            W(fT,"    e cambiare stop o target non lo cambiera'."+L+L);
+            W(fT,"    ma vale per orizzonte INFINITO. Il tuo dura "+IntegerToString(OrbHorizon())+" minuti."+L);
+            W(fT,"    ATTENZIONE: se la colonna 'risolte' scende al crescere di RR, la pendenza della"+L);
+            W(fT,"    curva e' in buona parte troncamento temporale, non struttura di mercato: i target"+L);
+            W(fT,"    lontani scadono irrisolti mentre gli stop vicini fanno in tempo a scattare."+L);
+            W(fT,"    Test: alza InpOrbHorizonMin finche' 'risolte' e' vicina al 100%% ovunque, e rilancia."+L);
+            W(fT,"    Se la pendenza sparisce era l'orologio. Se resta, e' il mercato."+L+L);
             W(fT,"  nota                   la finestra e' stata scelta come migliore fra "+IntegerToString(g_nOrb)+L);
             W(fT,"                         candidate sullo stesso campione: parte del vantaggio e'"+L);
             W(fT,"                         selezione, non edge. Rifallo su un altro simbolo o periodo."+L);
@@ -5102,7 +5126,22 @@ void BuildOrb(string sym,string dir)
 
      "<b>E netto</b> e' il valore atteso per operazione dopo aver tolto "+F(InpOrbCostPt,1)+" punti di costo "
      "(InpOrbCostPt). Con uno stop stretto il costo pesa di piu' in proporzione: e' il motivo per cui i "
-     "rapporti bassi, anche quando vincono spesso, spesso non pagano.</div>");
+     "rapporti bassi, anche quando vincono spesso, spesso non pagano.<br><br>"
+
+     "<b class=\"w\">PRIMA di leggere questa curva come un risultato: guarda la colonna 'risolte'.</b> "
+     "La curva nulla 1/(1+RR) vale per un orizzonte <b>infinito</b>. Il tuo dura "+
+     IntegerToString(OrbHorizon())+" minuti, e un target lontano ha bisogno di piu' tempo per essere "
+     "raggiunto di uno vicino. Quindi ai rapporti alti le operazioni che avrebbero vinto scadono irrisolte "
+     "mentre quelle che perdono - lo stop e' vicino - fanno in tempo a perdere: il win rate calcolato sulle "
+     "sole risolte finisce <b>sotto</b> la curva nulla. Ai rapporti bassi succede l'opposto e finisce "
+     "<b>sopra</b>. Il risultato e' una curva decrescente e monotona <b>anche in un mercato perfettamente "
+     "casuale</b>: e' un artefatto della finestra temporale, non una scoperta.<br><br>"
+
+     "<b>Il test che separa le due cose</b> costa un input: alza <b>InpOrbHorizonMin</b> finche' la colonna "
+     "'risolte' non e' vicina al 100% a <b>tutti</b> i rapporti, e rilancia. Se la pendenza sparisce era "
+     "troncamento. Se sopravvive, hai trovato una struttura vera. Finche' 'risolte' scende al crescere di "
+     "RR, la pendenza della curva <b>non e' interpretabile</b>: i rapporti dove 'risolte' e' gia' vicino al "
+     "100% sono gli unici su cui il delta significa qualcosa.</div>");
 
    HtmlTableHead("tO8","RR (target/stop);n;risolte;win%;wlow;atteso casuale;delta;z;E in R;E ATR lordo;E ATR netto",false);
    {
@@ -5130,7 +5169,8 @@ void BuildOrb(string sym,string dir)
          double eA =g_orb[sel2].sPnlR[z]/totz;
          string cz =(MathAbs(zz)<2.0?"nz":(de>0?"hi":"lo"));
          H("<tr><td><b>1 : "+F(g_rr[z],2)+"</b>"+(z==g_rrMain?" &#9656;":"")+"</td><td>"+IntegerToString(totz)+
-           "</td><td class=\"nz\">"+F(100.0*resz/totz,1)+"%</td><td>"+F(wr2,2)+"</td><td>"+F(wl2,2)+
+           "</td><td class=\""+(100.0*resz/totz>=97.0?"nz":"lo")+"\">"+F(100.0*resz/totz,1)+
+           "%</td><td>"+F(wr2,2)+"</td><td>"+F(wl2,2)+
            "</td><td class=\"nz\"><b>"+F(nl,2)+"</b></td><td class=\""+cz+"\"><b>"+F(de,2)+
            "</b></td><td class=\""+(MathAbs(zz)>=3.0?(de>0?"hi":"lo"):"nz")+"\">"+F(zz,2)+
            "</td><td class=\""+(eR>0?"up":"dn")+"\">"+F(eR,3)+"</td><td>"+F(eA,4)+
