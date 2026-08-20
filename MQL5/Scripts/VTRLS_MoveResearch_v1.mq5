@@ -5933,6 +5933,17 @@ void BuildOrb(string sym,string dir)
            "ritrovera'.</div>");
       }
 
+      // CSV dedicato: le tabelle di questa scheda finiscono anche su file,
+      // altrimenti restano leggibili solo nell'HTML
+      int fV=INVALID_HANDLE;
+      if(InpWriteCsv)
+      {
+         fV=FileOpen(dir+fn+"_orb_vp.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+         if(fV!=INVALID_HANDLE)
+            W(fV,"finestra;tabella;value_area;chiave;n;win_perc;wlow_perc;E_in_R;"
+                 "n_placebo;placebo_win_perc;delta;z;mfe;mae\r\n");
+      }
+
       // stato VP dei breakout reali, per ogni percentuale di Value Area
       double beV=OrbBE();
       HtmlTableHead("tV1","Value Area;condizione;n;% dei breakout;win%;wlow;E in R;n placebo;placebo win%;delta;z",true);
@@ -5972,6 +5983,11 @@ void BuildOrb(string sym,string dir)
               (hasP?F(pw4,2):"-")+"</td><td class=\""+(MathAbs(z4)<2.0?"nz":(d4>0?"hi":"lo"))+"\"><b>"+
               (hasP?F(d4,2):"-")+"</b></td><td class=\""+(MathAbs(z4)>=3.0?(d4>0?"hi":"lo"):"nz")+"\">"+
               (hasP?F(z4,2):"-")+"</td></tr>");
+            if(fV!=INVALID_HANDLE)
+               W(fV,OrbLab(g_orbSel)+";condizione;"+F(g_vaPct[z],0)+";"+OrbVpName(k)+";"+
+                    IntegerToString(vN[k])+";"+F(wr4,2)+";"+F(wl4,2)+";"+F(eR4,4)+";"+
+                    (hasP?IntegerToString(pres):"")+";"+(hasP?F(pw4,2):"")+";"+
+                    (hasP?F(d4,2):"")+";"+(hasP?F(z4,2):"")+";;\r\n");
          }
       }
       HtmlTableEnd();
@@ -6017,6 +6033,11 @@ void BuildOrb(string sym,string dir)
               "</td><td class=\""+((w4*g_rr[g_rrMain]-l4)>0?"up":"dn")+"\">"+
               F((w4*g_rr[g_rrMain]-l4)/(double)n4,3)+"</td><td>"+F(sM4/n4,2)+"</td><td>"+
               F(sA4/n4,2)+"</td></tr>");
+            if(fV!=INVALID_HANDLE)
+               W(fV,OrbLab(g_orbSel)+";ampiezza_va;"+F(g_vaPct[z],0)+";"+lab+";"+
+                    IntegerToString(n4)+";"+F(100.0*w4/res,2)+";"+F(wl4,2)+";"+
+                    F((w4*g_rr[g_rrMain]-l4)/(double)n4,4)+";;;;;"+
+                    F(sM4/n4,4)+";"+F(sA4/n4,4)+"\r\n");
          }
       }
       HtmlTableEnd();
@@ -6055,9 +6076,14 @@ void BuildOrb(string sym,string dir)
               F(100.0*w4/res,2)+"</td><td class=\""+(wl4>beV?"hi":"lo")+"\">"+F(wl4,2)+
               "</td><td class=\""+((w4*g_rr[g_rrMain]-l4)>0?"up":"dn")+"\">"+
               F((w4*g_rr[g_rrMain]-l4)/(double)n4,3)+"</td></tr>");
+            if(fV!=INVALID_HANDLE)
+               W(fV,OrbLab(g_orbSel)+";distanza_poc;"+F(g_vaPct[g_vaMain],0)+";"+lab+";"+
+                    IntegerToString(n4)+";"+F(100.0*w4/res,2)+";"+F(wl4,2)+";"+
+                    F((w4*g_rr[g_rrMain]-l4)/(double)n4,4)+";;;;;;\r\n");
          }
       }
       HtmlTableEnd();
+      if(fV!=INVALID_HANDLE) FileClose(fV);
       H("</section>");
    }
 
