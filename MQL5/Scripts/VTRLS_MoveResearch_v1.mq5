@@ -142,6 +142,9 @@ input int             InpOrbRRMain      = 3;               // Quale della lista 
 input double          InpOrbMinStopAtr  = 0.05;            // Stop minimo in ATR: sotto, spread e commissioni se lo mangiano
 input int             InpOrbHorizonMin  = 0;               // Orizzonte del breakout in minuti (0 = usa InpScanHorizonMin)
 input bool            InpOrbPlacebo     = true;            // Calcola il riferimento placebo (ingresso a caso, stesso rischio)
+input double          InpOrbRsiConf     = 50.0;            // RSI: soglia di conferma nel verso della rottura
+input double          InpOrbZsConf      = 0.0;             // Z-Score: soglia di conferma nel verso della rottura
+input double          InpOrbCciConf     = 40.0;            // CCI: soglia di conferma nel verso della rottura
 input double          InpOrbCostPt      = 0.0;             // Costo di andata e ritorno in punti (spread + commissioni)
 input double          InpOrbBufferAtr   = 0.03;            // Margine oltre il livello perche' la rottura conti
 input double          InpOrbMinResolved = 60.0;            // % minima di rotture risolte perche' la finestra entri in classifica
@@ -1164,6 +1167,13 @@ void HtmlHead(string sym)
    H("<tr><td><b>RR (target/stop)</b></td><td>Quante volte lo stop vale il target. 1:2 significa rischiare "
      "una unita' per guadagnarne due. Lo stop resta identico fra i rapporti: cambia solo dove si mette il "
      "target, quindi i rapporti sono confrontabili fra loro</td></tr>");
+   H("<tr><td><b>conferme</b></td><td>Quanti dei tre indicatori - CCI, RSI, Z-Score - erano d'accordo con "
+     "la direzione della rottura, letti sull'ultima barra chiusa PRIMA della barra di rottura. Da 0 a 3. "
+     "L'idea regge solo se il win rate cresce in modo ordinato da 0 a 3, non se un valore singolo spicca</td></tr>");
+   H("<tr><td><b>placebo win% (per conferme)</b></td><td>Lo stesso conteggio di conferme applicato a un "
+     "ingresso a caso alla chiusura della finestra. Se il win rate cresce con le conferme anche qui, il "
+     "merito e' degli indicatori e non della rottura; se cresce solo nella colonna reale, e' la "
+     "combinazione a valere</td></tr>");
    H("<tr><td><b>placebo misurato</b></td><td>Stessa giornata, stessa finestra, stesso stop e stessi "
      "target, ma ingresso alla chiusura della finestra e direzione a sorte. Subisce lo stesso troncamento "
      "temporale e la stessa volatilita' dei dati veri: e' quanto vale NON avere segnale, ed e' il "
@@ -1616,6 +1626,11 @@ struct SOrb
    // infinito e per una gaussiana: ai rapporti alti sbaglia di parecchio.
    int    pN;
    int    pWinR[ORB_MAXRR], pLossR[ORB_MAXRR], pFlatR[ORB_MAXRR];
+   // placebo spezzato per numero di conferme degli indicatori: serve a
+   // separare cio' che aggiunge la ROTTURA da cio' che aggiungono gli
+   // INDICATORI. Se anche un ingresso a caso migliora quando i tre sono
+   // concordi, il merito e' loro e la rottura non c'entra.
+   int    pcfN[4], pcfWin[4], pcfLoss[4];
 };
 SOrb g_orb[];
 int  g_nOrb=0;
@@ -1635,6 +1650,36 @@ double RrNull(double rr){ return (rr>0 ? 1.0/(1.0+rr) : 0.0); }
 // sotto la curva nulla ai rapporti alti anche in un mercato perfettamente
 // casuale. Allungando l'orizzonte, se l'effetto era troncamento sparisce.
 int OrbHorizon(){ return (InpOrbHorizonMin>0 ? InpOrbHorizonMin : InpScanHorizonMin); }
+
+// Quanti dei tre indicatori confermano la direzione della rottura.
+// Una sola definizione, usata identica dal breakout e dal placebo: e' cio'
+// che rende il confronto fra i due un confronto e non un'illusione.
+int OrbConfirm(int dir,double cci,double rsi,double zs)
+{
+   int k=0;
+   if(dir*cci >  InpOrbCciConf) k++;
+   if(dir>0 ? rsi>InpOrbRsiConf : rsi<(100.0-InpOrbRsiConf)) k++;
+   if(dir*zs  >  InpOrbZsConf)  k++;
+   return k;
+}
+// maschera dei tre: bit0 = CCI, bit1 = RSI, bit2 = Z
+int OrbConfMask(int dir,double cci,double rsi,double zs)
+{
+   int m=0;
+   if(dir*cci >  InpOrbCciConf) m|=1;
+   if(dir>0 ? rsi>InpOrbRsiConf : rsi<(100.0-InpOrbRsiConf)) m|=2;
+   if(dir*zs  >  InpOrbZsConf)  m|=4;
+   return m;
+}
+string OrbConfName(int m)
+{
+   if(m==0) return "nessuna conferma";
+   string x="";
+   if((m&1)!=0) x+="CCI";
+   if((m&2)!=0) x+=(x==""?"":" + ")+"RSI";
+   if((m&4)!=0) x+=(x==""?"":" + ")+"Z";
+   return x;
+}
 
 // rapporto stop/target del rapporto principale: e' il reciproco del suo RR.
 // OrbRatio() resta la soglia della griglia point-in-time e non c'entra.
@@ -1717,6 +1762,9 @@ void OrbInit()
          ArrayInitialize(g_orb[g_nOrb].pWinR,0);
          ArrayInitialize(g_orb[g_nOrb].pLossR,0);
          ArrayInitialize(g_orb[g_nOrb].pFlatR,0);
+         ArrayInitialize(g_orb[g_nOrb].pcfN,0);
+         ArrayInitialize(g_orb[g_nOrb].pcfWin,0);
+         ArrayInitialize(g_orb[g_nOrb].pcfLoss,0);
          g_orb[g_nOrb].n1=0; g_orb[g_nOrb].brk1=0; g_orb[g_nOrb].win1=0; g_orb[g_nOrb].res1=0;
          g_orb[g_nOrb].n2=0; g_orb[g_nOrb].brk2=0; g_orb[g_nOrb].win2=0; g_orb[g_nOrb].res2=0;
          ArrayInitialize(g_orb[g_nOrb].dN,0);   ArrayInitialize(g_orb[g_nOrb].dBrk,0);
@@ -2575,6 +2623,19 @@ bool ProcessSymbol(string sym)
                      else if(pRes[z]<0) g_orb[w].pLossR[z]++;
                      else               g_orb[w].pFlatR[z]++;
                   }
+                  // gli stessi indicatori, letti sull'ultima barra chiusa
+                  // prima dell'ingresso placebo, contro la direzione tirata
+                  // a sorte: e' il gruppo di controllo dei filtri
+                  double qC=0.0, qR=50.0, qZ=0.0;
+                  if(nIndT[mainIx]>0)
+                  {
+                     int qi=IndIdxAt(iTime,mainIx,nIndT[mainIx],indSec[mainIx],r[ib].time);
+                     if(qi>=need){ qC=iCci[qi][mainIx]; qR=iRsi[qi][mainIx]; qZ=iZs[qi][mainIx]; }
+                  }
+                  int pk=OrbConfirm(pd,qC,qR,qZ);
+                  g_orb[w].pcfN[pk]++;
+                  if(pRes[g_rrMain]>0)      g_orb[w].pcfWin[pk]++;
+                  else if(pRes[g_rrMain]<0) g_orb[w].pcfLoss[pk]++;
                }
             }
 
@@ -5266,6 +5327,132 @@ void BuildOrb(string sym,string dir)
         F(costMed,4)+" ATR</b>. Se il costo e' dello stesso ordine di grandezza di <b>E ATR lordo</b>, la "
         "discussione su quale rapporto usare e' accademica: l'operazione non esiste comunque. Metti il tuo "
         "spread e la tua commissione reali in InpOrbCostPt prima di trarre conclusioni.</div>");
+   }
+
+   //=================================================================
+   //  IL SETUP COMPLETO: RANGE -> ROTTURA -> CONFERMA DEGLI INDICATORI
+   //  Non un filtro alla volta: i tre insieme, contati come voti.
+   //  E confrontati con lo stesso conteggio fatto sul placebo, perche'
+   //  se anche un ingresso a caso migliora quando i tre sono concordi,
+   //  il merito e' degli indicatori e la rottura non c'entra niente.
+   //=================================================================
+   H("<h2>Setup completo: rottura + conferma degli indicatori</h2><div class=\"note\">"
+     "Questa e' l'idea per intero. Il range si forma nella finestra <b>"+OrbLab(g_orbSel)+"</b>, il segnale "
+     "e' la rottura di un estremo, e la conferma sono i tre indicatori letti sull'ultima barra "+
+     IndTfName(IndMain())+" <b>chiusa prima</b> della barra di rottura:<br>"
+     "&nbsp;&nbsp;- <b>CCI</b> oltre "+F(InpOrbCciConf,0)+" nel verso della rottura<br>"
+     "&nbsp;&nbsp;- <b>RSI</b> oltre "+F(InpOrbRsiConf,0)+" (o sotto "+F(100.0-InpOrbRsiConf,0)+") nel verso<br>"
+     "&nbsp;&nbsp;- <b>Z-Score</b> oltre "+F(InpOrbZsConf,1)+" nel verso<br><br>"
+
+     "La riga <b>conferme</b> dice quanti dei tre erano d'accordo. Se l'idea funziona, il win rate deve "
+     "<b>crescere in modo ordinato</b> passando da 0 a 3: e' l'unica forma che non si puo' ottenere per "
+     "caso. Un singolo valore alto in mezzo a valori bassi e' rumore, e con quattro righe capita spesso.<br><br>"
+
+     "<b>Le colonne placebo sono la ragione per cui questa tabella si puo' credere.</b> Contengono lo stesso "
+     "conteggio di conferme fatto su un ingresso <b>a caso</b> alla chiusura della finestra, negli stessi "
+     "giorni. Servono a separare due cose che altrimenti si confondono: se il win rate cresce con le conferme "
+     "<b>anche nel placebo</b>, il merito e' degli indicatori - dicono qualcosa sul mercato in generale, non "
+     "sulla rottura. Se cresce solo nella colonna reale, allora e' la <b>combinazione</b> rottura + conferma "
+     "a valere qualcosa, che e' esattamente cio' che volevi sapere. <b>delta</b> e' la differenza fra le due, "
+     "a parita' di conferme.</div>");
+
+   {
+      int    cN[4], cW[4], cL[4];
+      ArrayInitialize(cN,0); ArrayInitialize(cW,0); ArrayInitialize(cL,0);
+      int    mN[8], mW[8], mL[8];
+      ArrayInitialize(mN,0); ArrayInitialize(mW,0); ArrayInitialize(mL,0);
+      for(int q=0;q<nSel;q++)
+      {
+         int b=sel[q];
+         int dr=(int)g_bk[b].dir;
+         int k =OrbConfirm(dr,g_bk[b].cci,g_bk[b].rsi,g_bk[b].zs);
+         int mk=OrbConfMask(dr,g_bk[b].cci,g_bk[b].rsi,g_bk[b].zs);
+         cN[k]++; mN[mk]++;
+         if(g_bk[b].res>0){ cW[k]++; mW[mk]++; }
+         else if(g_bk[b].res<0){ cL[k]++; mL[mk]++; }
+      }
+      double be2=OrbBE();
+      HtmlTableHead("tO9","conferme;n;% dei breakout;win%;wlow;E in R;n placebo;placebo win%;delta;z",false);
+      for(int k=0;k<4;k++)
+      {
+         int res=cW[k]+cL[k];
+         if(res<30) continue;
+         double wr3=100.0*cW[k]/res;
+         double wl3=100.0*WilsonLowInd(cW[k],res);
+         double eR3=(cW[k]*g_rr[g_rrMain]-cL[k])/(double)MathMax(1,cN[k]);
+         int pres=g_orb[g_orbSel].pcfWin[k]+g_orb[g_orbSel].pcfLoss[k];
+         bool hasP=(pres>=50);
+         double pw3=(hasP? 100.0*g_orb[g_orbSel].pcfWin[k]/pres : 0.0);
+         double d3 =(hasP? wr3-pw3 : 0.0);
+         double se3=(hasP? 100.0*MathSqrt((pw3/100.0)*(1.0-pw3/100.0)*(1.0/res+1.0/pres)) : 0.0);
+         double z3 =(se3>0? d3/se3 : 0.0);
+         H("<tr><td><b>"+IntegerToString(k)+" su 3</b></td><td>"+IntegerToString(cN[k])+"</td><td>"+
+           F(100.0*cN[k]/MathMax(1,nSel),1)+"</td><td>"+F(wr3,2)+"</td><td class=\""+
+           (wl3>be2?"hi":"lo")+"\">"+F(wl3,2)+"</td><td class=\""+(eR3>0?"up":"dn")+"\">"+F(eR3,3)+
+           "</td><td class=\"nz\">"+(hasP?IntegerToString(pres):"-")+"</td><td class=\"nz\">"+
+           (hasP?F(pw3,2):"-")+"</td><td class=\""+(MathAbs(z3)<2.0?"nz":(d3>0?"hi":"lo"))+"\"><b>"+
+           (hasP?F(d3,2):"-")+"</b></td><td class=\""+(MathAbs(z3)>=3.0?(d3>0?"hi":"lo"):"nz")+"\">"+
+           (hasP?F(z3,2):"-")+"</td></tr>");
+      }
+      HtmlTableEnd();
+
+      //--- quale combinazione, non solo quante
+      H("<h2>Quale combinazione di indicatori</h2><div class=\"note\">"
+        "La tabella sopra conta i voti, questa dice <b>chi</b> ha votato. Serve a scoprire se due dei tre "
+        "fanno tutto il lavoro e il terzo e' decorativo - succede spesso, perche' RSI e Z-Score misurano "
+        "quasi la stessa cosa e si confermano fra loro senza aggiungere informazione.<br><br>"
+        "Il riferimento in fondo e' il breakeven richiesto dal rapporto in uso ("+F(be2,1)+"%). Con otto "
+        "combinazioni in tabella una supera quella soglia per caso quasi sempre: guarda <b>wlow</b>, non "
+        "<b>win%</b>, e diffida di qualunque riga con meno di duecento operazioni.</div>");
+      HtmlTableHead("tOA","combinazione;n;% dei breakout;win%;wlow;E in R",true);
+      for(int mk=0;mk<8;mk++)
+      {
+         int res=mW[mk]+mL[mk];
+         if(res<30) continue;
+         double wr3=100.0*mW[mk]/res;
+         double wl3=100.0*WilsonLowInd(mW[mk],res);
+         double eR3=(mW[mk]*g_rr[g_rrMain]-mL[mk])/(double)MathMax(1,mN[mk]);
+         H("<tr><td><b>"+HE(OrbConfName(mk))+"</b></td><td>"+IntegerToString(mN[mk])+"</td><td>"+
+           F(100.0*mN[mk]/MathMax(1,nSel),1)+"</td><td>"+F(wr3,2)+"</td><td class=\""+
+           (wl3>be2?"hi":"lo")+"\">"+F(wl3,2)+"</td><td class=\""+(eR3>0?"up":"dn")+"\">"+
+           F(eR3,3)+"</td></tr>");
+      }
+      HtmlTableEnd();
+
+      //--- CSV
+      if(InpWriteCsv)
+      {
+         int fC=FileOpen(dir+fn+"_orb_setup.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+         if(fC!=INVALID_HANDLE)
+         {
+            W(fC,"finestra;tipo;chiave;n;win_perc;wlow_perc;E_in_R;n_placebo;placebo_win_perc;delta;z\r\n");
+            for(int k=0;k<4;k++)
+            {
+               int res=cW[k]+cL[k];
+               if(res<30) continue;
+               double wr3=100.0*cW[k]/res;
+               int pres=g_orb[g_orbSel].pcfWin[k]+g_orb[g_orbSel].pcfLoss[k];
+               bool hasP=(pres>=50);
+               double pw3=(hasP? 100.0*g_orb[g_orbSel].pcfWin[k]/pres : 0.0);
+               double d3=(hasP? wr3-pw3 : 0.0);
+               double se3=(hasP? 100.0*MathSqrt((pw3/100.0)*(1.0-pw3/100.0)*(1.0/res+1.0/pres)) : 0.0);
+               W(fC,OrbLab(g_orbSel)+";conferme;"+IntegerToString(k)+" su 3;"+IntegerToString(cN[k])+";"+
+                    F(wr3,2)+";"+F(100.0*WilsonLowInd(cW[k],res),2)+";"+
+                    F((cW[k]*g_rr[g_rrMain]-cL[k])/(double)MathMax(1,cN[k]),4)+";"+
+                    (hasP?IntegerToString(pres):"")+";"+(hasP?F(pw3,2):"")+";"+
+                    (hasP?F(d3,2):"")+";"+(hasP&&se3>0?F(d3/se3,2):"")+"\r\n");
+            }
+            for(int mk=0;mk<8;mk++)
+            {
+               int res=mW[mk]+mL[mk];
+               if(res<30) continue;
+               W(fC,OrbLab(g_orbSel)+";combinazione;"+OrbConfName(mk)+";"+IntegerToString(mN[mk])+";"+
+                    F(100.0*mW[mk]/res,2)+";"+F(100.0*WilsonLowInd(mW[mk],res),2)+";"+
+                    F((mW[mk]*g_rr[g_rrMain]-mL[mk])/(double)MathMax(1,mN[mk]),4)+";;;;\r\n");
+            }
+            FileClose(fC);
+         }
+      }
    }
 
    //--- tabella dei filtri

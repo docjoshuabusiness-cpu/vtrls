@@ -56,6 +56,7 @@ Puoi disattivare l'uno o l'altro.
 | `<SYM>_dow_hour.csv` | matrici giorno x ora, giorno x 15 minuti e anno x ora |
 | `<SYM>_indicatori_tf.csv` | stessi stati RSI/CCI/Z-Score calcolati sui tre timeframe, con delta sul riferimento |
 | `<SYM>_orb_finestre.csv` | tutte le finestre di osservazione testate, con % di rottura, win rate, Wilson, valore atteso e le due meta' del periodo |
+| `<SYM>_orb_setup.csv` | setup completo: esito per numero di conferme (0-3) con il placebo appaiato, e per combinazione di indicatori |
 | `<SYM>_orb_rr.csv` | curva rischio/rendimento della finestra selezionata: per ogni RR, win rate misurato contro il placebo (ingresso a caso, stesso rischio e stesso orizzonte), delta e z |
 | `<SYM>_orb_breakout.csv` | una riga per ogni rottura della finestra selezionata: direzione, esito, range, intensita', volatilita', RSI/CCI/Z al momento della rottura, MFE/MAE |
 | `<SYM>_report.html` | tutto quanto sopra (tranne lo scan grezzo) in un report navigabile |
@@ -239,6 +240,39 @@ vuol dire cose opposte se si e' formato in 15 minuti o in due ore.
 Nella scheda operativa due filtri usano questa misura (`compressione sotto 1` e
 `sotto 0,70`). Se il vantaggio compare solo li', il meccanismo e' reale: si opera
 la rottura di una compressione, non una rottura qualsiasi.
+
+### Il setup completo: rottura + conferma degli indicatori
+
+E' l'idea per intero, e le tabelle sono **aggiuntive**: nessuna delle altre
+sparisce, si leggono tutte insieme.
+
+Range nella finestra -> rottura di un estremo -> conferma dai tre indicatori,
+letti sull'ultima barra chiusa **prima** della barra di rottura:
+
+- `InpOrbCciConf` (default 40): CCI oltre soglia nel verso della rottura
+- `InpOrbRsiConf` (default 50): RSI oltre soglia nel verso
+- `InpOrbZsConf` (default 0): Z-Score oltre soglia nel verso
+
+**Tabella `conferme`**: quanti dei tre erano d'accordo, da 0 a 3. L'idea regge
+solo se il win rate **cresce in modo ordinato** da 0 a 3. Un singolo valore alto
+in mezzo a valori bassi e' rumore, e con quattro righe capita spesso.
+
+**Le colonne placebo accanto sono la ragione per cui la tabella si puo'
+credere.** Contengono lo stesso conteggio di conferme applicato a un ingresso a
+caso alla chiusura della finestra, negli stessi giorni. Separano due cose che
+altrimenti restano confuse:
+
+- il win rate cresce con le conferme **anche nel placebo** -> il merito e' degli
+  indicatori, dicono qualcosa sul mercato in generale e la rottura non c'entra
+- cresce **solo** nella colonna reale -> e' la combinazione rottura + conferma a
+  valere qualcosa
+
+**Tabella `combinazione`**: quale dei tre ha votato, non solo quanti. Serve a
+scoprire se due fanno tutto il lavoro e il terzo e' decorativo - succede spesso,
+perche' RSI e Z-Score misurano quasi la stessa cosa e si confermano a vicenda
+senza aggiungere informazione. Con otto combinazioni una supera il breakeven per
+caso quasi sempre: guarda `wlow`, non `win%`, e diffida di righe sotto le
+duecento operazioni.
 
 ### Sui filtri, e sul "100% di sicurezza"
 
