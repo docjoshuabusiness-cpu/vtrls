@@ -83,12 +83,12 @@ input int             InpATRPeriod      = 14;              // Periodo ATR (su da
 input int             InpMinBarsDay     = 200;             // Barre minime perche' la giornata sia valida
 input double          InpMinDayRangeAtr = 0.25;            // Range minimo della giornata in ATR (scarta i mezzi-giorni)
 
-input string          s1                = "=== LARGEST MOVE ===";
+input string          sec1                = "=== LARGEST MOVE ===";
 input bool            InpCleanLeg       = true;            // Gamba "pulita": OBBLIGATORIO, vedi nota nell'intestazione
 input double          InpMaxRetracePct  = 33.0;            // % ritracciamento che chiude la gamba
 input double          InpMinRetraceAtr  = 0.15;            // Ritracciamento minimo assoluto in ATR: sotto, il pullback e' rumore
 
-input string          s2                = "=== SCAN POINT-IN-TIME ===";
+input string          sec2                = "=== SCAN POINT-IN-TIME ===";
 input bool            InpDoScan         = true;            // Genera griglia point-in-time + tabelle condizioni
 input bool            InpWriteScanRows  = true;            // Scrive anche il CSV grezzo dello scan (file grande)
 input int             InpScanStepMin    = 15;              // Passo della griglia in minuti
@@ -123,23 +123,23 @@ input string          sRun              = "=== MOVIMENTI PULITI ===";
 input bool            InpDoRuns         = true;            // Analizza le sequenze di barre consecutive
 input int             InpRunMinBars     = 3;               // Barre consecutive minime perche' sia un movimento
 
-input string          s3                = "=== NEWS ===";
+input string          sec3                = "=== NEWS ===";
 input bool            InpUseCalendar    = true;            // Usa il calendario economico MQL5
 input int             InpMinImportance  = 2;               // Importanza minima (1=low 2=medium 3=high)
 input int             InpNewsWindowMin  = 60;              // Finestra +/- minuti per il flag "news presente"
 
-input string          s4                = "=== SESSIONI (ora server) ===";
+input string          sec4                = "=== SESSIONI (ora server) ===";
 input int             InpLondonStart    = 8;               // Inizio London
 input int             InpNYStart        = 13;              // Inizio NY (overlap)
 input int             InpNYLateStart    = 17;              // Inizio NY late
 
-input string          s5                = "=== DEBUG ===";
+input string          sec5                = "=== DEBUG ===";
 input int             InpDebug          = 1;               // 0=minimo 1=normale 2=verboso 3=dump giornaliero
 input int             InpSyncTimeoutSec = 900;             // Timeout massimo per il download dello storico (s)
 input bool            InpAutoAdjustRange= true;            // Se il periodo richiesto non esiste, analizza quello disponibile
 input int             InpDebugDays      = 5;               // giornate da dumpare in dettaglio (debug>=3)
 
-input string          s6                = "=== OUTPUT ===";
+input string          sec6                = "=== OUTPUT ===";
 input string          InpOutDir         = "VTRLS_Research";// Sottocartella in MQL5/Files
 input bool            InpWriteCsv       = true;            // Scrive i CSV (dati grezzi, per Excel/Python)
 input bool            InpWriteHtml      = true;            // Scrive il report HTML (doppio clic, si apre nel browser)
@@ -1963,8 +1963,9 @@ bool ProcessSymbol(string sym)
             int j0=i0;
             while(j0+1<n)
             {
-               int s2=(r[j0+1].close>r[j0+1].open?1:(r[j0+1].close<r[j0+1].open?-1:0));
-               if(s2!=sg) break;
+               // NB: non chiamarla s2 - collide con l'input s2 delle etichette
+               int sgNext=(r[j0+1].close>r[j0+1].open?1:(r[j0+1].close<r[j0+1].open?-1:0));
+               if(sgNext!=sg) break;
                j0++;
             }
             int len=j0-i0+1;
