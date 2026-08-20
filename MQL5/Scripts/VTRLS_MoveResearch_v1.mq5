@@ -156,12 +156,13 @@ input int             InpOrbMomBars     = 10;              // Barre PRIMA della 
 input double          InpOrbMomMinAtr   = 0.10;            // Intensita' minima in ATR perche' il filtro sia attivo
 input int             InpOrbFixStartMin = -1;              // Finestra da usare nella scheda operativa (-1 = la migliore)
 input int             InpOrbFixDurMin   = -1;              // Durata da usare nella scheda operativa (-1 = la migliore)
-input int             InpOrbMaxRec      = 1000000;         // Tetto ai breakout memorizzati (circa 48 byte l'uno)
+input int             InpOrbMaxRec      = 700000;          // Tetto ai breakout memorizzati (circa 80 byte l'uno)
 
 input string          sVp               = "=== VOLUME PROFILE (POC / VAH / VAL del giorno precedente) ===";
 input bool            InpDoVp           = true;            // Calcola il profilo volumi del giorno precedente
 input int             InpVpLevels       = 50;              // Livelli di prezzo del profilo
-input double          InpVpValueArea    = 70.0;            // % di volume dentro la Value Area
+input string          InpVpVaList       = "40,50,60,70,80"; // Percentuali di Value Area testate insieme (max 5)
+input int             InpVpVaMain       = 4;               // Quale della lista alimenta le condizioni (1 = la prima)
 input bool            InpVpRealVolume   = true;            // Usa il volume reale se il broker lo fornisce
 input double          InpVpNearAtr      = 0.10;            // Quanto vicino a VAH/VAL per dire che il livello "coincide"
 
@@ -1176,8 +1177,9 @@ void HtmlHead(string sym)
      "una unita' per guadagnarne due. Lo stop resta identico fra i rapporti: cambia solo dove si mette il "
      "target, quindi i rapporti sono confrontabili fra loro</td></tr>");
    H("<tr><td><b>POC / VAH / VAL</b></td><td>Point of Control = livello di prezzo a volume massimo del "
-     "giorno precedente. VAH e VAL sono i bordi della Value Area, l'intervallo che contiene il "+
-     F(InpVpValueArea,0)+"% del volume. Sono l'unica informazione dello script che non derivi dall'OHLC</td></tr>");
+     "giorno precedente. VAH e VAL sono i bordi della Value Area, l'intervallo che contiene una data "
+     "quota del volume - qui misurata a piu' percentuali insieme. Sono l'unica informazione dello script "
+     "che non derivi dall'OHLC</td></tr>");
    H("<tr><td><b>larghezza Value Area</b></td><td>VAH meno VAL, in ATR. E' la compressione VOLUMETRICA: "
      "compress misura quanto si e' mosso il prezzo, questa quanto stretto e' l'intervallo in cui si e' "
      "davvero scambiato. Quando le due divergono, l'informazione in piu' e' reale</td></tr>");
@@ -1651,7 +1653,7 @@ struct SOrb
    // concordi, il merito e' loro e la rottura non c'entra.
    int    pcfN[4], pcfWin[4], pcfLoss[4];
    // stessa cosa per gli stati di Volume Profile
-   int    pvpN[5], pvpWin[5], pvpLoss[5];
+   int    pvpN[VP_MAXVA][5], pvpWin[VP_MAXVA][5], pvpLoss[VP_MAXVA][5];
 };
 SOrb g_orb[];
 int  g_nOrb=0;
@@ -1755,10 +1757,10 @@ struct SBrk
    float rangeAtr, mom, vol, cci, rsi, zs, mfe, mae, ttb, tgt, compr, cost, stopAtr;
    char  resR[ORB_MAXRR];
    // volume profile del giorno precedente, letto al momento della rottura
-   float vpPocDist;     // (entry - POC) in ATR, con il segno della rottura
-   float vpVaWidth;     // ampiezza della Value Area in ATR: compressione VOLUMETRICA
-   float vpVolPos;      // dove stava il volume dentro la finestra, 0..1
-   char  vpState;       // vedi OrbVpState()
+   float vpPocDist;              // (entry - POC) in ATR, col segno della rottura
+   float vpVolPos;               // dove stava il volume dentro la finestra, 0..1
+   float vpVaWidthV[VP_MAXVA];   // ampiezza Value Area in ATR, una per percentuale
+   char  vpStateV[VP_MAXVA];     // stato VP, una per percentuale (vedi OrbVpState)
 };
 SBrk g_bk[];
 int  g_nBk=0;
@@ -1773,6 +1775,8 @@ void OrbInit()
    g_nBk=0;  ArrayResize(g_bk,0);
    g_bkCap=false; g_orbSel=-1;
    if(!InpDoOrb) return;
+
+   VpInitVa();
 
    double rr[]; int nrr=ParseDoubles(InpOrbRR,rr);
    g_nRR=0;
@@ -1824,7 +1828,7 @@ void OrbInit()
          ArrayInitialize(g_orb[g_nOrb].pcfLoss,0);
          ArrayInitialize(g_orb[g_nOrb].pvpN,0);
          ArrayInitialize(g_orb[g_nOrb].pvpWin,0);
-         ArrayInitialize(g_orb[g_nOrb].pvpLoss,0);
+         ArrayInitialize(g_orb[g_nOrb].pvpLoss,0);   // array 2D: azzerato per intero
          g_orb[g_nOrb].n1=0; g_orb[g_nOrb].brk1=0; g_orb[g_nOrb].win1=0; g_orb[g_nOrb].res1=0;
          g_orb[g_nOrb].n2=0; g_orb[g_nOrb].brk2=0; g_orb[g_nOrb].win2=0; g_orb[g_nOrb].res2=0;
          ArrayInitialize(g_orb[g_nOrb].dN,0);   ArrayInitialize(g_orb[g_nOrb].dBrk,0);
@@ -1925,10 +1929,31 @@ double OrbScore(int i)
 //  tick per prezzo non si puo' fare di meglio, e su un profilo
 //  giornaliero l'errore si media via.
 //==================================================================
-void VolProfile(const MqlRates &rr[],int a,int b,int levels,double vaPct,bool useReal,
-                double &poc,double &vah,double &val,double &tot)
+// Percentuali di Value Area testate nella stessa passata. L'istogramma si
+// costruisce UNA volta - e' la parte cara - e poi si espande dal POC piu'
+// volte, una per percentuale. Costo aggiuntivo trascurabile, e si scopre se
+// una condizione dipende dall'idea o solo dalla soglia scelta.
+#define VP_MAXVA 5
+double g_vaPct[VP_MAXVA];
+int    g_nVa=0;
+int    g_vaMain=0;
+
+void VpInitVa()
 {
-   poc=0; vah=0; val=0; tot=0;
+   double v[]; int nv=ParseDoubles(InpVpVaList,v);
+   g_nVa=0;
+   for(int i=0;i<nv && g_nVa<VP_MAXVA;i++)
+      if(v[i]>10.0 && v[i]<100.0){ g_vaPct[g_nVa]=v[i]; g_nVa++; }
+   if(g_nVa<=0){ g_vaPct[0]=70.0; g_nVa=1; }
+   g_vaMain=InpVpVaMain-1;
+   if(g_vaMain<0 || g_vaMain>=g_nVa) g_vaMain=0;
+}
+
+void VolProfile(const MqlRates &rr[],int a,int b,int levels,bool useReal,
+                double &poc,double &vah[],double &val[],double &tot)
+{
+   poc=0; tot=0;
+   for(int z=0;z<g_nVa;z++){ vah[z]=0; val[z]=0; }
    if(b<=a || levels<4) return;
 
    double hi=-DBL_MAX, lo=DBL_MAX;
@@ -1958,21 +1983,25 @@ void VolProfile(const MqlRates &rr[],int a,int b,int levels,double vaPct,bool us
    for(int k=0;k<levels;k++) if(vol[k]>mx){ mx=vol[k]; pk=k; }
    poc=lo+(pk+0.5)*step;
 
-   // Value Area: si espande dal POC verso il lato con piu' volume,
-   // finche' non si copre la quota richiesta. E' la definizione classica.
-   double target=tot*(vaPct/100.0);
-   double acc=vol[pk];
-   int up=pk, dn=pk;
-   while(acc<target && (up<levels-1 || dn>0))
+   // Value Area: si espande dal POC verso il lato con piu' volume, finche'
+   // non copre la quota richiesta. Definizione classica, ripetuta per ogni
+   // percentuale della lista: il POC non cambia, cambiano solo i bordi.
+   for(int z=0;z<g_nVa;z++)
    {
-      double va=(up<levels-1? vol[up+1] : -1.0);
-      double vb=(dn>0      ? vol[dn-1] : -1.0);
-      if(va>=vb && up<levels-1){ up++; acc+=vol[up]; }
-      else if(dn>0)           { dn--; acc+=vol[dn]; }
-      else break;
+      double target=tot*(g_vaPct[z]/100.0);
+      double acc=vol[pk];
+      int up=pk, dn=pk;
+      while(acc<target && (up<levels-1 || dn>0))
+      {
+         double va=(up<levels-1? vol[up+1] : -1.0);
+         double vb=(dn>0      ? vol[dn-1] : -1.0);
+         if(va>=vb && up<levels-1){ up++; acc+=vol[up]; }
+         else if(dn>0)           { dn--; acc+=vol[dn]; }
+         else break;
+      }
+      vah[z]=lo+(up+0.5)*step;
+      val[z]=lo+(dn+0.5)*step;
    }
-   vah=lo+(up+0.5)*step;
-   val=lo+(dn+0.5)*step;
 }
 
 // indice dell'ultima barra indicatore CHIUSA prima di t
@@ -2645,7 +2674,9 @@ bool ProcessSymbol(string sym)
       //--- profilo volumi del giorno PRECEDENTE: e' noto per intero
       // prima che la giornata cominci, quindi e' point-in-time pulito
       // per qualunque istante di oggi.
-      double vpPoc=0, vpVah=0, vpVal=0, vpTot=0, vpVaAtr=0;
+      double vpPoc=0, vpTot=0;
+      double vpVah[VP_MAXVA], vpVal[VP_MAXVA], vpVaAtr[VP_MAXVA];
+      ArrayInitialize(vpVah,0.0); ArrayInitialize(vpVal,0.0); ArrayInitialize(vpVaAtr,0.0);
       bool   vpOk=false;
       if(InpDoVp && InpDoOrb)
       {
@@ -2653,9 +2684,11 @@ bool ProcessSymbol(string sym)
          int np=CopyRates(sym,InpBaseTF,d1[di-1].time,d1[di-1].time+86399,rp);
          if(np>InpVpLevels)
          {
-            VolProfile(rp,0,np,InpVpLevels,InpVpValueArea,InpVpRealVolume,vpPoc,vpVah,vpVal,vpTot);
-            vpOk=(vpTot>0.0 && vpVah>vpVal);
-            if(vpOk) vpVaAtr=((vpVah-vpVal)/g_point)/atrPt;
+            VolProfile(rp,0,np,InpVpLevels,InpVpRealVolume,vpPoc,vpVah,vpVal,vpTot);
+            vpOk=(vpTot>0.0 && vpVah[g_vaMain]>vpVal[g_vaMain]);
+            if(vpOk)
+               for(int z=0;z<g_nVa;z++)
+                  vpVaAtr[z]=((vpVah[z]-vpVal[z])/g_point)/atrPt;
          }
       }
 
@@ -2787,13 +2820,14 @@ bool ProcessSymbol(string sym)
                   else if(pRes[g_rrMain]<0) g_orb[w].pcfLoss[pk]++;
                   if(vpOk)
                   {
-                     int pv=OrbVpState(pd,pEntry,vpPoc,vpVah,vpVal,
-                                       InpVpNearAtr*atrPt*g_point,winVolPos);
-                     if(pv>=0 && pv<5)
+                     for(int z=0;z<g_nVa;z++)
                      {
-                        g_orb[w].pvpN[pv]++;
-                        if(pRes[g_rrMain]>0)      g_orb[w].pvpWin[pv]++;
-                        else if(pRes[g_rrMain]<0) g_orb[w].pvpLoss[pv]++;
+                        int pv=OrbVpState(pd,pEntry,vpPoc,vpVah[z],vpVal[z],
+                                          InpVpNearAtr*atrPt*g_point,winVolPos);
+                        if(pv<0 || pv>=5) continue;
+                        g_orb[w].pvpN[z][pv]++;
+                        if(pRes[g_rrMain]>0)      g_orb[w].pvpWin[z][pv]++;
+                        else if(pRes[g_rrMain]<0) g_orb[w].pvpLoss[z][pv]++;
                      }
                   }
                }
@@ -2936,19 +2970,22 @@ bool ProcessSymbol(string sym)
                g_bk[g_nBk].cost=(float)costAtr;
                g_bk[g_nBk].stopAtr=(float)stopAtr;
                g_bk[g_nBk].vpVolPos=(float)winVolPos;
+               for(int z=0;z<VP_MAXVA;z++)
+               {
+                  g_bk[g_nBk].vpVaWidthV[z]=0.0f;
+                  g_bk[g_nBk].vpStateV[z]=(char)-1;
+               }
                if(vpOk)
                {
                   g_bk[g_nBk].vpPocDist=(float)(dir*((entry-vpPoc)/g_point)/atrPt);
-                  g_bk[g_nBk].vpVaWidth=(float)vpVaAtr;
-                  g_bk[g_nBk].vpState=(char)OrbVpState(dir,entry,vpPoc,vpVah,vpVal,
-                                                       InpVpNearAtr*atrPt*g_point,winVolPos);
+                  for(int z=0;z<g_nVa;z++)
+                  {
+                     g_bk[g_nBk].vpVaWidthV[z]=(float)vpVaAtr[z];
+                     g_bk[g_nBk].vpStateV[z]=(char)OrbVpState(dir,entry,vpPoc,vpVah[z],vpVal[z],
+                                                              InpVpNearAtr*atrPt*g_point,winVolPos);
+                  }
                }
-               else
-               {
-                  g_bk[g_nBk].vpPocDist=0.0f;
-                  g_bk[g_nBk].vpVaWidth=0.0f;
-                  g_bk[g_nBk].vpState=(char)-1;
-               }
+               else g_bk[g_nBk].vpPocDist=0.0f;
                for(int z=0;z<ORB_MAXRR;z++)
                   g_bk[g_nBk].resR[z]=(char)(z<g_nRR ? resR[z] : 0);
                g_nBk++;
@@ -5862,7 +5899,7 @@ void BuildOrb(string sym,string dir)
    else
    {
       H("POC, VAH e VAL del <b>giorno precedente</b>, su "+IntegerToString(InpVpLevels)+
-        " livelli di prezzo e Value Area al "+F(InpVpValueArea,0)+"%. Il profilo di ieri e' noto per intero "
+        " livelli di prezzo. Il profilo di ieri e' noto per intero "
         "prima che oggi cominci: e' point-in-time pulito per qualunque istante della giornata.<br><br>"
 
         "<b>Perche' vale la pena guardarlo.</b> Ogni altra cosa misurata in questo report - range, ATR, RSI, "
@@ -5877,40 +5914,61 @@ void BuildOrb(string sym,string dir)
         "win rate e' alto anche nel placebo, quella condizione descrive un momento buono della giornata e "
         "non ha niente a che vedere con la rottura.</div>");
 
-      // stato VP dei breakout reali
-      int vN[5], vW[5], vL[5];
-      ArrayInitialize(vN,0); ArrayInitialize(vW,0); ArrayInitialize(vL,0);
-      int vTot=0;
-      for(int q=0;q<nSel;q++)
       {
-         int b=sel[q];
-         int k=(int)g_bk[b].vpState;
-         if(k<0 || k>4) continue;
-         vN[k]++; vTot++;
-         if(g_bk[b].res>0) vW[k]++; else if(g_bk[b].res<0) vL[k]++;
+         string vlist="";
+         for(int z=0;z<g_nVa;z++) vlist+=(z==0?"":(z==g_nVa-1?" e ":", "))+F(g_vaPct[z],0)+"%";
+         H("<div class=\"note\"><b>"+IntegerToString(g_nVa)+" Value Area invece di una.</b> La stessa "
+           "condizione viene misurata a "+vlist+" di volume. Non serve a scegliere la percentuale migliore - "
+           "quello sarebbe overfitting su una soglia - ma a vedere <b>come si comporta il risultato mentre la "
+           "soglia si muove</b>.<br><br>"
+           "Il ventaglio e' largo apposta: al "+F(g_vaPct[0],0)+"% la Value Area e' il nocciolo stretto attorno "
+           "al POC, all'"+F(g_vaPct[g_nVa-1],0)+"% copre quasi tutta la giornata. Se una condizione ha un "
+           "senso, il suo effetto deve <b>variare in modo ordinato</b> passando da una all'altra - crescere, "
+           "calare, o restare stabile. Un valore che spicca a una sola percentuale e sparisce alle due "
+           "vicine non e' un effetto: e' rumore che ha trovato la sua soglia, e fuori campione non la "
+           "ritrovera'.</div>");
       }
+
+      // stato VP dei breakout reali, per ogni percentuale di Value Area
       double beV=OrbBE();
-      HtmlTableHead("tV1","condizione;n;% dei breakout;win%;wlow;E in R;n placebo;placebo win%;delta;z",false);
-      for(int k=0;k<5;k++)
+      HtmlTableHead("tV1","Value Area;condizione;n;% dei breakout;win%;wlow;E in R;n placebo;placebo win%;delta;z",true);
+      int vTot=0;
+      for(int z=0;z<g_nVa;z++)
       {
-         int res=vW[k]+vL[k];
-         if(res<30) continue;
-         double wr4=100.0*vW[k]/res;
-         double wl4=100.0*WilsonLowInd(vW[k],res);
-         double eR4=(vW[k]*g_rr[g_rrMain]-vL[k])/(double)MathMax(1,vN[k]);
-         int pres=g_orb[g_orbSel].pvpWin[k]+g_orb[g_orbSel].pvpLoss[k];
-         bool hasP=(pres>=50);
-         double pw4=(hasP? 100.0*g_orb[g_orbSel].pvpWin[k]/pres : 0.0);
-         double d4 =(hasP? wr4-pw4 : 0.0);
-         double se4=(hasP? 100.0*MathSqrt((pw4/100.0)*(1.0-pw4/100.0)*(1.0/res+1.0/pres)) : 0.0);
-         double z4 =(se4>0? d4/se4 : 0.0);
-         H("<tr><td><b>"+HE(OrbVpName(k))+"</b></td><td>"+IntegerToString(vN[k])+"</td><td>"+
-           F(100.0*vN[k]/MathMax(1,vTot),1)+"</td><td>"+F(wr4,2)+"</td><td class=\""+
-           (wl4>beV?"hi":"lo")+"\">"+F(wl4,2)+"</td><td class=\""+(eR4>0?"up":"dn")+"\">"+F(eR4,3)+
-           "</td><td class=\"nz\">"+(hasP?IntegerToString(pres):"-")+"</td><td class=\"nz\">"+
-           (hasP?F(pw4,2):"-")+"</td><td class=\""+(MathAbs(z4)<2.0?"nz":(d4>0?"hi":"lo"))+"\"><b>"+
-           (hasP?F(d4,2):"-")+"</b></td><td class=\""+(MathAbs(z4)>=3.0?(d4>0?"hi":"lo"):"nz")+"\">"+
-           (hasP?F(z4,2):"-")+"</td></tr>");
+         int vN[5], vW[5], vL[5];
+         ArrayInitialize(vN,0); ArrayInitialize(vW,0); ArrayInitialize(vL,0);
+         int zTot=0;
+         for(int q=0;q<nSel;q++)
+         {
+            int b=sel[q];
+            int k=(int)g_bk[b].vpStateV[z];
+            if(k<0 || k>4) continue;
+            vN[k]++; zTot++;
+            if(g_bk[b].res>0) vW[k]++; else if(g_bk[b].res<0) vL[k]++;
+         }
+         if(z==g_vaMain) vTot=zTot;
+         for(int k=0;k<5;k++)
+         {
+            int res=vW[k]+vL[k];
+            if(res<30) continue;
+            double wr4=100.0*vW[k]/res;
+            double wl4=100.0*WilsonLowInd(vW[k],res);
+            double eR4=(vW[k]*g_rr[g_rrMain]-vL[k])/(double)MathMax(1,vN[k]);
+            int pres=g_orb[g_orbSel].pvpWin[z][k]+g_orb[g_orbSel].pvpLoss[z][k];
+            bool hasP=(pres>=50);
+            double pw4=(hasP? 100.0*g_orb[g_orbSel].pvpWin[z][k]/pres : 0.0);
+            double d4 =(hasP? wr4-pw4 : 0.0);
+            double se4=(hasP? 100.0*MathSqrt((pw4/100.0)*(1.0-pw4/100.0)*(1.0/res+1.0/pres)) : 0.0);
+            double z4 =(se4>0? d4/se4 : 0.0);
+            H("<tr><td><b>"+F(g_vaPct[z],0)+"%</b>"+(z==g_vaMain?" &#9656;":"")+"</td><td>"+
+              HE(OrbVpName(k))+"</td><td>"+IntegerToString(vN[k])+"</td><td>"+
+              F(100.0*vN[k]/MathMax(1,zTot),1)+"</td><td>"+F(wr4,2)+"</td><td class=\""+
+              (wl4>beV?"hi":"lo")+"\">"+F(wl4,2)+"</td><td class=\""+(eR4>0?"up":"dn")+"\">"+F(eR4,3)+
+              "</td><td class=\"nz\">"+(hasP?IntegerToString(pres):"-")+"</td><td class=\"nz\">"+
+              (hasP?F(pw4,2):"-")+"</td><td class=\""+(MathAbs(z4)<2.0?"nz":(d4>0?"hi":"lo"))+"\"><b>"+
+              (hasP?F(d4,2):"-")+"</b></td><td class=\""+(MathAbs(z4)>=3.0?(d4>0?"hi":"lo"):"nz")+"\">"+
+              (hasP?F(z4,2):"-")+"</td></tr>");
+         }
       }
       HtmlTableEnd();
       if(vTot==0)
@@ -5925,17 +5983,18 @@ void BuildOrb(string sym,string dir)
         "giornata che spazia molto ma scambia tutto in mezzo ha range largo e Value Area stretta - e "
         "<b>quando divergono, l'informazione e' reale</b>: e' la parte di volume che il prezzo da solo non "
         "conteneva.</div>");
-      HtmlTableHead("tV2","Value Area di ieri;n;win%;wlow;E in R;MFE media;MAE media",false);
+      HtmlTableHead("tV2","Value Area;ampiezza di ieri;n;win%;wlow;E in R;MFE media;MAE media",true);
       {
          double ed[]; ArrayResize(ed,3); ed[0]=0.40; ed[1]=0.70; ed[2]=1.00;
+         for(int z=0;z<g_nVa;z++)
          for(int q2=0;q2<=3;q2++)
          {
             int n4=0, w4=0, l4=0; double sM4=0.0, sA4=0.0;
             for(int q=0;q<nSel;q++)
             {
                int b=sel[q];
-               if(g_bk[b].vpState<0 || g_bk[b].vpVaWidth<=0.0f) continue;
-               double vw=g_bk[b].vpVaWidth;
+               if(g_bk[b].vpStateV[z]<0 || g_bk[b].vpVaWidthV[z]<=0.0f) continue;
+               double vw=g_bk[b].vpVaWidthV[z];
                int bucket=(vw<=ed[0]?0:(vw<=ed[1]?1:(vw<=ed[2]?2:3)));
                if(bucket!=q2) continue;
                n4++;
@@ -5948,7 +6007,8 @@ void BuildOrb(string sym,string dir)
                        (q2==1?F(ed[0],2)+" - "+F(ed[1],2)+" ATR":
                        (q2==2?F(ed[1],2)+" - "+F(ed[2],2)+" ATR":"oltre "+F(ed[2],2)+" ATR (larga)")));
             double wl4=100.0*WilsonLowInd(w4,res);
-            H("<tr><td><b>"+HE(lab)+"</b></td><td>"+IntegerToString(n4)+"</td><td>"+
+            H("<tr><td><b>"+F(g_vaPct[z],0)+"%</b>"+(z==g_vaMain?" &#9656;":"")+"</td><td>"+HE(lab)+
+              "</td><td>"+IntegerToString(n4)+"</td><td>"+
               F(100.0*w4/res,2)+"</td><td class=\""+(wl4>beV?"hi":"lo")+"\">"+F(wl4,2)+
               "</td><td class=\""+((w4*g_rr[g_rrMain]-l4)>0?"up":"dn")+"\">"+
               F((w4*g_rr[g_rrMain]-l4)/(double)n4,3)+"</td><td>"+F(sM4/n4,2)+"</td><td>"+
@@ -5973,7 +6033,7 @@ void BuildOrb(string sym,string dir)
             for(int q=0;q<nSel;q++)
             {
                int b=sel[q];
-               if(g_bk[b].vpState<0) continue;
+               if(g_bk[b].vpStateV[g_vaMain]<0) continue;
                double pd2=g_bk[b].vpPocDist;
                int bucket=(pd2<=eg[0]?0:(pd2<=eg[1]?1:(pd2<=eg[2]?2:3)));
                if(bucket!=q2) continue;
@@ -6034,7 +6094,10 @@ void BuildOrb(string sym,string dir)
       {
          W(fF,"finestra;giorno;ora;direzione;esito;anno;range_atr;compressione;target_atr;intensita_atr;"
               "volatilita_atr;cci;rsi;zscore;mfe_atr;mae_atr;min_alla_rottura;"
-              "vp_stato;vp_dist_poc_atr;vp_larghezza_va_atr;vp_pos_volume\r\n");
+              "vp_stato;vp_dist_poc_atr;vp_larghezza_va_atr;vp_pos_volume");
+         for(int z=0;z<g_nVa;z++) W(fF,";vp_stato_"+F(g_vaPct[z],0));
+         for(int z=0;z<g_nVa;z++) W(fF,";vp_larghezza_"+F(g_vaPct[z],0));
+         W(fF,"\r\n");
          for(int q=0;q<nSel;q++)
          {
             int b=sel[q];
@@ -6045,10 +6108,14 @@ void BuildOrb(string sym,string dir)
                  F(g_bk[b].tgt,4)+";"+F(g_bk[b].mom,4)+";"+
                  F(g_bk[b].vol,4)+";"+F(g_bk[b].cci,2)+";"+F(g_bk[b].rsi,2)+";"+F(g_bk[b].zs,3)+";"+
                  F(g_bk[b].mfe,4)+";"+F(g_bk[b].mae,4)+";"+F(g_bk[b].ttb,1)+";"+
-                 (g_bk[b].vpState>=0?OrbVpName((int)g_bk[b].vpState):"")+";"+
-                 (g_bk[b].vpState>=0?F(g_bk[b].vpPocDist,4):"")+";"+
-                 (g_bk[b].vpState>=0?F(g_bk[b].vpVaWidth,4):"")+";"+
-                 (g_bk[b].vpVolPos>=0.0f?F(g_bk[b].vpVolPos,4):"")+"\r\n");
+                 (g_bk[b].vpStateV[g_vaMain]>=0?OrbVpName((int)g_bk[b].vpStateV[g_vaMain]):"")+";"+
+                 (g_bk[b].vpStateV[g_vaMain]>=0?F(g_bk[b].vpPocDist,4):"")+";"+
+                 (g_bk[b].vpStateV[g_vaMain]>=0?F(g_bk[b].vpVaWidthV[g_vaMain],4):"")+";"+
+                 (g_bk[b].vpVolPos>=0.0f?F(g_bk[b].vpVolPos,4):""));
+            for(int z=0;z<g_nVa;z++)
+               W(fF,";"+(g_bk[b].vpStateV[z]>=0?IntegerToString((int)g_bk[b].vpStateV[z]):""));
+            for(int z=0;z<g_nVa;z++) W(fF,";"+F(g_bk[b].vpVaWidthV[z],4));
+            W(fF,"\r\n");
          }
          FileClose(fF);
       }

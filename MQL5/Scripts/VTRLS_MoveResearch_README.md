@@ -301,9 +301,23 @@ periodo o un altro simbolo.
 ## Volume Profile
 
 Scheda dedicata, **aggiuntiva**: POC, VAH e VAL del **giorno precedente**
-(`InpVpLevels` livelli, Value Area al `InpVpValueArea`%). Il profilo di ieri e'
-noto per intero prima che oggi cominci, quindi e' point-in-time pulito per
-qualunque istante della giornata.
+(`InpVpLevels` livelli). Il profilo di ieri e' noto per intero prima che oggi
+cominci, quindi e' point-in-time pulito per qualunque istante della giornata.
+
+**Cinque Value Area, non una.** `InpVpVaList` (default `40,50,60,70,80`) misura
+ogni condizione a piu' percentuali di volume; `InpVpVaMain` sceglie quale
+alimenta le colonne principali e il CSV (default 4 = 70%). L'istogramma si
+costruisce una volta sola e poi si espande dal POC cinque volte: il costo
+aggiuntivo e' trascurabile.
+
+Non serve a scegliere la percentuale migliore - quello sarebbe overfitting su
+una soglia. Serve a vedere **come si muove il risultato mentre la soglia si
+muove**. Il ventaglio e' largo apposta: al 40% la Value Area e' il nocciolo
+stretto attorno al POC, all'80% copre quasi tutta la giornata. Se una condizione
+ha senso, il suo effetto deve variare in modo ordinato - crescere, calare o
+restare stabile. Un valore che spicca a una sola percentuale e sparisce alle due
+vicine e' rumore che ha trovato la sua soglia, e fuori campione non la
+ritrovera'.
 
 **Perche' merita una scheda a se.** Ogni altra cosa misurata in questo report -
 range, ATR, RSI, CCI, Z-Score, momentum, compressione - e' una trasformazione
