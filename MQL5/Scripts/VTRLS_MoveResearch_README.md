@@ -87,9 +87,23 @@ domanda in due tempi: **dove** si forma l'accumulazione dentro la giornata, e
 
 **Primo tempo.** Lo script non decide a priori quale sia la fascia buona: prova
 ogni combinazione di ora di inizio (`InpOrbFirstHour` -> `InpOrbLastHour`, passo
-`InpOrbStartStep`) e durata (`InpOrbDur`), tipicamente qualche centinaio di
-finestre. Per ognuna costruisce massimo e minimo **solo con le barre dentro la
-finestra**, poi aspetta la rottura di un estremo entro `InpOrbDeadlineMin` minuti.
+`InpOrbStartStep`) e durata (`InpOrbDur`, default `1,5,15,30,60,90,120`),
+tipicamente qualche centinaio di finestre. Per ognuna costruisce massimo e minimo
+**solo con le barre dentro la finestra**, poi aspetta la rottura di un estremo
+entro `InpOrbDeadlineMin` minuti.
+
+Le durate sono **minuti di orologio**, non timeframe: non hanno niente a che
+vedere con `InpIndTF1/2/3`, che riguardano solo su quale barra vengono letti RSI,
+CCI e Z-Score. Massimo e minimo si costruiscono sempre con le barre di
+`InpBaseTF`, quindi una durata inferiore alla barra base viene scartata da sola
+(su M5 la durata 1 sparisce, su M1 restano tutte).
+
+Occhio a cosa vuol dire una finestra da 1 minuto su base M1: il "range" e' una
+singola candela, viene rotta quasi subito e quasi sempre. Non e' accumulazione.
+Sta nella lista come termine di paragone - guarda la colonna `range medio ATR`:
+se e' una frazione minima di ATR, quella riga descrive rumore, non compressione.
+Ogni durata in piu' allunga il run in proporzione: togli quelle che non ti
+servono.
 
 **Secondo tempo.** Entrata sul livello rotto, target `InpOrbTargetAtr` ATR, stop
 `InpAdverseRatio` x target, esito a primo tocco entro `InpScanHorizonMin`.

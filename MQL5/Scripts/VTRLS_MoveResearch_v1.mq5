@@ -132,7 +132,7 @@ input bool            InpDoOrb          = true;            // Cerca la finestra 
 input int             InpOrbFirstHour   = 0;               // Prima ora in cui puo' iniziare la finestra
 input int             InpOrbLastHour    = 21;              // Ultima ora in cui puo' iniziare la finestra
 input int             InpOrbStartStep   = 60;              // Passo degli inizi finestra in minuti (30 raddoppia il tempo di run)
-input string          InpOrbDur         = "15,30,60,90,120"; // Durate della finestra da testare, in minuti
+input string          InpOrbDur         = "1,5,15,30,60,90,120"; // Durate della finestra, in minuti (ogni durata in piu' allunga il run)
 input int             InpOrbDeadlineMin = 240;             // Entro quanto dalla chiusura finestra deve avvenire la rottura
 input double          InpOrbTargetAtr   = 0.50;            // Target in ATR(D-1) misurato dal livello rotto
 input double          InpOrbBufferAtr   = 0.00;            // Margine oltre il livello perche' la rottura conti
@@ -1605,7 +1605,11 @@ void OrbInit()
       {
          int d=(int)dur[k];
          if(d<=0) continue;
-         if(d<g_tfMin) continue;             // finestra piu' corta della barra base
+         // Una finestra piu' corta della barra base non e' calcolabile: il
+         // massimo e il minimo si costruiscono con le barre di InpBaseTF, e
+         // sotto quella risoluzione non c'e' niente da leggere. Su M1 quindi
+         // 1 e 5 minuti passano, su M5 il durata 1 viene scartata da sola.
+         if(d<g_tfMin) continue;
          if(m+d>=1440) continue;             // deve chiudersi dentro la giornata
          ArrayResize(g_orb,g_nOrb+1,256);
          g_orb[g_nOrb].startMin=m;
@@ -4564,6 +4568,13 @@ void BuildOrb(string sym,string dir)
         F(InpOrbTargetAtr,2)+" ATR dal livello rotto, stop "+F(InpOrbTargetAtr*InpAdverseRatio,2)+
         " ATR, orizzonte "+IntegerToString(InpScanHorizonMin)+" minuti. Gli orari sono quelli del server del "
         "broker, contati dall'apertura della barra giornaliera.<br><br>"
+
+        "<b>Sulle durate piu' corte.</b> Massimo e minimo si costruiscono con le barre del timeframe base ("+
+        EnumToString(InpBaseTF)+"): una durata inferiore alla barra viene scartata da sola. Attenzione pero' a "
+        "cosa significa una finestra di 1 minuto su M1: il 'range' e' una singola candela, viene rotto quasi "
+        "subito e quasi sempre, e non e' accumulazione - e' una candela. Guarda la colonna <b>range medio "
+        "ATR</b>: se e' una frazione minuscola di ATR, quella riga non descrive una fase di compressione, "
+        "descrive rumore. Serve come termine di paragone, non come setup.<br><br>"
 
         "<b>Nessun dato successivo alla rottura entra nella decisione di entrare.</b> Anzi: la barra in cui il "
         "livello viene rotto viene valutata <b>solo per lo stop, mai per il target</b>. Dentro una barra non si "
