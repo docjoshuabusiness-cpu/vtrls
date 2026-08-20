@@ -298,6 +298,46 @@ periodo o un altro simbolo.
 
 `InpDoOrb = false` salta entrambe le schede.
 
+## Volume Profile
+
+Scheda dedicata, **aggiuntiva**: POC, VAH e VAL del **giorno precedente**
+(`InpVpLevels` livelli, Value Area al `InpVpValueArea`%). Il profilo di ieri e'
+noto per intero prima che oggi cominci, quindi e' point-in-time pulito per
+qualunque istante della giornata.
+
+**Perche' merita una scheda a se.** Ogni altra cosa misurata in questo report -
+range, ATR, RSI, CCI, Z-Score, momentum, compressione - e' una trasformazione
+della **stessa serie OHLC**. Sono modi diversi di guardare gli stessi numeri, ed
+e' una ragione plausibile per cui tendono a dare tutti la stessa risposta. Il
+volume per livello di prezzo e' informazione **diversa**: dice dove si e'
+scambiato, non che forma avevano le candele.
+
+Tre tabelle, tutte misurate contro il **placebo** come il resto:
+
+1. **Condizione di Volume Profile** all'ingresso: fuori/dentro la Value Area di
+   ieri, livello rotto coincidente con VAH/VAL, rottura in allontanamento dal
+   POC, volume della finestra dal lato della rottura. Il placebo si trova nella
+   stessa condizione negli stessi giorni: se il win rate e' alto anche li',
+   quella condizione descrive un buon momento della giornata e non ha niente a
+   che vedere con la rottura.
+
+2. **Larghezza della Value Area** in ATR - la compressione **volumetrica**.
+   `compress` misura quanto si e' mosso il prezzo, questa quanto stretto e'
+   l'intervallo in cui si e' davvero scambiato. Le due possono divergere: una
+   giornata che spazia molto ma scambia tutto in mezzo ha range largo e Value
+   Area stretta. **Quando divergono, l'informazione in piu' e' reale** - e' la
+   parte che il prezzo da solo non conteneva.
+
+3. **Distanza dal POC di ieri**, col segno della rottura: positivo = ci si
+   allontana, negativo = ci si va incontro. E' la domanda operativa vera del
+   Volume Profile - il prezzo torna verso il volume o scappa da esso? Se il
+   ritorno verso il POC pagasse in modo sistematico, la rottura andrebbe operata
+   al contrario di come la si opera d'istinto.
+
+Le stesse misure finiscono per riga in `<SYM>_orb_breakout.csv`.
+
+`InpDoVp = false` salta la scheda e non calcola i profili.
+
 ## Normalizzazione cross-simbolo
 Le soglie in punti non sono confrontabili tra XAUUSD, US30 ed EURUSD. Ogni
 metrica esiste in **punti** e in **multipli di ATR(D-1)**; i bin delle tabelle

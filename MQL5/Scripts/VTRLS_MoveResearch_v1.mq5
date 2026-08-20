@@ -158,6 +158,13 @@ input int             InpOrbFixStartMin = -1;              // Finestra da usare 
 input int             InpOrbFixDurMin   = -1;              // Durata da usare nella scheda operativa (-1 = la migliore)
 input int             InpOrbMaxRec      = 1000000;         // Tetto ai breakout memorizzati (circa 48 byte l'uno)
 
+input string          sVp               = "=== VOLUME PROFILE (POC / VAH / VAL del giorno precedente) ===";
+input bool            InpDoVp           = true;            // Calcola il profilo volumi del giorno precedente
+input int             InpVpLevels       = 50;              // Livelli di prezzo del profilo
+input double          InpVpValueArea    = 70.0;            // % di volume dentro la Value Area
+input bool            InpVpRealVolume   = true;            // Usa il volume reale se il broker lo fornisce
+input double          InpVpNearAtr      = 0.10;            // Quanto vicino a VAH/VAL per dire che il livello "coincide"
+
 input string          sec3                = "=== NEWS ===";
 input bool            InpUseCalendar    = true;            // Usa il calendario economico MQL5
 input int             InpMinImportance  = 2;               // Importanza minima (1=low 2=medium 3=high)
@@ -1043,6 +1050,7 @@ void HtmlHead(string sym)
    H("<button onclick=\"tab(9)\">Condizioni marginali</button>");
    H("<button onclick=\"tab(10)\">Range e breakout</button>");
    H("<button onclick=\"tab(11)\">Breakout operativo</button>");
+   H("<button onclick=\"tab(12)\">Volume Profile</button>");
    H("</nav><main>");
    H("<section class=\"on\"><div id=\"sum\" class=\"sum\"></div><div id=\"lett\"></div>");
    H("<h2>Come leggere questo report</h2><div class=\"note\">");
@@ -1167,6 +1175,17 @@ void HtmlHead(string sym)
    H("<tr><td><b>RR (target/stop)</b></td><td>Quante volte lo stop vale il target. 1:2 significa rischiare "
      "una unita' per guadagnarne due. Lo stop resta identico fra i rapporti: cambia solo dove si mette il "
      "target, quindi i rapporti sono confrontabili fra loro</td></tr>");
+   H("<tr><td><b>POC / VAH / VAL</b></td><td>Point of Control = livello di prezzo a volume massimo del "
+     "giorno precedente. VAH e VAL sono i bordi della Value Area, l'intervallo che contiene il "+
+     F(InpVpValueArea,0)+"% del volume. Sono l'unica informazione dello script che non derivi dall'OHLC</td></tr>");
+   H("<tr><td><b>larghezza Value Area</b></td><td>VAH meno VAL, in ATR. E' la compressione VOLUMETRICA: "
+     "compress misura quanto si e' mosso il prezzo, questa quanto stretto e' l'intervallo in cui si e' "
+     "davvero scambiato. Quando le due divergono, l'informazione in piu' e' reale</td></tr>");
+   H("<tr><td><b>distanza dal POC</b></td><td>Quanto era lontano il livello rotto dal POC di ieri, col segno "
+     "della rottura: positivo = ci si allontana, negativo = ci si va incontro</td></tr>");
+   H("<tr><td><b>posizione del volume</b></td><td>Dove stava il baricentro del volume dentro la finestra di "
+     "osservazione, da 0 (in basso) a 1 (in alto). Un range che scambia in alto e rompe al rialzo non e' la "
+     "stessa cosa di uno che rompe al rialzo dopo aver scambiato tutto in basso</td></tr>");
    H("<tr><td><b>conferme</b></td><td>Quanti dei tre indicatori - CCI, RSI, Z-Score - erano d'accordo con "
      "la direzione della rottura, letti sull'ultima barra chiusa PRIMA della barra di rottura. Da 0 a 3. "
      "L'idea regge solo se il win rate cresce in modo ordinato da 0 a 3, non se un valore singolo spicca</td></tr>");
@@ -1631,6 +1650,8 @@ struct SOrb
    // INDICATORI. Se anche un ingresso a caso migliora quando i tre sono
    // concordi, il merito e' loro e la rottura non c'entra.
    int    pcfN[4], pcfWin[4], pcfLoss[4];
+   // stessa cosa per gli stati di Volume Profile
+   int    pvpN[5], pvpWin[5], pvpLoss[5];
 };
 SOrb g_orb[];
 int  g_nOrb=0;
@@ -1671,6 +1692,37 @@ int OrbConfMask(int dir,double cci,double rsi,double zs)
    if(dir*zs  >  InpOrbZsConf)  m|=4;
    return m;
 }
+// Condizione di Volume Profile al momento dell'ingresso. Una sola
+// definizione, usata identica dal breakout e dal placebo.
+//  0 = ingresso FUORI dalla Value Area di ieri
+//  1 = ingresso DENTRO la Value Area di ieri
+//  2 = il livello rotto coincide con VAH/VAL di ieri
+//  3 = si rompe ALLONTANANDOSI dal POC di ieri
+//  4 = il volume della finestra stava dalla parte della rottura
+int OrbVpState(int dir,double entry,double poc,double vah,double val,
+               double nearPt,double winVolPos)
+{
+   if(vah<=val) return -1;
+   double lvl=(dir>0? vah : val);
+   if(MathAbs(entry-lvl)<=nearPt) return 2;
+   if(dir*(entry-poc)>0.0)        return 3;
+   if(winVolPos>=0.0 && (dir>0 ? winVolPos>=0.6 : winVolPos<=0.4)) return 4;
+   if(entry>vah || entry<val)     return 0;
+   return 1;
+}
+string OrbVpName(int k)
+{
+   switch(k)
+   {
+      case 0: return "fuori dalla Value Area di ieri";
+      case 1: return "dentro la Value Area di ieri";
+      case 2: return "livello rotto = VAH/VAL di ieri";
+      case 3: return "rottura in allontanamento dal POC";
+      case 4: return "volume della finestra dal lato della rottura";
+   }
+   return "-";
+}
+
 string OrbConfName(int m)
 {
    if(m==0) return "nessuna conferma";
@@ -1702,6 +1754,11 @@ struct SBrk
    int   year;
    float rangeAtr, mom, vol, cci, rsi, zs, mfe, mae, ttb, tgt, compr, cost, stopAtr;
    char  resR[ORB_MAXRR];
+   // volume profile del giorno precedente, letto al momento della rottura
+   float vpPocDist;     // (entry - POC) in ATR, con il segno della rottura
+   float vpVaWidth;     // ampiezza della Value Area in ATR: compressione VOLUMETRICA
+   float vpVolPos;      // dove stava il volume dentro la finestra, 0..1
+   char  vpState;       // vedi OrbVpState()
 };
 SBrk g_bk[];
 int  g_nBk=0;
@@ -1765,6 +1822,9 @@ void OrbInit()
          ArrayInitialize(g_orb[g_nOrb].pcfN,0);
          ArrayInitialize(g_orb[g_nOrb].pcfWin,0);
          ArrayInitialize(g_orb[g_nOrb].pcfLoss,0);
+         ArrayInitialize(g_orb[g_nOrb].pvpN,0);
+         ArrayInitialize(g_orb[g_nOrb].pvpWin,0);
+         ArrayInitialize(g_orb[g_nOrb].pvpLoss,0);
          g_orb[g_nOrb].n1=0; g_orb[g_nOrb].brk1=0; g_orb[g_nOrb].win1=0; g_orb[g_nOrb].res1=0;
          g_orb[g_nOrb].n2=0; g_orb[g_nOrb].brk2=0; g_orb[g_nOrb].win2=0; g_orb[g_nOrb].res2=0;
          ArrayInitialize(g_orb[g_nOrb].dN,0);   ArrayInitialize(g_orb[g_nOrb].dBrk,0);
@@ -1850,6 +1910,69 @@ double OrbScore(int i)
    int tot=g_orb[i].win+g_orb[i].loss+g_orb[i].flat;
    double cost=(tot>0? g_orb[i].sCost/tot : 0.0);
    return 100.0*pb*OrbExpLow(g_orb[i].win,g_orb[i].loss,g_orb[i].flat,OrbTgt(i),cost);
+}
+
+//==================================================================
+//  PROFILO VOLUMI
+//  L'unica informazione, in tutto lo script, che NON sia una
+//  trasformazione dell'OHLC: dove si e' scambiato il volume, non
+//  che forma avevano le candele. Se il prezzo non contiene l'edge,
+//  nessuna formula sul prezzo lo fa comparire - questa e' l'unica
+//  che guarda altrove.
+//
+//  Il volume di ogni barra viene spalmato uniformemente sui livelli
+//  che la barra attraversa. E' l'approssimazione standard: senza dati
+//  tick per prezzo non si puo' fare di meglio, e su un profilo
+//  giornaliero l'errore si media via.
+//==================================================================
+void VolProfile(const MqlRates &rr[],int a,int b,int levels,double vaPct,bool useReal,
+                double &poc,double &vah,double &val,double &tot)
+{
+   poc=0; vah=0; val=0; tot=0;
+   if(b<=a || levels<4) return;
+
+   double hi=-DBL_MAX, lo=DBL_MAX;
+   for(int i=a;i<b;i++){ if(rr[i].high>hi) hi=rr[i].high; if(rr[i].low<lo) lo=rr[i].low; }
+   if(hi<=lo) return;
+
+   double vol[]; ArrayResize(vol,levels); ArrayInitialize(vol,0.0);
+   double step=(hi-lo)/levels;
+   if(step<=0.0) return;
+
+   for(int i=a;i<b;i++)
+   {
+      double v=(double)(useReal && rr[i].real_volume>0 ? rr[i].real_volume : rr[i].tick_volume);
+      if(v<=0.0) continue;
+      int k0=(int)((rr[i].low -lo)/step);
+      int k1=(int)((rr[i].high-lo)/step);
+      if(k0<0) k0=0; if(k0>levels-1) k0=levels-1;
+      if(k1<0) k1=0; if(k1>levels-1) k1=levels-1;
+      if(k1<k0){ int tp=k0; k0=k1; k1=tp; }
+      double per=v/(double)(k1-k0+1);
+      for(int k=k0;k<=k1;k++) vol[k]+=per;
+      tot+=v;
+   }
+   if(tot<=0.0) return;
+
+   int pk=0; double mx=-1.0;
+   for(int k=0;k<levels;k++) if(vol[k]>mx){ mx=vol[k]; pk=k; }
+   poc=lo+(pk+0.5)*step;
+
+   // Value Area: si espande dal POC verso il lato con piu' volume,
+   // finche' non si copre la quota richiesta. E' la definizione classica.
+   double target=tot*(vaPct/100.0);
+   double acc=vol[pk];
+   int up=pk, dn=pk;
+   while(acc<target && (up<levels-1 || dn>0))
+   {
+      double va=(up<levels-1? vol[up+1] : -1.0);
+      double vb=(dn>0      ? vol[dn-1] : -1.0);
+      if(va>=vb && up<levels-1){ up++; acc+=vol[up]; }
+      else if(dn>0)           { dn--; acc+=vol[dn]; }
+      else break;
+   }
+   vah=lo+(up+0.5)*step;
+   val=lo+(dn+0.5)*step;
 }
 
 // indice dell'ultima barra indicatore CHIUSA prima di t
@@ -2519,6 +2642,23 @@ bool ProcessSymbol(string sym)
          }
       }
 
+      //--- profilo volumi del giorno PRECEDENTE: e' noto per intero
+      // prima che la giornata cominci, quindi e' point-in-time pulito
+      // per qualunque istante di oggi.
+      double vpPoc=0, vpVah=0, vpVal=0, vpTot=0, vpVaAtr=0;
+      bool   vpOk=false;
+      if(InpDoVp && InpDoOrb)
+      {
+         MqlRates rp[];
+         int np=CopyRates(sym,InpBaseTF,d1[di-1].time,d1[di-1].time+86399,rp);
+         if(np>InpVpLevels)
+         {
+            VolProfile(rp,0,np,InpVpLevels,InpVpValueArea,InpVpRealVolume,vpPoc,vpVah,vpVal,vpTot);
+            vpOk=(vpTot>0.0 && vpVah>vpVal);
+            if(vpOk) vpVaAtr=((vpVah-vpVal)/g_point)/atrPt;
+         }
+      }
+
       //============ RANGE DI OSSERVAZIONE -> BREAKOUT ==============
       // Per ogni finestra candidata: massimo e minimo costruiti dentro la
       // finestra, poi si aspetta la rottura di uno dei due estremi e si
@@ -2563,11 +2703,20 @@ bool ProcessSymbol(string sym)
             if(ib-ia < (int)MathMax(1,expBars*0.6)) continue;
 
             double RH=-DBL_MAX, RL=DBL_MAX;
+            // dove sta il volume DENTRO la finestra: non l'estremo, il
+            // baricentro. Un range il cui volume si e' accumulato in alto
+            // e poi rompe al rialzo non e' la stessa cosa di uno che rompe
+            // al rialzo dopo aver scambiato tutto in basso.
+            double vwNum=0.0, vwDen=0.0;
             for(int q=ia;q<ib;q++)
             {
                if(r[q].high>RH) RH=r[q].high;
                if(r[q].low <RL) RL=r[q].low;
+               double vq=(double)(InpVpRealVolume && r[q].real_volume>0 ? r[q].real_volume : r[q].tick_volume);
+               if(vq>0.0){ vwNum+=((r[q].high+r[q].low+r[q].close)/3.0)*vq; vwDen+=vq; }
             }
+            double winVolPos=-1.0;
+            if(vwDen>0.0 && RH>RL) winVolPos=(vwNum/vwDen-RL)/(RH-RL);
             double rngAtr=((RH-RL)/g_point)/atrPt;
             if(rngAtr<=0.0 || rngAtr>InpOrbMaxRangeAtr) continue;
 
@@ -2636,6 +2785,17 @@ bool ProcessSymbol(string sym)
                   g_orb[w].pcfN[pk]++;
                   if(pRes[g_rrMain]>0)      g_orb[w].pcfWin[pk]++;
                   else if(pRes[g_rrMain]<0) g_orb[w].pcfLoss[pk]++;
+                  if(vpOk)
+                  {
+                     int pv=OrbVpState(pd,pEntry,vpPoc,vpVah,vpVal,
+                                       InpVpNearAtr*atrPt*g_point,winVolPos);
+                     if(pv>=0 && pv<5)
+                     {
+                        g_orb[w].pvpN[pv]++;
+                        if(pRes[g_rrMain]>0)      g_orb[w].pvpWin[pv]++;
+                        else if(pRes[g_rrMain]<0) g_orb[w].pvpLoss[pv]++;
+                     }
+                  }
                }
             }
 
@@ -2775,6 +2935,20 @@ bool ProcessSymbol(string sym)
                g_bk[g_nBk].compr=(float)compr;
                g_bk[g_nBk].cost=(float)costAtr;
                g_bk[g_nBk].stopAtr=(float)stopAtr;
+               g_bk[g_nBk].vpVolPos=(float)winVolPos;
+               if(vpOk)
+               {
+                  g_bk[g_nBk].vpPocDist=(float)(dir*((entry-vpPoc)/g_point)/atrPt);
+                  g_bk[g_nBk].vpVaWidth=(float)vpVaAtr;
+                  g_bk[g_nBk].vpState=(char)OrbVpState(dir,entry,vpPoc,vpVah,vpVal,
+                                                       InpVpNearAtr*atrPt*g_point,winVolPos);
+               }
+               else
+               {
+                  g_bk[g_nBk].vpPocDist=0.0f;
+                  g_bk[g_nBk].vpVaWidth=0.0f;
+                  g_bk[g_nBk].vpState=(char)-1;
+               }
                for(int z=0;z<ORB_MAXRR;z++)
                   g_bk[g_nBk].resR[z]=(char)(z<g_nRR ? resR[z] : 0);
                g_nBk++;
@@ -4878,6 +5052,7 @@ void BuildOrb(string sym,string dir)
            "InpDoOrb e' disattivato oppure nessuna finestra candidata e' compatibile con il timeframe base "
            "(una finestra piu' corta della barra non ha senso).</div></section>");
          H("<section><h2>Breakout operativo</h2><div class=\"note\">Non generata.</div></section>");
+         H("<section><h2>Volume Profile</h2><div class=\"note\">Non generata: dipende dai breakout.</div></section>");
       }
       return;
    }
@@ -5154,6 +5329,7 @@ void BuildOrb(string sym,string dir)
    {
       H("<section><h2>Breakout operativo</h2><div class=\"note\">Nessuna finestra selezionabile: "
         "nessuna raggiunge InpOrbMinN giornate, oppure non e' stato registrato alcun breakout.</div></section>");
+      H("<section><h2>Volume Profile</h2><div class=\"note\">Non generata: dipende dai breakout.</div></section>");
       return;
    }
 
@@ -5674,6 +5850,153 @@ void BuildOrb(string sym,string dir)
    }
    H("</section>");
 
+   //=================================================================
+   //  SCHEDA: VOLUME PROFILE
+   //  L'unica informazione dello script che non sia una
+   //  trasformazione dell'OHLC. Misurata con lo stesso metro di
+   //  tutto il resto: contro il placebo, non contro se stessa.
+   //=================================================================
+   H("<section><h2>Volume Profile del giorno precedente</h2><div class=\"note\">");
+   if(!InpDoVp)
+      H("Non calcolato: InpDoVp e' disattivato.</div></section>");
+   else
+   {
+      H("POC, VAH e VAL del <b>giorno precedente</b>, su "+IntegerToString(InpVpLevels)+
+        " livelli di prezzo e Value Area al "+F(InpVpValueArea,0)+"%. Il profilo di ieri e' noto per intero "
+        "prima che oggi cominci: e' point-in-time pulito per qualunque istante della giornata.<br><br>"
+
+        "<b>Perche' vale la pena guardarlo.</b> Ogni altra cosa misurata in questo report - range, ATR, RSI, "
+        "CCI, Z-Score, momentum, compressione - e' una trasformazione della <b>stessa serie OHLC</b>. Sono "
+        "modi diversi di guardare gli stessi numeri, ed e' il motivo per cui tendono a dare tutti la stessa "
+        "risposta. Il volume per livello di prezzo e' informazione <b>diversa</b>: dice dove si e' scambiato, "
+        "non che forma avevano le candele. Se un edge esiste in questo report, e' il posto piu' probabile in "
+        "cui trovarlo - il che non vuol dire che ci sia.<br><br>"
+
+        "<b>Come si legge.</b> Identico a tutto il resto: la colonna che conta e' <b>delta vs placebo</b>, "
+        "perche' il placebo si trova nella stessa condizione di Volume Profile negli stessi giorni. Se il "
+        "win rate e' alto anche nel placebo, quella condizione descrive un momento buono della giornata e "
+        "non ha niente a che vedere con la rottura.</div>");
+
+      // stato VP dei breakout reali
+      int vN[5], vW[5], vL[5];
+      ArrayInitialize(vN,0); ArrayInitialize(vW,0); ArrayInitialize(vL,0);
+      int vTot=0;
+      for(int q=0;q<nSel;q++)
+      {
+         int b=sel[q];
+         int k=(int)g_bk[b].vpState;
+         if(k<0 || k>4) continue;
+         vN[k]++; vTot++;
+         if(g_bk[b].res>0) vW[k]++; else if(g_bk[b].res<0) vL[k]++;
+      }
+      double beV=OrbBE();
+      HtmlTableHead("tV1","condizione;n;% dei breakout;win%;wlow;E in R;n placebo;placebo win%;delta;z",false);
+      for(int k=0;k<5;k++)
+      {
+         int res=vW[k]+vL[k];
+         if(res<30) continue;
+         double wr4=100.0*vW[k]/res;
+         double wl4=100.0*WilsonLowInd(vW[k],res);
+         double eR4=(vW[k]*g_rr[g_rrMain]-vL[k])/(double)MathMax(1,vN[k]);
+         int pres=g_orb[g_orbSel].pvpWin[k]+g_orb[g_orbSel].pvpLoss[k];
+         bool hasP=(pres>=50);
+         double pw4=(hasP? 100.0*g_orb[g_orbSel].pvpWin[k]/pres : 0.0);
+         double d4 =(hasP? wr4-pw4 : 0.0);
+         double se4=(hasP? 100.0*MathSqrt((pw4/100.0)*(1.0-pw4/100.0)*(1.0/res+1.0/pres)) : 0.0);
+         double z4 =(se4>0? d4/se4 : 0.0);
+         H("<tr><td><b>"+HE(OrbVpName(k))+"</b></td><td>"+IntegerToString(vN[k])+"</td><td>"+
+           F(100.0*vN[k]/MathMax(1,vTot),1)+"</td><td>"+F(wr4,2)+"</td><td class=\""+
+           (wl4>beV?"hi":"lo")+"\">"+F(wl4,2)+"</td><td class=\""+(eR4>0?"up":"dn")+"\">"+F(eR4,3)+
+           "</td><td class=\"nz\">"+(hasP?IntegerToString(pres):"-")+"</td><td class=\"nz\">"+
+           (hasP?F(pw4,2):"-")+"</td><td class=\""+(MathAbs(z4)<2.0?"nz":(d4>0?"hi":"lo"))+"\"><b>"+
+           (hasP?F(d4,2):"-")+"</b></td><td class=\""+(MathAbs(z4)>=3.0?(d4>0?"hi":"lo"):"nz")+"\">"+
+           (hasP?F(z4,2):"-")+"</td></tr>");
+      }
+      HtmlTableEnd();
+      if(vTot==0)
+         H("<div class=\"note\">Nessun breakout ha un profilo del giorno precedente utilizzabile: "
+           "storico mancante, oppure InpVpLevels troppo alto per il numero di barre disponibili.</div>");
+
+      //--- compressione VOLUMETRICA: larghezza della Value Area
+      H("<h2>Compressione volumetrica: larghezza della Value Area</h2><div class=\"note\">"
+        "La Value Area di ieri, misurata in ATR. E' la versione <b>volumetrica</b> della colonna "
+        "<b>compress</b> della scheda accanto: quella misura quanto si e' mosso il prezzo, questa misura "
+        "quanto stretto e' stato l'intervallo in cui si e' davvero scambiato. Le due possono divergere - una "
+        "giornata che spazia molto ma scambia tutto in mezzo ha range largo e Value Area stretta - e "
+        "<b>quando divergono, l'informazione e' reale</b>: e' la parte di volume che il prezzo da solo non "
+        "conteneva.</div>");
+      HtmlTableHead("tV2","Value Area di ieri;n;win%;wlow;E in R;MFE media;MAE media",false);
+      {
+         double ed[]; ArrayResize(ed,3); ed[0]=0.40; ed[1]=0.70; ed[2]=1.00;
+         for(int q2=0;q2<=3;q2++)
+         {
+            int n4=0, w4=0, l4=0; double sM4=0.0, sA4=0.0;
+            for(int q=0;q<nSel;q++)
+            {
+               int b=sel[q];
+               if(g_bk[b].vpState<0 || g_bk[b].vpVaWidth<=0.0f) continue;
+               double vw=g_bk[b].vpVaWidth;
+               int bucket=(vw<=ed[0]?0:(vw<=ed[1]?1:(vw<=ed[2]?2:3)));
+               if(bucket!=q2) continue;
+               n4++;
+               if(g_bk[b].res>0) w4++; else if(g_bk[b].res<0) l4++;
+               sM4+=g_bk[b].mfe; sA4+=g_bk[b].mae;
+            }
+            int res=w4+l4;
+            if(res<30) continue;
+            string lab=(q2==0?"entro "+F(ed[0],2)+" ATR (molto stretta)":
+                       (q2==1?F(ed[0],2)+" - "+F(ed[1],2)+" ATR":
+                       (q2==2?F(ed[1],2)+" - "+F(ed[2],2)+" ATR":"oltre "+F(ed[2],2)+" ATR (larga)")));
+            double wl4=100.0*WilsonLowInd(w4,res);
+            H("<tr><td><b>"+HE(lab)+"</b></td><td>"+IntegerToString(n4)+"</td><td>"+
+              F(100.0*w4/res,2)+"</td><td class=\""+(wl4>beV?"hi":"lo")+"\">"+F(wl4,2)+
+              "</td><td class=\""+((w4*g_rr[g_rrMain]-l4)>0?"up":"dn")+"\">"+
+              F((w4*g_rr[g_rrMain]-l4)/(double)n4,3)+"</td><td>"+F(sM4/n4,2)+"</td><td>"+
+              F(sA4/n4,2)+"</td></tr>");
+         }
+      }
+      HtmlTableEnd();
+
+      //--- distanza dal POC
+      H("<h2>Distanza dal POC di ieri</h2><div class=\"note\">"
+        "Quanto era lontano il livello rotto dal punto di massimo volume del giorno precedente, con il segno "
+        "della rottura: <b>positivo</b> = si rompe allontanandosi dal POC, <b>negativo</b> = si rompe "
+        "andandogli incontro. E' la domanda operativa vera del Volume Profile: il prezzo torna verso il "
+        "volume o scappa da esso? Se il ritorno verso il POC pagasse in modo sistematico, la rottura "
+        "andrebbe operata al contrario di come la si opera d'istinto.</div>");
+      HtmlTableHead("tV3","posizione rispetto al POC di ieri;n;win%;wlow;E in R",false);
+      {
+         double eg[]; ArrayResize(eg,3); eg[0]=-0.30; eg[1]=0.0; eg[2]=0.30;
+         for(int q2=0;q2<=3;q2++)
+         {
+            int n4=0, w4=0, l4=0;
+            for(int q=0;q<nSel;q++)
+            {
+               int b=sel[q];
+               if(g_bk[b].vpState<0) continue;
+               double pd2=g_bk[b].vpPocDist;
+               int bucket=(pd2<=eg[0]?0:(pd2<=eg[1]?1:(pd2<=eg[2]?2:3)));
+               if(bucket!=q2) continue;
+               n4++;
+               if(g_bk[b].res>0) w4++; else if(g_bk[b].res<0) l4++;
+            }
+            int res=w4+l4;
+            if(res<30) continue;
+            string lab=(q2==0?"verso il POC, oltre "+F(-eg[0],2)+" ATR":
+                       (q2==1?"verso il POC, entro "+F(-eg[0],2)+" ATR":
+                       (q2==2?"lontano dal POC, entro "+F(eg[2],2)+" ATR":
+                              "lontano dal POC, oltre "+F(eg[2],2)+" ATR")));
+            double wl4=100.0*WilsonLowInd(w4,res);
+            H("<tr><td><b>"+HE(lab)+"</b></td><td>"+IntegerToString(n4)+"</td><td>"+
+              F(100.0*w4/res,2)+"</td><td class=\""+(wl4>beV?"hi":"lo")+"\">"+F(wl4,2)+
+              "</td><td class=\""+((w4*g_rr[g_rrMain]-l4)>0?"up":"dn")+"\">"+
+              F((w4*g_rr[g_rrMain]-l4)/(double)n4,3)+"</td></tr>");
+         }
+      }
+      HtmlTableEnd();
+      H("</section>");
+   }
+
    //--- CSV della curva rischio/rendimento
    if(InpWriteCsv && g_orbSel>=0)
    {
@@ -5710,7 +6033,8 @@ void BuildOrb(string sym,string dir)
       if(fF!=INVALID_HANDLE)
       {
          W(fF,"finestra;giorno;ora;direzione;esito;anno;range_atr;compressione;target_atr;intensita_atr;"
-              "volatilita_atr;cci;rsi;zscore;mfe_atr;mae_atr;min_alla_rottura\r\n");
+              "volatilita_atr;cci;rsi;zscore;mfe_atr;mae_atr;min_alla_rottura;"
+              "vp_stato;vp_dist_poc_atr;vp_larghezza_va_atr;vp_pos_volume\r\n");
          for(int q=0;q<nSel;q++)
          {
             int b=sel[q];
@@ -5720,7 +6044,11 @@ void BuildOrb(string sym,string dir)
                  IntegerToString(g_bk[b].year)+";"+F(g_bk[b].rangeAtr,4)+";"+F(g_bk[b].compr,4)+";"+
                  F(g_bk[b].tgt,4)+";"+F(g_bk[b].mom,4)+";"+
                  F(g_bk[b].vol,4)+";"+F(g_bk[b].cci,2)+";"+F(g_bk[b].rsi,2)+";"+F(g_bk[b].zs,3)+";"+
-                 F(g_bk[b].mfe,4)+";"+F(g_bk[b].mae,4)+";"+F(g_bk[b].ttb,1)+"\r\n");
+                 F(g_bk[b].mfe,4)+";"+F(g_bk[b].mae,4)+";"+F(g_bk[b].ttb,1)+";"+
+                 (g_bk[b].vpState>=0?OrbVpName((int)g_bk[b].vpState):"")+";"+
+                 (g_bk[b].vpState>=0?F(g_bk[b].vpPocDist,4):"")+";"+
+                 (g_bk[b].vpState>=0?F(g_bk[b].vpVaWidth,4):"")+";"+
+                 (g_bk[b].vpVolPos>=0.0f?F(g_bk[b].vpVolPos,4):"")+"\r\n");
          }
          FileClose(fF);
       }
