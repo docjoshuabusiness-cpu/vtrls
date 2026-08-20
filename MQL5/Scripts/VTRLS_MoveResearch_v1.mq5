@@ -1356,6 +1356,52 @@ void RkSort()
    }
 }
 
+
+//==================================================================
+//  CLASSIFICA DEI BREAKOUT CCI
+//  Stessa forma della classifica delle finestre, ma la metrica che
+//  ordina non e' la frequenza: e' il VANTAGGIO sul riferimento, cioe'
+//  quanto il breakout aggiunge rispetto alla stessa ora senza breakout.
+//  Ordinare per probabilita' assoluta riporterebbe in cima le ore
+//  calde, dove il mercato si muove comunque e il segnale non serve.
+//==================================================================
+struct SRankB
+{
+   string lab, lab15;
+   int    dow, hour, dir;         // dir +1 uscita UP, -1 uscita DOWN
+   int    n, n15, hit, up, dn;
+   int    nRef, hitRef;
+   double p, pRef, delta;
+};
+SRankB g_rb[];
+int    g_nRb=0;
+
+void RbAdd(string lab,string lab15,int dow,int hour,int dir,
+           int n15,int n,int hit,int up,int dn,int nRef,int hitRef)
+{
+   if(n<=0 || nRef<=0) return;
+   ArrayResize(g_rb,g_nRb+1,256);
+   g_rb[g_nRb].lab=lab;   g_rb[g_nRb].lab15=lab15; g_rb[g_nRb].n15=n15;
+   g_rb[g_nRb].dow=dow;   g_rb[g_nRb].hour=hour;   g_rb[g_nRb].dir=dir;
+   g_rb[g_nRb].n=n;       g_rb[g_nRb].hit=hit;     g_rb[g_nRb].up=up; g_rb[g_nRb].dn=dn;
+   g_rb[g_nRb].nRef=nRef; g_rb[g_nRb].hitRef=hitRef;
+   g_rb[g_nRb].p   =100.0*hit/n;
+   g_rb[g_nRb].pRef=100.0*hitRef/nRef;
+   g_rb[g_nRb].delta=g_rb[g_nRb].p-g_rb[g_nRb].pRef;
+   g_nRb++;
+}
+
+void RbSort()
+{
+   for(int i=1;i<g_nRb;i++)
+   {
+      SRankB k=g_rb[i];
+      int j=i-1;
+      while(j>=0 && g_rb[j].delta<k.delta){ g_rb[j+1]=g_rb[j]; j--; }
+      g_rb[j+1]=k;
+   }
+}
+
 //==================================================================
 //  AGGREGAZIONI SULL'INTERO PERIODO
 //  Le tabelle precedenti mostrano le giornate una per una. Questa
@@ -1572,6 +1618,8 @@ bool ProcessSymbol(string sym)
    // stati degli indicatori contati per finestra giorno x ora
    // breakout per ora del giorno: 0 = uscita DOWN, 1 = nessuna, 2 = uscita UP
    int    bkN[24][3], bkHit[24][3], bkUp[24][3], bkDn[24][3];
+   int    bdN[7][24][3], bdHit[7][24][3], bdUp[7][24][3], bdDn[7][24][3];
+   int    bmN[7][96][3];
    int    indN[7][24], zHi[7][24], zLo[7][24], rHi[7][24], rLo[7][24];
    int    cHi[7][24], cLo[7][24], cPos[7][24];
    int    cntM[96], buyM[96], bigM[96];  double sAtM[96];
@@ -1582,6 +1630,9 @@ bool ProcessSymbol(string sym)
    ArrayInitialize(cntH,0);  ArrayInitialize(buyH,0);  ArrayInitialize(bigH,0);  ArrayInitialize(sAtH,0.0);
    ArrayInitialize(cntM,0);  ArrayInitialize(buyM,0);  ArrayInitialize(bigM,0);  ArrayInitialize(sAtM,0.0);
    ArrayInitialize(bkN,0); ArrayInitialize(bkHit,0); ArrayInitialize(bkUp,0); ArrayInitialize(bkDn,0);
+   ArrayInitialize(bdN,0); ArrayInitialize(bdHit,0); ArrayInitialize(bdUp,0); ArrayInitialize(bdDn,0);
+   ArrayInitialize(bmN,0);
+   g_nRb=0; ArrayResize(g_rb,0);
    ArrayInitialize(indN,0); ArrayInitialize(zHi,0); ArrayInitialize(zLo,0);
    ArrayInitialize(rHi,0);  ArrayInitialize(rLo,0);
    ArrayInitialize(cHi,0);  ArrayInitialize(cLo,0); ArrayInitialize(cPos,0);
@@ -1984,10 +2035,13 @@ bool ProcessSymbol(string sym)
             if(s.indOk && g_nAtr>0)
             {
                int bi=(s.brk>0?2:(s.brk<0?0:1));
+               int m15b=s.hour*4+s.minute/15;
                bkN[s.hour][bi]++;
-               if(s.hitUpAtr[0]>=0 || s.hitDnAtr[0]>=0) bkHit[s.hour][bi]++;
-               if(s.hitUpAtr[0]>=0) bkUp[s.hour][bi]++;
-               if(s.hitDnAtr[0]>=0) bkDn[s.hour][bi]++;
+               bdN[s.dow][s.hour][bi]++;
+               if(m15b>=0 && m15b<96) bmN[s.dow][m15b][bi]++;
+               if(s.hitUpAtr[0]>=0 || s.hitDnAtr[0]>=0){ bkHit[s.hour][bi]++; bdHit[s.dow][s.hour][bi]++; }
+               if(s.hitUpAtr[0]>=0){ bkUp[s.hour][bi]++; bdUp[s.dow][s.hour][bi]++; }
+               if(s.hitDnAtr[0]>=0){ bkDn[s.hour][bi]++; bdDn[s.dow][s.hour][bi]++; }
             }
             if(s.indOk)
             {
@@ -2311,6 +2365,74 @@ bool ProcessSymbol(string sym)
       }
       HtmlTableEnd();
 
+      //--- CLASSIFICA dei breakout: stessa forma della classifica finestre
+      for(int d=0;d<7;d++)
+         for(int h=0;h<24;h++)
+         {
+            int nr=bdN[d][h][1];
+            if(nr<InpRankMinN*5) continue;
+            for(int k=0;k<2;k++)
+            {
+               int bi=(k==0?2:0), dir=(k==0?+1:-1);
+               int nn=bdN[d][h][bi];
+               if(nn<InpRankMinN) continue;
+               int q15=-1, v15=0;
+               for(int q=h*4;q<h*4+4;q++)
+                  if(bmN[d][q][bi]>v15){ v15=bmN[d][q][bi]; q15=q; }
+               RbAdd(DowIT(d)+"  "+D2(h)+":00", (q15>=0?M15Label(q15/4,(q15%4)*15):"-"),
+                     d,h,dir,v15,nn,bdHit[d][h][bi],bdUp[d][h][bi],bdDn[d][h][bi],nr,bdHit[d][h][1]);
+            }
+         }
+      RbSort();
+
+      if(g_nRb>0)
+      {
+         H("<h2>Classifica dei breakout CCI per giorno e ora</h2><div class=\"note\">"
+           "Stessa forma della classifica delle finestre, ma <b>ordinata per vantaggio</b>, non per probabilita'. "
+           "<b>delta = p - rif</b>: quanto il breakout aggiunge rispetto allo stesso giorno alla stessa ora "
+           "<b>senza</b> breakout. Ordinare per p assoluta riporterebbe in cima le ore calde, dove il mercato "
+           "si muove comunque e il segnale non serve a niente.<br><br>"
+           "Solo <b>delta positivo</b> significa qualcosa. Un delta negativo dice che dopo una compressione "
+           "quell'ora si muove MENO del normale: informazione utile, ma per stare fuori, non per entrare. "
+           "<b>pUP e pDN</b> dicono se l'uscita sceglie un lato: se restano vicine, il breakout segnala "
+           "volatilita' e non direzione, e allora si opera sui due lati.</div>");
+         HtmlTableHead("tRB","#;finestra;dir;top 15min;n15;n;p;rif;delta;pUP;pDN;n rif",true);
+         for(int i=0;i<g_nRb;i++)
+         {
+            string cls=(g_rb[i].delta>=2.0?"hi":(g_rb[i].delta<=-2.0?"lo":"nz"));
+            H("<tr><td>"+IntegerToString(i+1)+"</td><td><b>"+HE(g_rb[i].lab)+"</b></td><td class=\""+
+              (g_rb[i].dir>0?"up":"dn")+"\">"+(g_rb[i].dir>0?"USCITA UP":"USCITA DOWN")+"</td><td>"+
+              HE(g_rb[i].lab15)+"</td><td>"+IntegerToString(g_rb[i].n15)+"</td><td>"+
+              IntegerToString(g_rb[i].n)+"</td><td>"+F(g_rb[i].p,1)+"%</td><td class=\"nz\">"+
+              F(g_rb[i].pRef,1)+"%</td><td class=\""+cls+"\"><b>"+F(g_rb[i].delta,1)+"</b></td><td>"+
+              F(100.0*g_rb[i].up/g_rb[i].n,1)+"</td><td>"+F(100.0*g_rb[i].dn/g_rb[i].n,1)+"</td><td class=\"nz\">"+
+              IntegerToString(g_rb[i].nRef)+"</td></tr>");
+         }
+         HtmlTableEnd();
+
+         H("<h2>I migliori "+IntegerToString(InpRankPerDay)+" breakout di ogni giorno</h2><div class=\"note\">"
+           "La classifica riparte da capo per ogni giorno. Il delta resta sulla stessa scala fra tutte le righe: "
+           "se il primo posto di un giorno ha delta negativo, quel giorno il breakout non va operato.</div>");
+         HtmlTableHead("tRBg","giorno;#;ora;dir;top 15min;n;p;rif;delta;pUP;pDN",true);
+         for(int k=0;k<7;k++)
+         {
+            int d=(k+1)%7, shown=0;
+            for(int i=0;i<g_nRb && shown<InpRankPerDay;i++)
+            {
+               if(g_rb[i].dow!=d) continue;
+               shown++;
+               string cls=(g_rb[i].delta>=2.0?"hi":(g_rb[i].delta<=-2.0?"lo":"nz"));
+               H("<tr><td>"+(shown==1?"<b>"+HE(DowIT(d))+"</b>":"")+"</td><td>"+IntegerToString(shown)+
+                 "</td><td><b>"+D2(g_rb[i].hour)+":00</b></td><td class=\""+(g_rb[i].dir>0?"up":"dn")+"\">"+
+                 (g_rb[i].dir>0?"UP":"DOWN")+"</td><td>"+HE(g_rb[i].lab15)+"</td><td>"+
+                 IntegerToString(g_rb[i].n)+"</td><td>"+F(g_rb[i].p,1)+"%</td><td class=\"nz\">"+
+                 F(g_rb[i].pRef,1)+"%</td><td class=\""+cls+"\"><b>"+F(g_rb[i].delta,1)+"</b></td><td>"+
+                 F(100.0*g_rb[i].up/g_rb[i].n,1)+"</td><td>"+F(100.0*g_rb[i].dn/g_rb[i].n,1)+"</td></tr>");
+            }
+         }
+         HtmlTableEnd();
+      }
+
       H("<div class=\"note\">La verifica che conta - se questi stati <b>predicono</b> il movimento e la sua "
         "direzione - e' nella scheda <b>Condizioni marginali</b>: gli stati sono stati aggiunti li' come "
         "dimensioni, con probabilita', lift e ripartizione UP/DOWN calcolati sulla stessa baseline delle "
@@ -2335,6 +2457,28 @@ bool ProcessSymbol(string sym)
                   F(100.0*cPos[d][h]/nn,2)+"\r\n");
          }
          FileClose(fI);
+      }
+
+      if(g_nRb>0)
+      {
+         int fRB=FileOpen(dir+fn+"_cci_ranking.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
+         if(fRB!=INVALID_HANDLE)
+         {
+            W(fRB,"pos;pos_nel_giorno;giorno;ora;direzione;top_15min;n_15min;n;p;rif;delta;pUP;pDN;n_rif\r\n");
+            int seen2[7]; ArrayInitialize(seen2,0);
+            for(int i=0;i<g_nRb;i++)
+            {
+               string lb=g_rb[i].lab; StringReplace(lb,"  ",";");
+               seen2[g_rb[i].dow]++;
+               W(fRB,IntegerToString(i+1)+";"+IntegerToString(seen2[g_rb[i].dow])+";"+lb+";"+
+                     (g_rb[i].dir>0?"USCITA_UP":"USCITA_DOWN")+";"+g_rb[i].lab15+";"+
+                     IntegerToString(g_rb[i].n15)+";"+IntegerToString(g_rb[i].n)+";"+
+                     F(g_rb[i].p,2)+";"+F(g_rb[i].pRef,2)+";"+F(g_rb[i].delta,2)+";"+
+                     F(100.0*g_rb[i].up/g_rb[i].n,2)+";"+F(100.0*g_rb[i].dn/g_rb[i].n,2)+";"+
+                     IntegerToString(g_rb[i].nRef)+"\r\n");
+            }
+            FileClose(fRB);
+         }
       }
 
       int fB=FileOpen(dir+fn+"_cci_breakout.csv",FILE_WRITE|FILE_TXT|FILE_ANSI);
