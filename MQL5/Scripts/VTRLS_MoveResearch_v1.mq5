@@ -2816,6 +2816,18 @@ bool ProcessSymbol(string sym)
          }
       }
 
+      // mappa minuto del giorno -> primo indice di barra. Serve sia al
+      // modulo delle finestre sia a quello delle uscite dal CCI.
+      int minIdx[1442];
+      {
+         int i=0;
+         for(int m=0;m<=1441;m++)
+         {
+            while(i<nAll && (int)((r[i].time-dStart)/60) < m) i++;
+            minIdx[m]=i;
+         }
+      }
+
       //--- REGIME DI VOLATILITA': dove sta l'ATR di ieri nella sua stessa
       // storia recente. Serve perche' tutto il resto dello script normalizza
       // PER ATR, e quella normalizzazione cancella il regime: rende una
@@ -2946,18 +2958,6 @@ bool ProcessSymbol(string sym)
       // finestra, poi si aspetta la rottura di uno dei due estremi e si
       // risolve target/stop a primo tocco. Nessun dato successivo alla
       // rottura entra nella decisione di entrare.
-      // mappa minuto del giorno -> primo indice di barra. Serve sia al
-      // modulo delle finestre sia a quello delle uscite dal CCI.
-      int minIdx[1442];
-      {
-         int i=0;
-         for(int m=0;m<=1441;m++)
-         {
-            while(i<nAll && (int)((r[i].time-dStart)/60) < m) i++;
-            minIdx[m]=i;
-         }
-      }
-
       if(InpDoOrb && g_nOrb>0)
       {
          datetime lastBar = r[nAll-1].time;
@@ -6683,7 +6683,6 @@ void BuildOrb(string sym,string dir)
          string cnt="";
          for(int t=0;t<3;t++)
          {
-            if(nIndT[0]<0) break;
             cnt+=(cnt==""?"":" | ")+IndTfName(t)+": ";
             for(int pz=0;pz<3;pz++) cnt+=(pz==0?"":", ")+IntegerToString(g_cxN[t][pz]);
          }
