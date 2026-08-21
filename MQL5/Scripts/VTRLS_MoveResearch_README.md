@@ -57,6 +57,7 @@ Puoi disattivare l'uno o l'altro.
 | `<SYM>_indicatori_tf.csv` | stessi stati RSI/CCI/Z-Score calcolati sui tre timeframe, con delta sul riferimento |
 | `<SYM>_orb_finestre.csv` | tutte le finestre di osservazione testate, con % di rottura, win rate, Wilson, valore atteso e le due meta' del periodo |
 | `<SYM>_orb_setup.csv` | setup completo: esito per numero di conferme (0-3) con il placebo appaiato, e per combinazione di indicatori |
+| `<SYM>_cci_trade.csv` | uscita dalla banda CCI come ingresso: per periodo e per rapporto rischio/rendimento, con placebo appaiato; piu' la ripartizione per ora |
 | `<SYM>_orb_rr.csv` | curva rischio/rendimento della finestra selezionata: per ogni RR, win rate misurato contro il placebo (ingresso a caso, stesso rischio e stesso orizzonte), delta e z |
 | `<SYM>_orb_breakout.csv` | una riga per ogni rottura della finestra selezionata: direzione, esito, range, intensita', volatilita', RSI/CCI/Z al momento della rottura, MFE/MAE |
 | `<SYM>_report.html` | tutto quanto sopra (tranne lo scan grezzo) in un report navigabile |
@@ -297,6 +298,49 @@ finestra con `InpOrbFixStartMin` / `InpOrbFixDurMin` e rilancia su un altro
 periodo o un altro simbolo.
 
 `InpDoOrb = false` salta entrambe le schede.
+
+## CCI: l'uscita dalla banda come ingresso
+
+Scheda dedicata, **aggiuntiva**. Fino a qui l'uscita dalla banda `+/-InpCciCross`
+era misurata solo come *"dopo, il prezzo si muove di 0,5 ATR?"* - una domanda
+sulla volatilita', non su un'operazione. Qui diventa un ingresso vero:
+
+- si aspetta che la barra `InpIndTF1` che esce dalla banda **chiuda**
+- si entra all'apertura della prima barra base successiva
+- stop `InpCxStopAtr` ATR, target sulla stessa scala `InpOrbRR` (1:0,5 ... 1:5)
+- richiesta un'accumulazione di almeno `InpAccMinBars` barre dentro la banda
+- tutto ripetuto sui **tre periodi** CCI
+
+Nessun dato della barra del segnale entra nella decisione, e la barra
+d'ingresso conta solo per lo stop, mai per il target.
+
+**Il placebo qui e' il punto.** Stesso istante, stesso stop, stessi target, ma
+direzione tirata a sorte. Separa due cose che altrimenti restano confuse per
+sempre: *il CCI sa dove andra' il prezzo*, oppure *il CCI esce dalla banda
+quando il mercato si sta muovendo comunque*? Nel secondo caso il win rate e'
+alto e il delta e' zero - l'indicatore sta solo dicendo che qualcosa sta
+succedendo, cosa che il grafico diceva gia'.
+
+La seconda tabella spezza per ora del segnale, col placebo alla stessa ora:
+risponde a *"si riesce a capire quando andare a cercare il setup?"* senza che
+l'effetto dell'ora si confonda con quello dell'indicatore.
+
+## Le due letture opposte di RSI e Z-Score
+
+Nella scheda `Breakout operativo` la conferma degli indicatori viene misurata
+in **due modi opposti**, in due tabelle affiancate:
+
+- **momentum**: RSI sopra 50 e Z sopra 0 confermano un BUY. Si compra la forza.
+- **esaurimento**: RSI sotto `InpRsiLow` e Z sotto `InpZsLow` confermano un BUY.
+  Si compra la debolezza. E' la lettura classica di questi due indicatori, che
+  misurano estremi.
+
+Il CCI resta direzionale in entrambe, perche' e' il trigger e non il filtro.
+
+Non sono sfumature della stessa idea: su un dato campione al massimo una delle
+due puo' avere ragione, e molto probabilmente nessuna. Il placebo appaiato per
+numero di conferme dice se la differenza viene dal segnale o dal momento della
+giornata.
 
 ## Volume Profile
 
