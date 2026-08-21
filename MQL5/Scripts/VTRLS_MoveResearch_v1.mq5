@@ -171,6 +171,11 @@ input double          InpCxStopAtr      = 0.15;            // Stop in ATR(D-1) d
 input int             InpCxFirstHour    = 0;               // Prima ora ammessa
 input int             InpCxLastHour     = 23;              // Ultima ora ammessa
 
+input bool            InpDoPrev         = true;            // Testa il range di IERI rotto OGGI
+input int             InpPrevTradeStart = 420;             // Inizio finestra operativa di oggi (minuti da mezzanotte)
+input int             InpPrevTradeEnd   = 1080;            // Fine finestra operativa di oggi
+input double          InpPrevStopAtr    = 0.25;            // Stop in ATR(D-1): FISSO, mai proporzionale al range
+
 input string          sVp               = "=== VOLUME PROFILE (POC / VAH / VAL del giorno precedente) ===";
 input bool            InpDoVp           = true;            // Calcola il profilo volumi del giorno precedente
 input int             InpVpLevels       = 50;              // Livelli di prezzo del profilo
@@ -1915,6 +1920,64 @@ void CxResolve2(const MqlRates &r[],int nAll,int k0,double entry,double stpD,
       }
    }
 }
+//==================================================================
+// RANGE DI IERI -> ROTTURA DI OGGI
+//------------------------------------------------------------------
+// Il modulo ORB costruisce il range e ne opera la rottura nella STESSA
+// giornata. Qui il livello nasce ieri e viene rotto oggi: e' un'ipotesi
+// diversa, non una variante. Tre riferimenti fissi, nessuno da ottimizzare.
+//
+// Vincolo di progetto, imparato a spese di questo dataset: lo stop e' una
+// frazione FISSA di ATR e il target e' RR volte lo stop. Il range di ieri
+// decide SE operare, non quanto e' lontano il bersaglio. Legare il target
+// all'ampiezza del range produce un gradiente di win rate che sembra un
+// edge ed e' solo troncamento dell'orizzonte.
+#define PV_NW 3                  // riferimenti D-1
+#define PV_NB 4                  // fasce di ampiezza del range D-1
+
+int    g_pvStart[PV_NW] = {   0,   0, 960 };   // minuti da mezzanotte
+int    g_pvDur  [PV_NW] = {1440, 480, 480 };
+string g_pvName [PV_NW] = { "giornata intera D-1", "notte D-1 00:00-08:00",
+                            "pomeriggio D-1 16:00-24:00" };
+double g_pvEdge [PV_NB-1] = { 0.50, 0.80, 1.20 };  // ampiezza in ATR
+
+int g_pvN[PV_NW], g_pvUp[PV_NW], g_pvDn[PV_NW], g_pvOut[PV_NW], g_pvDays[PV_NW];
+int g_pvW[PV_NW][ORB_MAXRR], g_pvL[PV_NW][ORB_MAXRR], g_pvF[PV_NW][ORB_MAXRR];
+int g_qvW[PV_NW][ORB_MAXRR], g_qvL[PV_NW][ORB_MAXRR], g_qvF[PV_NW][ORB_MAXRR];
+int g_pvBn[PV_NW][PV_NB], g_pvBw[PV_NW][PV_NB], g_pvBl[PV_NW][PV_NB];
+int g_qvBw[PV_NW][PV_NB], g_qvBl[PV_NW][PV_NB];
+int g_pvHn[PV_NW][24], g_pvHw[PV_NW][24], g_pvHl[PV_NW][24];
+int g_pvDwN[PV_NW][7],  g_pvDwW[PV_NW][7],  g_pvDwL[PV_NW][7];
+
+void PvReset()
+{
+   for(int f=0;f<PV_NW;f++)
+   {
+      g_pvN[f]=0; g_pvUp[f]=0; g_pvDn[f]=0; g_pvOut[f]=0; g_pvDays[f]=0;
+      for(int z=0;z<ORB_MAXRR;z++)
+      { g_pvW[f][z]=0; g_pvL[f][z]=0; g_pvF[f][z]=0;
+        g_qvW[f][z]=0; g_qvL[f][z]=0; g_qvF[f][z]=0; }
+      for(int b=0;b<PV_NB;b++)
+      { g_pvBn[f][b]=0; g_pvBw[f][b]=0; g_pvBl[f][b]=0;
+        g_qvBw[f][b]=0; g_qvBl[f][b]=0; }
+      for(int h=0;h<24;h++){ g_pvHn[f][h]=0; g_pvHw[f][h]=0; g_pvHl[f][h]=0; }
+      for(int d=0;d<7;d++){ g_pvDwN[f][d]=0; g_pvDwW[f][d]=0; g_pvDwL[f][d]=0; }
+   }
+}
+
+int PvBin(double a)
+{
+   for(int b=0;b<PV_NB-1;b++) if(a<=g_pvEdge[b]) return b;
+   return PV_NB-1;
+}
+
+string PvBinLab(int b)
+{
+   if(b==0) return "stretto (entro "+F(g_pvEdge[0],2)+" ATR)";
+   if(b==PV_NB-1) return "largo (oltre "+F(g_pvEdge[PV_NB-2],2)+" ATR)";
+   return F(g_pvEdge[b-1],2)+" - "+F(g_pvEdge[b],2)+" ATR";
+}
+
 bool g_bkCap=false;             // tetto ai record raggiunto: campione troncato
 int  g_orbSel=-1;               // finestra portata nella scheda operativa
 
@@ -1929,6 +1992,7 @@ void OrbInit()
 
    VpInitVa();
    CxReset();
+   PvReset();
 
    double rr[]; int nrr=ParseDoubles(InpOrbRR,rr);
    g_nRR=0;
@@ -2939,17 +3003,110 @@ bool ProcessSymbol(string sym)
       double vpVah[VP_MAXVA], vpVal[VP_MAXVA], vpVaAtr[VP_MAXVA];
       ArrayInitialize(vpVah,0.0); ArrayInitialize(vpVal,0.0); ArrayInitialize(vpVaAtr,0.0);
       bool   vpOk=false;
-      if(InpDoVp && InpDoOrb)
+      double pvHi[PV_NW], pvLo[PV_NW];
+      for(int z=0;z<PV_NW;z++){ pvHi[z]=0.0; pvLo[z]=0.0; }
+      if((InpDoVp || InpDoPrev) && InpDoOrb)
       {
          MqlRates rp[];
-         int np=CopyRates(sym,InpBaseTF,d1[di-1].time,d1[di-1].time+86399,rp);
-         if(np>InpVpLevels)
+         datetime pStart=d1[di-1].time;
+         int np=CopyRates(sym,InpBaseTF,pStart,pStart+86399,rp);
+         if(InpDoVp && np>InpVpLevels)
          {
             VolProfile(rp,0,np,InpVpLevels,InpVpRealVolume,vpPoc,vpVah,vpVal,vpTot);
             vpOk=(vpTot>0.0 && vpVah[g_vaMain]>vpVal[g_vaMain]);
             if(vpOk)
                for(int z=0;z<g_nVa;z++)
                   vpVaAtr[z]=((vpVah[z]-vpVal[z])/g_point)/atrPt;
+         }
+         // massimo e minimo delle tre finestre di ieri. Si legge il giorno
+         // precedente per intero: e' chiuso prima che oggi cominci, quindi
+         // qualunque istante di oggi lo vede senza guardare avanti.
+         if(InpDoPrev && np>0)
+         {
+            for(int f=0;f<PV_NW;f++)
+            {
+               double hh=-DBL_MAX, ll=DBL_MAX; int cnt=0;
+               int a0=g_pvStart[f], b0=a0+g_pvDur[f];
+               for(int q=0;q<np;q++)
+               {
+                  int mm=(int)((rp[q].time-pStart)/60);
+                  if(mm<a0 || mm>=b0) continue;
+                  if(rp[q].high>hh) hh=rp[q].high;
+                  if(rp[q].low <ll) ll=rp[q].low;
+                  cnt++;
+               }
+               // niente sessione, niente livello: meglio un buco che un
+               // range costruito su tre barre di fine settimana
+               int expB=(int)MathMax(1,g_pvDur[f]/g_tfMin);
+               if(cnt>=(int)MathMax(1,expB*0.5) && hh>ll){ pvHi[f]=hh; pvLo[f]=ll; }
+            }
+         }
+      }
+
+      //====== RANGE DI IERI ROTTO OGGI ======
+      if(InpDoPrev && InpDoOrb && g_nRR>0 && atrPt>0.0)
+      {
+         double stpDP=InpPrevStopAtr*atrPt*g_point;
+         double bufP =InpOrbBufferAtr*atrPt*g_point;
+         int mA=(int)MathMax(0,MathMin(1439,InpPrevTradeStart));
+         int mB=(int)MathMax(mA+1,MathMin(1440,InpPrevTradeEnd));
+         MqlDateTime dtp; TimeToStruct(dStart,dtp);
+         int dowP=dtp.day_of_week;
+
+         for(int f=0;f<PV_NW;f++)
+         {
+            if(pvHi[f]<=pvLo[f]) continue;
+            int k0=minIdx[mA], kZ=minIdx[mB];
+            if(kZ<=k0 || k0>=nAll) continue;
+            g_pvDays[f]++;
+
+            double lvU=pvHi[f]+bufP, lvD=pvLo[f]-bufP;
+            // se la finestra si apre gia' fuori dal range di ieri non c'e'
+            // nessuna rottura da osservare: e' gia' avvenuta altrove
+            if(r[k0].open>=lvU || r[k0].open<=lvD){ g_pvOut[f]++; continue; }
+
+            int    kEnt=-1, dirP=0; double entP=0.0;
+            for(int q=k0;q<kZ && q<nAll;q++)
+            {
+               bool tu=(r[q].high>=lvU), td=(r[q].low<=lvD);
+               if(tu && td) break;             // barra ambigua: si scarta il giorno
+               // su un gap il livello non e' eseguibile: si entra al peggiore
+               // fra il livello e l'apertura della barra che lo attraversa
+               if(tu){ kEnt=q; dirP=+1; entP=MathMax(lvU,r[q].open); break; }
+               if(td){ kEnt=q; dirP=-1; entP=MathMin(lvD,r[q].open); break; }
+            }
+            if(kEnt<0) continue;
+
+            // l'orizzonte deve stare dentro i dati, altrimenti l'esito
+            // "irrisolto" non e' una proprieta' del mercato ma del file
+            datetime hEndP=r[kEnt].time+(datetime)(OrbHorizon()*60);
+            if(r[nAll-1].time<hEndP) continue;
+
+            int resL[ORB_MAXRR], resS[ORB_MAXRR];
+            CxResolve2(r,nAll,kEnt,entP,stpDP,hEndP,resL,resS);
+
+            double rngA=((pvHi[f]-pvLo[f])/g_point)/atrPt;
+            int    bIx =PvBin(rngA);
+            MqlDateTime dte; TimeToStruct(r[kEnt].time,dte);
+            int hIx=dte.hour; if(hIx<0||hIx>23) hIx=0;
+
+            g_pvN[f]++;
+            if(dirP>0) g_pvUp[f]++; else g_pvDn[f]++;
+            g_pvBn[f][bIx]++; g_pvHn[f][hIx]++; g_pvDwN[f][dowP]++;
+
+            for(int z=0;z<g_nRR;z++)
+            {
+               int mine=(dirP>0? resL[z] : resS[z]);
+               int opp =(dirP>0? resS[z] : resL[z]);
+               if(mine>0) g_pvW[f][z]++; else if(mine<0) g_pvL[f][z]++; else g_pvF[f][z]++;
+               if(opp >0) g_qvW[f][z]++; else if(opp <0) g_qvL[f][z]++; else g_qvF[f][z]++;
+               if(z==g_rrMain)
+               {
+                  if(mine>0){ g_pvBw[f][bIx]++; g_pvHw[f][hIx]++; g_pvDwW[f][dowP]++; }
+                  else if(mine<0){ g_pvBl[f][bIx]++; g_pvHl[f][hIx]++; g_pvDwL[f][dowP]++; }
+                  if(opp>0) g_qvBw[f][bIx]++; else if(opp<0) g_qvBl[f][bIx]++;
+               }
+            }
          }
       }
 
@@ -6849,6 +7006,105 @@ void BuildOrb(string sym,string dir)
                  F(g_orb[g_orbSel].sPnlR[z]/totz,5)+"\r\n");
          }
          FileClose(fR);
+
+         //--- range di ieri rotto oggi
+         if(InpDoPrev)
+         {
+            int fP=FileOpen(dir+fn+"_prev_range.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+            if(fP!=INVALID_HANDLE)
+            {
+               W(fP,"tabella;riferimento_D1;chiave;giornate;n;perc_operabili;perc_up;"
+                    "perc_risolte;win_perc;wlow_perc;win_perc_opposta;delta;z;E_in_R\r\n");
+               for(int f=0;f<PV_NW;f++)
+               {
+                  if(g_pvN[f]<50) continue;
+                  string rf=g_pvName[f];
+                  double opPct=100.0*g_pvN[f]/MathMax(1,g_pvDays[f]);
+                  double upPct=100.0*g_pvUp[f]/MathMax(1,g_pvN[f]);
+
+                  //--- scala dei rapporti rischio/rendimento
+                  for(int z=0;z<g_nRR;z++)
+                  {
+                     int res=g_pvW[f][z]+g_pvL[f][z];
+                     int tot=res+g_pvF[f][z];
+                     if(res<50) continue;
+                     int ores=g_qvW[f][z]+g_qvL[f][z];
+                     bool hasO=(ores>=50);
+                     double wr=100.0*g_pvW[f][z]/res;
+                     double ow=(hasO? 100.0*g_qvW[f][z]/ores : 0.0);
+                     double de=(hasO? wr-ow : 0.0);
+                     double se=(hasO? 100.0*MathSqrt((ow/100.0)*(1.0-ow/100.0)*
+                                                     (1.0/res+1.0/ores)) : 0.0);
+                     W(fP,"rapporto;"+rf+";1:"+F(g_rr[z],2)+";"+
+                          IntegerToString(g_pvDays[f])+";"+IntegerToString(tot)+";"+
+                          F(opPct,2)+";"+F(upPct,2)+";"+F(100.0*res/tot,2)+";"+
+                          F(wr,2)+";"+F(100.0*WilsonLowInd(g_pvW[f][z],res),2)+";"+
+                          (hasO?F(ow,2):"")+";"+(hasO?F(de,2):"")+";"+
+                          (hasO?F(se>0?de/se:0.0,2):"")+";"+
+                          F((g_pvW[f][z]*g_rr[z]-g_pvL[f][z])/(double)tot,4)+"\r\n");
+                  }
+
+                  //--- ampiezza del range di ieri: e' l'unica ipotesi che
+                  // questo dataset ha gia' sostenuto (larghezza Value Area)
+                  for(int b=0;b<PV_NB;b++)
+                  {
+                     int res=g_pvBw[f][b]+g_pvBl[f][b];
+                     if(res<50) continue;
+                     int ores=g_qvBw[f][b]+g_qvBl[f][b];
+                     bool hasO=(ores>=50);
+                     double wr=100.0*g_pvBw[f][b]/res;
+                     double ow=(hasO? 100.0*g_qvBw[f][b]/ores : 0.0);
+                     double de=(hasO? wr-ow : 0.0);
+                     double se=(hasO? 100.0*MathSqrt((ow/100.0)*(1.0-ow/100.0)*
+                                                     (1.0/res+1.0/ores)) : 0.0);
+                     W(fP,"ampiezza_D1;"+rf+";"+PvBinLab(b)+";"+
+                          IntegerToString(g_pvDays[f])+";"+IntegerToString(g_pvBn[f][b])+";"+
+                          F(opPct,2)+";"+F(upPct,2)+";"+
+                          F(100.0*res/MathMax(1,g_pvBn[f][b]),2)+";"+
+                          F(wr,2)+";"+F(100.0*WilsonLowInd(g_pvBw[f][b],res),2)+";"+
+                          (hasO?F(ow,2):"")+";"+(hasO?F(de,2):"")+";"+
+                          (hasO?F(se>0?de/se:0.0,2):"")+";"+
+                          F((g_pvBw[f][b]*g_rr[g_rrMain]-g_pvBl[f][b])/
+                            (double)MathMax(1,g_pvBn[f][b]),4)+"\r\n");
+                  }
+
+                  //--- ora della rottura
+                  for(int h=0;h<24;h++)
+                  {
+                     int res=g_pvHw[f][h]+g_pvHl[f][h];
+                     if(res<50) continue;
+                     W(fP,"ora;"+rf+";"+D2(h)+":00;"+IntegerToString(g_pvDays[f])+";"+
+                          IntegerToString(g_pvHn[f][h])+";"+F(opPct,2)+";"+F(upPct,2)+";"+
+                          F(100.0*res/MathMax(1,g_pvHn[f][h]),2)+";"+
+                          F(100.0*g_pvHw[f][h]/res,2)+";"+
+                          F(100.0*WilsonLowInd(g_pvHw[f][h],res),2)+";;;;"+
+                          F((g_pvHw[f][h]*g_rr[g_rrMain]-g_pvHl[f][h])/
+                            (double)MathMax(1,g_pvHn[f][h]),4)+"\r\n");
+                  }
+
+                  //--- giorno della settimana
+                  for(int d=1;d<=5;d++)
+                  {
+                     int res=g_pvDwW[f][d]+g_pvDwL[f][d];
+                     if(res<50) continue;
+                     W(fP,"giorno;"+rf+";"+DowIT(d)+";"+IntegerToString(g_pvDays[f])+";"+
+                          IntegerToString(g_pvDwN[f][d])+";"+F(opPct,2)+";"+F(upPct,2)+";"+
+                          F(100.0*res/MathMax(1,g_pvDwN[f][d]),2)+";"+
+                          F(100.0*g_pvDwW[f][d]/res,2)+";"+
+                          F(100.0*WilsonLowInd(g_pvDwW[f][d],res),2)+";;;;"+
+                          F((g_pvDwW[f][d]*g_rr[g_rrMain]-g_pvDwL[f][d])/
+                            (double)MathMax(1,g_pvDwN[f][d]),4)+"\r\n");
+                  }
+
+                  //--- giornate scartate perche' la finestra si apriva gia'
+                  // fuori dal range di ieri: e' un dato, non uno scarto
+                  W(fP,"copertura;"+rf+";aperta gia' fuori dal range;"+
+                       IntegerToString(g_pvDays[f])+";"+IntegerToString(g_pvOut[f])+";"+
+                       F(100.0*g_pvOut[f]/MathMax(1,g_pvDays[f]),2)+";;;;;;;;\r\n");
+               }
+               FileClose(fP);
+            }
+         }
       }
    }
 

@@ -60,6 +60,7 @@ Puoi disattivare l'uno o l'altro.
 | `<SYM>_orb_regime.csv` | regime di volatilita' e livelli vergini: esito per regime col placebo appaiato, e curva rischio/rendimento spezzata per regime |
 | `<SYM>_cci_trade.csv` | uscita dalla banda CCI come ingresso: per periodo e per rapporto rischio/rendimento, con placebo appaiato; piu' la ripartizione per ora |
 | `<SYM>_orb_rr.csv` | curva rischio/rendimento della finestra selezionata: per ogni RR, win rate misurato contro il placebo (ingresso a caso, stesso rischio e stesso orizzonte), delta e z |
+| `<SYM>_prev_range.csv` | range di IERI rotto OGGI: tre riferimenti fissi (giornata intera, notte 00:00-08:00, pomeriggio 16:00-24:00), scala RR, ampiezza del range D-1, ora della rottura, giorno, e la quota di giornate che si aprono gia' fuori dal range |
 | `<SYM>_orb_condizioni.csv` | effetto di ogni filtro sulla rottura, con `perc_risolte`, `target_medio_atr` e il win rate nei due estremi (irrisolto contato come perdita / come vincita): serve a distinguere un gradiente vero da un effetto di troncamento dell'orizzonte |
 | `<SYM>_orb_breakout.csv` | una riga per ogni rottura della finestra selezionata: direzione, esito, range, intensita', volatilita', RSI/CCI/Z al momento della rottura, MFE/MAE |
 | `<SYM>_report.html` | tutto quanto sopra (tranne lo scan grezzo) in un report navigabile |
@@ -503,3 +504,32 @@ abbiano senso, poi rilanci sul periodo pieno con lo scan attivo.
 
 Se la riga "giornate scartate" e' alta, lo storico non e' completo: ripeti il
 punto 2 e rilancia (al secondo run i dati sono gia' in cache locale).
+
+
+## Range di ieri rotto oggi (`InpDoPrev`)
+
+Il modulo ORB costruisce il range e ne opera la rottura nella **stessa**
+giornata. Questo modulo fa una cosa diversa: il livello nasce ieri e viene
+rotto oggi. Tre riferimenti fissi, nessuno da ottimizzare — giornata intera
+D-1, notte D-1 (00:00-08:00), pomeriggio D-1 (16:00-24:00) — e una finestra
+operativa di oggi (`InpPrevTradeStart` / `InpPrevTradeEnd`, default 07:00-18:00).
+
+Regola di costruzione, imparata a spese di questo dataset: **lo stop e' una
+frazione fissa di ATR(D-1) e il target e' RR volte lo stop**. L'ampiezza del
+range di ieri decide *se* operare, mai *quanto e' lontano il bersaglio*.
+Legare il target all'ampiezza del range produce un gradiente di win rate che
+sembra un edge ed e' solo troncamento dell'orizzonte: i target vicini si
+toccano dentro l'orizzonte, quelli lontani no, e la differenza finisce tutta
+nella colonna degli irrisolti.
+
+Tre garanzie sul campione:
+
+- si scarta la giornata se la finestra operativa si **apre gia' fuori** dal
+  range di ieri (la rottura e' avvenuta altrove, non e' osservabile qui);
+  la quota di giornate cosi' scartate e' riportata nella riga `copertura`
+- si scarta la barra che tocca **entrambi** gli estremi: e' ambigua
+- si scarta la giornata se l'orizzonte non entra nei dati disponibili
+- su un gap l'ingresso e' al **peggiore** fra livello e apertura della barra
+
+Il controllo e' la **direzione opposta**: stesso istante, stesso stop, stessi
+target, solo il segno cambia. `delta` e `z` confrontano le due.
