@@ -60,7 +60,7 @@ Puoi disattivare l'uno o l'altro.
 | `<SYM>_orb_regime.csv` | regime di volatilita' e livelli vergini: esito per regime col placebo appaiato, e curva rischio/rendimento spezzata per regime |
 | `<SYM>_cci_trade.csv` | uscita dalla banda CCI come ingresso: per periodo e per rapporto rischio/rendimento, con placebo appaiato; piu' la ripartizione per ora |
 | `<SYM>_orb_rr.csv` | curva rischio/rendimento della finestra selezionata: per ogni RR, win rate misurato contro il placebo (ingresso a caso, stesso rischio e stesso orizzonte), delta e z |
-| `<SYM>_orb_stop.csv` | calibrazione dello stop sulla finestra DICHIARATA da input: moltiplicatore dello stop x scala RR x fascia di larghezza Value Area, con l'aspettativa lorda, il costo espresso in R e il netto |
+| `<SYM>_orb_stop.csv` | calibrazione dello stop sulla finestra DICHIARATA da input: stop ancorati all'ATR **e** stop in punti fissi, x scala RR, per fascia di larghezza Value Area e per meta' del periodo, con lo stop realmente applicato in ATR, l'aspettativa lorda, il costo in R e il netto |
 | `<SYM>_orb_tempi.csv` | quando arriva la rottura: per ora, per giorno x ora (griglia intera), per giorno, e la finestra migliore di ogni giorno della settimana su tutta la griglia. Stesse colonne di controllo del file condizioni |
 | `<SYM>_prev_range.csv` | range di IERI rotto OGGI: tre riferimenti fissi (giornata intera, notte 00:00-08:00, pomeriggio 16:00-24:00), scala RR, ampiezza del range D-1, ora della rottura, giorno, e la quota di giornate che si aprono gia' fuori dal range |
 | `<SYM>_orb_condizioni.csv` | effetto di ogni filtro sulla rottura, con `perc_risolte`, `target_medio_atr` e il win rate nei due estremi (irrisolto contato come perdita / come vincita): serve a distinguere un gradiente vero da un effetto di troncamento dell'orizzonte |
@@ -582,3 +582,26 @@ Letta all'ultima barra **chiusa** di `InpStrTF` prima della rottura. Sui
 metalli non esiste una gamba XAU: si usa la forza del dollaro col segno
 girato. Quattro righe nella tabella dei filtri (concorde forte, concorde,
 contraria, contraria forte) e una colonna in `_orb_breakout.csv`.
+
+
+## Stop in ATR o stop in punti (`InpStopSweep` / `InpStopSweepPt`)
+
+Nessuno dei due ancoraggi e' giusto da solo, e la tabella li mette accanto
+apposta.
+
+Lo stop **ancorato all'ATR** segue il mercato ma non segue il costo: lo
+spread e' fisso in punti, quindi negli anni calmi lo stop si restringe fino
+a sfiorare lo spread e l'operazione smette di avere senso economico.
+
+Lo stop **in punti fissi** segue il costo ma non il mercato. Su EURUSD il
+range medio D-1 passa da 1506 punti nel 2010 a 605 nel 2024: gli stessi 100
+punti sono 0.066 ATR allora e 0.165 ATR oggi. Ottimizzare un valore in punti
+su tutto il periodo trova il compromesso fra due regimi diversi, e quel
+compromesso non e' detto valga in nessuno dei due.
+
+Per questo ogni riga riporta `stop_medio_atr` - lo stop **realmente
+applicato**, non il moltiplicatore - e la tabella include le fasce
+`prima meta' del periodo` e `seconda meta' del periodo`. **Se il valore in
+punti migliore cambia fra le due meta', quel valore non si trasferisce in
+avanti e la scelta va fatta in ATR.** E' l'unico modo di rispondere alla
+domanda invece di sceglierne una a priori.

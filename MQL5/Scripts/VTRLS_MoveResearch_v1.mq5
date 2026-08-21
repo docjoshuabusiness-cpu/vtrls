@@ -181,7 +181,8 @@ input int             InpOrbExtBars     = 10;              // Barre indicatore i
 input bool            InpDoStopSweep    = true;            // Calibra lo stop sulla finestra dichiarata sotto
 input int             InpSweepStartMin  = 540;             // Finestra della calibrazione: inizio (minuti da mezzanotte)
 input int             InpSweepDurMin    = 60;              // Finestra della calibrazione: durata
-input string          InpStopSweep      = "0.5,0.75,1,1.25,1.5,2";  // Moltiplicatori dello stop base
+input string          InpStopSweep      = "0.5,0.75,1,1.25,1.5,2";  // Stop ancorati all'ATR: moltiplicatori dello stop base
+input string          InpStopSweepPt    = "50,75,100,150,200,300";  // Stop in PUNTI fissi (vuoto = non testarli)
 
 input bool            InpDoStrength     = true;            // Forza relativa cross-sectional delle valute
 input ENUM_TIMEFRAMES InpStrTF          = PERIOD_H1;      // TF su cui misurare la forza
@@ -2029,10 +2030,22 @@ string PvBinLab(int b)
 //  - la spazzata gira dentro lo stesso ciclo di barre della risoluzione
 //    normale: stessi bar letti, solo piu' confronti. Un secondo passaggio
 //    moltiplicherebbe il costo per il numero di stop testati.
-#define SW_MAXST 8
-#define SW_NB    5              // 4 fasce di ampiezza VA + "tutte"
-double g_sw[SW_MAXST]; int g_nSw=0;
-int g_swN[SW_MAXST][SW_NB];
+// Due modi di fissare lo stop, misurati fianco a fianco perche' nessuno
+// dei due e' giusto da solo:
+//  - ancorato all'ATR: segue il mercato, ma NON segue il costo. Lo spread
+//    e' fisso in punti, quindi negli anni calmi uno stop in ATR si
+//    restringe fino a sfiorare lo spread e il trade smette di esistere.
+//  - fisso in punti: segue il costo, ma non il mercato. Su EURUSD il range
+//    medio D-1 passa da 1506 punti nel 2010 a 605 nel 2024: gli stessi 100
+//    punti valgono 0.066 ATR allora e 0.165 ATR oggi, due rischi diversi.
+// Per questo la tabella ha anche la spaccatura prima meta' / seconda meta':
+// se il valore migliore in punti cambia fra le due, quel valore non si
+// trasferisce in avanti e la scelta va fatta in ATR.
+#define SW_MAXST 16
+#define SW_NB    7   // 0-3 fasce VA, 4 tutte, 5 prima meta', 6 seconda meta'
+double g_swVal[SW_MAXST]; bool g_swIsPt[SW_MAXST]; int g_nSw=0;
+int    g_swN[SW_MAXST][SW_NB];
+double g_swSumAtr[SW_MAXST][SW_NB];      // stop realizzato in ATR, per leggere i punti
 int g_swW[SW_MAXST][ORB_MAXRR][SW_NB];
 int g_swL[SW_MAXST][ORB_MAXRR][SW_NB];
 int g_swF[SW_MAXST][ORB_MAXRR][SW_NB];
@@ -2042,14 +2055,17 @@ void SwReset()
    g_nSw=0;
    for(int m=0;m<SW_MAXST;m++)
    {
-      for(int b=0;b<SW_NB;b++) g_swN[m][b]=0;
+      for(int b=0;b<SW_NB;b++){ g_swN[m][b]=0; g_swSumAtr[m][b]=0.0; }
       for(int z=0;z<ORB_MAXRR;z++)
          for(int b=0;b<SW_NB;b++){ g_swW[m][z][b]=0; g_swL[m][z][b]=0; g_swF[m][z][b]=0; }
    }
    if(!InpDoStopSweep) return;
    double v[]; int nv=ParseDoubles(InpStopSweep,v);
    for(int i=0;i<nv && g_nSw<SW_MAXST;i++)
-      if(v[i]>0.0){ g_sw[g_nSw]=v[i]; g_nSw++; }
+      if(v[i]>0.0){ g_swVal[g_nSw]=v[i]; g_swIsPt[g_nSw]=false; g_nSw++; }
+   double w[]; int nw=ParseDoubles(InpStopSweepPt,w);
+   for(int i=0;i<nw && g_nSw<SW_MAXST;i++)
+      if(w[i]>0.0){ g_swVal[g_nSw]=w[i]; g_swIsPt[g_nSw]=true;  g_nSw++; }
 }
 
 // stesse soglie della tabella ampiezza VA, cosi' le due tabelle si leggono
@@ -2069,7 +2085,14 @@ string SwBinLab(int b)
    if(b==1) return "VA 0.40 - 0.70 ATR";
    if(b==2) return "VA 0.70 - 1.00 ATR";
    if(b==3) return "VA oltre 1.00 ATR (larga)";
-   return "tutte le rotture";
+   if(b==4) return "tutte le rotture";
+   if(b==5) return "prima meta' del periodo";
+   return "seconda meta' del periodo";
+}
+
+string SwStopLab(int m)
+{
+   return (g_swIsPt[m] ? F(g_swVal[m],0)+" punti" : F(g_swVal[m],2)+" x base ATR");
 }
 
 //==================================================================
@@ -3605,7 +3628,8 @@ bool ProcessSymbol(string sym)
                if(doSw)
                   for(int m=0;m<g_nSw;m++)
                   {
-                     double sdM=stpD*g_sw[m];
+                     double sdM=(g_swIsPt[m] ? g_swVal[m]*g_point : stpD*g_swVal[m]);
+                     if(sdM<=0.0) continue;
                      bool hsM=(dir>0 ? r[q].low<=entry-sdM : r[q].high>=entry+sdM);
                      for(int z=0;z<g_nRR;z++)
                      {
@@ -3630,16 +3654,19 @@ bool ProcessSymbol(string sym)
             if(doSw)
             {
                int vb=SwBin(vpOk ? vpVaAtr[g_vaMain] : 0.0);
+               int hb=(secondHalf ? 6 : 5);
                for(int m=0;m<g_nSw;m++)
                {
-                  g_swN[m][SW_NB-1]++;
-                  if(vb>=0) g_swN[m][vb]++;
+                  double sdA=(g_swIsPt[m] ? g_swVal[m]/atrPt : stopAtr*g_swVal[m]);
+                  g_swN[m][4]++;  g_swSumAtr[m][4]+=sdA;
+                  g_swN[m][hb]++; g_swSumAtr[m][hb]+=sdA;
+                  if(vb>=0){ g_swN[m][vb]++; g_swSumAtr[m][vb]+=sdA; }
                   for(int z=0;z<g_nRR;z++)
                   {
                      int rr2=swR[m][z];
-                     if(rr2>0){ g_swW[m][z][SW_NB-1]++; if(vb>=0) g_swW[m][z][vb]++; }
-                     else if(rr2<0){ g_swL[m][z][SW_NB-1]++; if(vb>=0) g_swL[m][z][vb]++; }
-                     else { g_swF[m][z][SW_NB-1]++; if(vb>=0) g_swF[m][z][vb]++; }
+                     if(rr2>0)      { g_swW[m][z][4]++; g_swW[m][z][hb]++; if(vb>=0) g_swW[m][z][vb]++; }
+                     else if(rr2<0) { g_swL[m][z][4]++; g_swL[m][z][hb]++; if(vb>=0) g_swL[m][z][vb]++; }
+                     else           { g_swF[m][z][4]++; g_swF[m][z][hb]++; if(vb>=0) g_swF[m][z][vb]++; }
                   }
                }
             }
@@ -7644,19 +7671,21 @@ void BuildOrb(string sym,string dir)
             int fS2=FileOpen(dir+fn+"_orb_stop.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
             if(fS2!=INVALID_HANDLE)
             {
-               W(fS2,"finestra;fascia_va;stop_x_base;stop_medio_atr;rr;n;perc_risolte;"
+               W(fS2,"finestra;fascia;stop;ancoraggio;stop_medio_atr;rr;n;perc_risolte;"
                      "win_perc;wlow_perc;breakeven_perc;E_lordo_in_R;costo_in_R;E_netto_in_R\r\n");
-               // lo stop medio e il costo medio della finestra servono a
-               // convertire l'aspettativa in una cifra che tiene conto dello
-               // spread: senza, ogni stop piu' stretto sembra sempre migliore
-               double baseStop=(wi>=0 && g_rr[g_rrMain]>0 ? OrbTgt(wi)/g_rr[g_rrMain] : 0.0);
+               // Il costo e' fisso in PUNTI, l'aspettativa e' in R: per
+               // confrontarli serve lo stop realmente applicato, in ATR.
+               // Per gli stop in punti quel numero cambia da un anno
+               // all'altro, ed e' esattamente il motivo per cui la colonna
+               // esiste invece di essere ricavata dal moltiplicatore.
                double meanCost=(wi>=0 && g_orb[wi].nBrk>0 ? g_orb[wi].sCost/g_orb[wi].nBrk : 0.0);
                string wlab=(wi>=0 ? OrbLab(wi)
                                   : D2(InpSweepStartMin/60)+":"+D2(InpSweepStartMin%60));
                for(int b=0;b<SW_NB;b++)
                for(int m=0;m<g_nSw;m++)
                {
-                  double stM=baseStop*g_sw[m];
+                  if(g_swN[m][b]<=0) continue;
+                  double stM=g_swSumAtr[m][b]/g_swN[m][b];
                   double cR =(stM>0.0 ? meanCost/stM : 0.0);
                   for(int z=0;z<g_nRR;z++)
                   {
@@ -7664,7 +7693,8 @@ void BuildOrb(string sym,string dir)
                      int res=wn+ls, tot=res+fl;
                      if(res<50) continue;
                      double eR=(wn*g_rr[z]-ls)/(double)tot;
-                     W(fS2,wlab+";"+SwBinLab(b)+";"+F(g_sw[m],2)+";"+F(stM,4)+";1:"+
+                     W(fS2,wlab+";"+SwBinLab(b)+";"+SwStopLab(m)+";"+
+                           (g_swIsPt[m]?"punti":"ATR")+";"+F(stM,4)+";1:"+
                            F(g_rr[z],2)+";"+IntegerToString(tot)+";"+
                            F(100.0*res/tot,2)+";"+F(100.0*wn/res,2)+";"+
                            F(100.0*WilsonLowInd(wn,res),2)+";"+F(RrNull(g_rr[z])*100.0,2)+";"+
