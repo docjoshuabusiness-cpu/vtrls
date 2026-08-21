@@ -189,6 +189,7 @@ input ENUM_TIMEFRAMES InpStrTF          = PERIOD_H1;      // TF su cui misurare 
 input int             InpStrSm1         = 25;              // Primo smoothing (TSI)
 input int             InpStrSm2         = 15;              // Secondo smoothing (TSI)
 input double          InpStrConf        = 25.0;            // Soglia di forza "decisa"
+input string          InpStrSuffix      = "AUTO";           // Suffisso delle altre 27 coppie. AUTO: prova quello del simbolo, poi lo accorcia a ogni "_", poi vuoto
 
 input string          sVp               = "=== VOLUME PROFILE (POC / VAH / VAL del giorno precedente) ===";
 input bool            InpDoVp           = true;            // Calcola il profilo volumi del giorno precedente
@@ -2181,7 +2182,39 @@ bool CsBuild(string sym,datetime from,datetime to)
    if(StringLen(sym)<6) return false;
 
    string c1=StringSubstr(sym,0,3), c2=StringSubstr(sym,3,3);
-   string suf=StringSubstr(sym,6);
+
+   // Il simbolo operato puo' avere un suffisso che le altre coppie non hanno:
+   // su un set sintetico tipo "EURUSD.r_QDM" le maggiori restano "EURUSD.r".
+   // Si prova il suffisso pieno, poi lo si accorcia a ogni "_", poi vuoto, e
+   // si tiene quello con piu' simboli realmente selezionabili.
+   string cand[8]; int nCand=0;
+   if(InpStrSuffix!="AUTO"){ cand[0]=InpStrSuffix; nCand=1; }
+   else
+   {
+      string t=StringSubstr(sym,6);
+      cand[nCand++]=t;
+      while(nCand<7)
+      {
+         int cut=-1;
+         for(int q=StringLen(t)-1;q>=0;q--) if(StringSubstr(t,q,1)=="_"){ cut=q; break; }
+         if(cut<0) break;
+         t=StringSubstr(t,0,cut);
+         cand[nCand++]=t;
+      }
+      cand[nCand++]="";
+   }
+
+   string suf=cand[0]; int bestHit=-1;
+   for(int k=0;k<nCand;k++)
+   {
+      int hit=0;
+      for(int p=0;p<CS_NP;p++)
+         if(SymbolSelect(g_csPair[p]+cand[k],true)) hit++;
+      if(hit>bestHit){ bestHit=hit; suf=cand[k]; }
+      if(hit>=20) break;                       // complesso completo, inutile cercare oltre
+   }
+   PrintFormat("[%s] forza relativa: suffisso scelto '%s' (%d coppie su %d selezionabili)",
+               sym, suf, bestHit, CS_NP);
    bool metal=(c1=="XAU" || c1=="XAG");
    // sull'oro non esiste una "gamba XAU": conta solo quanto e' forte il
    // dollaro, con il segno girato (oro su = dollaro debole)
@@ -5578,7 +5611,8 @@ bool ProcessSymbol(string sym)
                   sym,TerminalInfoString(TERMINAL_DATA_PATH),InpOutDir,fn);
    }
 
-   PrintFormat("[%s] RIEPILOGO: giornate analizzate %d | scartate %d (senza dati %d, poche barre %d, ATR nullo %d) | righe scan %d | TF %s",
+   PrintFormat("[%s] RIEPILOGO: giornate analizzate %d | scartate %d (senza dati %d, poche barre %d, "
+               "ATR nullo %d, troncate %d) | righe scan %d | TF %s",
                sym,nDays,nSkipped,skNoData,skFewBars,skNoAtr,skStub,g_nScan,EnumToString(InpBaseTF));
    if(nDays==0)
       PrintFormat("[%s] NESSUNA GIORNATA ANALIZZATA. Cause tipiche: storico %s non scaricato "
