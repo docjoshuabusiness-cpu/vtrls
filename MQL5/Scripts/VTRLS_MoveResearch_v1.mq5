@@ -158,6 +158,13 @@ input int             InpOrbFixStartMin = -1;              // Finestra da usare 
 input int             InpOrbFixDurMin   = -1;              // Durata da usare nella scheda operativa (-1 = la migliore)
 input int             InpOrbMaxRec      = 700000;          // Tetto ai breakout memorizzati (circa 80 byte l'uno)
 
+input string          sReg              = "=== REGIME DI VOLATILITA\' E LIVELLI VERGINI ===";
+input bool            InpDoRegime       = true;            // Classifica ogni giornata per regime di volatilita'
+input int             InpVolLookback    = 100;             // Giornate su cui calcolare il percentile di ATR
+input int             InpVolLow         = 30;              // Sotto questo percentile: regime BASSO
+input int             InpVolHigh        = 70;              // Sopra questo percentile: regime ALTO
+input int             InpVolExtreme     = 90;              // Sopra questo percentile: regime ESTREMO
+
 input string          sCx               = "=== CCI: USCITA DALLA BANDA COME INGRESSO ===";
 input bool            InpDoCciTrade     = true;            // Testa l'uscita dalla banda CCI come ingresso vero
 input double          InpCxStopAtr      = 0.15;            // Stop in ATR(D-1) dall'ingresso
@@ -1058,7 +1065,8 @@ void HtmlHead(string sym)
    H("<button onclick=\"tab(10)\">Range e breakout</button>");
    H("<button onclick=\"tab(11)\">Breakout operativo</button>");
    H("<button onclick=\"tab(12)\">Volume Profile</button>");
-   H("<button onclick=\"tab(13)\">CCI operativo</button>");
+   H("<button onclick=\"tab(13)\">Regime volatilita'</button>");
+   H("<button onclick=\"tab(14)\">CCI operativo</button>");
    H("</nav><main>");
    H("<section class=\"on\"><div id=\"sum\" class=\"sum\"></div><div id=\"lett\"></div>");
    H("<h2>Come leggere questo report</h2><div class=\"note\">");
@@ -1682,6 +1690,8 @@ struct SOrb
    int    pcrN[4], pcrWin[4], pcrLoss[4];   // conferma di esaurimento
    // stessa cosa per gli stati di Volume Profile
    int    pvpN[VP_MAXVA][5], pvpWin[VP_MAXVA][5], pvpLoss[VP_MAXVA][5];
+   int    prgN[4], prgWin[4], prgLoss[4];      // controllo per regime di volatilita'
+   int    pvvN[2], pvvWin[2], pvvLoss[2];      // controllo per livello vergine / gia' toccato
 };
 SOrb g_orb[];
 int  g_nOrb=0;
@@ -1758,6 +1768,18 @@ int OrbVpState(int dir,double entry,double poc,double vah,double val,
    if(entry>vah || entry<val)     return 0;
    return 1;
 }
+string OrbRegName(int k)
+{
+   switch(k)
+   {
+      case 0: return "volatilita' BASSA";
+      case 1: return "volatilita' NORMALE";
+      case 2: return "volatilita' ALTA";
+      case 3: return "volatilita' ESTREMA";
+   }
+   return "-";
+}
+
 string OrbVpName(int k)
 {
    switch(k)
@@ -1807,6 +1829,14 @@ struct SBrk
    float vpVolPos;               // dove stava il volume dentro la finestra, 0..1
    float vpVaWidthV[VP_MAXVA];   // ampiezza Value Area in ATR, una per percentuale
    char  vpStateV[VP_MAXVA];     // stato VP, una per percentuale (vedi OrbVpState)
+   // REGIME DI VOLATILITA': dove sta l'ATR di ieri nella sua stessa storia.
+   // Tutto il resto di questo script e' normalizzato PER ATR, il che cancella
+   // il regime dal quadro per costruzione: una giornata calma e una tempesta
+   // vengono rese della stessa dimensione. Questa colonna e' l'unica che
+   // rimette la domanda sul tavolo.
+   float volPct;                 // percentile dell'ATR di ieri, 0-100
+   char  volReg;                 // 0=basso 1=normale 2=alto 3=estremo
+   char  vpVirgin;               // livello rotto ancora VERGINE oggi (mai toccato prima)
 };
 SBrk g_bk[];
 int  g_nBk=0;
@@ -1958,6 +1988,12 @@ void OrbInit()
                g_orb[g_nOrb].pvpWin[z][k]=0;
                g_orb[g_nOrb].pvpLoss[z][k]=0;
             }
+         ArrayInitialize(g_orb[g_nOrb].prgN,0);
+         ArrayInitialize(g_orb[g_nOrb].prgWin,0);
+         ArrayInitialize(g_orb[g_nOrb].prgLoss,0);
+         ArrayInitialize(g_orb[g_nOrb].pvvN,0);
+         ArrayInitialize(g_orb[g_nOrb].pvvWin,0);
+         ArrayInitialize(g_orb[g_nOrb].pvvLoss,0);
          g_orb[g_nOrb].n1=0; g_orb[g_nOrb].brk1=0; g_orb[g_nOrb].win1=0; g_orb[g_nOrb].res1=0;
          g_orb[g_nOrb].n2=0; g_orb[g_nOrb].brk2=0; g_orb[g_nOrb].win2=0; g_orb[g_nOrb].res2=0;
          ArrayInitialize(g_orb[g_nOrb].dN,0);   ArrayInitialize(g_orb[g_nOrb].dBrk,0);
@@ -2780,6 +2816,27 @@ bool ProcessSymbol(string sym)
          }
       }
 
+      //--- REGIME DI VOLATILITA': dove sta l'ATR di ieri nella sua stessa
+      // storia recente. Serve perche' tutto il resto dello script normalizza
+      // PER ATR, e quella normalizzazione cancella il regime: rende una
+      // giornata calma e una tempesta della stessa dimensione. Utile per
+      // confrontare, cieca per rispondere a "conviene operare quando il
+      // mercato e' fermo o quando corre?".
+      double volPct=50.0;
+      int    volReg=1;
+      if(InpDoRegime && di-1>=InpVolLookback)
+      {
+         int below=0, cnt=0;
+         for(int q=di-1-InpVolLookback; q<di-1; q++)
+         {
+            if(q<0 || atr[q]<=0) continue;
+            if(atr[q]<=atr[di-1]) below++;
+            cnt++;
+         }
+         if(cnt>0) volPct=100.0*below/cnt;
+         volReg=(volPct>=InpVolExtreme?3:(volPct>=InpVolHigh?2:(volPct>=InpVolLow?1:0)));
+      }
+
       //====== CCI: USCITA DALLA BANDA COME INGRESSO ======
       // Tre timeframe x tre periodi. Si scorrono le barre dell'indicatore,
       // non quelle del prezzo: il segnale nasce li'. L'ingresso e'
@@ -3016,6 +3073,24 @@ bool ProcessSymbol(string sym)
                   g_orb[w].pcrN[pr2]++;
                   if(pRes[g_rrMain]>0)      g_orb[w].pcrWin[pr2]++;
                   else if(pRes[g_rrMain]<0) g_orb[w].pcrLoss[pr2]++;
+
+                  if(volReg>=0 && volReg<4)
+                  {
+                     g_orb[w].prgN[volReg]++;
+                     if(pRes[g_rrMain]>0)      g_orb[w].prgWin[volReg]++;
+                     else if(pRes[g_rrMain]<0) g_orb[w].prgLoss[volReg]++;
+                  }
+                  // livello vergine per il placebo: il livello del range dalla
+                  // parte in cui il placebo e' entrato, testato con lo stesso
+                  // criterio - prezzo gia' passato di li' oggi oppure no
+                  if(ib-1>=0)
+                  {
+                     double lvlP=(pd>0?RH:RL);
+                     int vgp=((rLow[ib-1]<=lvlP && rHigh[ib-1]>=lvlP) ? 0 : 1);
+                     g_orb[w].pvvN[vgp]++;
+                     if(pRes[g_rrMain]>0)      g_orb[w].pvvWin[vgp]++;
+                     else if(pRes[g_rrMain]<0) g_orb[w].pvvLoss[vgp]++;
+                  }
                   if(vpOk)
                   {
                      for(int z=0;z<g_nVa;z++)
@@ -3168,6 +3243,23 @@ bool ProcessSymbol(string sym)
                g_bk[g_nBk].cost=(float)costAtr;
                g_bk[g_nBk].stopAtr=(float)stopAtr;
                g_bk[g_nBk].vpVolPos=(float)winVolPos;
+               g_bk[g_nBk].volPct=(float)volPct;
+               g_bk[g_nBk].volReg=(char)volReg;
+               // Livello VERGINE: il prezzo non era ancora passato di li' oggi,
+               // prima della rottura. E' l'idea del "mitigato" del profilo
+               // volumi - un livello gia' toccato e' consumato, uno intatto no.
+               // rHigh/rLow sono i prefissi cumulati fino alla barra PRECEDENTE
+               // a quella della rottura: nessun dato futuro.
+               {
+                  int kv=kb-1;
+                  char vg=(char)-1;
+                  if(kv>=0)
+                  {
+                     double lvlB=(dir>0?lvUp:lvDn);
+                     vg=(char)((rLow[kv]<=lvlB && rHigh[kv]>=lvlB) ? 0 : 1);
+                  }
+                  g_bk[g_nBk].vpVirgin=vg;
+               }
                for(int z=0;z<VP_MAXVA;z++)
                {
                   g_bk[g_nBk].vpVaWidthV[z]=0.0f;
@@ -5288,6 +5380,7 @@ void BuildOrb(string sym,string dir)
            "(una finestra piu' corta della barra non ha senso).</div></section>");
          H("<section><h2>Breakout operativo</h2><div class=\"note\">Non generata.</div></section>");
          H("<section><h2>Volume Profile</h2><div class=\"note\">Non generata: dipende dai breakout.</div></section>");
+         H("<section><h2>Regime volatilita\'</h2><div class=\"note\">Non generata.</div></section>");
          H("<section><h2>CCI operativo</h2><div class=\"note\">Non generata.</div></section>");
       }
       return;
@@ -5566,7 +5659,8 @@ void BuildOrb(string sym,string dir)
       H("<section><h2>Breakout operativo</h2><div class=\"note\">Nessuna finestra selezionabile: "
         "nessuna raggiunge InpOrbMinN giornate, oppure non e' stato registrato alcun breakout.</div></section>");
       H("<section><h2>Volume Profile</h2><div class=\"note\">Non generata: dipende dai breakout.</div></section>");
-      H("<section><h2>CCI operativo</h2><div class=\"note\">Non generata.</div></section>");
+      H("<section><h2>Regime volatilita\'</h2><div class=\"note\">Non generata.</div></section>");
+         H("<section><h2>CCI operativo</h2><div class=\"note\">Non generata.</div></section>");
       return;
    }
 
@@ -6334,6 +6428,190 @@ void BuildOrb(string sym,string dir)
       if(fV!=INVALID_HANDLE) FileClose(fV);
       H("</section>");
    }
+
+   //=================================================================
+   //  SCHEDA: REGIME DI VOLATILITA' E LIVELLI VERGINI
+   //=================================================================
+   H("<section><h2>Regime di volatilita' e livelli vergini</h2><div class=\"note\">"
+     "<b>Perche' questa scheda esiste.</b> Tutto il resto del report normalizza <b>per ATR</b>: range, "
+     "target, stop, compressione, escursioni. E' la scelta giusta per confrontare giornate e simboli "
+     "diversi, ma ha un prezzo che finora non era stato pagato apertamente - <b>cancella il regime</b>. "
+     "Dividendo ogni misura per l'ATR del giorno, una giornata addormentata e una tempesta diventano della "
+     "stessa dimensione, e la domanda <i>conviene operare quando il mercato e' fermo o quando corre?</i> "
+     "diventa letteralmente impossibile da porre.<br><br>"
+     "Qui il regime torna esplicito: l'ATR di ieri viene messo in percentile rispetto ai suoi ultimi "+
+     IntegerToString(InpVolLookback)+" valori. Sotto "+IntegerToString(InpVolLow)+" = basso, sopra "+
+     IntegerToString(InpVolHigh)+" = alto, sopra "+IntegerToString(InpVolExtreme)+" = estremo. Il "
+     "controllo e' il placebo nello stesso regime, negli stessi giorni.<br><br>"
+     "<b>Livello vergine</b> e' l'altra idea, presa dal concetto di mitigazione del volume profile: un "
+     "livello che il prezzo non ha ancora toccato oggi e' <b>intatto</b>, uno gia' visitato e' consumato. "
+     "Qui la domanda e' se rompere un estremo mai toccato prima nella giornata valga piu' di rompere un "
+     "livello su cui il prezzo era gia' passato.</div>");
+   {
+      int gN[4], gW[4], gL[4], vN2[2], vW2[2], vL2[2];
+      ArrayInitialize(gN,0); ArrayInitialize(gW,0); ArrayInitialize(gL,0);
+      ArrayInitialize(vN2,0); ArrayInitialize(vW2,0); ArrayInitialize(vL2,0);
+      int gTot=0;
+      for(int q=0;q<nSel;q++)
+      {
+         int b=sel[q];
+         int k=(int)g_bk[b].volReg;
+         if(k>=0 && k<4)
+         {
+            gN[k]++; gTot++;
+            if(g_bk[b].res>0) gW[k]++; else if(g_bk[b].res<0) gL[k]++;
+         }
+         int v=(int)g_bk[b].vpVirgin;
+         if(v>=0 && v<2)
+         {
+            vN2[v]++;
+            if(g_bk[b].res>0) vW2[v]++; else if(g_bk[b].res<0) vL2[v]++;
+         }
+      }
+      double beG=OrbBE();
+      HtmlTableHead("tG1","regime;n;% dei breakout;win%;wlow;E in R;n placebo;placebo win%;delta;z",false);
+      for(int k=0;k<4;k++)
+      {
+         int res=gW[k]+gL[k];
+         if(res<30) continue;
+         double wr7=100.0*gW[k]/res;
+         double wl7=100.0*WilsonLowInd(gW[k],res);
+         double eR7=(gW[k]*g_rr[g_rrMain]-gL[k])/(double)MathMax(1,gN[k]);
+         int pres=g_orb[g_orbSel].prgWin[k]+g_orb[g_orbSel].prgLoss[k];
+         bool hasP=(pres>=50);
+         double pw7=(hasP? 100.0*g_orb[g_orbSel].prgWin[k]/pres : 0.0);
+         double d7 =(hasP? wr7-pw7 : 0.0);
+         double se7=(hasP? 100.0*MathSqrt((pw7/100.0)*(1.0-pw7/100.0)*(1.0/res+1.0/pres)) : 0.0);
+         double z7 =(se7>0? d7/se7 : 0.0);
+         H("<tr><td><b>"+HE(OrbRegName(k))+"</b></td><td>"+IntegerToString(gN[k])+"</td><td>"+
+           F(100.0*gN[k]/MathMax(1,gTot),1)+"</td><td>"+F(wr7,2)+"</td><td class=\""+
+           (wl7>beG?"hi":"lo")+"\">"+F(wl7,2)+"</td><td class=\""+(eR7>0?"up":"dn")+"\">"+F(eR7,3)+
+           "</td><td class=\"nz\">"+(hasP?IntegerToString(pres):"-")+"</td><td class=\"nz\">"+
+           (hasP?F(pw7,2):"-")+"</td><td class=\""+(MathAbs(z7)<2.0?"nz":(d7>0?"hi":"lo"))+"\"><b>"+
+           (hasP?F(d7,2):"-")+"</b></td><td class=\""+(MathAbs(z7)>=3.0?(d7>0?"hi":"lo"):"nz")+"\">"+
+           (hasP?F(z7,2):"-")+"</td></tr>");
+      }
+      HtmlTableEnd();
+
+      H("<h2>Livello vergine contro livello gia' toccato</h2><div class=\"note\">"
+        "Il prezzo era gia' passato dal livello rotto, prima della rottura, nella stessa giornata? "
+        "<b>Vergine</b> = no, mai toccato prima. E' l'idea della mitigazione: un livello intatto ha ancora "
+        "ordini appoggiati sopra, uno gia' visitato li ha gia' consumati.</div>");
+      HtmlTableHead("tG2","livello;n;win%;wlow;E in R;n placebo;placebo win%;delta;z",false);
+      for(int v=1;v>=0;v--)
+      {
+         int res=vW2[v]+vL2[v];
+         if(res<30) continue;
+         double wr7=100.0*vW2[v]/res;
+         double wl7=100.0*WilsonLowInd(vW2[v],res);
+         double eR7=(vW2[v]*g_rr[g_rrMain]-vL2[v])/(double)MathMax(1,vN2[v]);
+         int pres=g_orb[g_orbSel].pvvWin[v]+g_orb[g_orbSel].pvvLoss[v];
+         bool hasP=(pres>=50);
+         double pw7=(hasP? 100.0*g_orb[g_orbSel].pvvWin[v]/pres : 0.0);
+         double d7 =(hasP? wr7-pw7 : 0.0);
+         double se7=(hasP? 100.0*MathSqrt((pw7/100.0)*(1.0-pw7/100.0)*(1.0/res+1.0/pres)) : 0.0);
+         double z7 =(se7>0? d7/se7 : 0.0);
+         H("<tr><td><b>"+(v==1?"VERGINE (mai toccato oggi)":"gia' toccato oggi")+"</b></td><td>"+
+           IntegerToString(vN2[v])+"</td><td>"+F(wr7,2)+"</td><td class=\""+(wl7>beG?"hi":"lo")+"\">"+
+           F(wl7,2)+"</td><td class=\""+(eR7>0?"up":"dn")+"\">"+F(eR7,3)+"</td><td class=\"nz\">"+
+           (hasP?IntegerToString(pres):"-")+"</td><td class=\"nz\">"+(hasP?F(pw7,2):"-")+
+           "</td><td class=\""+(MathAbs(z7)<2.0?"nz":(d7>0?"hi":"lo"))+"\"><b>"+(hasP?F(d7,2):"-")+
+           "</b></td><td class=\""+(MathAbs(z7)>=3.0?(d7>0?"hi":"lo"):"nz")+"\">"+(hasP?F(z7,2):"-")+
+           "</td></tr>");
+      }
+      HtmlTableEnd();
+
+      //--- regime x rapporto: la curva cambia forma col regime?
+      H("<h2>La curva rischio/rendimento cambia con il regime?</h2><div class=\"note\">"
+        "Stessa scala di rapporti della scheda breakout, spezzata per regime. Se un target lontano paga solo "
+        "quando la volatilita' e' alta, e uno vicino solo quando e' bassa, non hai un rapporto giusto: ne hai "
+        "uno per regime, e il regime lo conosci in anticipo perche' e' l'ATR di ieri.</div>");
+      HtmlTableHead("tG3","regime;RR;n;win%;wlow;atteso casuale;E in R",true);
+      for(int k=0;k<4;k++)
+      {
+         for(int z=0;z<g_nRR;z++)
+         {
+            int n7=0, w7=0, l7=0;
+            for(int q=0;q<nSel;q++)
+            {
+               int b=sel[q];
+               if((int)g_bk[b].volReg!=k) continue;
+               n7++;
+               if(g_bk[b].resR[z]>0) w7++; else if(g_bk[b].resR[z]<0) l7++;
+            }
+            int res=w7+l7;
+            if(res<50) continue;
+            double wr7=100.0*w7/res;
+            double nl7=100.0/(1.0+g_rr[z]);
+            H("<tr><td><b>"+HE(OrbRegName(k))+"</b></td><td>1 : "+F(g_rr[z],2)+"</td><td>"+
+              IntegerToString(n7)+"</td><td>"+F(wr7,2)+"</td><td class=\""+
+              (100.0*WilsonLowInd(w7,res)>nl7?"hi":"lo")+"\">"+F(100.0*WilsonLowInd(w7,res),2)+
+              "</td><td class=\"nz\">"+F(nl7,2)+"</td><td class=\""+
+              ((w7*g_rr[z]-l7)>0?"up":"dn")+"\">"+F((w7*g_rr[z]-l7)/(double)n7,3)+"</td></tr>");
+         }
+      }
+      HtmlTableEnd();
+
+      if(InpWriteCsv)
+      {
+         int fG=FileOpen(dir+fn+"_orb_regime.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+         if(fG!=INVALID_HANDLE)
+         {
+            W(fG,"tabella;chiave;rr;n;win_perc;wlow_perc;E_in_R;n_placebo;placebo_win_perc;delta;z\r\n");
+            for(int k=0;k<4;k++)
+            {
+               int res=gW[k]+gL[k];
+               if(res<30) continue;
+               int pres=g_orb[g_orbSel].prgWin[k]+g_orb[g_orbSel].prgLoss[k];
+               bool hasP=(pres>=50);
+               double wr7=100.0*gW[k]/res;
+               double pw7=(hasP? 100.0*g_orb[g_orbSel].prgWin[k]/pres : 0.0);
+               double d7=(hasP? wr7-pw7 : 0.0);
+               double se7=(hasP? 100.0*MathSqrt((pw7/100.0)*(1.0-pw7/100.0)*(1.0/res+1.0/pres)) : 0.0);
+               W(fG,"regime;"+OrbRegName(k)+";;"+IntegerToString(gN[k])+";"+F(wr7,2)+";"+
+                    F(100.0*WilsonLowInd(gW[k],res),2)+";"+
+                    F((gW[k]*g_rr[g_rrMain]-gL[k])/(double)MathMax(1,gN[k]),4)+";"+
+                    (hasP?IntegerToString(pres):"")+";"+(hasP?F(pw7,2):"")+";"+
+                    (hasP?F(d7,2):"")+";"+(hasP&&se7>0?F(d7/se7,2):"")+"\r\n");
+            }
+            for(int v=1;v>=0;v--)
+            {
+               int res=vW2[v]+vL2[v];
+               if(res<30) continue;
+               int pres=g_orb[g_orbSel].pvvWin[v]+g_orb[g_orbSel].pvvLoss[v];
+               bool hasP=(pres>=50);
+               double wr7=100.0*vW2[v]/res;
+               double pw7=(hasP? 100.0*g_orb[g_orbSel].pvvWin[v]/pres : 0.0);
+               double d7=(hasP? wr7-pw7 : 0.0);
+               double se7=(hasP? 100.0*MathSqrt((pw7/100.0)*(1.0-pw7/100.0)*(1.0/res+1.0/pres)) : 0.0);
+               W(fG,"vergine;"+(v==1?"vergine":"gia_toccato")+";;"+IntegerToString(vN2[v])+";"+
+                    F(wr7,2)+";"+F(100.0*WilsonLowInd(vW2[v],res),2)+";"+
+                    F((vW2[v]*g_rr[g_rrMain]-vL2[v])/(double)MathMax(1,vN2[v]),4)+";"+
+                    (hasP?IntegerToString(pres):"")+";"+(hasP?F(pw7,2):"")+";"+
+                    (hasP?F(d7,2):"")+";"+(hasP&&se7>0?F(d7/se7,2):"")+"\r\n");
+            }
+            for(int k=0;k<4;k++)
+            for(int z=0;z<g_nRR;z++)
+            {
+               int n7=0, w7=0, l7=0;
+               for(int q=0;q<nSel;q++)
+               {
+                  int b=sel[q];
+                  if((int)g_bk[b].volReg!=k) continue;
+                  n7++;
+                  if(g_bk[b].resR[z]>0) w7++; else if(g_bk[b].resR[z]<0) l7++;
+               }
+               int res=w7+l7;
+               if(res<50) continue;
+               W(fG,"regime_rr;"+OrbRegName(k)+";1:"+F(g_rr[z],2)+";"+IntegerToString(n7)+";"+
+                    F(100.0*w7/res,2)+";"+F(100.0*WilsonLowInd(w7,res),2)+";"+
+                    F((w7*g_rr[z]-l7)/(double)n7,4)+";;;;\r\n");
+            }
+            FileClose(fG);
+         }
+      }
+   }
+   H("</section>");
 
    //=================================================================
    //  SCHEDA: CCI OPERATIVO

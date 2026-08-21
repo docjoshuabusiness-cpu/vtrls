@@ -57,6 +57,7 @@ Puoi disattivare l'uno o l'altro.
 | `<SYM>_indicatori_tf.csv` | stessi stati RSI/CCI/Z-Score calcolati sui tre timeframe, con delta sul riferimento |
 | `<SYM>_orb_finestre.csv` | tutte le finestre di osservazione testate, con % di rottura, win rate, Wilson, valore atteso e le due meta' del periodo |
 | `<SYM>_orb_setup.csv` | setup completo: esito per numero di conferme (0-3) con il placebo appaiato, e per combinazione di indicatori |
+| `<SYM>_orb_regime.csv` | regime di volatilita' e livelli vergini: esito per regime col placebo appaiato, e curva rischio/rendimento spezzata per regime |
 | `<SYM>_cci_trade.csv` | uscita dalla banda CCI come ingresso: per periodo e per rapporto rischio/rendimento, con placebo appaiato; piu' la ripartizione per ora |
 | `<SYM>_orb_rr.csv` | curva rischio/rendimento della finestra selezionata: per ogni RR, win rate misurato contro il placebo (ingresso a caso, stesso rischio e stesso orizzonte), delta e z |
 | `<SYM>_orb_breakout.csv` | una riga per ogni rottura della finestra selezionata: direzione, esito, range, intensita', volatilita', RSI/CCI/Z al momento della rottura, MFE/MAE |
@@ -298,6 +299,32 @@ finestra con `InpOrbFixStartMin` / `InpOrbFixDurMin` e rilancia su un altro
 periodo o un altro simbolo.
 
 `InpDoOrb = false` salta entrambe le schede.
+
+## Regime di volatilita' e livelli vergini
+
+Scheda dedicata, **aggiuntiva**, e nasce da un punto cieco strutturale.
+
+Tutto il resto del report normalizza **per ATR**: range, target, stop,
+compressione, escursioni. E' la scelta giusta per confrontare giornate e
+simboli diversi, ma ha un prezzo: **cancella il regime**. Dividendo ogni misura
+per l'ATR del giorno, una giornata addormentata e una tempesta diventano della
+stessa dimensione, e la domanda *"conviene operare quando il mercato e' fermo o
+quando corre?"* diventa impossibile da porre.
+
+Qui il regime torna esplicito: l'ATR di ieri messo in percentile sui suoi ultimi
+`InpVolLookback` valori (default 100 giornate). Sotto `InpVolLow` = basso, sopra
+`InpVolHigh` = alto, sopra `InpVolExtreme` = estremo. Il controllo e' il placebo
+**nello stesso regime**, negli stessi giorni.
+
+La terza tabella spezza la **curva rischio/rendimento per regime**: se un target
+lontano paga solo con volatilita' alta e uno vicino solo con volatilita' bassa,
+non esiste un rapporto giusto - ne esiste uno per regime, e il regime si conosce
+in anticipo perche' e' l'ATR di ieri.
+
+**Livello vergine** e' l'altra idea, presa dalla mitigazione del volume profile:
+un livello che il prezzo non ha ancora toccato oggi e' intatto, uno gia'
+visitato e' consumato. La domanda e' se rompere un estremo mai toccato prima
+nella giornata valga piu' che rompere un livello gia' attraversato.
 
 ## CCI: l'uscita dalla banda come ingresso
 
