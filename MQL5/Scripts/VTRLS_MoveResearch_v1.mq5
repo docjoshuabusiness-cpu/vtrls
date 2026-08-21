@@ -5882,6 +5882,10 @@ void BuildOrb(string sym,string dir)
             if(g_orb[i].dN[d]<InpOrbMinN/3) continue;
             int rs=g_orb[i].dRes[d];
             if(rs<20) continue;
+            // senza questo filtro vincono le finestre da un minuto: il livello
+            // si tocca ogni giorno e non si risolve quasi mai, quindi la
+            // frequenza e' altissima e l'esito e' costruito su nulla
+            if(100.0*rs/MathMax(1,g_orb[i].dBrk[d]) < InpOrbMinResolved) continue;
             double pb=(double)g_orb[i].dBrk[d]/(double)g_orb[i].dN[d];
             int wn=g_orb[i].dWin[d], ls=rs-wn;
             int fl=g_orb[i].dBrk[d]-rs;
@@ -6528,6 +6532,7 @@ void BuildOrb(string sym,string dir)
                if(g_orb[i].dN[d]<InpOrbMinN/3) continue;
                int rs=g_orb[i].dRes[d];
                if(rs<20) continue;
+               if(100.0*rs/MathMax(1,g_orb[i].dBrk[d]) < InpOrbMinResolved) continue;
                double pb=(double)g_orb[i].dBrk[d]/(double)g_orb[i].dN[d];
                int wn=g_orb[i].dWin[d];
                double v=100.0*pb*OrbExpLow(wn,rs-wn,g_orb[i].dBrk[d]-rs,OrbTgt(i));
