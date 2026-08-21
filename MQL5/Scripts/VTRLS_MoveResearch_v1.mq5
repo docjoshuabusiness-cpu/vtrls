@@ -6009,6 +6009,36 @@ void BuildOrb(string sym,string dir)
                     F(100.0*mW[mk]/res,2)+";"+F(100.0*WilsonLowInd(mW[mk],res),2)+";"+
                     F((mW[mk]*g_rr[g_rrMain]-mL[mk])/(double)MathMax(1,mN[mk]),4)+";;;;\r\n");
             }
+            // lettura di ESAURIMENTO: sta nello stesso file, altrimenti la
+            // meta' piu' interessante del confronto resta solo nell'HTML
+            {
+               int rN2[4], rW2[4], rL2[4];
+               ArrayInitialize(rN2,0); ArrayInitialize(rW2,0); ArrayInitialize(rL2,0);
+               for(int q=0;q<nSel;q++)
+               {
+                  int b=sel[q];
+                  int k=OrbConfirmRev((int)g_bk[b].dir,g_bk[b].cci,g_bk[b].rsi,g_bk[b].zs);
+                  rN2[k]++;
+                  if(g_bk[b].res>0) rW2[k]++; else if(g_bk[b].res<0) rL2[k]++;
+               }
+               for(int k=0;k<4;k++)
+               {
+                  int res=rW2[k]+rL2[k];
+                  if(res<30) continue;
+                  double wr5=100.0*rW2[k]/res;
+                  int pres=g_orb[g_orbSel].pcrWin[k]+g_orb[g_orbSel].pcrLoss[k];
+                  bool hasP=(pres>=50);
+                  double pw5=(hasP? 100.0*g_orb[g_orbSel].pcrWin[k]/pres : 0.0);
+                  double d5=(hasP? wr5-pw5 : 0.0);
+                  double se5=(hasP? 100.0*MathSqrt((pw5/100.0)*(1.0-pw5/100.0)*(1.0/res+1.0/pres)) : 0.0);
+                  W(fC,OrbLab(g_orbSel)+";esaurimento;"+IntegerToString(k)+" su 3;"+
+                       IntegerToString(rN2[k])+";"+F(wr5,2)+";"+
+                       F(100.0*WilsonLowInd(rW2[k],res),2)+";"+
+                       F((rW2[k]*g_rr[g_rrMain]-rL2[k])/(double)MathMax(1,rN2[k]),4)+";"+
+                       (hasP?IntegerToString(pres):"")+";"+(hasP?F(pw5,2):"")+";"+
+                       (hasP?F(d5,2):"")+";"+(hasP&&se5>0?F(d5/se5,2):"")+"\r\n");
+               }
+            }
             FileClose(fC);
          }
       }
