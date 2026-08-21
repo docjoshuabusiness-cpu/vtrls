@@ -145,7 +145,7 @@ input bool            InpOrbPlacebo     = true;            // Calcola il riferim
 input double          InpOrbRsiConf     = 50.0;            // RSI: soglia di conferma nel verso della rottura
 input double          InpOrbZsConf      = 0.0;             // Z-Score: soglia di conferma nel verso della rottura
 input double          InpOrbCciConf     = 40.0;            // CCI: soglia di conferma nel verso della rottura
-input double          InpOrbCostPt      = 0.0;             // Costo di andata e ritorno in punti (spread + commissioni)
+input double          InpOrbCostPt      = 7.0;             // Costo andata+ritorno in PUNTI (spread+commissioni). A zero la colonna netta e' una copia della lorda
 input double          InpOrbBufferAtr   = 0.03;            // Margine oltre il livello perche' la rottura conti
 input double          InpOrbMinResolved = 60.0;            // % minima di rotture risolte perche' la finestra entri in classifica
 input double          InpOrbMinTradePct = 80.0;            // % minima di giornate realmente operabili (stop sopra il minimo)
@@ -2047,7 +2047,11 @@ string PvBinLab(int b)
 // distribuzione nulla sta gia' intorno a z 2.9. La cella migliore SEMBRERA'
 // sempre buona. L'unica difesa e' che sia la stessa nelle due meta'.
 #define SW_MAXST 48
-#define SW_NB    7   // 0-3 fasce VA, 4 tutte, 5 prima meta', 6 seconda meta'
+#define SW_NB    15  // 0-3 fasce VA, 4 tutte, 5-6 meta' del periodo,
+                     // 7-10 VA x prima meta', 11-14 VA x seconda meta'.
+                     // L'incrocio serve a una domanda sola: la larghezza
+                     // della Value Area - l'unica condizione sopravvissuta
+                     // su tre simboli - regge ancora nella meta' recente?
 double g_swVal[SW_MAXST]; bool g_swIsPt[SW_MAXST]; int g_nSw=0;
 int    g_swN[SW_MAXST][SW_NB];
 double g_swSumAtr[SW_MAXST][SW_NB];      // stop realizzato in ATR, per leggere i punti
@@ -2092,7 +2096,9 @@ string SwBinLab(int b)
    if(b==3) return "VA oltre 1.00 ATR (larga)";
    if(b==4) return "tutte le rotture";
    if(b==5) return "prima meta' del periodo";
-   return "seconda meta' del periodo";
+   if(b==6) return "seconda meta' del periodo";
+   if(b<=10) return SwBinLab(b-7)+" | prima meta'";
+   return SwBinLab(b-11)+" | seconda meta'";
 }
 
 string SwStopLab(int m)
@@ -2209,6 +2215,7 @@ bool CsBuild(string sym,datetime from,datetime to)
    //--- una coppia alla volta, fusione ordinata sull'asse: nessun bisogno
    // di tenere in memoria 28 serie insieme
    int nUsed=0;
+   string miss[12]; int nMiss=0;
    for(int p=0;p<CS_NP;p++)
    {
       int s1=(c1!="" ? CsSign(p,c1) : 0);
@@ -2216,9 +2223,20 @@ bool CsBuild(string sym,datetime from,datetime to)
       if(s1==0 && s2==0) continue;
       if(g_csPair[p]+suf==sym) continue;          // leave-one-out
 
+      // Senza SymbolSelect il terminale non tiene lo storico della coppia e
+      // CopyRates torna 0 al primo giro: era il motivo per cui il modulo
+      // usciva sempre vuoto senza dire niente.
+      string pn=g_csPair[p]+suf;
+      if(!SymbolInfoInteger(pn,SYMBOL_SELECT)) SymbolSelect(pn,true);
       MqlRates rp[];
-      int np=CopyRates(g_csPair[p]+suf,InpStrTF,from,to,rp);
-      if(np<200) continue;
+      int np=0;
+      for(int att=0; att<6; att++)
+      {
+         np=CopyRates(pn,InpStrTF,from,to,rp);
+         if(np>=200) break;
+         Sleep(300);
+      }
+      if(np<200){ if(nMiss<12) miss[nMiss++]=pn; continue; }
       nUsed++;
 
       int j=0;
@@ -2233,7 +2251,13 @@ bool CsBuild(string sym,datetime from,datetime to)
          if(s2!=0){ sum2[i]+=s2*v; cnt2[i]++; }
       }
    }
-   if(nUsed<6) return false;
+   if(nUsed<6)
+   {
+      string ml=""; for(int q=0;q<nMiss;q++) ml+=(q?", ":"")+miss[q];
+      PrintFormat("[%s] forza relativa NON disponibile: solo %d coppie utilizzabili. Mancanti: %s",
+                  sym, nUsed, (nMiss>0?ml:"(nessuna elencata)"));
+      return false;
+   }
 
    //--- TSI su ciascuna gamba, poi differenza
    double a1=2.0/(InpStrSm1+1.0), a2=2.0/(InpStrSm2+1.0);
@@ -2262,8 +2286,8 @@ bool CsBuild(string sym,datetime from,datetime to)
       g_csDiff[i]=(float)(c1!="" ? t1-t2 : -t2);
    }
    g_csN=nr; g_csOk=true;
-   DBG(1,"["+sym+"] forza relativa: "+IntegerToString(nUsed)+" coppie, "+
-         IntegerToString(nr)+" barre "+EnumToString(InpStrTF));
+   PrintFormat("[%s] forza relativa: %d coppie, %d barre %s",
+               sym, nUsed, nr, EnumToString(InpStrTF));
    return true;
 }
 
@@ -3663,15 +3687,20 @@ bool ProcessSymbol(string sym)
                for(int m=0;m<g_nSw;m++)
                {
                   double sdA=(g_swIsPt[m] ? g_swVal[m]/atrPt : stopAtr*g_swVal[m]);
+                  int xb=(vb>=0 ? (secondHalf?11:7)+vb : -1);   // VA incrociata con la meta'
                   g_swN[m][4]++;  g_swSumAtr[m][4]+=sdA;
                   g_swN[m][hb]++; g_swSumAtr[m][hb]+=sdA;
-                  if(vb>=0){ g_swN[m][vb]++; g_swSumAtr[m][vb]+=sdA; }
+                  if(vb>=0){ g_swN[m][vb]++;  g_swSumAtr[m][vb]+=sdA;
+                             g_swN[m][xb]++;  g_swSumAtr[m][xb]+=sdA; }
                   for(int z=0;z<g_nRR;z++)
                   {
                      int rr2=swR[m][z];
-                     if(rr2>0)      { g_swW[m][z][4]++; g_swW[m][z][hb]++; if(vb>=0) g_swW[m][z][vb]++; }
-                     else if(rr2<0) { g_swL[m][z][4]++; g_swL[m][z][hb]++; if(vb>=0) g_swL[m][z][vb]++; }
-                     else           { g_swF[m][z][4]++; g_swF[m][z][hb]++; if(vb>=0) g_swF[m][z][vb]++; }
+                     if(rr2>0)      { g_swW[m][z][4]++; g_swW[m][z][hb]++;
+                                      if(vb>=0){ g_swW[m][z][vb]++; g_swW[m][z][xb]++; } }
+                     else if(rr2<0) { g_swL[m][z][4]++; g_swL[m][z][hb]++;
+                                      if(vb>=0){ g_swL[m][z][vb]++; g_swL[m][z][xb]++; } }
+                     else           { g_swF[m][z][4]++; g_swF[m][z][hb]++;
+                                      if(vb>=0){ g_swF[m][z][vb]++; g_swF[m][z][xb]++; } }
                   }
                }
             }
