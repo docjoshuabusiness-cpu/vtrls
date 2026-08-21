@@ -555,3 +555,30 @@ Insieme arrivano due misure sulla barra chiusa prima della rottura:
 l'**ombra** dal lato in cui si romperà (il mercato aveva gia' provato ad
 andare li' ed era stato respinto) e il **volume relativo** alla media delle
 barre precedenti.
+
+
+## Forza relativa cross-sectional (`InpDoStrength`)
+
+Tutto il resto dello script guarda **un solo strumento**. Questa e' la prima
+misura che porta informazione da fuori: la forza di EUR e quella di USD
+ricavate dalle altre coppie del complesso, differenza fra le due, girata nel
+verso della rottura.
+
+Tre scelte che la distinguono dagli indicatori di currency strength in
+circolazione, e sono la ragione per cui vale la pena misurarla:
+
+1. **Rendimenti, non differenze di prezzo.** Sommare `close-open` di EURUSD,
+   EURGBP e EURJPY produce una media pesata i cui pesi sono la convenzione di
+   quotazione: EURJPY pesa cento volte EURUSD. Dividere le coppie JPY per 100
+   e' una toppa; il rendimento elimina il problema alla radice.
+2. **Leave-one-out.** La coppia che si opera e' esclusa da entrambe le gambe.
+   Senza, circa il 29% del differenziale EUR-USD e' il rendimento di EURUSD
+   stesso, e si finirebbe a rimisurare il momentum del simbolo - la cosa che
+   in questo dataset ha gia' fallito trenta volte.
+3. **Segno dedotto dal nome della coppia**, non da tabelle scritte a mano: la
+   valuta base prende +1, quella quotata -1.
+
+Letta all'ultima barra **chiusa** di `InpStrTF` prima della rottura. Sui
+metalli non esiste una gamba XAU: si usa la forza del dollaro col segno
+girato. Quattro righe nella tabella dei filtri (concorde forte, concorde,
+contraria, contraria forte) e una colonna in `_orb_breakout.csv`.

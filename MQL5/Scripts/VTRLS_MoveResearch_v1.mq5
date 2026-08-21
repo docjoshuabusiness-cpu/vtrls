@@ -183,6 +183,12 @@ input int             InpSweepStartMin  = 540;             // Finestra della cal
 input int             InpSweepDurMin    = 60;              // Finestra della calibrazione: durata
 input string          InpStopSweep      = "0.5,0.75,1,1.25,1.5,2";  // Moltiplicatori dello stop base
 
+input bool            InpDoStrength     = true;            // Forza relativa cross-sectional delle valute
+input ENUM_TIMEFRAMES InpStrTF          = PERIOD_H1;      // TF su cui misurare la forza
+input int             InpStrSm1         = 25;              // Primo smoothing (TSI)
+input int             InpStrSm2         = 15;              // Secondo smoothing (TSI)
+input double          InpStrConf        = 25.0;            // Soglia di forza "decisa"
+
 input string          sVp               = "=== VOLUME PROFILE (POC / VAH / VAL del giorno precedente) ===";
 input bool            InpDoVp           = true;            // Calcola il profilo volumi del giorno precedente
 input int             InpVpLevels       = 50;              // Livelli di prezzo del profilo
@@ -1854,6 +1860,10 @@ struct SBrk
    // l'ORDINE della sequenza. Un range largo puo' essere ordinato e uno
    // stretto puo' essere puro rumore.
    float ent;
+   // forza relativa delle due valute all'ultima barra CHIUSA prima della
+   // rottura, gia' girata nel verso della rottura. Zero se il simbolo non
+   // appartiene al complesso o le coppie mancano.
+   float str;
    char  resR[ORB_MAXRR];
    // volume profile del giorno precedente, letto al momento della rottura
    float vpPocDist;              // (entry - POC) in ATR, col segno della rottura
@@ -2060,6 +2070,173 @@ string SwBinLab(int b)
    if(b==2) return "VA 0.70 - 1.00 ATR";
    if(b==3) return "VA oltre 1.00 ATR (larga)";
    return "tutte le rotture";
+}
+
+//==================================================================
+// FORZA RELATIVA CROSS-SECTIONAL
+//------------------------------------------------------------------
+// Tutto il resto di questo script guarda UN solo strumento. Questa e'
+// la prima misura che porta informazione da FUORI: la forza di EUR e
+// quella di USD ricavate dalle altre coppie del complesso.
+//
+// Tre scelte che si discostano dagli indicatori di currency strength
+// in circolazione, e sono la ragione per cui vale la pena misurarla:
+//
+//  1. RENDIMENTI, non differenze di prezzo. Sommare (close-open) di
+//     EURUSD, EURGBP e EURJPY significa fare una media pesata dove i
+//     pesi sono la convenzione di quotazione: EURJPY pesa cento volte
+//     EURUSD. Dividere le coppie JPY per 100 e' una toppa; il
+//     rendimento elimina il problema alla radice.
+//  2. LEAVE-ONE-OUT. La coppia che si opera viene esclusa da entrambe
+//     le gambe. Altrimenti circa il 29% del differenziale EUR-USD e'
+//     il rendimento di EURUSD stesso, e si finisce a misurare di nuovo
+//     il momentum del simbolo - la cosa che ha gia' fallito trenta volte.
+//  3. Segno dedotto dal NOME della coppia, non da tabelle scritte a
+//     mano: la valuta base prende +1, quella quotata -1.
+#define CS_NP 28
+#define CS_NC 8
+string g_csPair[CS_NP] =
+{
+   "EURUSD","EURGBP","EURCHF","EURJPY","EURAUD","EURCAD","EURNZD",
+   "USDCHF","USDJPY","USDCAD",
+   "GBPUSD","GBPCHF","GBPJPY","GBPAUD","GBPCAD","GBPNZD",
+   "CHFJPY",
+   "AUDUSD","AUDCHF","AUDJPY","AUDCAD","AUDNZD",
+   "CADCHF","CADJPY",
+   "NZDUSD","NZDCHF","NZDJPY","NZDCAD"
+};
+
+datetime g_csTime[];
+float    g_csDiff[];
+int      g_csN=0;
+bool     g_csOk=false;
+int      g_csSec=3600;
+
+int CsSign(int p,string ccy)
+{
+   if(StringSubstr(g_csPair[p],0,3)==ccy) return +1;
+   if(StringSubstr(g_csPair[p],3,3)==ccy) return -1;
+   return 0;
+}
+
+// ultima barra CHIUSA di InpStrTF prima dell'istante t
+int CsIndexAt(datetime t)
+{
+   if(g_csN<=0) return -1;
+   int lo=0, hi=g_csN-1, best=-1;
+   while(lo<=hi)
+   {
+      int mid=(lo+hi)/2;
+      if(g_csTime[mid]+(datetime)g_csSec<=t){ best=mid; lo=mid+1; }
+      else hi=mid-1;
+   }
+   return best;
+}
+
+double CsAt(datetime t)
+{
+   int i=CsIndexAt(t);
+   return (i>=0 ? (double)g_csDiff[i] : 0.0);
+}
+
+bool CsBuild(string sym,datetime from,datetime to)
+{
+   g_csN=0; g_csOk=false;
+   ArrayResize(g_csTime,0); ArrayResize(g_csDiff,0);
+   if(!InpDoStrength) return false;
+   if(StringLen(sym)<6) return false;
+
+   string c1=StringSubstr(sym,0,3), c2=StringSubstr(sym,3,3);
+   string suf=StringSubstr(sym,6);
+   bool metal=(c1=="XAU" || c1=="XAG");
+   // sull'oro non esiste una "gamba XAU": conta solo quanto e' forte il
+   // dollaro, con il segno girato (oro su = dollaro debole)
+   if(metal) c1="";
+
+   bool has1=false, has2=false;
+   for(int p=0;p<CS_NP;p++)
+   {
+      if(c1!="" && CsSign(p,c1)!=0) has1=true;
+      if(CsSign(p,c2)!=0) has2=true;
+   }
+   if(!has2 || (c1!="" && !has1)) return false;
+
+   //--- asse dei tempi: il TF forza del simbolo stesso
+   MqlRates rr[];
+   int nr=CopyRates(sym,InpStrTF,from,to,rr);
+   if(nr<200) return false;
+   g_csSec=PeriodSeconds(InpStrTF);
+   if(g_csSec<=0) g_csSec=3600;
+
+   ArrayResize(g_csTime,nr);
+   double sum1[], sum2[]; int cnt1[], cnt2[];
+   ArrayResize(sum1,nr); ArrayResize(sum2,nr);
+   ArrayResize(cnt1,nr); ArrayResize(cnt2,nr);
+   for(int i=0;i<nr;i++)
+   {
+      g_csTime[i]=rr[i].time;
+      sum1[i]=0.0; sum2[i]=0.0; cnt1[i]=0; cnt2[i]=0;
+   }
+
+   //--- una coppia alla volta, fusione ordinata sull'asse: nessun bisogno
+   // di tenere in memoria 28 serie insieme
+   int nUsed=0;
+   for(int p=0;p<CS_NP;p++)
+   {
+      int s1=(c1!="" ? CsSign(p,c1) : 0);
+      int s2=CsSign(p,c2);
+      if(s1==0 && s2==0) continue;
+      if(g_csPair[p]+suf==sym) continue;          // leave-one-out
+
+      MqlRates rp[];
+      int np=CopyRates(g_csPair[p]+suf,InpStrTF,from,to,rp);
+      if(np<200) continue;
+      nUsed++;
+
+      int j=0;
+      for(int i=0;i<nr;i++)
+      {
+         while(j<np && rp[j].time<g_csTime[i]) j++;
+         if(j>=np) break;
+         if(rp[j].time!=g_csTime[i]) continue;
+         if(rp[j].open<=0.0) continue;
+         double v=rp[j].close/rp[j].open-1.0;
+         if(s1!=0){ sum1[i]+=s1*v; cnt1[i]++; }
+         if(s2!=0){ sum2[i]+=s2*v; cnt2[i]++; }
+      }
+   }
+   if(nUsed<6) return false;
+
+   //--- TSI su ciascuna gamba, poi differenza
+   double a1=2.0/(InpStrSm1+1.0), a2=2.0/(InpStrSm2+1.0);
+   double m1a=0,m1b=0,v1a=0,v1b=0, m2a=0,m2b=0,v2a=0,v2b=0;
+   bool init=false;
+   ArrayResize(g_csDiff,nr);
+   for(int i=0;i<nr;i++)
+   {
+      double x1=(cnt1[i]>0 ? sum1[i]/cnt1[i] : 0.0);
+      double x2=(cnt2[i]>0 ? sum2[i]/cnt2[i] : 0.0);
+      if(!init)
+      {
+         m1a=x1; m1b=x1; v1a=MathAbs(x1); v1b=MathAbs(x1);
+         m2a=x2; m2b=x2; v2a=MathAbs(x2); v2b=MathAbs(x2);
+         init=true;
+      }
+      else
+      {
+         m1a+=a1*(x1-m1a);            v1a+=a1*(MathAbs(x1)-v1a);
+         m1b+=a2*(m1a-m1b);           v1b+=a2*(v1a-v1b);
+         m2a+=a1*(x2-m2a);            v2a+=a1*(MathAbs(x2)-v2a);
+         m2b+=a2*(m2a-m2b);           v2b+=a2*(v2a-v2b);
+      }
+      double t1=(v1b>0.0 ? 100.0*m1b/v1b : 0.0);
+      double t2=(v2b>0.0 ? 100.0*m2b/v2b : 0.0);
+      g_csDiff[i]=(float)(c1!="" ? t1-t2 : -t2);
+   }
+   g_csN=nr; g_csOk=true;
+   DBG(1,"["+sym+"] forza relativa: "+IntegerToString(nUsed)+" coppie, "+
+         IntegerToString(nr)+" barre "+EnumToString(InpStrTF));
+   return true;
 }
 
 bool g_bkCap=false;             // tetto ai record raggiunto: campione troncato
@@ -2457,6 +2634,9 @@ bool ProcessSymbol(string sym)
       return false;
    }
    DBG(1,"["+sym+"] storico pronto "+MS(tPhase));
+
+   if(InpDoStrength && !CsBuild(sym,effFrom,effTo))
+      DBG(1,"["+sym+"] forza relativa non disponibile: coppie mancanti o simbolo fuori dal complesso");
 
    DBG(1,"=== ["+sym+"] FASE 4: calendario economico ===");
    tPhase=GetTickCount();
@@ -3601,6 +3781,7 @@ bool ProcessSymbol(string sym)
                g_bk[g_nBk].volRat=(float)volRatV;
                g_bk[g_nBk].extRec=(char)extR;
                g_bk[g_nBk].ent  =(float)entV;
+               g_bk[g_nBk].str  =(float)(g_csOk ? CsAt(r[kb].time)*dir : 0.0);
                g_bk[g_nBk].cost=(float)costAtr;
                g_bk[g_nBk].stopAtr=(float)stopAtr;
                g_bk[g_nBk].vpVolPos=(float)winVolPos;
@@ -6424,7 +6605,7 @@ void BuildOrb(string sym,string dir)
 
    // I nomi si costruiscono una volta sola: dentro il ciclo sui breakout
    // sarebbero decine di migliaia di concatenazioni di stringa per niente.
-   string fName[31];
+   string fName[35];
    fName[0] ="nessun filtro (tutte le rotture)";
    fName[1] ="CCI concorde oltre "+F(InpCciCross,0);
    fName[2] ="CCI concorde (solo segno)";
@@ -6456,6 +6637,10 @@ void BuildOrb(string sym,string dir)
    fName[28]="volume pre-rottura oltre 1.50 volte la media";
    fName[29]="sequenza ORDINATA prima della rottura (entropia entro 0.90)";
    fName[30]="sequenza CASUALE prima della rottura (entropia oltre 0.97)";
+   fName[31]="forza relativa CONCORDE oltre "+F(InpStrConf,0);
+   fName[32]="forza relativa concorde (solo segno)";
+   fName[33]="forza relativa contraria (solo segno)";
+   fName[34]="forza relativa CONTRARIA oltre "+F(InpStrConf,0);
 
    // La tabella dei filtri finiva solo nell'HTML. Ogni riga porta ora anche
    // la quota di esiti risolti e i due estremi (irrisolto contato come perdita
@@ -6469,7 +6654,7 @@ void BuildOrb(string sym,string dir)
             "E_atr;delta_E_atr;mfe_medio;mae_medio\r\n");
 
    double baseE=0.0;
-   for(int f=0; f<31; f++)
+   for(int f=0; f<35; f++)
    {
       string nm=fName[f];
       int n=0, wn=0, ls=0, fl=0; double sM=0.0, sA=0.0, sP=0.0, sC=0.0, sT=0.0;
@@ -6513,6 +6698,10 @@ void BuildOrb(string sym,string dir)
             case 28: ok=(g_bk[b].volRat > 1.50); break;
             case 29: ok=(g_bk[b].ent > 0.0 && g_bk[b].ent <= 0.90); break;
             case 30: ok=(g_bk[b].ent > 0.97); break;
+            case 31: ok=(g_bk[b].str >  InpStrConf); break;
+            case 32: ok=(g_bk[b].str >  0.0); break;
+            case 33: ok=(g_bk[b].str <  0.0); break;
+            case 34: ok=(g_bk[b].str < -InpStrConf); break;
          }
          if(!ok) continue;
          n++;
@@ -7494,7 +7683,7 @@ void BuildOrb(string sym,string dir)
       int fF=FileOpen(dir+fn+"_orb_breakout.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
       if(fF!=INVALID_HANDLE)
       {
-         W(fF,"finestra;giorno;ora;direzione;esito;anno;clv;espansione_tr;ombra;volume_rel;estremo_recente;entropia;range_atr;compressione;target_atr;intensita_atr;"
+         W(fF,"finestra;giorno;ora;direzione;esito;anno;clv;espansione_tr;ombra;volume_rel;estremo_recente;entropia;forza_relativa;range_atr;compressione;target_atr;intensita_atr;"
               "volatilita_atr;cci;rsi;zscore;mfe_atr;mae_atr;min_alla_rottura;"
               "vp_stato;vp_dist_poc_atr;vp_larghezza_va_atr;vp_pos_volume");
          for(int z=0;z<g_nVa;z++) W(fF,";vp_stato_"+F(g_vaPct[z],0));
@@ -7508,6 +7697,7 @@ void BuildOrb(string sym,string dir)
                  (g_bk[b].res>0?"TARGET":(g_bk[b].res<0?"STOP":"IRRISOLTO"))+";"+
                  IntegerToString(g_bk[b].year)+";"+F(g_bk[b].clv,4)+";"+F(g_bk[b].expTr,4)+";"+F(g_bk[b].wick,4)+";"+
                  F(g_bk[b].volRat,4)+";"+IntegerToString((int)g_bk[b].extRec)+";"+F(g_bk[b].ent,4)+";"+
+                 F(g_bk[b].str,2)+";"+
                  F(g_bk[b].rangeAtr,4)+";"+F(g_bk[b].compr,4)+";"+
                  F(g_bk[b].tgt,4)+";"+F(g_bk[b].mom,4)+";"+
                  F(g_bk[b].vol,4)+";"+F(g_bk[b].cci,2)+";"+F(g_bk[b].rsi,2)+";"+F(g_bk[b].zs,3)+";"+
