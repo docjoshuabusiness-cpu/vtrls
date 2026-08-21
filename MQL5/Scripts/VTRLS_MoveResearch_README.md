@@ -533,3 +533,23 @@ Tre garanzie sul campione:
 
 Il controllo e' la **direzione opposta**: stesso istante, stesso stop, stessi
 target, solo il segno cambia. `delta` e `z` confrontano le due.
+
+
+## L'estremo RECENTE, non simultaneo (`InpOrbExtBars`)
+
+Il test di esaurimento sulla rottura era uscito vuoto: pretendere RSI<30 e
+Z<-2 **nello stesso istante** in cui il massimo di un'accumulazione viene
+rotto al rialzo e' una contraddizione, e infatti su 4078 rotture solo 7
+soddisfacevano due condizioni su tre.
+
+La versione corretta guarda **indietro**: c'e' stato un estremo RSI/Z nelle
+ultime `InpOrbExtBars` barre dell'indicatore, prima della rottura? Un mercato
+sceso in ipervenduto e poi risalito fino a rompere il massimo del range e'
+un evento comune, e non ha niente a che vedere con quello impossibile di
+prima. Tre righe nella tabella dei filtri: estremo opposto alla rottura
+(esaurimento recente), estremo concorde (spinta recente), nessun estremo.
+
+Insieme arrivano due misure sulla barra chiusa prima della rottura:
+l'**ombra** dal lato in cui si romperà (il mercato aveva gia' provato ad
+andare li' ed era stato respinto) e il **volume relativo** alla media delle
+barre precedenti.

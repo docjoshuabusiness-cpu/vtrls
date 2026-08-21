@@ -176,6 +176,8 @@ input int             InpPrevTradeStart = 420;             // Inizio finestra op
 input int             InpPrevTradeEnd   = 1080;            // Fine finestra operativa di oggi
 input double          InpPrevStopAtr    = 0.25;            // Stop in ATR(D-1): FISSO, mai proporzionale al range
 
+input int             InpOrbExtBars     = 10;              // Barre indicatore in cui cercare un estremo RSI/Z PRIMA della rottura
+
 input string          sVp               = "=== VOLUME PROFILE (POC / VAH / VAL del giorno precedente) ===";
 input bool            InpDoVp           = true;            // Calcola il profilo volumi del giorno precedente
 input int             InpVpLevels       = 50;              // Livelli di prezzo del profilo
@@ -1832,6 +1834,14 @@ struct SBrk
    // range, in [-1,+1] e col segno girato nella direzione della rottura.
    // expTr: True Range di quella barra diviso il TR medio recente.
    float clv, expTr;
+   // extRec: estremo RSI/Z toccato nelle ultime InpOrbExtBars barre PRIMA
+   // della rottura, +1 ipercomprato -1 ipervenduto 0 nessuno. E' la
+   // riparazione del test di esaurimento: preteso SIMULTANEO alla rottura
+   // e' un evento quasi impossibile (7 casi su 4078), preteso RECENTE no.
+   // wick: ombra dal lato della rottura sulla barra precedente, sul range.
+   // volRat: volume tick di quella barra sulla media delle precedenti.
+   char  extRec;
+   float wick, volRat;
    char  resR[ORB_MAXRR];
    // volume profile del giorno precedente, letto al momento della rottura
    float vpPocDist;              // (entry - POC) in ATR, col segno della rottura
@@ -3382,7 +3392,7 @@ bool ProcessSymbol(string sym)
                // in giro: fracBuy-fracSell = 2*(close-low)/range-1. Il peso
                // volumetrico che gli si moltiplica sopra e' sempre positivo,
                // quindi puo' cambiare l'ampiezza ma mai il segno.
-               double clvV=0.0, expV=0.0;
+               double clvV=0.0, expV=0.0, wickV=0.0, volRatV=0.0;
                if(kb-1>=1)
                {
                   double hiB=r[kb-1].high, loB=r[kb-1].low, clB=r[kb-1].close;
@@ -3399,12 +3409,37 @@ bool ProcessSymbol(string sym)
                      trN++;
                   }
                   if(trN>0 && trS>0.0) expV=trB/(trS/trN);
+                  // ombra dal LATO della rottura: il mercato aveva gia' provato
+                  // ad andare li' ed era stato respinto
+                  double bodyHi=MathMax(r[kb-1].open,r[kb-1].close);
+                  double bodyLo=MathMin(r[kb-1].open,r[kb-1].close);
+                  if(rgB>0.0) wickV=(dir>0 ? (hiB-bodyHi)/rgB : (bodyLo-loB)/rgB);
+                  double vSum=0.0; int vN=0;
+                  for(int q=(m0>0? m0 : 0); q<kb-1; q++)
+                  {
+                     double vq=(double)(InpVpRealVolume && r[q].real_volume>0
+                                        ? r[q].real_volume : r[q].tick_volume);
+                     if(vq>0.0){ vSum+=vq; vN++; }
+                  }
+                  double vCur=(double)(InpVpRealVolume && r[kb-1].real_volume>0
+                                       ? r[kb-1].real_volume : r[kb-1].tick_volume);
+                  if(vN>0 && vSum>0.0) volRatV=vCur/(vSum/vN);
                }
-               double vC=0.0, vR=50.0, vZ=0.0;
+               double vC=0.0, vR=50.0, vZ=0.0; int extR=0;
                if(nIndT[mainIx]>0)
                {
                   int ii=IndIdxAt(iTime,mainIx,nIndT[mainIx],indSec[mainIx],r[kb].time);
-                  if(ii>=need){ vC=iCci[ii][mainIx]; vR=iRsi[ii][mainIx]; vZ=iZs[ii][mainIx]; }
+                  if(ii>=need)
+                  {
+                     vC=iCci[ii][mainIx]; vR=iRsi[ii][mainIx]; vZ=iZs[ii][mainIx];
+                     // si guarda INDIETRO dalla barra indicatore gia' chiusa:
+                     // il piu' recente estremo vince, se non ce ne sono resta 0
+                     for(int q=ii; q>ii-InpOrbExtBars && q>=need; q--)
+                     {
+                        if(iRsi[q][mainIx]>InpRsiHigh || iZs[q][mainIx]> InpZsHigh){ extR=+1; break; }
+                        if(iRsi[q][mainIx]<InpRsiLow  || iZs[q][mainIx]< InpZsLow ){ extR=-1; break; }
+                     }
+                  }
                }
                MqlDateTime bt2; TimeToStruct(r[kb].time,bt2);
                ArrayResize(g_bk,g_nBk+1,65536);
@@ -3427,6 +3462,9 @@ bool ProcessSymbol(string sym)
                g_bk[g_nBk].compr=(float)compr;
                g_bk[g_nBk].clv  =(float)clvV;
                g_bk[g_nBk].expTr=(float)expV;
+               g_bk[g_nBk].wick =(float)wickV;
+               g_bk[g_nBk].volRat=(float)volRatV;
+               g_bk[g_nBk].extRec=(char)extR;
                g_bk[g_nBk].cost=(float)costAtr;
                g_bk[g_nBk].stopAtr=(float)stopAtr;
                g_bk[g_nBk].vpVolPos=(float)winVolPos;
@@ -6246,7 +6284,7 @@ void BuildOrb(string sym,string dir)
 
    // I nomi si costruiscono una volta sola: dentro il ciclo sui breakout
    // sarebbero decine di migliaia di concatenazioni di stringa per niente.
-   string fName[24];
+   string fName[29];
    fName[0] ="nessun filtro (tutte le rotture)";
    fName[1] ="CCI concorde oltre "+F(InpCciCross,0);
    fName[2] ="CCI concorde (solo segno)";
@@ -6271,6 +6309,11 @@ void BuildOrb(string sym,string dir)
    fName[21]="chiusura pre-rottura contro (CLV sotto -0.50)";
    fName[22]="barra pre-rottura in espansione (TR/TRmedio oltre 1.80)";
    fName[23]="barra pre-rottura compressa (TR/TRmedio entro 1.00)";
+   fName[24]="estremo OPPOSTO nelle ultime "+IntegerToString(InpOrbExtBars)+" barre (esaurimento recente)";
+   fName[25]="estremo CONCORDE nelle ultime "+IntegerToString(InpOrbExtBars)+" barre (spinta recente)";
+   fName[26]="nessun estremo nelle ultime "+IntegerToString(InpOrbExtBars)+" barre";
+   fName[27]="ombra grande dal lato della rottura (oltre 0.40 del range)";
+   fName[28]="volume pre-rottura oltre 1.50 volte la media";
 
    // La tabella dei filtri finiva solo nell'HTML. Ogni riga porta ora anche
    // la quota di esiti risolti e i due estremi (irrisolto contato come perdita
@@ -6284,7 +6327,7 @@ void BuildOrb(string sym,string dir)
             "E_atr;delta_E_atr;mfe_medio;mae_medio\r\n");
 
    double baseE=0.0;
-   for(int f=0; f<24; f++)
+   for(int f=0; f<29; f++)
    {
       string nm=fName[f];
       int n=0, wn=0, ls=0, fl=0; double sM=0.0, sA=0.0, sP=0.0, sC=0.0, sT=0.0;
@@ -6321,6 +6364,11 @@ void BuildOrb(string sym,string dir)
             case 21: ok=(g_bk[b].clv < -0.50); break;
             case 22: ok=(g_bk[b].expTr > 1.80); break;
             case 23: ok=(g_bk[b].expTr > 0.0 && g_bk[b].expTr <= 1.00); break;
+            case 24: ok=(dr*(int)g_bk[b].extRec < 0); break;
+            case 25: ok=(dr*(int)g_bk[b].extRec > 0); break;
+            case 26: ok=((int)g_bk[b].extRec == 0); break;
+            case 27: ok=(g_bk[b].wick > 0.40); break;
+            case 28: ok=(g_bk[b].volRat > 1.50); break;
          }
          if(!ok) continue;
          n++;
@@ -7152,7 +7200,7 @@ void BuildOrb(string sym,string dir)
       int fF=FileOpen(dir+fn+"_orb_breakout.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
       if(fF!=INVALID_HANDLE)
       {
-         W(fF,"finestra;giorno;ora;direzione;esito;anno;clv;espansione_tr;range_atr;compressione;target_atr;intensita_atr;"
+         W(fF,"finestra;giorno;ora;direzione;esito;anno;clv;espansione_tr;ombra;volume_rel;estremo_recente;range_atr;compressione;target_atr;intensita_atr;"
               "volatilita_atr;cci;rsi;zscore;mfe_atr;mae_atr;min_alla_rottura;"
               "vp_stato;vp_dist_poc_atr;vp_larghezza_va_atr;vp_pos_volume");
          for(int z=0;z<g_nVa;z++) W(fF,";vp_stato_"+F(g_vaPct[z],0));
@@ -7164,7 +7212,8 @@ void BuildOrb(string sym,string dir)
             W(fF,OrbLab(g_orbSel)+";"+DowIT((int)g_bk[b].dow)+";"+D2((int)g_bk[b].hour)+":00;"+
                  (g_bk[b].dir>0?"UP":"DOWN")+";"+
                  (g_bk[b].res>0?"TARGET":(g_bk[b].res<0?"STOP":"IRRISOLTO"))+";"+
-                 IntegerToString(g_bk[b].year)+";"+F(g_bk[b].clv,4)+";"+F(g_bk[b].expTr,4)+";"+
+                 IntegerToString(g_bk[b].year)+";"+F(g_bk[b].clv,4)+";"+F(g_bk[b].expTr,4)+";"+F(g_bk[b].wick,4)+";"+
+                 F(g_bk[b].volRat,4)+";"+IntegerToString((int)g_bk[b].extRec)+";"+
                  F(g_bk[b].rangeAtr,4)+";"+F(g_bk[b].compr,4)+";"+
                  F(g_bk[b].tgt,4)+";"+F(g_bk[b].mom,4)+";"+
                  F(g_bk[b].vol,4)+";"+F(g_bk[b].cci,2)+";"+F(g_bk[b].rsi,2)+";"+F(g_bk[b].zs,3)+";"+
