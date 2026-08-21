@@ -6081,11 +6081,22 @@ void BuildOrb(string sym,string dir)
    fName[18]="CCI concorde + compressione entro mediana";
    fName[19]="CCI concorde + intensita' concorde";
 
+   // La tabella dei filtri finiva solo nell'HTML. Ogni riga porta ora anche
+   // la quota di esiti risolti e i due estremi (irrisolto contato come perdita
+   // e come vincita): senza quei tre numeri un gradiente di win rate non si
+   // distingue da un effetto di troncamento dell'orizzonte.
+   int fB2=(InpWriteCsv? FileOpen(dir+fn+"_orb_condizioni.csv",
+                                  FILE_WRITE|FILE_CSV|FILE_ANSI,';') : INVALID_HANDLE);
+   if(fB2!=INVALID_HANDLE)
+      W(fB2,"finestra;filtro;n;perc_dei_breakout;perc_risolte;target_medio_atr;"
+            "win_perc;wlow_perc;win_irrisolti_come_perdita;win_irrisolti_come_vincita;"
+            "E_atr;delta_E_atr;mfe_medio;mae_medio\r\n");
+
    double baseE=0.0;
    for(int f=0; f<20; f++)
    {
       string nm=fName[f];
-      int n=0, wn=0, ls=0, fl=0; double sM=0.0, sA=0.0, sP=0.0, sC=0.0;
+      int n=0, wn=0, ls=0, fl=0; double sM=0.0, sA=0.0, sP=0.0, sC=0.0, sT=0.0;
       for(int q=0;q<nSel;q++)
       {
          int b=sel[q];
@@ -6119,7 +6130,7 @@ void BuildOrb(string sym,string dir)
          if(!ok) continue;
          n++;
          if(g_bk[b].res>0) wn++; else if(g_bk[b].res<0) ls++; else fl++;
-         sM+=g_bk[b].mfe; sA+=g_bk[b].mae;
+         sM+=g_bk[b].mfe; sA+=g_bk[b].mae; sT+=g_bk[b].tgt;
          // ogni rottura ha il suo target: si somma il risultato realizzato,
          // non lo si ricostruisce da una media che non e' mai stata usata
          sP+=(g_bk[b].res>0 ? g_bk[b].tgt
@@ -6140,8 +6151,17 @@ void BuildOrb(string sym,string dir)
         (n>0?F(100.0*fl/n,1):"-")+"</td><td class=\""+(e>0?"up":"dn")+"\">"+F(e,3)+"</td><td class=\""+cd+
         "\"><b>"+(f==0?"-":F(de,3))+"</b></td><td>"+(n>0?F(sM/n,2):"-")+"</td><td>"+
         (n>0?F(sA/n,2):"-")+"</td></tr>");
+      if(fB2!=INVALID_HANDLE)
+         W(fB2,OrbLab(g_orbSel)+";"+nm+";"+IntegerToString(n)+";"+
+               F(100.0*n/MathMax(1,nSel),1)+";"+F(100.0*res/MathMax(1,n),1)+";"+
+               F(sT/MathMax(1,n),4)+";"+
+               (res>0?F(100.0*wn/res,2):"")+";"+F(wl,2)+";"+
+               F(100.0*wn/MathMax(1,n),2)+";"+F(100.0*(wn+fl)/MathMax(1,n),2)+";"+
+               F(e,5)+";"+(f==0?"":F(de,5))+";"+F(sM/MathMax(1,n),4)+";"+
+               F(sA/MathMax(1,n),4)+"\r\n");
    }
    HtmlTableEnd();
+   if(fB2!=INVALID_HANDLE) FileClose(fB2);
 
    //--- ora della rottura
    H("<h2>A che ora avviene la rottura</h2><div class=\"note\">"
