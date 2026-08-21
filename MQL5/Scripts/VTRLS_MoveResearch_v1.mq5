@@ -1828,6 +1828,10 @@ struct SBrk
    char  dir, res;                 // res +1 target, -1 stop, 0 irrisolto
    int   year;
    float rangeAtr, mom, vol, cci, rsi, zs, mfe, mae, ttb, tgt, compr, cost, stopAtr;
+   // clv: dove ha chiuso l'ultima barra prima della rottura dentro il proprio
+   // range, in [-1,+1] e col segno girato nella direzione della rottura.
+   // expTr: True Range di quella barra diviso il TR medio recente.
+   float clv, expTr;
    char  resR[ORB_MAXRR];
    // volume profile del giorno precedente, letto al momento della rottura
    float vpPocDist;              // (entry - POC) in ATR, col segno della rottura
@@ -3372,6 +3376,30 @@ bool ProcessSymbol(string sym)
                   mom=((r[kb-1].close-r[m0].open)/g_point)/atrPt*dir;
                   for(int q=m0;q<=kb-1;q++) vol+=((r[q].high-r[q].low)/g_point)/atrPt;
                }
+               // Close Location Value ed espansione del True Range: entrambe
+               // leggono la barra kb-1, l'ultima chiusa prima della rottura.
+               // Il CLV e' il termine dominante del "synthetic delta" letto
+               // in giro: fracBuy-fracSell = 2*(close-low)/range-1. Il peso
+               // volumetrico che gli si moltiplica sopra e' sempre positivo,
+               // quindi puo' cambiare l'ampiezza ma mai il segno.
+               double clvV=0.0, expV=0.0;
+               if(kb-1>=1)
+               {
+                  double hiB=r[kb-1].high, loB=r[kb-1].low, clB=r[kb-1].close;
+                  double rgB=hiB-loB;
+                  if(rgB>0.0) clvV=(2.0*(clB-loB)/rgB-1.0)*dir;
+                  double pcB=r[kb-2>=0? kb-2 : kb-1].close;
+                  double trB=MathMax(hiB-loB,MathMax(MathAbs(hiB-pcB),MathAbs(loB-pcB)));
+                  double trS=0.0; int trN=0;
+                  for(int q=(m0>1? m0 : 1); q<=kb-1; q++)
+                  {
+                     double p2=r[q-1].close;
+                     trS+=MathMax(r[q].high-r[q].low,
+                                  MathMax(MathAbs(r[q].high-p2),MathAbs(r[q].low-p2)));
+                     trN++;
+                  }
+                  if(trN>0 && trS>0.0) expV=trB/(trS/trN);
+               }
                double vC=0.0, vR=50.0, vZ=0.0;
                if(nIndT[mainIx]>0)
                {
@@ -3397,6 +3425,8 @@ bool ProcessSymbol(string sym)
                g_bk[g_nBk].ttb=(float)ttb;
                g_bk[g_nBk].tgt=(float)tgtAtr;
                g_bk[g_nBk].compr=(float)compr;
+               g_bk[g_nBk].clv  =(float)clvV;
+               g_bk[g_nBk].expTr=(float)expV;
                g_bk[g_nBk].cost=(float)costAtr;
                g_bk[g_nBk].stopAtr=(float)stopAtr;
                g_bk[g_nBk].vpVolPos=(float)winVolPos;
@@ -6216,7 +6246,7 @@ void BuildOrb(string sym,string dir)
 
    // I nomi si costruiscono una volta sola: dentro il ciclo sui breakout
    // sarebbero decine di migliaia di concatenazioni di stringa per niente.
-   string fName[20];
+   string fName[24];
    fName[0] ="nessun filtro (tutte le rotture)";
    fName[1] ="CCI concorde oltre "+F(InpCciCross,0);
    fName[2] ="CCI concorde (solo segno)";
@@ -6237,6 +6267,10 @@ void BuildOrb(string sym,string dir)
    fName[17]="rottura lenta";
    fName[18]="CCI concorde + compressione entro mediana";
    fName[19]="CCI concorde + intensita' concorde";
+   fName[20]="chiusura pre-rottura a favore (CLV oltre +0.50)";
+   fName[21]="chiusura pre-rottura contro (CLV sotto -0.50)";
+   fName[22]="barra pre-rottura in espansione (TR/TRmedio oltre 1.80)";
+   fName[23]="barra pre-rottura compressa (TR/TRmedio entro 1.00)";
 
    // La tabella dei filtri finiva solo nell'HTML. Ogni riga porta ora anche
    // la quota di esiti risolti e i due estremi (irrisolto contato come perdita
@@ -6250,7 +6284,7 @@ void BuildOrb(string sym,string dir)
             "E_atr;delta_E_atr;mfe_medio;mae_medio\r\n");
 
    double baseE=0.0;
-   for(int f=0; f<20; f++)
+   for(int f=0; f<24; f++)
    {
       string nm=fName[f];
       int n=0, wn=0, ls=0, fl=0; double sM=0.0, sA=0.0, sP=0.0, sC=0.0, sT=0.0;
@@ -6283,6 +6317,10 @@ void BuildOrb(string sym,string dir)
             case 17: ok=(tt> t50); break;
             case 18: ok=(dr*cc>InpCciCross && rg<=q50); break;
             case 19: ok=(dr*cc>InpCciCross && mo>InpOrbMomMinAtr); break;
+            case 20: ok=(g_bk[b].clv >  0.50); break;
+            case 21: ok=(g_bk[b].clv < -0.50); break;
+            case 22: ok=(g_bk[b].expTr > 1.80); break;
+            case 23: ok=(g_bk[b].expTr > 0.0 && g_bk[b].expTr <= 1.00); break;
          }
          if(!ok) continue;
          n++;
@@ -7114,7 +7152,7 @@ void BuildOrb(string sym,string dir)
       int fF=FileOpen(dir+fn+"_orb_breakout.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
       if(fF!=INVALID_HANDLE)
       {
-         W(fF,"finestra;giorno;ora;direzione;esito;anno;range_atr;compressione;target_atr;intensita_atr;"
+         W(fF,"finestra;giorno;ora;direzione;esito;anno;clv;espansione_tr;range_atr;compressione;target_atr;intensita_atr;"
               "volatilita_atr;cci;rsi;zscore;mfe_atr;mae_atr;min_alla_rottura;"
               "vp_stato;vp_dist_poc_atr;vp_larghezza_va_atr;vp_pos_volume");
          for(int z=0;z<g_nVa;z++) W(fF,";vp_stato_"+F(g_vaPct[z],0));
@@ -7126,7 +7164,8 @@ void BuildOrb(string sym,string dir)
             W(fF,OrbLab(g_orbSel)+";"+DowIT((int)g_bk[b].dow)+";"+D2((int)g_bk[b].hour)+":00;"+
                  (g_bk[b].dir>0?"UP":"DOWN")+";"+
                  (g_bk[b].res>0?"TARGET":(g_bk[b].res<0?"STOP":"IRRISOLTO"))+";"+
-                 IntegerToString(g_bk[b].year)+";"+F(g_bk[b].rangeAtr,4)+";"+F(g_bk[b].compr,4)+";"+
+                 IntegerToString(g_bk[b].year)+";"+F(g_bk[b].clv,4)+";"+F(g_bk[b].expTr,4)+";"+
+                 F(g_bk[b].rangeAtr,4)+";"+F(g_bk[b].compr,4)+";"+
                  F(g_bk[b].tgt,4)+";"+F(g_bk[b].mom,4)+";"+
                  F(g_bk[b].vol,4)+";"+F(g_bk[b].cci,2)+";"+F(g_bk[b].rsi,2)+";"+F(g_bk[b].zs,3)+";"+
                  F(g_bk[b].mfe,4)+";"+F(g_bk[b].mae,4)+";"+F(g_bk[b].ttb,1)+";"+
