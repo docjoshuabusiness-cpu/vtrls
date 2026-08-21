@@ -6438,6 +6438,114 @@ void BuildOrb(string sym,string dir)
    HtmlTableEnd();
    if(fB2!=INVALID_HANDLE) FileClose(fB2);
 
+   //=================================================================
+   //  Quando arriva la rottura: quattro tabelle che finivano solo
+   //  nell'HTML. Il blocco e' autonomo - ricalcola quello che gli
+   //  serve invece di intrecciarsi con le tabelle sotto - cosi' il
+   //  CSV esce anche se un domani l'HTML cambia forma.
+   //=================================================================
+   if(InpWriteCsv)
+   {
+      int fT2=FileOpen(dir+fn+"_orb_tempi.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+      if(fT2!=INVALID_HANDLE)
+      {
+         W(fT2,"tabella;chiave;dettaglio;n;perc_dei_breakout;perc_up;perc_risolte;"
+               "win_perc;wlow_perc;win_irrisolti_come_perdita;win_irrisolti_come_vincita;"
+               "E_atr;mfe_medio;mae_medio\r\n");
+
+         //--- ora della rottura
+         for(int h=0;h<24;h++)
+         {
+            int n=0, wn=0, ls=0, fl=0, up=0; double sM=0,sA=0,sP=0,sC=0;
+            for(int q=0;q<nSel;q++)
+            {
+               int b=sel[q];
+               if((int)g_bk[b].hour!=h) continue;
+               n++;
+               if(g_bk[b].dir>0) up++;
+               if(g_bk[b].res>0) wn++; else if(g_bk[b].res<0) ls++; else fl++;
+               sM+=g_bk[b].mfe; sA+=g_bk[b].mae; sC+=g_bk[b].cost;
+               sP+=(g_bk[b].res>0 ? g_bk[b].tgt
+                                  : (g_bk[b].res<0 ? -g_bk[b].tgt*OrbRatio() : 0.0));
+            }
+            if(n<20) continue;
+            int res=wn+ls;
+            W(fT2,"ora_rottura;"+D2(h)+":00;;"+IntegerToString(n)+";"+
+                  F(100.0*n/MathMax(1,nSel),2)+";"+F(100.0*up/n,2)+";"+
+                  F(100.0*res/n,2)+";"+(res>0?F(100.0*wn/res,2):"")+";"+
+                  F(res>0?100.0*WilsonLowInd(wn,res):0.0,2)+";"+
+                  F(100.0*wn/n,2)+";"+F(100.0*(wn+fl)/n,2)+";"+
+                  F((sP-sC)/n,5)+";"+F(sM/n,4)+";"+F(sA/n,4)+"\r\n");
+         }
+
+         //--- giorno x ora, griglia intera (non solo le prime posizioni)
+         for(int d=1;d<=5;d++)
+         {
+            int dn=0, dw=0, dl=0, df=0, du=0; double dM=0,dA=0,dP=0,dC=0;
+            for(int h=0;h<24;h++)
+            {
+               int n=0, wn=0, ls=0, fl=0, up=0; double sM=0,sA=0,sP=0,sC=0;
+               for(int q=0;q<nSel;q++)
+               {
+                  int b=sel[q];
+                  if((int)g_bk[b].dow!=d || (int)g_bk[b].hour!=h) continue;
+                  n++;
+                  if(g_bk[b].dir>0) up++;
+                  if(g_bk[b].res>0) wn++; else if(g_bk[b].res<0) ls++; else fl++;
+                  sM+=g_bk[b].mfe; sA+=g_bk[b].mae; sC+=g_bk[b].cost;
+                  sP+=(g_bk[b].res>0 ? g_bk[b].tgt
+                                     : (g_bk[b].res<0 ? -g_bk[b].tgt*OrbRatio() : 0.0));
+               }
+               dn+=n; dw+=wn; dl+=ls; df+=fl; du+=up;
+               dM+=sM; dA+=sA; dP+=sP; dC+=sC;
+               if(n<20) continue;
+               int res=wn+ls;
+               W(fT2,"giorno_ora;"+DowIT(d)+";"+D2(h)+":00;"+IntegerToString(n)+";"+
+                     F(100.0*n/MathMax(1,nSel),2)+";"+F(100.0*up/n,2)+";"+
+                     F(100.0*res/n,2)+";"+(res>0?F(100.0*wn/res,2):"")+";"+
+                     F(res>0?100.0*WilsonLowInd(wn,res):0.0,2)+";"+
+                     F(100.0*wn/n,2)+";"+F(100.0*(wn+fl)/n,2)+";"+
+                     F((sP-sC)/n,5)+";"+F(sM/n,4)+";"+F(sA/n,4)+"\r\n");
+            }
+            if(dn<20) continue;
+            int dres=dw+dl;
+            W(fT2,"per_giorno;"+DowIT(d)+";;"+IntegerToString(dn)+";"+
+                  F(100.0*dn/MathMax(1,nSel),2)+";"+F(100.0*du/dn,2)+";"+
+                  F(100.0*dres/dn,2)+";"+(dres>0?F(100.0*dw/dres,2):"")+";"+
+                  F(dres>0?100.0*WilsonLowInd(dw,dres):0.0,2)+";"+
+                  F(100.0*dw/dn,2)+";"+F(100.0*(dw+df)/dn,2)+";"+
+                  F((dP-dC)/dn,5)+";"+F(dM/dn,4)+";"+F(dA/dn,4)+"\r\n");
+         }
+
+         //--- migliore finestra per giorno della settimana, su TUTTA la
+         // griglia delle finestre: non e' la finestra selezionata, e' la
+         // domanda "il lunedi' converrebbe guardare un'altra finestra?"
+         for(int d=1;d<=5;d++)
+         {
+            int bi=-1; double bv=-1e9;
+            for(int i=0;i<g_nOrb;i++)
+            {
+               if(g_orb[i].dN[d]<InpOrbMinN/3) continue;
+               int rs=g_orb[i].dRes[d];
+               if(rs<20) continue;
+               double pb=(double)g_orb[i].dBrk[d]/(double)g_orb[i].dN[d];
+               int wn=g_orb[i].dWin[d];
+               double v=100.0*pb*OrbExpLow(wn,rs-wn,g_orb[i].dBrk[d]-rs,OrbTgt(i));
+               if(v>bv){ bv=v; bi=i; }
+            }
+            if(bi<0) continue;
+            int rs=g_orb[bi].dRes[d], wn=g_orb[bi].dWin[d];
+            int br=g_orb[bi].dBrk[d], gg=g_orb[bi].dN[d];
+            W(fT2,"finestra_per_giorno;"+DowIT(d)+";"+OrbLab(bi)+";"+IntegerToString(gg)+";"+
+                  F(100.0*br/MathMax(1,gg),2)+";;"+F(100.0*rs/MathMax(1,br),2)+";"+
+                  (rs>0?F(100.0*wn/rs,2):"")+";"+F(rs>0?100.0*WilsonLowInd(wn,rs):0.0,2)+";"+
+                  F(100.0*wn/MathMax(1,br),2)+";"+F(100.0*(wn+br-rs)/MathMax(1,br),2)+";"+
+                  F(OrbExp(wn,rs-wn,br-rs,OrbTgt(bi)),5)+";;\r\n");
+         }
+         FileClose(fT2);
+      }
+   }
+
    //--- ora della rottura
    H("<h2>A che ora avviene la rottura</h2><div class=\"note\">"
      "La finestra dice <b>dove guardare</b>, questa tabella dice <b>quando arriva</b> il segnale e se l'ora "
