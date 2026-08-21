@@ -1842,6 +1842,13 @@ struct SBrk
    // volRat: volume tick di quella barra sulla media delle precedenti.
    char  extRec;
    float wick, volRat;
+   // ent: entropia di Shannon delle quattro transizioni di segno
+   // (su-su, su-giu', giu'-su, giu'-giu') nelle barre che precedono la
+   // rottura, normalizzata in [0,1]. Misura una cosa che la compressione
+   // NON misura: la compressione guarda l'ampiezza, questa guarda
+   // l'ORDINE della sequenza. Un range largo puo' essere ordinato e uno
+   // stretto puo' essere puro rumore.
+   float ent;
    char  resR[ORB_MAXRR];
    // volume profile del giorno precedente, letto al momento della rottura
    float vpPocDist;              // (entry - POC) in ATR, col segno della rottura
@@ -3392,7 +3399,7 @@ bool ProcessSymbol(string sym)
                // in giro: fracBuy-fracSell = 2*(close-low)/range-1. Il peso
                // volumetrico che gli si moltiplica sopra e' sempre positivo,
                // quindi puo' cambiare l'ampiezza ma mai il segno.
-               double clvV=0.0, expV=0.0, wickV=0.0, volRatV=0.0;
+               double clvV=0.0, expV=0.0, wickV=0.0, volRatV=0.0, entV=0.0;
                if(kb-1>=1)
                {
                   double hiB=r[kb-1].high, loB=r[kb-1].low, clB=r[kb-1].close;
@@ -3424,6 +3431,26 @@ bool ProcessSymbol(string sym)
                   double vCur=(double)(InpVpRealVolume && r[kb-1].real_volume>0
                                        ? r[kb-1].real_volume : r[kb-1].tick_volume);
                   if(vN>0 && vSum>0.0) volRatV=vCur/(vSum/vN);
+
+                  // entropia delle transizioni di segno. Le barre piatte non
+                  // sono una transizione: si saltano invece di inventare uno
+                  // stato che falserebbe la distribuzione.
+                  int cT[4]={0,0,0,0}; int totT=0, prevS=0;
+                  for(int q=(m0>0? m0 : 1); q<=kb-1; q++)
+                  {
+                     int sg=(r[q].close>r[q-1].close ? 1
+                            :(r[q].close<r[q-1].close ? -1 : 0));
+                     if(sg==0) continue;
+                     if(prevS!=0){ cT[(prevS>0?0:2)+(sg>0?0:1)]++; totT++; }
+                     prevS=sg;
+                  }
+                  if(totT>=8)
+                  {
+                     double hh2=0.0;
+                     for(int z=0;z<4;z++)
+                        if(cT[z]>0){ double pz=(double)cT[z]/totT; hh2-=pz*MathLog(pz); }
+                     entV=hh2/MathLog(4.0);
+                  }
                }
                double vC=0.0, vR=50.0, vZ=0.0; int extR=0;
                if(nIndT[mainIx]>0)
@@ -3465,6 +3492,7 @@ bool ProcessSymbol(string sym)
                g_bk[g_nBk].wick =(float)wickV;
                g_bk[g_nBk].volRat=(float)volRatV;
                g_bk[g_nBk].extRec=(char)extR;
+               g_bk[g_nBk].ent  =(float)entV;
                g_bk[g_nBk].cost=(float)costAtr;
                g_bk[g_nBk].stopAtr=(float)stopAtr;
                g_bk[g_nBk].vpVolPos=(float)winVolPos;
@@ -6284,7 +6312,7 @@ void BuildOrb(string sym,string dir)
 
    // I nomi si costruiscono una volta sola: dentro il ciclo sui breakout
    // sarebbero decine di migliaia di concatenazioni di stringa per niente.
-   string fName[29];
+   string fName[31];
    fName[0] ="nessun filtro (tutte le rotture)";
    fName[1] ="CCI concorde oltre "+F(InpCciCross,0);
    fName[2] ="CCI concorde (solo segno)";
@@ -6314,6 +6342,8 @@ void BuildOrb(string sym,string dir)
    fName[26]="nessun estremo nelle ultime "+IntegerToString(InpOrbExtBars)+" barre";
    fName[27]="ombra grande dal lato della rottura (oltre 0.40 del range)";
    fName[28]="volume pre-rottura oltre 1.50 volte la media";
+   fName[29]="sequenza ORDINATA prima della rottura (entropia entro 0.90)";
+   fName[30]="sequenza CASUALE prima della rottura (entropia oltre 0.97)";
 
    // La tabella dei filtri finiva solo nell'HTML. Ogni riga porta ora anche
    // la quota di esiti risolti e i due estremi (irrisolto contato come perdita
@@ -6327,7 +6357,7 @@ void BuildOrb(string sym,string dir)
             "E_atr;delta_E_atr;mfe_medio;mae_medio\r\n");
 
    double baseE=0.0;
-   for(int f=0; f<29; f++)
+   for(int f=0; f<31; f++)
    {
       string nm=fName[f];
       int n=0, wn=0, ls=0, fl=0; double sM=0.0, sA=0.0, sP=0.0, sC=0.0, sT=0.0;
@@ -6369,6 +6399,8 @@ void BuildOrb(string sym,string dir)
             case 26: ok=((int)g_bk[b].extRec == 0); break;
             case 27: ok=(g_bk[b].wick > 0.40); break;
             case 28: ok=(g_bk[b].volRat > 1.50); break;
+            case 29: ok=(g_bk[b].ent > 0.0 && g_bk[b].ent <= 0.90); break;
+            case 30: ok=(g_bk[b].ent > 0.97); break;
          }
          if(!ok) continue;
          n++;
@@ -7200,7 +7232,7 @@ void BuildOrb(string sym,string dir)
       int fF=FileOpen(dir+fn+"_orb_breakout.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
       if(fF!=INVALID_HANDLE)
       {
-         W(fF,"finestra;giorno;ora;direzione;esito;anno;clv;espansione_tr;ombra;volume_rel;estremo_recente;range_atr;compressione;target_atr;intensita_atr;"
+         W(fF,"finestra;giorno;ora;direzione;esito;anno;clv;espansione_tr;ombra;volume_rel;estremo_recente;entropia;range_atr;compressione;target_atr;intensita_atr;"
               "volatilita_atr;cci;rsi;zscore;mfe_atr;mae_atr;min_alla_rottura;"
               "vp_stato;vp_dist_poc_atr;vp_larghezza_va_atr;vp_pos_volume");
          for(int z=0;z<g_nVa;z++) W(fF,";vp_stato_"+F(g_vaPct[z],0));
@@ -7213,7 +7245,7 @@ void BuildOrb(string sym,string dir)
                  (g_bk[b].dir>0?"UP":"DOWN")+";"+
                  (g_bk[b].res>0?"TARGET":(g_bk[b].res<0?"STOP":"IRRISOLTO"))+";"+
                  IntegerToString(g_bk[b].year)+";"+F(g_bk[b].clv,4)+";"+F(g_bk[b].expTr,4)+";"+F(g_bk[b].wick,4)+";"+
-                 F(g_bk[b].volRat,4)+";"+IntegerToString((int)g_bk[b].extRec)+";"+
+                 F(g_bk[b].volRat,4)+";"+IntegerToString((int)g_bk[b].extRec)+";"+F(g_bk[b].ent,4)+";"+
                  F(g_bk[b].rangeAtr,4)+";"+F(g_bk[b].compr,4)+";"+
                  F(g_bk[b].tgt,4)+";"+F(g_bk[b].mom,4)+";"+
                  F(g_bk[b].vol,4)+";"+F(g_bk[b].cci,2)+";"+F(g_bk[b].rsi,2)+";"+F(g_bk[b].zs,3)+";"+
