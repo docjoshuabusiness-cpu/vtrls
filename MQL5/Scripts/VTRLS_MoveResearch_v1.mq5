@@ -181,8 +181,8 @@ input int             InpOrbExtBars     = 10;              // Barre indicatore i
 input bool            InpDoStopSweep    = true;            // Calibra lo stop sulla finestra dichiarata sotto
 input int             InpSweepStartMin  = 540;             // Finestra della calibrazione: inizio (minuti da mezzanotte)
 input int             InpSweepDurMin    = 60;              // Finestra della calibrazione: durata
-input string          InpStopSweep      = "0.5,0.75,1,1.25,1.5,2";  // Stop ancorati all'ATR: moltiplicatori dello stop base
-input string          InpStopSweepPt    = "50,75,100,150,200,300";  // Stop in PUNTI fissi (vuoto = non testarli)
+input string          InpStopSweep      = "0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.25,1.4,1.6,1.8,2,2.25,2.5,2.75,3,3.5,4";  // Stop ancorati all'ATR: moltiplicatori dello stop base
+input string          InpStopSweepPt    = "30,40,50,60,70,80,90,100,115,130,145,160,180,200,225,250,280,320,360,400";   // Stop in PUNTI fissi (vuoto = non testarli)
 
 input bool            InpDoStrength     = true;            // Forza relativa cross-sectional delle valute
 input ENUM_TIMEFRAMES InpStrTF          = PERIOD_H1;      // TF su cui misurare la forza
@@ -2041,7 +2041,12 @@ string PvBinLab(int b)
 // Per questo la tabella ha anche la spaccatura prima meta' / seconda meta':
 // se il valore migliore in punti cambia fra le due, quel valore non si
 // trasferisce in avanti e la scelta va fatta in ATR.
-#define SW_MAXST 16
+//
+// Quella spaccatura non e' un di piu': con 20 stop per famiglia e 6 rapporti
+// si guardano 240 combinazioni, e il massimo di 240 estrazioni da una
+// distribuzione nulla sta gia' intorno a z 2.9. La cella migliore SEMBRERA'
+// sempre buona. L'unica difesa e' che sia la stessa nelle due meta'.
+#define SW_MAXST 48
 #define SW_NB    7   // 0-3 fasce VA, 4 tutte, 5 prima meta', 6 seconda meta'
 double g_swVal[SW_MAXST]; bool g_swIsPt[SW_MAXST]; int g_nSw=0;
 int    g_swN[SW_MAXST][SW_NB];
