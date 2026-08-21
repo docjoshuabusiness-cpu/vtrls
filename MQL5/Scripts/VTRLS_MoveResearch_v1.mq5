@@ -178,6 +178,11 @@ input double          InpPrevStopAtr    = 0.25;            // Stop in ATR(D-1): 
 
 input int             InpOrbExtBars     = 10;              // Barre indicatore in cui cercare un estremo RSI/Z PRIMA della rottura
 
+input bool            InpDoStopSweep    = true;            // Calibra lo stop sulla finestra dichiarata sotto
+input int             InpSweepStartMin  = 540;             // Finestra della calibrazione: inizio (minuti da mezzanotte)
+input int             InpSweepDurMin    = 60;              // Finestra della calibrazione: durata
+input string          InpStopSweep      = "0.5,0.75,1,1.25,1.5,2";  // Moltiplicatori dello stop base
+
 input string          sVp               = "=== VOLUME PROFILE (POC / VAH / VAL del giorno precedente) ===";
 input bool            InpDoVp           = true;            // Calcola il profilo volumi del giorno precedente
 input int             InpVpLevels       = 50;              // Livelli di prezzo del profilo
@@ -1999,6 +2004,64 @@ string PvBinLab(int b)
    return F(g_pvEdge[b-1],2)+" - "+F(g_pvEdge[b],2)+" ATR";
 }
 
+//==================================================================
+// CALIBRAZIONE DELLO STOP
+//------------------------------------------------------------------
+// Lo stop non e' mai stato scelto: e' sempre stato una frazione fissa
+// del range e basta. Ma tre simboli dicono che nei giorni a Value Area
+// stretta l'MAE e' dal 9% al 21% piu' basso, cioe' lo stop attuale e'
+// tarato sulla popolazione sbagliata.
+//
+// Due vincoli di metodo, entrambi imparati a spese di questo dataset:
+//  - la finestra e' DICHIARATA da input, non scelta dai dati. Misurare
+//    lo stop sulla finestra che i dati hanno gia' eletto migliore
+//    somma due selezioni sullo stesso campione.
+//  - la spazzata gira dentro lo stesso ciclo di barre della risoluzione
+//    normale: stessi bar letti, solo piu' confronti. Un secondo passaggio
+//    moltiplicherebbe il costo per il numero di stop testati.
+#define SW_MAXST 8
+#define SW_NB    5              // 4 fasce di ampiezza VA + "tutte"
+double g_sw[SW_MAXST]; int g_nSw=0;
+int g_swN[SW_MAXST][SW_NB];
+int g_swW[SW_MAXST][ORB_MAXRR][SW_NB];
+int g_swL[SW_MAXST][ORB_MAXRR][SW_NB];
+int g_swF[SW_MAXST][ORB_MAXRR][SW_NB];
+
+void SwReset()
+{
+   g_nSw=0;
+   for(int m=0;m<SW_MAXST;m++)
+   {
+      for(int b=0;b<SW_NB;b++) g_swN[m][b]=0;
+      for(int z=0;z<ORB_MAXRR;z++)
+         for(int b=0;b<SW_NB;b++){ g_swW[m][z][b]=0; g_swL[m][z][b]=0; g_swF[m][z][b]=0; }
+   }
+   if(!InpDoStopSweep) return;
+   double v[]; int nv=ParseDoubles(InpStopSweep,v);
+   for(int i=0;i<nv && g_nSw<SW_MAXST;i++)
+      if(v[i]>0.0){ g_sw[g_nSw]=v[i]; g_nSw++; }
+}
+
+// stesse soglie della tabella ampiezza VA, cosi' le due tabelle si leggono
+// una accanto all'altra senza dover riconvertire niente
+int SwBin(double vaAtr)
+{
+   if(vaAtr<=0.0)  return -1;
+   if(vaAtr<=0.40) return 0;
+   if(vaAtr<=0.70) return 1;
+   if(vaAtr<=1.00) return 2;
+   return 3;
+}
+
+string SwBinLab(int b)
+{
+   if(b==0) return "VA entro 0.40 ATR (stretta)";
+   if(b==1) return "VA 0.40 - 0.70 ATR";
+   if(b==2) return "VA 0.70 - 1.00 ATR";
+   if(b==3) return "VA oltre 1.00 ATR (larga)";
+   return "tutte le rotture";
+}
+
 bool g_bkCap=false;             // tetto ai record raggiunto: campione troncato
 int  g_orbSel=-1;               // finestra portata nella scheda operativa
 
@@ -2014,6 +2077,7 @@ void OrbInit()
    VpInitVa();
    CxReset();
    PvReset();
+   SwReset();
 
    double rr[]; int nrr=ParseDoubles(InpOrbRR,rr);
    g_nRR=0;
@@ -3328,6 +3392,13 @@ bool ProcessSymbol(string sym)
             int  resR[ORB_MAXRR];
             bool doneR[ORB_MAXRR];
             for(int z=0;z<g_nRR;z++){ resR[z]=0; doneR[z]=false; }
+
+            // la calibrazione dello stop gira solo sulla finestra dichiarata
+            bool doSw=(g_nSw>0 && a0==InpSweepStartMin && g_orb[w].durMin==InpSweepDurMin);
+            int  swR[SW_MAXST][ORB_MAXRR]; bool swD[SW_MAXST][ORB_MAXRR];
+            if(doSw)
+               for(int m=0;m<g_nSw;m++)
+                  for(int z=0;z<g_nRR;z++){ swR[m][z]=0; swD[m][z]=false; }
             bool rev=false;
             double mfe=0.0, mae=0.0;
             for(int q=kb; q<nAll && r[q].time<=hEnd; q++)
@@ -3348,6 +3419,26 @@ bool ProcessSymbol(string sym)
                // lo stop e' comune: quando salta, saltano tutti i rapporti
                // ancora aperti, nello stesso istante
                bool hs=(dir>0 ? r[q].low<=stp : r[q].high>=stp);
+
+               // stessa barra, stop diversi: costa qualche confronto in piu',
+               // non una seconda lettura dei dati
+               if(doSw)
+                  for(int m=0;m<g_nSw;m++)
+                  {
+                     double sdM=stpD*g_sw[m];
+                     bool hsM=(dir>0 ? r[q].low<=entry-sdM : r[q].high>=entry+sdM);
+                     for(int z=0;z<g_nRR;z++)
+                     {
+                        if(swD[m][z]) continue;
+                        if(hsM){ swR[m][z]=-1; swD[m][z]=true; continue; }
+                        if(q>kb)
+                        {
+                           double tg=entry+dir*sdM*g_rr[z];
+                           if(dir>0 ? r[q].high>=tg : r[q].low<=tg){ swR[m][z]=+1; swD[m][z]=true; }
+                        }
+                     }
+                  }
+
                for(int z=0;z<g_nRR;z++)
                {
                   if(doneR[z]) continue;
@@ -3356,6 +3447,23 @@ bool ProcessSymbol(string sym)
                   { resR[z]=+1; doneR[z]=true; }
                }
             }
+            if(doSw)
+            {
+               int vb=SwBin(vpOk ? vpVaAtr[g_vaMain] : 0.0);
+               for(int m=0;m<g_nSw;m++)
+               {
+                  g_swN[m][SW_NB-1]++;
+                  if(vb>=0) g_swN[m][vb]++;
+                  for(int z=0;z<g_nRR;z++)
+                  {
+                     int rr2=swR[m][z];
+                     if(rr2>0){ g_swW[m][z][SW_NB-1]++; if(vb>=0) g_swW[m][z][vb]++; }
+                     else if(rr2<0){ g_swL[m][z][SW_NB-1]++; if(vb>=0) g_swL[m][z][vb]++; }
+                     else { g_swF[m][z][SW_NB-1]++; if(vb>=0) g_swF[m][z][vb]++; }
+                  }
+               }
+            }
+
             int res=resR[g_rrMain];
             double tgtAtr=stopAtr*g_rr[g_rrMain];
 
@@ -7334,6 +7442,47 @@ void BuildOrb(string sym,string dir)
                        F(100.0*g_pvOut[f]/MathMax(1,g_pvDays[f]),2)+";;;;;;;;\r\n");
                }
                FileClose(fP);
+            }
+         }
+
+         //--- calibrazione dello stop
+         if(g_nSw>0)
+         {
+            int wi=-1;
+            for(int i=0;i<g_nOrb;i++)
+               if(g_orb[i].startMin==InpSweepStartMin && g_orb[i].durMin==InpSweepDurMin){ wi=i; break; }
+
+            int fS2=FileOpen(dir+fn+"_orb_stop.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+            if(fS2!=INVALID_HANDLE)
+            {
+               W(fS2,"finestra;fascia_va;stop_x_base;stop_medio_atr;rr;n;perc_risolte;"
+                     "win_perc;wlow_perc;breakeven_perc;E_lordo_in_R;costo_in_R;E_netto_in_R\r\n");
+               // lo stop medio e il costo medio della finestra servono a
+               // convertire l'aspettativa in una cifra che tiene conto dello
+               // spread: senza, ogni stop piu' stretto sembra sempre migliore
+               double baseStop=(wi>=0 && g_rr[g_rrMain]>0 ? OrbTgt(wi)/g_rr[g_rrMain] : 0.0);
+               double meanCost=(wi>=0 && g_orb[wi].nBrk>0 ? g_orb[wi].sCost/g_orb[wi].nBrk : 0.0);
+               string wlab=(wi>=0 ? OrbLab(wi)
+                                  : D2(InpSweepStartMin/60)+":"+D2(InpSweepStartMin%60));
+               for(int b=0;b<SW_NB;b++)
+               for(int m=0;m<g_nSw;m++)
+               {
+                  double stM=baseStop*g_sw[m];
+                  double cR =(stM>0.0 ? meanCost/stM : 0.0);
+                  for(int z=0;z<g_nRR;z++)
+                  {
+                     int wn=g_swW[m][z][b], ls=g_swL[m][z][b], fl=g_swF[m][z][b];
+                     int res=wn+ls, tot=res+fl;
+                     if(res<50) continue;
+                     double eR=(wn*g_rr[z]-ls)/(double)tot;
+                     W(fS2,wlab+";"+SwBinLab(b)+";"+F(g_sw[m],2)+";"+F(stM,4)+";1:"+
+                           F(g_rr[z],2)+";"+IntegerToString(tot)+";"+
+                           F(100.0*res/tot,2)+";"+F(100.0*wn/res,2)+";"+
+                           F(100.0*WilsonLowInd(wn,res),2)+";"+F(RrNull(g_rr[z])*100.0,2)+";"+
+                           F(eR,4)+";"+F(cR,4)+";"+F(eR-cR,4)+"\r\n");
+                  }
+               }
+               FileClose(fS2);
             }
          }
       }
