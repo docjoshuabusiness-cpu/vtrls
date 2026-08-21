@@ -1821,50 +1821,67 @@ int  g_nBk=0;
 //  cosi' si separa "il CCI sa dove va il prezzo" da "il CCI esce
 //  quando il mercato si sta muovendo comunque".
 //==================================================================
-int g_cxN[3];
-int g_cxW[3][ORB_MAXRR], g_cxL[3][ORB_MAXRR], g_cxF[3][ORB_MAXRR];
-int g_pxN[3];
-int g_pxW[3][ORB_MAXRR], g_pxL[3][ORB_MAXRR], g_pxF[3][ORB_MAXRR];
-int g_cxHn[24], g_cxHw[24], g_cxHl[24], g_pxHn[24], g_pxHw[24], g_pxHl[24];
-int g_cxUp[3], g_cxDn[3];
+// contatori [timeframe][periodo][rapporto]
+int g_cxN[3][3], g_cxUp[3][3], g_cxDn[3][3];
+int g_cxW[3][3][ORB_MAXRR], g_cxL[3][3][ORB_MAXRR], g_cxF[3][3][ORB_MAXRR];
+// CONTROLLO: la DIREZIONE OPPOSTA allo stesso istante. E' un controllo piu'
+// forte di una moneta - stesso momento, stessa volatilita', stesso stop,
+// cambia solo il segno - e misura per intero il vantaggio direzionale invece
+// di dimezzarlo come farebbe un sorteggio che meta' delle volte indovina.
+int g_oxW[3][3][ORB_MAXRR], g_oxL[3][3][ORB_MAXRR], g_oxF[3][3][ORB_MAXRR];
+int g_cxHn[3][24], g_cxHw[3][24], g_cxHl[3][24];
+int g_oxHw[3][24], g_oxHl[3][24];
 
 void CxReset()
 {
-   for(int p2=0;p2<3;p2++)
+   for(int t=0;t<3;t++)
    {
-      g_cxN[p2]=0; g_pxN[p2]=0; g_cxUp[p2]=0; g_cxDn[p2]=0;
-      for(int z=0;z<ORB_MAXRR;z++)
+      for(int p2=0;p2<3;p2++)
       {
-         g_cxW[p2][z]=0; g_cxL[p2][z]=0; g_cxF[p2][z]=0;
-         g_pxW[p2][z]=0; g_pxL[p2][z]=0; g_pxF[p2][z]=0;
+         g_cxN[t][p2]=0; g_cxUp[t][p2]=0; g_cxDn[t][p2]=0;
+         for(int z=0;z<ORB_MAXRR;z++)
+         {
+            g_cxW[t][p2][z]=0; g_cxL[t][p2][z]=0; g_cxF[t][p2][z]=0;
+            g_oxW[t][p2][z]=0; g_oxL[t][p2][z]=0; g_oxF[t][p2][z]=0;
+         }
       }
-   }
-   for(int h=0;h<24;h++)
-   {
-      g_cxHn[h]=0; g_cxHw[h]=0; g_cxHl[h]=0;
-      g_pxHn[h]=0; g_pxHw[h]=0; g_pxHl[h]=0;
+      for(int h=0;h<24;h++)
+      {
+         g_cxHn[t][h]=0; g_cxHw[t][h]=0; g_cxHl[t][h]=0;
+         g_oxHw[t][h]=0; g_oxHl[t][h]=0;
+      }
    }
 }
 
-// Risolve un ingresso a primo tocco su tutta la scala dei rapporti.
-// Stessa convenzione della scheda breakout: la barra d'ingresso conta
-// solo per lo stop, mai per il target.
-void CxResolve(const MqlRates &r[],int nAll,int k0,int dir,double entry,
-               double stpD,datetime hEnd,int &res[])
+// Risolve LONG e SHORT nella stessa passata, su tutta la scala dei rapporti.
+// Farlo insieme costa quanto farne uno solo e regala il controllo perfetto:
+// la stessa identica finestra di prezzo letta col segno opposto.
+// Stessa convenzione della scheda breakout: la barra d'ingresso conta solo
+// per lo stop, mai per il target. Il contatore degli aperti chiude la
+// passata appena non resta piu' niente da risolvere - senza, un target a
+// 1:5 terrebbe aperta la scansione per tutto l'orizzonte ogni volta.
+void CxResolve2(const MqlRates &r[],int nAll,int k0,double entry,double stpD,
+                datetime hEnd,int &resL[],int &resS[])
 {
-   for(int z=0;z<g_nRR;z++) res[z]=0;
-   bool done[ORB_MAXRR];
-   for(int z=0;z<g_nRR;z++) done[z]=false;
-   double stp=entry-dir*stpD;
-   for(int q=k0; q<nAll && r[q].time<=hEnd; q++)
+   bool dL[ORB_MAXRR], dS[ORB_MAXRR];
+   for(int z=0;z<g_nRR;z++){ resL[z]=0; resS[z]=0; dL[z]=false; dS[z]=false; }
+   int open=2*g_nRR;
+   double stpL=entry-stpD, stpS=entry+stpD;
+   for(int q=k0; q<nAll && open>0 && r[q].time<=hEnd; q++)
    {
-      bool hs=(dir>0 ? r[q].low<=stp : r[q].high>=stp);
+      bool hsL=(r[q].low<=stpL), hsS=(r[q].high>=stpS);
       for(int z=0;z<g_nRR;z++)
       {
-         if(done[z]) continue;
-         if(hs){ res[z]=-1; done[z]=true; continue; }
-         double tgt=entry+dir*stpD*g_rr[z];
-         if(q>k0 && (dir>0 ? r[q].high>=tgt : r[q].low<=tgt)){ res[z]=+1; done[z]=true; }
+         if(!dL[z])
+         {
+            if(hsL){ resL[z]=-1; dL[z]=true; open--; }
+            else if(q>k0 && r[q].high>=entry+stpD*g_rr[z]){ resL[z]=+1; dL[z]=true; open--; }
+         }
+         if(!dS[z])
+         {
+            if(hsS){ resS[z]=-1; dS[z]=true; open--; }
+            else if(q>k0 && r[q].low<=entry-stpD*g_rr[z]){ resS[z]=+1; dS[z]=true; open--; }
+         }
       }
    }
 }
@@ -2764,21 +2781,21 @@ bool ProcessSymbol(string sym)
       }
 
       //====== CCI: USCITA DALLA BANDA COME INGRESSO ======
-      // Si scorrono le barre dell'indicatore, non quelle del prezzo: il
-      // segnale nasce li'. L'ingresso e' all'apertura della prima barra
-      // base successiva alla CHIUSURA della barra indicatore, quindi
-      // nessun dato della barra del segnale entra nella decisione.
-      if(InpDoCciTrade && InpDoIndicators && nIndT[IndMain()]>0 && g_nRR>0)
+      // Tre timeframe x tre periodi. Si scorrono le barre dell'indicatore,
+      // non quelle del prezzo: il segnale nasce li'. L'ingresso e'
+      // all'apertura della prima barra base successiva alla CHIUSURA della
+      // barra indicatore, quindi nessun dato della barra del segnale entra
+      // nella decisione.
+      if(InpDoCciTrade && InpDoIndicators && g_nRR>0 && InpCxStopAtr>=InpOrbMinStopAtr)
       {
-         int mi=IndMain();
-         int sec=indSec[mi];
-         double stopAtrC=InpCxStopAtr;
-         if(stopAtrC>=InpOrbMinStopAtr)
+         double stpDC=InpCxStopAtr*atrPt*g_point;
+         for(int t=0;t<3;t++)
          {
-            double stpDC=stopAtrC*atrPt*g_point;
-            for(int p2=need+1; p2<nIndT[mi]; p2++)
+            if(nIndT[t]<=0) continue;
+            int sec=indSec[t];
+            for(int p2=need+1; p2<nIndT[t]; p2++)
             {
-               datetime tIn=iTime[p2][mi]+(datetime)sec;      // istante operabile
+               datetime tIn=iTime[p2][t]+(datetime)sec;      // istante operabile
                if(tIn<dStart || tIn>dEnd) continue;
                int mod=(int)((tIn-dStart)/60);
                if(mod<0 || mod>1439) continue;
@@ -2791,61 +2808,55 @@ bool ProcessSymbol(string sym)
                datetime hEnd=r[k0].time+(datetime)(OrbHorizon()*60);
                if(r[nAll-1].time<hEnd) continue;               // orizzonte incompleto
 
+               // le tre uscite condividono l'istante: risolvo una volta sola
+               // entrambe le direzioni e poi assegno per periodo
+               bool anyExit=false;
+               int  dirP[3];
                for(int pz=0;pz<3;pz++)
                {
-                  double cNow=(pz==0?iCci[p2][mi]:(pz==1?iCci2[p2][mi]:iCci3[p2][mi]));
-                  double cPrv=(pz==0?iCci[p2-1][mi]:(pz==1?iCci2[p2-1][mi]:iCci3[p2-1][mi]));
-                  // uscita dalla banda: fuori adesso, dentro un attimo fa
+                  dirP[pz]=0;
+                  double cNow=(pz==0?iCci[p2][t]:(pz==1?iCci2[p2][t]:iCci3[p2][t]));
+                  double cPrv=(pz==0?iCci[p2-1][t]:(pz==1?iCci2[p2-1][t]:iCci3[p2-1][t]));
                   if(!(MathAbs(cNow)>InpCciCross && MathAbs(cPrv)<=InpCciCross)) continue;
-                  // quanto era durata l'accumulazione dentro la banda
                   int q2=p2-1, L=0;
                   while(q2>0 && p2-q2<InpAccMaxScan)
                   {
-                     double cq=(pz==0?iCci[q2][mi]:(pz==1?iCci2[q2][mi]:iCci3[q2][mi]));
+                     double cq=(pz==0?iCci[q2][t]:(pz==1?iCci2[q2][t]:iCci3[q2][t]));
                      if(MathAbs(cq)>InpCciCross) break;
                      L++; q2--;
                   }
                   if(L<InpAccMinBars) continue;                // non era accumulazione
+                  dirP[pz]=(cNow>0? +1 : -1);
+                  anyExit=true;
+               }
+               if(!anyExit) continue;
 
-                  int dirC=(cNow>0? +1 : -1);
-                  double entryC=r[k0].open;
-                  int resC[ORB_MAXRR];
-                  CxResolve(r,nAll,k0,dirC,entryC,stpDC,hEnd,resC);
+               int resL[ORB_MAXRR], resS[ORB_MAXRR];
+               CxResolve2(r,nAll,k0,r[k0].open,stpDC,hEnd,resL,resS);
 
-                  g_cxN[pz]++;
-                  if(dirC>0) g_cxUp[pz]++; else g_cxDn[pz]++;
+               for(int pz=0;pz<3;pz++)
+               {
+                  if(dirP[pz]==0) continue;
+                  g_cxN[t][pz]++;
+                  if(dirP[pz]>0) g_cxUp[t][pz]++; else g_cxDn[t][pz]++;
                   for(int z=0;z<g_nRR;z++)
                   {
-                     if(resC[z]>0)      g_cxW[pz][z]++;
-                     else if(resC[z]<0) g_cxL[pz][z]++;
-                     else               g_cxF[pz][z]++;
+                     int rc=(dirP[pz]>0? resL[z] : resS[z]);   // direzione del CCI
+                     int ro=(dirP[pz]>0? resS[z] : resL[z]);   // direzione opposta
+                     if(rc>0)      g_cxW[t][pz][z]++;
+                     else if(rc<0) g_cxL[t][pz][z]++;
+                     else          g_cxF[t][pz][z]++;
+                     if(ro>0)      g_oxW[t][pz][z]++;
+                     else if(ro<0) g_oxL[t][pz][z]++;
+                     else          g_oxF[t][pz][z]++;
                   }
                   if(pz==0)
                   {
-                     g_cxHn[ct.hour]++;
-                     if(resC[g_rrMain]>0)      g_cxHw[ct.hour]++;
-                     else if(resC[g_rrMain]<0) g_cxHl[ct.hour]++;
-                  }
-
-                  // PLACEBO: stesso istante, direzione a sorte. Isola
-                  // "il CCI sa dove va" da "il CCI esce quando il mercato
-                  // si muove comunque".
-                  uint hs2=(uint)((uint)(tIn/60)*2654435761 + (uint)pz*40503);
-                  int pdC=(((hs2>>13)&1)==0 ? +1 : -1);
-                  int resP[ORB_MAXRR];
-                  CxResolve(r,nAll,k0,pdC,entryC,stpDC,hEnd,resP);
-                  g_pxN[pz]++;
-                  for(int z=0;z<g_nRR;z++)
-                  {
-                     if(resP[z]>0)      g_pxW[pz][z]++;
-                     else if(resP[z]<0) g_pxL[pz][z]++;
-                     else               g_pxF[pz][z]++;
-                  }
-                  if(pz==0)
-                  {
-                     g_pxHn[ct.hour]++;
-                     if(resP[g_rrMain]>0)      g_pxHw[ct.hour]++;
-                     else if(resP[g_rrMain]<0) g_pxHl[ct.hour]++;
+                     int rc=(dirP[pz]>0? resL[g_rrMain] : resS[g_rrMain]);
+                     int ro=(dirP[pz]>0? resS[g_rrMain] : resL[g_rrMain]);
+                     g_cxHn[t][ct.hour]++;
+                     if(rc>0) g_cxHw[t][ct.hour]++; else if(rc<0) g_cxHl[t][ct.hour]++;
+                     if(ro>0) g_oxHw[t][ct.hour]++; else if(ro<0) g_oxHl[t][ct.hour]++;
                   }
                }
             }
@@ -6328,90 +6339,109 @@ void BuildOrb(string sym,string dir)
    //  SCHEDA: CCI OPERATIVO
    //=================================================================
    H("<section><h2>CCI: uscita dalla banda come ingresso</h2><div class=\"note\">");
-   if(!InpDoCciTrade || g_cxN[0]+g_cxN[1]+g_cxN[2]<=0)
-      H("Non generata: InpDoCciTrade disattivato, indicatori spenti, oppure nessuna uscita dalla banda "
-        "con almeno "+IntegerToString(InpAccMinBars)+" barre di accumulazione.</div></section>");
-   else
    {
+      int cxTot=0;
+      for(int t=0;t<3;t++) for(int pz=0;pz<3;pz++) cxTot+=g_cxN[t][pz];
+      if(!InpDoCciTrade || cxTot<=0)
+         H("Non generata: InpDoCciTrade disattivato, indicatori spenti, oppure nessuna uscita dalla banda "
+           "con almeno "+IntegerToString(InpAccMinBars)+" barre di accumulazione.</div></section>");
+      else
+      {
       H("Finora l'uscita dalla banda +/-"+F(InpCciCross,0)+" era misurata solo come <i>dopo, il prezzo si "
         "muove di "+F(g_nAtr>0?g_thrAtr[0]:0.5,2)+" ATR?</i> - una domanda sulla volatilita', non su "
-        "un'operazione. <b>Qui diventa un ingresso vero</b>: si entra all'apertura della prima barra "
-        "successiva alla chiusura della barra "+IndTfName(IndMain())+" che esce dalla banda, dopo almeno "+
-        IntegerToString(InpAccMinBars)+" barre dentro, con stop a "+F(InpCxStopAtr,2)+" ATR e la stessa "
-        "scala di rapporti della scheda breakout. Orizzonte "+IntegerToString(OrbHorizon())+" minuti.<br><br>"
+        "un'operazione. <b>Qui diventa un ingresso vero</b>: si aspetta che la barra che esce dalla banda "
+        "<b>chiuda</b>, si entra all'apertura della barra successiva, stop a "+F(InpCxStopAtr,2)+" ATR e "
+        "target su tutta la scala dei rapporti. Orizzonte "+IntegerToString(OrbHorizon())+" minuti. "
+        "Tutto ripetuto su <b>tre timeframe</b> ("+IndTfName(0)+", "+IndTfName(1)+", "+IndTfName(2)+
+        ") e <b>tre periodi</b> ("+IntegerToString(InpCciPeriod)+", "+IntegerToString(InpCciPeriod2)+", "+
+        IntegerToString(InpCciPeriod3)+").<br><br>"
 
-        "Nessun dato della barra del segnale entra nella decisione: si aspetta che quella barra <b>chiuda</b>, "
-        "e si entra dopo. La barra d'ingresso conta solo per lo stop, mai per il target.<br><br>"
+        "<b>Il controllo e' la direzione opposta, non un sorteggio.</b> Stesso istante, stesso stop, stessi "
+        "target, stessa identica finestra di prezzo - cambia solo il segno. E' il controllo piu' stretto "
+        "possibile per un'affermazione direzionale: qualunque cosa non sia la direzione viene tenuta "
+        "costante per costruzione. Una moneta avrebbe indovinato meta' delle volte, dimezzando il vantaggio "
+        "misurato; cosi' il <b>delta</b> e' il vantaggio direzionale per intero.<br><br>"
 
-        "<b>Il placebo qui e' la cosa importante.</b> E' lo stesso identico istante, lo stesso stop, gli "
-        "stessi target - ma con la direzione tirata a sorte invece che presa dal CCI. Separa due cose che "
-        "altrimenti si confondono per sempre: <b>il CCI sa dove andra' il prezzo</b>, oppure <b>il CCI esce "
-        "dalla banda quando il mercato si sta muovendo comunque</b>? Nel secondo caso il win rate e' alto e "
-        "il delta e' zero, e l'indicatore sta solo dicendo che qualcosa sta succedendo - cosa che sapevi "
-        "gia' guardando il grafico.</div>");
+        "<b>Come si legge.</b> Se il CCI sa dove va il prezzo, il delta e' positivo. Se il CCI esce dalla "
+        "banda semplicemente perche' il mercato si sta muovendo, il win rate puo' essere alto ma il delta e' "
+        "<b>zero</b>: l'indicatore sta dicendo che sta succedendo qualcosa, cosa che il grafico diceva gia'. "
+        "E come per i periodi, non prendere la riga migliore fra nove combinazioni: guarda se il segno del "
+        "delta e' lo stesso scendendo di timeframe e cambiando periodo. Se cambia, sono nove rumori.</div>");
 
-      HtmlTableHead("tX1","periodo CCI;RR;n;win%;wlow;E in R;n placebo;placebo win%;delta;z",true);
-      double beX=100.0/(1.0+g_rr[g_rrMain]);
-      for(int pz=0;pz<3;pz++)
+      HtmlTableHead("tX1","timeframe;periodo CCI;RR;n;win%;wlow;E in R;n opposta;win% opposta;delta;z",true);
+      for(int t=0;t<3;t++)
       {
-         int per=(pz==0?InpCciPeriod:(pz==1?InpCciPeriod2:InpCciPeriod3));
-         for(int z=0;z<g_nRR;z++)
+         for(int pz=0;pz<3;pz++)
          {
-            int res=g_cxW[pz][z]+g_cxL[pz][z];
-            int tot=res+g_cxF[pz][z];
-            if(res<50) continue;
-            double wr6=100.0*g_cxW[pz][z]/res;
-            double wl6=100.0*WilsonLowInd(g_cxW[pz][z],res);
-            double eR6=(g_cxW[pz][z]*g_rr[z]-g_cxL[pz][z])/(double)tot;
-            int pres=g_pxW[pz][z]+g_pxL[pz][z];
-            bool hasP=(pres>=50);
-            double pw6=(hasP? 100.0*g_pxW[pz][z]/pres : 0.0);
-            double d6 =(hasP? wr6-pw6 : 0.0);
-            double se6=(hasP? 100.0*MathSqrt((pw6/100.0)*(1.0-pw6/100.0)*(1.0/res+1.0/pres)) : 0.0);
-            double z6 =(se6>0? d6/se6 : 0.0);
-            double nl6=100.0/(1.0+g_rr[z]);
-            H("<tr><td><b>"+IntegerToString(per)+"</b></td><td>1 : "+F(g_rr[z],2)+
-              (z==g_rrMain?" &#9656;":"")+"</td><td>"+IntegerToString(tot)+"</td><td>"+F(wr6,2)+
-              "</td><td class=\""+(wl6>nl6?"hi":"lo")+"\">"+F(wl6,2)+"</td><td class=\""+
-              (eR6>0?"up":"dn")+"\">"+F(eR6,3)+"</td><td class=\"nz\">"+
-              (hasP?IntegerToString(pres):"-")+"</td><td class=\"nz\">"+(hasP?F(pw6,2):"-")+
-              "</td><td class=\""+(MathAbs(z6)<2.0?"nz":(d6>0?"hi":"lo"))+"\"><b>"+
-              (hasP?F(d6,2):"-")+"</b></td><td class=\""+(MathAbs(z6)>=3.0?(d6>0?"hi":"lo"):"nz")+"\">"+
-              (hasP?F(z6,2):"-")+"</td></tr>");
+            int per=(pz==0?InpCciPeriod:(pz==1?InpCciPeriod2:InpCciPeriod3));
+            for(int z=0;z<g_nRR;z++)
+            {
+               int res=g_cxW[t][pz][z]+g_cxL[t][pz][z];
+               int tot=res+g_cxF[t][pz][z];
+               if(res<50) continue;
+               double wr6=100.0*g_cxW[t][pz][z]/res;
+               double wl6=100.0*WilsonLowInd(g_cxW[t][pz][z],res);
+               double eR6=(g_cxW[t][pz][z]*g_rr[z]-g_cxL[t][pz][z])/(double)tot;
+               int ores=g_oxW[t][pz][z]+g_oxL[t][pz][z];
+               bool hasO=(ores>=50);
+               double ow6=(hasO? 100.0*g_oxW[t][pz][z]/ores : 0.0);
+               double d6 =(hasO? wr6-ow6 : 0.0);
+               double se6=(hasO? 100.0*MathSqrt((ow6/100.0)*(1.0-ow6/100.0)*(1.0/res+1.0/ores)) : 0.0);
+               double z6 =(se6>0? d6/se6 : 0.0);
+               double nl6=100.0/(1.0+g_rr[z]);
+               H("<tr><td><b>"+IndTfName(t)+"</b></td><td>"+IntegerToString(per)+"</td><td>1 : "+
+                 F(g_rr[z],2)+(z==g_rrMain?" &#9656;":"")+"</td><td>"+IntegerToString(tot)+"</td><td>"+
+                 F(wr6,2)+"</td><td class=\""+(wl6>nl6?"hi":"lo")+"\">"+F(wl6,2)+"</td><td class=\""+
+                 (eR6>0?"up":"dn")+"\">"+F(eR6,3)+"</td><td class=\"nz\">"+
+                 (hasO?IntegerToString(ores):"-")+"</td><td class=\"nz\">"+(hasO?F(ow6,2):"-")+
+                 "</td><td class=\""+(MathAbs(z6)<2.0?"nz":(d6>0?"hi":"lo"))+"\"><b>"+
+                 (hasO?F(d6,2):"-")+"</b></td><td class=\""+(MathAbs(z6)>=3.0?(d6>0?"hi":"lo"):"nz")+"\">"+
+                 (hasO?F(z6,2):"-")+"</td></tr>");
+            }
          }
       }
       HtmlTableEnd();
-      H("<div class=\"note\">Uscite registrate: periodo "+IntegerToString(InpCciPeriod)+" -> "+
-        IntegerToString(g_cxN[0])+" ("+F(100.0*g_cxUp[0]/MathMax(1,g_cxN[0]),0)+"% verso l'alto), periodo "+
-        IntegerToString(InpCciPeriod2)+" -> "+IntegerToString(g_cxN[1])+", periodo "+
-        IntegerToString(InpCciPeriod3)+" -> "+IntegerToString(g_cxN[2])+". <b>wlow</b> e' colorato in verde "
-        "quando supera il win rate di pareggio del rapporto della sua riga, che a 1:"+F(g_rr[g_rrMain],2)+
-        " vale "+F(beX,1)+"%.</div>");
-
-      //--- ora del segnale
-      H("<h2>A che ora conviene guardare l'uscita dalla banda</h2><div class=\"note\">"
-        "Periodo "+IntegerToString(InpCciPeriod)+", rapporto 1:"+F(g_rr[g_rrMain],2)+". E' la risposta alla "
-        "domanda che avevi posto all'inizio: <i>si riesce a capire quando andare a cercare il setup?</i> "
-        "Il placebo e' alla stessa ora, quindi il delta e' pulito dall'effetto ora.</div>");
-      HtmlTableHead("tX2","ora;n;win%;wlow;n placebo;placebo win%;delta;z",false);
-      for(int h=0;h<24;h++)
       {
-         int res=g_cxHw[h]+g_cxHl[h];
-         int pres=g_pxHw[h]+g_pxHl[h];
-         if(res<40) continue;
-         double wr6=100.0*g_cxHw[h]/res;
-         double wl6=100.0*WilsonLowInd(g_cxHw[h],res);
-         bool hasP=(pres>=40);
-         double pw6=(hasP? 100.0*g_pxHw[h]/pres : 0.0);
-         double d6=(hasP? wr6-pw6 : 0.0);
-         double se6=(hasP? 100.0*MathSqrt((pw6/100.0)*(1.0-pw6/100.0)*(1.0/res+1.0/pres)) : 0.0);
-         double z6=(se6>0? d6/se6 : 0.0);
-         H("<tr><td><b>"+D2(h)+":00</b></td><td>"+IntegerToString(g_cxHn[h])+"</td><td>"+F(wr6,2)+
-           "</td><td class=\""+(wl6>beX?"hi":"lo")+"\">"+F(wl6,2)+"</td><td class=\"nz\">"+
-           (hasP?IntegerToString(pres):"-")+"</td><td class=\"nz\">"+(hasP?F(pw6,2):"-")+
-           "</td><td class=\""+(MathAbs(z6)<2.0?"nz":(d6>0?"hi":"lo"))+"\"><b>"+(hasP?F(d6,2):"-")+
-           "</b></td><td class=\""+(MathAbs(z6)>=3.0?(d6>0?"hi":"lo"):"nz")+"\">"+(hasP?F(z6,2):"-")+
-           "</td></tr>");
+         string cnt="";
+         for(int t=0;t<3;t++)
+         {
+            if(nIndT[0]<0) break;
+            cnt+=(cnt==""?"":" | ")+IndTfName(t)+": ";
+            for(int pz=0;pz<3;pz++) cnt+=(pz==0?"":", ")+IntegerToString(g_cxN[t][pz]);
+         }
+         H("<div class=\"note\">Uscite registrate (periodi "+IntegerToString(InpCciPeriod)+"/"+
+           IntegerToString(InpCciPeriod2)+"/"+IntegerToString(InpCciPeriod3)+") - "+cnt+
+           ". <b>wlow</b> e' verde quando supera il win rate di pareggio del rapporto della sua riga.</div>");
+      }
+
+      //--- ora del segnale, per timeframe
+      H("<h2>A che ora conviene guardare l'uscita dalla banda</h2><div class=\"note\">"
+        "Periodo "+IntegerToString(InpCciPeriod)+", rapporto 1:"+F(g_rr[g_rrMain],2)+", i tre timeframe a "
+        "confronto. E' la risposta alla domanda che avevi posto all'inizio: <i>si riesce a capire quando "
+        "andare a cercare il setup?</i> Il controllo e' la direzione opposta alla stessa ora, quindi il "
+        "delta e' gia' pulito dall'effetto dell'ora - se un'ora e' buona per tutti, non compare qui.</div>");
+      HtmlTableHead("tX2","timeframe;ora;n;win%;wlow;win% opposta;delta;z",true);
+      for(int t=0;t<3;t++)
+      {
+         for(int h=0;h<24;h++)
+         {
+            int res=g_cxHw[t][h]+g_cxHl[t][h];
+            int ores=g_oxHw[t][h]+g_oxHl[t][h];
+            if(res<40 || ores<40) continue;
+            double wr6=100.0*g_cxHw[t][h]/res;
+            double wl6=100.0*WilsonLowInd(g_cxHw[t][h],res);
+            double ow6=100.0*g_oxHw[t][h]/ores;
+            double d6=wr6-ow6;
+            double se6=100.0*MathSqrt((ow6/100.0)*(1.0-ow6/100.0)*(1.0/res+1.0/ores));
+            double z6=(se6>0? d6/se6 : 0.0);
+            double nl6=100.0/(1.0+g_rr[g_rrMain]);
+            H("<tr><td><b>"+IndTfName(t)+"</b></td><td>"+D2(h)+":00</td><td>"+
+              IntegerToString(g_cxHn[t][h])+"</td><td>"+F(wr6,2)+"</td><td class=\""+
+              (wl6>nl6?"hi":"lo")+"\">"+F(wl6,2)+"</td><td class=\"nz\">"+F(ow6,2)+
+              "</td><td class=\""+(MathAbs(z6)<2.0?"nz":(d6>0?"hi":"lo"))+"\"><b>"+F(d6,2)+
+              "</b></td><td class=\""+(MathAbs(z6)>=3.0?(d6>0?"hi":"lo"):"nz")+"\">"+F(z6,2)+
+              "</td></tr>");
+         }
       }
       HtmlTableEnd();
 
@@ -6420,46 +6450,50 @@ void BuildOrb(string sym,string dir)
          int fX=FileOpen(dir+fn+"_cci_trade.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
          if(fX!=INVALID_HANDLE)
          {
-            W(fX,"tabella;periodo;chiave;n;win_perc;wlow_perc;E_in_R;n_placebo;placebo_win_perc;delta;z\r\n");
+            W(fX,"tabella;timeframe;periodo;chiave;n;win_perc;wlow_perc;E_in_R;"
+                 "n_opposta;win_perc_opposta;delta;z\r\n");
+            for(int t=0;t<3;t++)
             for(int pz=0;pz<3;pz++)
             {
                int per=(pz==0?InpCciPeriod:(pz==1?InpCciPeriod2:InpCciPeriod3));
                for(int z=0;z<g_nRR;z++)
                {
-                  int res=g_cxW[pz][z]+g_cxL[pz][z];
-                  int tot=res+g_cxF[pz][z];
+                  int res=g_cxW[t][pz][z]+g_cxL[t][pz][z];
+                  int tot=res+g_cxF[t][pz][z];
                   if(res<50) continue;
-                  int pres=g_pxW[pz][z]+g_pxL[pz][z];
-                  bool hasP=(pres>=50);
-                  double wr6=100.0*g_cxW[pz][z]/res;
-                  double pw6=(hasP? 100.0*g_pxW[pz][z]/pres : 0.0);
-                  double d6=(hasP? wr6-pw6 : 0.0);
-                  double se6=(hasP? 100.0*MathSqrt((pw6/100.0)*(1.0-pw6/100.0)*(1.0/res+1.0/pres)) : 0.0);
-                  W(fX,"rapporto;"+IntegerToString(per)+";1:"+F(g_rr[z],2)+";"+IntegerToString(tot)+";"+
-                       F(wr6,2)+";"+F(100.0*WilsonLowInd(g_cxW[pz][z],res),2)+";"+
-                       F((g_cxW[pz][z]*g_rr[z]-g_cxL[pz][z])/(double)tot,4)+";"+
-                       (hasP?IntegerToString(pres):"")+";"+(hasP?F(pw6,2):"")+";"+
-                       (hasP?F(d6,2):"")+";"+(hasP&&se6>0?F(d6/se6,2):"")+"\r\n");
+                  int ores=g_oxW[t][pz][z]+g_oxL[t][pz][z];
+                  bool hasO=(ores>=50);
+                  double wr6=100.0*g_cxW[t][pz][z]/res;
+                  double ow6=(hasO? 100.0*g_oxW[t][pz][z]/ores : 0.0);
+                  double d6=(hasO? wr6-ow6 : 0.0);
+                  double se6=(hasO? 100.0*MathSqrt((ow6/100.0)*(1.0-ow6/100.0)*(1.0/res+1.0/ores)) : 0.0);
+                  W(fX,"rapporto;"+IndTfName(t)+";"+IntegerToString(per)+";1:"+F(g_rr[z],2)+";"+
+                       IntegerToString(tot)+";"+F(wr6,2)+";"+
+                       F(100.0*WilsonLowInd(g_cxW[t][pz][z],res),2)+";"+
+                       F((g_cxW[t][pz][z]*g_rr[z]-g_cxL[t][pz][z])/(double)tot,4)+";"+
+                       (hasO?IntegerToString(ores):"")+";"+(hasO?F(ow6,2):"")+";"+
+                       (hasO?F(d6,2):"")+";"+(hasO&&se6>0?F(d6/se6,2):"")+"\r\n");
                }
             }
+            for(int t=0;t<3;t++)
             for(int h=0;h<24;h++)
             {
-               int res=g_cxHw[h]+g_cxHl[h], pres=g_pxHw[h]+g_pxHl[h];
-               if(res<40) continue;
-               bool hasP=(pres>=40);
-               double wr6=100.0*g_cxHw[h]/res;
-               double pw6=(hasP? 100.0*g_pxHw[h]/pres : 0.0);
-               double d6=(hasP? wr6-pw6 : 0.0);
-               double se6=(hasP? 100.0*MathSqrt((pw6/100.0)*(1.0-pw6/100.0)*(1.0/res+1.0/pres)) : 0.0);
-               W(fX,"ora;"+IntegerToString(InpCciPeriod)+";"+D2(h)+":00;"+IntegerToString(g_cxHn[h])+";"+
-                    F(wr6,2)+";"+F(100.0*WilsonLowInd(g_cxHw[h],res),2)+";;"+
-                    (hasP?IntegerToString(pres):"")+";"+(hasP?F(pw6,2):"")+";"+
-                    (hasP?F(d6,2):"")+";"+(hasP&&se6>0?F(d6/se6,2):"")+"\r\n");
+               int res=g_cxHw[t][h]+g_cxHl[t][h], ores=g_oxHw[t][h]+g_oxHl[t][h];
+               if(res<40 || ores<40) continue;
+               double wr6=100.0*g_cxHw[t][h]/res, ow6=100.0*g_oxHw[t][h]/ores;
+               double d6=wr6-ow6;
+               double se6=100.0*MathSqrt((ow6/100.0)*(1.0-ow6/100.0)*(1.0/res+1.0/ores));
+               W(fX,"ora;"+IndTfName(t)+";"+IntegerToString(InpCciPeriod)+";"+D2(h)+":00;"+
+                    IntegerToString(g_cxHn[t][h])+";"+F(wr6,2)+";"+
+                    F(100.0*WilsonLowInd(g_cxHw[t][h],res),2)+";;"+
+                    IntegerToString(ores)+";"+F(ow6,2)+";"+F(d6,2)+";"+
+                    (se6>0?F(d6/se6,2):"")+"\r\n");
             }
             FileClose(fX);
          }
       }
       H("</section>");
+      }
    }
 
    //--- CSV della curva rischio/rendimento

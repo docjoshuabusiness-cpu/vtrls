@@ -305,25 +305,36 @@ Scheda dedicata, **aggiuntiva**. Fino a qui l'uscita dalla banda `+/-InpCciCross
 era misurata solo come *"dopo, il prezzo si muove di 0,5 ATR?"* - una domanda
 sulla volatilita', non su un'operazione. Qui diventa un ingresso vero:
 
-- si aspetta che la barra `InpIndTF1` che esce dalla banda **chiuda**
+- si aspetta che la barra che esce dalla banda **chiuda**
 - si entra all'apertura della prima barra base successiva
 - stop `InpCxStopAtr` ATR, target sulla stessa scala `InpOrbRR` (1:0,5 ... 1:5)
 - richiesta un'accumulazione di almeno `InpAccMinBars` barre dentro la banda
-- tutto ripetuto sui **tre periodi** CCI
+- tutto ripetuto su **tre timeframe** (`InpIndTF1/2/3`, default M15/M5/M1) e
+  **tre periodi** CCI - nove combinazioni, ognuna col proprio controllo
 
 Nessun dato della barra del segnale entra nella decisione, e la barra
 d'ingresso conta solo per lo stop, mai per il target.
 
-**Il placebo qui e' il punto.** Stesso istante, stesso stop, stessi target, ma
-direzione tirata a sorte. Separa due cose che altrimenti restano confuse per
-sempre: *il CCI sa dove andra' il prezzo*, oppure *il CCI esce dalla banda
-quando il mercato si sta muovendo comunque*? Nel secondo caso il win rate e'
-alto e il delta e' zero - l'indicatore sta solo dicendo che qualcosa sta
-succedendo, cosa che il grafico diceva gia'.
+**Il controllo e' la direzione opposta, non un sorteggio.** Stesso istante,
+stesso stop, stessi target, stessa identica finestra di prezzo: cambia solo il
+segno. E' il controllo piu' stretto possibile per un'affermazione direzionale,
+perche' tutto cio' che non e' la direzione resta costante per costruzione. Una
+moneta avrebbe indovinato meta' delle volte e avrebbe dimezzato il vantaggio
+misurato; cosi' il `delta` e' il vantaggio direzionale per intero.
 
-La seconda tabella spezza per ora del segnale, col placebo alla stessa ora:
-risponde a *"si riesce a capire quando andare a cercare il setup?"* senza che
-l'effetto dell'ora si confonda con quello dell'indicatore.
+Separa due cose che altrimenti restano confuse per sempre: *il CCI sa dove
+andra' il prezzo*, oppure *il CCI esce dalla banda quando il mercato si sta
+muovendo comunque*? Nel secondo caso il win rate e' alto e il delta e' zero -
+l'indicatore dice che sta succedendo qualcosa, cosa che il grafico diceva gia'.
+
+Come per i periodi: **non prendere la riga migliore fra nove combinazioni**.
+Guarda se il segno del delta regge scendendo di timeframe e cambiando periodo.
+Se cambia, sono nove rumori.
+
+La seconda tabella spezza per ora del segnale sui tre timeframe, col controllo
+alla stessa ora: risponde a *"si riesce a capire quando andare a cercare il
+setup?"* senza che l'effetto dell'ora si confonda con quello dell'indicatore -
+se un'ora e' buona per chiunque, li' non compare.
 
 ## Le due letture opposte di RSI e Z-Score
 
