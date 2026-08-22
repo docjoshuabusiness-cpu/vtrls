@@ -1673,6 +1673,10 @@ void VpInitVa()
 // e comune a tutti: cambia solo dove si mette il target. Cosi' i rapporti
 // sono confrontabili fra loro e con la curva nulla.
 #define ORB_MAXRR 8
+// EXT_MAXTF sta QUI e non accanto al codice che lo usa: SBrk lo indicizza
+// duecento righe piu' sotto, e in MQL5 un #define deve precedere ogni suo
+// impiego. E' lo stesso inciampo gia' fatto con VP_MAXVA.
+#define EXT_MAXTF 8
 double g_rr[ORB_MAXRR];
 int    g_nRR=0;
 int    g_rrMain=0;
@@ -2408,7 +2412,6 @@ string HzLab(int h)
 // in _orb_breakout.csv. La ricerca su quelle colonne non vive in MQL5:
 // vive sul CSV, dove una modifica costa un secondo invece di un
 // compile-and-rerun, e dove il giudice walk-forward e' gia' montato.
-#define EXT_MAXTF 8
 ENUM_TIMEFRAMES g_xTf[EXT_MAXTF]; string g_xName[EXT_MAXTF]; int g_nXtf=0;
 
 ENUM_TIMEFRAMES TfFromName(string t)
