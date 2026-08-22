@@ -365,6 +365,18 @@ int TFMinutes(ENUM_TIMEFRAMES tf)
       case PERIOD_M20: return 20;
       case PERIOD_M30: return 30;
       case PERIOD_H1:  return 60;
+      // Le scale sopra l'ora mancavano perche' nessun modulo le usava. Da
+      // quando InpExtraTfList puo' chiederle, la loro assenza non dava un
+      // errore: TFMinutes tornava -1, il chiamante calcolava sec=-60 e
+      // saltava la scala in silenzio. H2, H4, H8 e D1 uscivano a zero.
+      case PERIOD_H2:  return 120;
+      case PERIOD_H3:  return 180;
+      case PERIOD_H4:  return 240;
+      case PERIOD_H6:  return 360;
+      case PERIOD_H8:  return 480;
+      case PERIOD_H12: return 720;
+      case PERIOD_D1:  return 1440;
+      case PERIOD_W1:  return 10080;
    }
    return -1;
 }
