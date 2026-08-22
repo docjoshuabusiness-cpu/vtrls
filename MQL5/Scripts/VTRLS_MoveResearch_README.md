@@ -733,3 +733,46 @@ La domanda a cui risponde la scala non e' "funziona": e' **quale orizzonte**.
 Se vince `forza_6b` la rottura cavalca un flusso valutario in corso e serve un
 innesco veloce; se vince `forza_400b` e' un filtro lento, si calcola una volta
 al giorno e non guarda piu' l'intraday. Sono due EA diversi.
+
+## La forza sulle scale fini: M1, M2, M5
+
+La scala delle lunghezze (`InpStrLadder`) allarga bene il lato lento ma non
+puo' scendere sotto la risoluzione del timeframe: su TF forza H1 la lunghezza
+piu' corta utile e' 6 barre, cioe' sei ore. Un flusso valutario cominciato
+venti minuti prima della rottura resta invisibile.
+
+`InpStrTFList` rimisura la forza da zero su altri timeframe. Default
+`M1,M2,M5`. Escono le colonne `forza_M1`, `forza_M2`, `forza_M5` in coda a
+`_orb_breakout.csv`.
+
+Questo costa davvero: 27 `CopyRates` per ogni scala, sull'intero periodo.
+
+* **M5 e oltre girano su tutto lo storico.** Circa 1.2 milioni di barre a
+  coppia su sedici anni: il terminale le regge e quasi sempre le ha.
+* **Sotto M5 il periodo e' tagliato** a `InpStrTFDays` giorni (default 2500,
+  circa sette anni). M1 su sedici anni sarebbero sei milioni di barre a
+  coppia, 360 MB di buffer per coppia, e uno storico che il broker spesso non
+  serve comunque.
+* Le rotture precedenti allo storico di una scala escono con la **cella
+  vuota**, non con uno zero: zero vorrebbe dire "forza neutra" e sarebbe una
+  bugia che il cercatore si berrebbe. Il cercatore tratta la cella vuota come
+  "quella regola non apre qui", che e' la lettura corretta.
+
+### Il numero da guardare prima di credere alle colonne fini
+
+La fusione delle 27 coppie pretende il **timestamp esatto**. Su H1 non e' un
+problema. Su M1 lo e': un minuto senza tick su una coppia minore non esiste,
+e nella sessione asiatica puo' mancare meta' del paniere. La "forza a M1"
+diventerebbe la media di tre coppie invece di quattordici, cioe' rumore di
+microstruttura.
+
+Per questo `CsAxis` stampa, per ogni scala:
+
+```
+forza PERIOD_M1: 26 coppie caricate, 8.3 contribuiscono in media per barra,
+                 71.2% delle barre ne ha almeno una
+```
+
+Se il secondo numero crolla sotto 6, quella colonna non e' forza relativa: e'
+il rumore di quelle poche coppie che avevano un tick. Va letta come tale, o
+non letta.

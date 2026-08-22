@@ -190,6 +190,8 @@ input string          InpExtraTfList    = "M10,M30,H1,H2,H4,H8,D1";  // Scale AG
 input bool            InpDoStrength     = true;            // Forza relativa cross-sectional delle valute
 input ENUM_TIMEFRAMES InpStrTF          = PERIOD_H1;      // TF su cui misurare la forza
 input string          InpStrLadder      = "6,25,100,400";   // Scala della forza: lunghezze TSI in BARRE del TF forza, come colonne per il cercatore (vuoto = non calcolarla)
+input string          InpStrTFList      = "M1,M2,M5";       // Scale AGGIUNTIVE su cui rimisurare la forza da zero (vuoto = nessuna). Ognuna costa 27 CopyRates
+input int             InpStrTFDays      = 2500;            // Giorni di storico per le scale SOTTO M5 (0 = tutto: M1 su 16 anni sono ~6 milioni di barre a coppia). M5 e oltre girano sempre su tutto
 input int             InpStrSm1         = 25;              // Primo smoothing (TSI)
 input int             InpStrSm2         = 15;              // Secondo smoothing (TSI)
 input double          InpStrConf        = 25.0;            // Soglia di forza "decisa"
@@ -809,6 +811,7 @@ string BinLabel(int b, const double &edges[], string unit)
 }
 
 //--- prototipi (le definizioni sono piu' avanti nel file)
+ENUM_TIMEFRAMES TfFromName(string t);
 void   BuildConditions(string sym,string dir);
 void   BuildOrb(string sym,string dir);
 void   WriteCells(string path,string keyHeader,const int &basePt[],const int &baseAtr[],
@@ -1697,6 +1700,8 @@ void VpInitVa()
 // rischio che meta' storico non ci sia - ma rifacendo il solo TSI, che
 // costa una passata su un array gia' in memoria, con lunghezze diverse.
 #define CS_MAXL   6
+// e questo per le scale VERE, quelle che costano 27 CopyRates l'una
+#define CS_MAXTF  6
 double g_rr[ORB_MAXRR];
 int    g_nRR=0;
 int    g_rrMain=0;
@@ -1897,6 +1902,7 @@ struct SBrk
    // tabella dello script.
    float xr[EXT_MAXTF], xc[EXT_MAXTF], xz[EXT_MAXTF];
    float xs[CS_MAXL];
+   float xt[CS_MAXTF]; uchar xtOk;
    char  resR[ORB_MAXRR];
    // volume profile del giorno precedente, letto al momento della rottura
    float vpPocDist;              // (entry - POC) in ATR, col segno della rottura
@@ -2205,6 +2211,14 @@ float    g_csDiff[];
 // una volta al giorno - e finora non erano distinguibili.
 float    g_csLad[][CS_MAXL];
 int      g_ladB[CS_MAXL]; int g_nLad=0;
+// Le scale aggiuntive hanno lunghezze diverse fra loro - M1 ha cinque volte
+// le barre di M5 - e in MQL5 solo la PRIMA dimensione di un array e'
+// dinamica. Quindi un array piatto con offset invece di una matrice: costa
+// la somma delle lunghezze, non il massimo moltiplicato per il numero di
+// scale, che su M1+M2+M5 sarebbe il triplo della memoria per niente.
+datetime g_sTime[]; float g_sDiff[];
+int      g_sOff[CS_MAXTF], g_sLen[CS_MAXTF], g_sSec[CS_MAXTF];
+string   g_sName[CS_MAXTF]; int g_nStf=0;
 int      g_csN=0;
 bool     g_csOk=false;
 int      g_csSec=3600;
@@ -2244,10 +2258,155 @@ double CsLadAt(datetime t,int k)
    return (i>=0 ? (double)g_csLad[i][k] : 0.0);
 }
 
+// Stessa disciplina, ma ogni scala ha il suo asse dentro l'array piatto.
+// 'ok' resta falso quando la rottura e' precedente allo storico di quella
+// scala: chi scrive la colonna deve lasciarla vuota, non metterci zero.
+double CsTfAt(datetime t,int k,bool &ok)
+{
+   ok=false;
+   if(k<0 || k>=g_nStf || g_sLen[k]<=0) return 0.0;
+   int lo=g_sOff[k], hi=g_sOff[k]+g_sLen[k]-1, best=-1;
+   while(lo<=hi)
+   {
+      int mid=(lo+hi)/2;
+      if(g_sTime[mid]+(datetime)g_sSec[k]<=t){ best=mid; lo=mid+1; }
+      else hi=mid-1;
+   }
+   if(best<0) return 0.0;
+   ok=true;
+   return (double)g_sDiff[best];
+}
+
+// L'ASSE E LE DUE GAMBE, per un timeframe qualunque.
+// Era il corpo di CsBuild; ora e' una funzione perche' la forza non si
+// misura piu' su una scala sola. Un solo posto in cui vive il leave-one-out:
+// duplicarlo significherebbe correggerlo una volta su due.
+int CsAxis(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to,
+           string c1, string c2, string suf, int &nUsed,
+           datetime &oT[], float &oX1[], float &oX2[])
+{
+   nUsed=0;
+   MqlRates rr[];
+   int nr=CopyRates(sym,tf,from,to,rr);
+   if(nr<200) return 0;
+
+   ArrayResize(oT,nr); ArrayResize(oX1,nr); ArrayResize(oX2,nr);
+   double sum1[], sum2[]; int cnt1[], cnt2[];
+   ArrayResize(sum1,nr); ArrayResize(sum2,nr);
+   ArrayResize(cnt1,nr); ArrayResize(cnt2,nr);
+   for(int i=0;i<nr;i++)
+   {
+      oT[i]=rr[i].time;
+      sum1[i]=0.0; sum2[i]=0.0; cnt1[i]=0; cnt2[i]=0;
+   }
+   ArrayFree(rr);
+
+   //--- una coppia alla volta, fusione ordinata sull'asse: nessun bisogno
+   // di tenere in memoria 28 serie insieme
+   string miss[12]; int nMiss=0;
+   for(int p=0;p<CS_NP;p++)
+   {
+      int s1=(c1!="" ? CsSign(p,c1) : 0);
+      int s2=CsSign(p,c2);
+      if(s1==0 && s2==0) continue;
+      // Leave-one-out sul CODICE della coppia, non sul nome completo.
+      // Confrontare g_csPair[p]+suf con sym funziona solo finche' il
+      // suffisso delle altre coppie coincide con quello del simbolo
+      // operato: appena il fallback sceglie un suffisso piu' corto
+      // ("EURUSD.r" contro "EURUSD.r_QDM") il confronto fallisce, la
+      // coppia operata rientra in ENTRAMBE le gambe e circa il 29% del
+      // differenziale torna a essere il rendimento del simbolo stesso.
+      if(g_csPair[p]==StringSubstr(sym,0,6)) continue;
+
+      // Senza SymbolSelect il terminale non tiene lo storico della coppia e
+      // CopyRates torna 0 al primo giro: era il motivo per cui il modulo
+      // usciva sempre vuoto senza dire niente.
+      string pn=g_csPair[p]+suf;
+      if(!SymbolInfoInteger(pn,SYMBOL_SELECT)) SymbolSelect(pn,true);
+      MqlRates rp[];
+      int np=0;
+      for(int att=0; att<6; att++)
+      {
+         np=CopyRates(pn,tf,from,to,rp);
+         if(np>=200) break;
+         Sleep(300);
+      }
+      if(np<200){ if(nMiss<12) miss[nMiss++]=pn; continue; }
+      nUsed++;
+
+      int j=0;
+      for(int i=0;i<nr;i++)
+      {
+         while(j<np && rp[j].time<oT[i]) j++;
+         if(j>=np) break;
+         if(rp[j].time!=oT[i]) continue;
+         if(rp[j].open<=0.0) continue;
+         double v=rp[j].close/rp[j].open-1.0;
+         if(s1!=0){ sum1[i]+=s1*v; cnt1[i]++; }
+         if(s2!=0){ sum2[i]+=s2*v; cnt2[i]++; }
+      }
+   }
+   if(nUsed<6)
+   {
+      string ml=""; for(int q=0;q<nMiss;q++) ml+=(q?", ":"")+miss[q];
+      PrintFormat("[%s] forza %s NON disponibile: solo %d coppie utilizzabili. Mancanti: %s",
+                  sym, EnumToString(tf), nUsed, (nMiss>0?ml:"(nessuna elencata)"));
+      return 0;
+   }
+   // QUANTE coppie contribuiscono DAVVERO a ogni barra, non quante sono
+   // state caricate. Sui timeframe fini la fusione pretende il timestamp
+   // esatto, e un minuto senza tick su una minore semplicemente non c'e':
+   // a M1, nella sessione asiatica, meta' del paniere puo' sparire e la
+   // "forza" diventa la media di tre coppie. Il numero va guardato prima
+   // di credere a qualunque colonna fine.
+   double occ=0.0; int nz=0;
+   for(int i=0;i<nr;i++)
+   {
+      oX1[i]=(float)(cnt1[i]>0 ? sum1[i]/cnt1[i] : 0.0);
+      oX2[i]=(float)(cnt2[i]>0 ? sum2[i]/cnt2[i] : 0.0);
+      if(cnt2[i]>0){ occ+=cnt1[i]+cnt2[i]; nz++; }
+   }
+   PrintFormat("[%s] forza %s: %d coppie caricate, %.1f contribuiscono in media per barra, "
+               "%.1f%% delle barre ne ha almeno una",
+               sym, EnumToString(tf), nUsed, (nz>0?occ/nz:0.0), 100.0*nz/nr);
+   return nr;
+}
+
+// TSI su ciascuna gamba, poi differenza. Sull'oro la gamba 1 non esiste:
+// conta solo quanto e' forte il dollaro, con il segno girato.
+void CsTsi(const float &x1[], const float &x2[], int n, int sm1, int sm2,
+           bool leg1, float &out[], int off)
+{
+   double a1=2.0/(sm1+1.0), a2=2.0/(sm2+1.0);
+   double m1a=0,m1b=0,v1a=0,v1b=0, m2a=0,m2b=0,v2a=0,v2b=0;
+   bool init=false;
+   for(int i=0;i<n;i++)
+   {
+      double u1=x1[i], u2=x2[i];
+      if(!init)
+      {
+         m1a=u1; m1b=u1; v1a=MathAbs(u1); v1b=MathAbs(u1);
+         m2a=u2; m2b=u2; v2a=MathAbs(u2); v2b=MathAbs(u2);
+         init=true;
+      }
+      else
+      {
+         m1a+=a1*(u1-m1a);            v1a+=a1*(MathAbs(u1)-v1a);
+         m1b+=a2*(m1a-m1b);           v1b+=a2*(v1a-v1b);
+         m2a+=a1*(u2-m2a);            v2a+=a1*(MathAbs(u2)-v2a);
+         m2b+=a2*(m2a-m2b);           v2b+=a2*(v2a-v2b);
+      }
+      double t1=(v1b>0.0 ? 100.0*m1b/v1b : 0.0);
+      double t2=(v2b>0.0 ? 100.0*m2b/v2b : 0.0);
+      out[off+i]=(float)(leg1 ? t1-t2 : -t2);
+   }
+}
+
 bool CsBuild(string sym,datetime from,datetime to)
 {
-   g_csN=0; g_csOk=false; g_nLad=0;
+   g_csN=0; g_csOk=false; g_nLad=0; g_nStf=0;
    ArrayResize(g_csTime,0); ArrayResize(g_csDiff,0); ArrayResize(g_csLad,0);
+   ArrayResize(g_sTime,0);  ArrayResize(g_sDiff,0);
    if(!InpDoStrength) return false;
    if(StringLen(sym)<6) return false;
 
@@ -2298,147 +2457,81 @@ bool CsBuild(string sym,datetime from,datetime to)
    }
    if(!has2 || (c1!="" && !has1)) return false;
 
-   //--- asse dei tempi: il TF forza del simbolo stesso
-   MqlRates rr[];
-   int nr=CopyRates(sym,InpStrTF,from,to,rr);
-   if(nr<200) return false;
+   //--- scala principale
+   float x1[], x2[]; int nUsed=0;
+   int nr=CsAxis(sym,InpStrTF,from,to,c1,c2,suf,nUsed,g_csTime,x1,x2);
+   if(nr<=0) return false;
    g_csSec=PeriodSeconds(InpStrTF);
    if(g_csSec<=0) g_csSec=3600;
-
-   ArrayResize(g_csTime,nr);
-   double sum1[], sum2[]; int cnt1[], cnt2[];
-   ArrayResize(sum1,nr); ArrayResize(sum2,nr);
-   ArrayResize(cnt1,nr); ArrayResize(cnt2,nr);
-   for(int i=0;i<nr;i++)
-   {
-      g_csTime[i]=rr[i].time;
-      sum1[i]=0.0; sum2[i]=0.0; cnt1[i]=0; cnt2[i]=0;
-   }
-
-   //--- una coppia alla volta, fusione ordinata sull'asse: nessun bisogno
-   // di tenere in memoria 28 serie insieme
-   int nUsed=0;
-   string miss[12]; int nMiss=0;
-   for(int p=0;p<CS_NP;p++)
-   {
-      int s1=(c1!="" ? CsSign(p,c1) : 0);
-      int s2=CsSign(p,c2);
-      if(s1==0 && s2==0) continue;
-      // Leave-one-out sul CODICE della coppia, non sul nome completo.
-      // Confrontare g_csPair[p]+suf con sym funziona solo finche' il
-      // suffisso delle altre coppie coincide con quello del simbolo
-      // operato: appena il fallback sceglie un suffisso piu' corto
-      // ("EURUSD.r" contro "EURUSD.r_QDM") il confronto fallisce, la
-      // coppia operata rientra in ENTRAMBE le gambe e circa il 29% del
-      // differenziale torna a essere il rendimento del simbolo stesso.
-      if(g_csPair[p]==StringSubstr(sym,0,6)) continue;
-
-      // Senza SymbolSelect il terminale non tiene lo storico della coppia e
-      // CopyRates torna 0 al primo giro: era il motivo per cui il modulo
-      // usciva sempre vuoto senza dire niente.
-      string pn=g_csPair[p]+suf;
-      if(!SymbolInfoInteger(pn,SYMBOL_SELECT)) SymbolSelect(pn,true);
-      MqlRates rp[];
-      int np=0;
-      for(int att=0; att<6; att++)
-      {
-         np=CopyRates(pn,InpStrTF,from,to,rp);
-         if(np>=200) break;
-         Sleep(300);
-      }
-      if(np<200){ if(nMiss<12) miss[nMiss++]=pn; continue; }
-      nUsed++;
-
-      int j=0;
-      for(int i=0;i<nr;i++)
-      {
-         while(j<np && rp[j].time<g_csTime[i]) j++;
-         if(j>=np) break;
-         if(rp[j].time!=g_csTime[i]) continue;
-         if(rp[j].open<=0.0) continue;
-         double v=rp[j].close/rp[j].open-1.0;
-         if(s1!=0){ sum1[i]+=s1*v; cnt1[i]++; }
-         if(s2!=0){ sum2[i]+=s2*v; cnt2[i]++; }
-      }
-   }
-   if(nUsed<6)
-   {
-      string ml=""; for(int q=0;q<nMiss;q++) ml+=(q?", ":"")+miss[q];
-      PrintFormat("[%s] forza relativa NON disponibile: solo %d coppie utilizzabili. Mancanti: %s",
-                  sym, nUsed, (nMiss>0?ml:"(nessuna elencata)"));
-      return false;
-   }
-
-   //--- TSI su ciascuna gamba, poi differenza
-   double a1=2.0/(InpStrSm1+1.0), a2=2.0/(InpStrSm2+1.0);
-   double m1a=0,m1b=0,v1a=0,v1b=0, m2a=0,m2b=0,v2a=0,v2b=0;
-   bool init=false;
    ArrayResize(g_csDiff,nr);
-   for(int i=0;i<nr;i++)
-   {
-      double x1=(cnt1[i]>0 ? sum1[i]/cnt1[i] : 0.0);
-      double x2=(cnt2[i]>0 ? sum2[i]/cnt2[i] : 0.0);
-      if(!init)
-      {
-         m1a=x1; m1b=x1; v1a=MathAbs(x1); v1b=MathAbs(x1);
-         m2a=x2; m2b=x2; v2a=MathAbs(x2); v2b=MathAbs(x2);
-         init=true;
-      }
-      else
-      {
-         m1a+=a1*(x1-m1a);            v1a+=a1*(MathAbs(x1)-v1a);
-         m1b+=a2*(m1a-m1b);           v1b+=a2*(v1a-v1b);
-         m2a+=a1*(x2-m2a);            v2a+=a1*(MathAbs(x2)-v2a);
-         m2b+=a2*(m2a-m2b);           v2b+=a2*(v2a-v2b);
-      }
-      double t1=(v1b>0.0 ? 100.0*m1b/v1b : 0.0);
-      double t2=(v2b>0.0 ? 100.0*m2b/v2b : 0.0);
-      g_csDiff[i]=(float)(c1!="" ? t1-t2 : -t2);
-   }
-   //--- LA SCALA. sum1/sum2 sono gia' fusi e in memoria: rifare il TSI con
-   // lunghezze diverse costa una passata lineare l'una, contro 27 CopyRates
-   // per ogni timeframe in piu' se si fosse allargato di la'.
+   CsTsi(x1,x2,nr,InpStrSm1,InpStrSm2,(c1!=""),g_csDiff,0);
+
+   //--- LA SCALA DELLE LUNGHEZZE. x1/x2 sono gia' fusi e in memoria: rifare
+   // il TSI con lunghezze diverse costa una passata lineare l'una, contro 27
+   // CopyRates per ogni timeframe in piu' se si fosse allargato di la'.
    double lv[]; int nlv=ParseDoubles(InpStrLadder,lv);
    for(int k=0;k<nlv && g_nLad<CS_MAXL;k++)
       if(lv[k]>=2.0) g_ladB[g_nLad++]=(int)lv[k];
    if(g_nLad>0)
    {
       ArrayResize(g_csLad,nr);
+      float tmp[]; ArrayResize(tmp,nr);
       for(int k=0;k<g_nLad;k++)
       {
          // stesso rapporto 15/25 fra i due smoothing dell'impostazione
          // principale: la scala cambia la LUNGHEZZA, non la forma del filtro
-         double b1=2.0/(g_ladB[k]+1.0);
-         double b2=2.0/(MathMax(2.0,MathRound(g_ladB[k]*0.6))+1.0);
-         double q1a=0,q1b=0,w1a=0,w1b=0, q2a=0,q2b=0,w2a=0,w2b=0;
-         bool in2=false;
-         for(int i=0;i<nr;i++)
-         {
-            double x1=(cnt1[i]>0 ? sum1[i]/cnt1[i] : 0.0);
-            double x2=(cnt2[i]>0 ? sum2[i]/cnt2[i] : 0.0);
-            if(!in2)
-            {
-               q1a=x1; q1b=x1; w1a=MathAbs(x1); w1b=MathAbs(x1);
-               q2a=x2; q2b=x2; w2a=MathAbs(x2); w2b=MathAbs(x2);
-               in2=true;
-            }
-            else
-            {
-               q1a+=b1*(x1-q1a);  w1a+=b1*(MathAbs(x1)-w1a);
-               q1b+=b2*(q1a-q1b); w1b+=b2*(w1a-w1b);
-               q2a+=b1*(x2-q2a);  w2a+=b1*(MathAbs(x2)-w2a);
-               q2b+=b2*(q2a-q2b); w2b+=b2*(w2a-w2b);
-            }
-            double u1=(w1b>0.0 ? 100.0*q1b/w1b : 0.0);
-            double u2=(w2b>0.0 ? 100.0*q2b/w2b : 0.0);
-            g_csLad[i][k]=(float)(c1!="" ? u1-u2 : -u2);
-         }
+         int s2b=(int)MathMax(2.0,MathRound(g_ladB[k]*0.6));
+         CsTsi(x1,x2,nr,g_ladB[k],s2b,(c1!=""),tmp,0);
+         for(int i=0;i<nr;i++) g_csLad[i][k]=tmp[i];
       }
    }
-
    g_csN=nr; g_csOk=true;
    PrintFormat("[%s] forza relativa: %d coppie, %d barre %s, scala su %d lunghezze",
                sym, nUsed, nr, EnumToString(InpStrTF), g_nLad);
+
+   //--- SCALE AGGIUNTIVE. Qui si paga davvero: 27 CopyRates per timeframe.
+   // Sotto M15 lo storico completo non serve e spesso non c'e' - M1 su
+   // sedici anni sono sei milioni di barre a coppia - quindi le scale fini
+   // partono da InpStrTFDays giorni fa. Le rotture piu' vecchie di cosi'
+   // escono con la cella VUOTA, non con uno zero: zero vorrebbe dire
+   // "forza neutra" e sarebbe una bugia che il cercatore si berrebbe.
+   string parts[]; int np2=StringSplit(InpStrTFList,',',parts);
+   int tot=0;
+   for(int i=0;i<np2 && g_nStf<CS_MAXTF;i++)
+   {
+      string tn=parts[i];
+      StringTrimLeft(tn); StringTrimRight(tn);
+      if(tn=="") continue;
+      ENUM_TIMEFRAMES tf=TfFromName(tn);
+      if(tf==PERIOD_CURRENT) continue;
+      int psec=PeriodSeconds(tf);
+      if(psec<=0) continue;
+
+      datetime f2=from;
+      // La soglia sta a M5 e non a M15 di proposito: M5 su sedici anni sono
+      // circa 1.2 milioni di barre a coppia, che il terminale regge e
+      // quasi sempre ha. M1 sono sei milioni, che spesso non ha e che
+      // comunque farebbero girare la fusione su 360 MB di buffer.
+      if(InpStrTFDays>0 && psec<PeriodSeconds(PERIOD_M5))
+      {
+         datetime cut=to-(datetime)((long)InpStrTFDays*86400);
+         if(cut>f2) f2=cut;
+      }
+
+      datetime aT[]; float a1[], a2[]; int nu2=0;
+      int n2=CsAxis(sym,tf,f2,to,c1,c2,suf,nu2,aT,a1,a2);
+      if(n2<=0){ PrintFormat("[%s] forza %s saltata: storico insufficiente",sym,tn); continue; }
+
+      int k=g_nStf;
+      ArrayResize(g_sTime,tot+n2); ArrayResize(g_sDiff,tot+n2);
+      for(int q=0;q<n2;q++) g_sTime[tot+q]=aT[q];
+      CsTsi(a1,a2,n2,InpStrSm1,InpStrSm2,(c1!=""),g_sDiff,tot);
+      g_sOff[k]=tot; g_sLen[k]=n2; g_sSec[k]=psec;
+      StringToUpper(tn); g_sName[k]=tn;
+      g_nStf++; tot+=n2;
+      PrintFormat("[%s] forza %s: %d coppie, %d barre da %s",
+                  sym, tn, nu2, n2, TimeToString(aT[0],TIME_DATE));
+   }
    return true;
 }
 
@@ -4214,6 +4307,16 @@ bool ProcessSymbol(string sym)
                if(g_csOk)
                   for(int k=0;k<g_nLad;k++)
                      g_bk[g_nBk].xs[k]=(float)(CsLadAt(r[kb].time,k)*dir);
+               g_bk[g_nBk].xtOk=0;
+               for(int k=0;k<CS_MAXTF;k++) g_bk[g_nBk].xt[k]=0.0f;
+               for(int k=0;k<g_nStf;k++)
+               {
+                  bool okT=false;
+                  double vT=CsTfAt(r[kb].time,k,okT);
+                  if(!okT) continue;
+                  g_bk[g_nBk].xt[k]=(float)(vT*dir);
+                  g_bk[g_nBk].xtOk|=(uchar)(1<<k);
+               }
                // ultima barra CHIUSA di ciascuna scala aggiuntiva
                for(int t=0;t<EXT_MAXTF;t++)
                { g_bk[g_nBk].xr[t]=0.0f; g_bk[g_nBk].xc[t]=0.0f; g_bk[g_nBk].xz[t]=0.0f; }
@@ -8214,6 +8317,8 @@ void BuildOrb(string sym,string dir)
             W(fF,";rsi_"+g_xName[t]+";cci_"+g_xName[t]+";zs_"+g_xName[t]);
          for(int k=0;k<g_nLad;k++)
             W(fF,";forza_"+IntegerToString(g_ladB[k])+"b");
+         for(int k=0;k<g_nStf;k++)
+            W(fF,";forza_"+g_sName[k]);
          W(fF,"\r\n");
          for(int q=0;q<nSel;q++)
          {
@@ -8238,6 +8343,10 @@ void BuildOrb(string sym,string dir)
             for(int t=0;t<g_nXtf;t++)
                W(fF,";"+F(g_bk[b].xr[t],2)+";"+F(g_bk[b].xc[t],2)+";"+F(g_bk[b].xz[t],3));
             for(int k=0;k<g_nLad;k++) W(fF,";"+F(g_bk[b].xs[k],2));
+            // cella VUOTA quando quella scala non arriva fin qui: uno zero
+            // sarebbe indistinguibile da forza neutra
+            for(int k=0;k<g_nStf;k++)
+               W(fF,";"+(((g_bk[b].xtOk>>k)&1)!=0 ? F(g_bk[b].xt[k],2) : ""));
             W(fF,"\r\n");
          }
          FileClose(fF);

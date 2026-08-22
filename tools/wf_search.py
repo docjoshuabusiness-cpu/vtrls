@@ -53,18 +53,28 @@ def carica(path, cost):
         rd = csv.reader(f, delimiter=";")
         hdr = next(rd)
         ix  = {n: i for i, n in enumerate(hdr)}
+        righe = [r for r in rd
+                 if r and r[0] != "finestra" and len(r) >= len(hdr)]
+
+        # Le feature si deducono dall'intestazione - cosi' le colonne nuove
+        # entrano nella ricerca senza toccare questo file - ma NON dalla prima
+        # riga sola. Le scale fini della forza partono da meta' campione e
+        # nelle righe piu' vecchie la cella e' vuota: dedurle dalla prima riga
+        # le scartava tutte in silenzio, che e' il modo peggiore di perdere
+        # una colonna. Basta che il valore sia leggibile da qualche parte.
         feats, hist, out = [], {}, []
-        for r in rd:
-            if not r or r[0] == "finestra" or len(r) < len(hdr):
+        for n in hdr:
+            if n in SKIP or n.startswith("vp_stato"):
                 continue
-            if not feats:                       # feature dedotte dall'intestazione:
-                for n in hdr:                   # le colonne nuove entrano da sole
-                    if n in SKIP or n.startswith("vp_stato"):
-                        continue
-                    try:
-                        float(r[ix[n]]); feats.append(n); hist[n] = []
-                    except (ValueError, IndexError):
-                        pass
+            for r in righe:
+                try:
+                    float(r[ix[n]])
+                except (ValueError, IndexError):
+                    continue
+                feats.append(n); hist[n] = []
+                break
+
+        for r in righe:
             e = r[ix["esito"]]
             p = 2.0 - cost if e == "TARGET" else (-1.0 - cost if e == "STOP" else -cost)
             pc = {}
@@ -72,7 +82,7 @@ def carica(path, cost):
                 try:
                     v = float(r[ix[n]])
                 except ValueError:
-                    continue
+                    continue          # cella vuota: quella regola non apre qui
                 h = hist[n]
                 if len(h) >= 100:
                     w = sorted(h[-WIN:])
