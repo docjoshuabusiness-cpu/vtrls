@@ -2255,7 +2255,14 @@ bool CsBuild(string sym,datetime from,datetime to)
       int s1=(c1!="" ? CsSign(p,c1) : 0);
       int s2=CsSign(p,c2);
       if(s1==0 && s2==0) continue;
-      if(g_csPair[p]+suf==sym) continue;          // leave-one-out
+      // Leave-one-out sul CODICE della coppia, non sul nome completo.
+      // Confrontare g_csPair[p]+suf con sym funziona solo finche' il
+      // suffisso delle altre coppie coincide con quello del simbolo
+      // operato: appena il fallback sceglie un suffisso piu' corto
+      // ("EURUSD.r" contro "EURUSD.r_QDM") il confronto fallisce, la
+      // coppia operata rientra in ENTRAMBE le gambe e circa il 29% del
+      // differenziale torna a essere il rendimento del simbolo stesso.
+      if(g_csPair[p]==StringSubstr(sym,0,6)) continue;
 
       // Senza SymbolSelect il terminale non tiene lo storico della coppia e
       // CopyRates torna 0 al primo giro: era il motivo per cui il modulo
