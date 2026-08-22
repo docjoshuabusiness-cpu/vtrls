@@ -189,6 +189,7 @@ input string          InpExtraTfList    = "M10,M30,H1,H2,H4,H8,D1";  // Scale AG
 
 input bool            InpDoStrength     = true;            // Forza relativa cross-sectional delle valute
 input ENUM_TIMEFRAMES InpStrTF          = PERIOD_H1;      // TF su cui misurare la forza
+input string          InpStrLadder      = "6,25,100,400";   // Scala della forza: lunghezze TSI in BARRE del TF forza, come colonne per il cercatore (vuoto = non calcolarla)
 input int             InpStrSm1         = 25;              // Primo smoothing (TSI)
 input int             InpStrSm2         = 15;              // Secondo smoothing (TSI)
 input double          InpStrConf        = 25.0;            // Soglia di forza "decisa"
@@ -1690,6 +1691,12 @@ void VpInitVa()
 // duecento righe piu' sotto, e in MQL5 un #define deve precedere ogni suo
 // impiego. E' lo stesso inciampo gia' fatto con VP_MAXVA.
 #define EXT_MAXTF 8
+// CS_MAXL sta accanto agli altri per la stessa ragione: SBrk indicizza
+// anche questo. La scala della forza NON si allarga caricando 27 coppie
+// su sette timeframe - quello moltiplica per sette il download e il
+// rischio che meta' storico non ci sia - ma rifacendo il solo TSI, che
+// costa una passata su un array gia' in memoria, con lunghezze diverse.
+#define CS_MAXL   6
 double g_rr[ORB_MAXRR];
 int    g_nRR=0;
 int    g_rrMain=0;
@@ -1889,6 +1896,7 @@ struct SBrk
    // della rottura. Materiale per il cercatore, non usati da nessuna
    // tabella dello script.
    float xr[EXT_MAXTF], xc[EXT_MAXTF], xz[EXT_MAXTF];
+   float xs[CS_MAXL];
    char  resR[ORB_MAXRR];
    // volume profile del giorno precedente, letto al momento della rottura
    float vpPocDist;              // (entry - POC) in ATR, col segno della rottura
@@ -2190,6 +2198,13 @@ string g_csPair[CS_NP] =
 
 datetime g_csTime[];
 float    g_csDiff[];
+// La forza misurata a una sola lunghezza risponde "si'" o "no". La scala
+// risponde a una domanda diversa e piu' utile: la rottura cavalca un flusso
+// valutario in corso da ore o una tendenza vecchia di giorni? Le due cose
+// portano a due EA diversi - un innesco veloce o un filtro lento calcolato
+// una volta al giorno - e finora non erano distinguibili.
+float    g_csLad[][CS_MAXL];
+int      g_ladB[CS_MAXL]; int g_nLad=0;
 int      g_csN=0;
 bool     g_csOk=false;
 int      g_csSec=3600;
@@ -2221,10 +2236,18 @@ double CsAt(datetime t)
    return (i>=0 ? (double)g_csDiff[i] : 0.0);
 }
 
+// stesso indice, stessa disciplina point-in-time: l'ultima barra CHIUSA
+double CsLadAt(datetime t,int k)
+{
+   if(k<0 || k>=g_nLad) return 0.0;
+   int i=CsIndexAt(t);
+   return (i>=0 ? (double)g_csLad[i][k] : 0.0);
+}
+
 bool CsBuild(string sym,datetime from,datetime to)
 {
-   g_csN=0; g_csOk=false;
-   ArrayResize(g_csTime,0); ArrayResize(g_csDiff,0);
+   g_csN=0; g_csOk=false; g_nLad=0;
+   ArrayResize(g_csTime,0); ArrayResize(g_csDiff,0); ArrayResize(g_csLad,0);
    if(!InpDoStrength) return false;
    if(StringLen(sym)<6) return false;
 
@@ -2372,9 +2395,50 @@ bool CsBuild(string sym,datetime from,datetime to)
       double t2=(v2b>0.0 ? 100.0*m2b/v2b : 0.0);
       g_csDiff[i]=(float)(c1!="" ? t1-t2 : -t2);
    }
+   //--- LA SCALA. sum1/sum2 sono gia' fusi e in memoria: rifare il TSI con
+   // lunghezze diverse costa una passata lineare l'una, contro 27 CopyRates
+   // per ogni timeframe in piu' se si fosse allargato di la'.
+   double lv[]; int nlv=ParseDoubles(InpStrLadder,lv);
+   for(int k=0;k<nlv && g_nLad<CS_MAXL;k++)
+      if(lv[k]>=2.0) g_ladB[g_nLad++]=(int)lv[k];
+   if(g_nLad>0)
+   {
+      ArrayResize(g_csLad,nr);
+      for(int k=0;k<g_nLad;k++)
+      {
+         // stesso rapporto 15/25 fra i due smoothing dell'impostazione
+         // principale: la scala cambia la LUNGHEZZA, non la forma del filtro
+         double b1=2.0/(g_ladB[k]+1.0);
+         double b2=2.0/(MathMax(2.0,MathRound(g_ladB[k]*0.6))+1.0);
+         double q1a=0,q1b=0,w1a=0,w1b=0, q2a=0,q2b=0,w2a=0,w2b=0;
+         bool in2=false;
+         for(int i=0;i<nr;i++)
+         {
+            double x1=(cnt1[i]>0 ? sum1[i]/cnt1[i] : 0.0);
+            double x2=(cnt2[i]>0 ? sum2[i]/cnt2[i] : 0.0);
+            if(!in2)
+            {
+               q1a=x1; q1b=x1; w1a=MathAbs(x1); w1b=MathAbs(x1);
+               q2a=x2; q2b=x2; w2a=MathAbs(x2); w2b=MathAbs(x2);
+               in2=true;
+            }
+            else
+            {
+               q1a+=b1*(x1-q1a);  w1a+=b1*(MathAbs(x1)-w1a);
+               q1b+=b2*(q1a-q1b); w1b+=b2*(w1a-w1b);
+               q2a+=b1*(x2-q2a);  w2a+=b1*(MathAbs(x2)-w2a);
+               q2b+=b2*(q2a-q2b); w2b+=b2*(w2a-w2b);
+            }
+            double u1=(w1b>0.0 ? 100.0*q1b/w1b : 0.0);
+            double u2=(w2b>0.0 ? 100.0*q2b/w2b : 0.0);
+            g_csLad[i][k]=(float)(c1!="" ? u1-u2 : -u2);
+         }
+      }
+   }
+
    g_csN=nr; g_csOk=true;
-   PrintFormat("[%s] forza relativa: %d coppie, %d barre %s",
-               sym, nUsed, nr, EnumToString(InpStrTF));
+   PrintFormat("[%s] forza relativa: %d coppie, %d barre %s, scala su %d lunghezze",
+               sym, nUsed, nr, EnumToString(InpStrTF), g_nLad);
    return true;
 }
 
@@ -4146,6 +4210,10 @@ bool ProcessSymbol(string sym)
                g_bk[g_nBk].extRec=(char)extR;
                g_bk[g_nBk].ent  =(float)entV;
                g_bk[g_nBk].str  =(float)(g_csOk ? CsAt(r[kb].time)*dir : 0.0);
+               for(int k=0;k<CS_MAXL;k++) g_bk[g_nBk].xs[k]=0.0f;
+               if(g_csOk)
+                  for(int k=0;k<g_nLad;k++)
+                     g_bk[g_nBk].xs[k]=(float)(CsLadAt(r[kb].time,k)*dir);
                // ultima barra CHIUSA di ciascuna scala aggiuntiva
                for(int t=0;t<EXT_MAXTF;t++)
                { g_bk[g_nBk].xr[t]=0.0f; g_bk[g_nBk].xc[t]=0.0f; g_bk[g_nBk].xz[t]=0.0f; }
@@ -8144,6 +8212,8 @@ void BuildOrb(string sym,string dir)
          // gia' scritta su questo file
          for(int t=0;t<g_nXtf;t++)
             W(fF,";rsi_"+g_xName[t]+";cci_"+g_xName[t]+";zs_"+g_xName[t]);
+         for(int k=0;k<g_nLad;k++)
+            W(fF,";forza_"+IntegerToString(g_ladB[k])+"b");
          W(fF,"\r\n");
          for(int q=0;q<nSel;q++)
          {
@@ -8167,6 +8237,7 @@ void BuildOrb(string sym,string dir)
             for(int z=0;z<g_nVa;z++) W(fF,";"+F(g_bk[b].vpVaWidthV[z],4));
             for(int t=0;t<g_nXtf;t++)
                W(fF,";"+F(g_bk[b].xr[t],2)+";"+F(g_bk[b].xc[t],2)+";"+F(g_bk[b].xz[t],3));
+            for(int k=0;k<g_nLad;k++) W(fF,";"+F(g_bk[b].xs[k],2));
             W(fF,"\r\n");
          }
          FileClose(fF);
