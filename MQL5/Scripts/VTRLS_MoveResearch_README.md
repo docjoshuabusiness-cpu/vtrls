@@ -700,3 +700,36 @@ domanda non e' quindi "la forza relativa funziona", a cui i dati rispondono di
 si': e' "sopravvive quando lo stop e' largo abbastanza da pagare il costo". Le
 fasce 15-20 della calibrazione esistono per rispondere a quella, e per
 rispondere anche nella sola meta' recente del campione.
+
+## Perche' la scala si allarga sulla forza e non sugli indicatori
+
+Su EURJPY, quartile alto contro quartile basso, 3527 rotture:
+
+| feature | z |
+|---|---|
+| `forza_relativa` | **+5.19** |
+| `cci` | +2.27 |
+| `rsi` | +2.25 |
+| miglior scala aggiuntiva (`zs_M30`) | +1.83 |
+
+Le 21 colonne M10/M30/H1/H2/H4/H8/D1 arrivano al massimo a 1.83. Il massimo
+di 21 estrazioni da una normale standard vale circa 2.0: quel blocco di
+colonne sta *sotto* quello che darebbe il puro rumore. Aggiungere altri
+timeframe di indicatore aggiunge colonne, non informazione.
+
+La forza invece e' misurata a un solo smoothing (25/15) e su un solo
+timeframe, e vale piu' del doppio della seconda. `InpStrLadder` rifa il TSI
+su quelle stesse somme gia' fuse in memoria con lunghezze diverse - default
+`6,25,100,400`, che su TF forza H1 sono 6 ore, un giorno, quattro giorni,
+due settimane e mezzo - e scrive `forza_6b ... forza_400b` in coda a
+`_orb_breakout.csv`.
+
+Il costo e' una passata lineare per lunghezza. Allargare invece la forza su
+sette timeframe vorrebbe dire 27 `CopyRates` per ognuno e lo storico
+corrispondente su tutte le 27 coppie: molte volte il tempo di tutto il resto,
+e sui timeframe fini spesso lo storico non c'e' e il modulo esce vuoto.
+
+La domanda a cui risponde la scala non e' "funziona": e' **quale orizzonte**.
+Se vince `forza_6b` la rottura cavalca un flusso valutario in corso e serve un
+innesco veloce; se vince `forza_400b` e' un filtro lento, si calcola una volta
+al giorno e non guarda piu' l'intraday. Sono due EA diversi.
