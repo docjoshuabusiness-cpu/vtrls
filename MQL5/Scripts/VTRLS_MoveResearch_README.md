@@ -633,3 +633,36 @@ Due discipline, entrambe gia' costate care altrove:
 Come la calibrazione dello stop, gira **solo sulla finestra dichiarata**
 (`InpSweepStartMin` / `InpSweepDurMin`): estenderla a tutte le 154 finestre
 costerebbe trenta volte il tempo di tutto il resto dello script.
+
+
+## Scale aggiuntive e ricerca sul CSV (`InpExtraTfList`, `tools/wf_search.py`)
+
+`_orb_breakout.csv` porta ora RSI, CCI e Z-Score anche su **M10, M30, H1, H2,
+H4, H8, D1**, letti all'ultima barra CHIUSA prima della rottura. Sono 21
+colonne in coda al file - in coda apposta: spostare quelle esistenti
+romperebbe ogni analisi gia' scritta.
+
+Il blocco che le calcola e' **deliberatamente additivo**: non tocca la
+macchina a tre timeframe che alimenta le tabelle degli indicatori e il modulo
+CCI. Quella e' gia' stata misurata (3 TF x 3 periodi x 6 rapporti, 51 righe
+negative su 54) e riaprirla per infilarci sette scale rischierebbe ogni altra
+tabella per un modulo che sappiamo non funzionare.
+
+**La ricerca non vive in MQL5.** Vive in `tools/wf_search.py`, che legge il
+CSV e fa l'unica cosa che trasforma una ricerca in una misura: sceglie la
+regola guardando solo il passato e la valuta su un blocco mai visto.
+
+    python3 tools/wf_search.py EURUSD=file.csv:0.078 GBPUSD=altro.csv:0.060
+
+Lo strumento deduce le feature dall'intestazione, quindi **le colonne nuove
+entrano nella ricerca da sole**, senza modifiche. Tre discipline dentro:
+percentile causale (una soglia assoluta smette di scattare quando la scala si
+sposta), selezione congiunta sui simboli, e il conteggio dei candidati stampato
+accanto al risultato - con 288 candidati una cella ha bisogno di z ~3.4 per
+significare qualcosa.
+
+`mfe_atr` e `mae_atr` sono esclusi a mano: sono escursioni misurate DOPO
+l'ingresso, cioe' l'esito travestito da feature. Alla prima esecuzione il
+cercatore le ha scelte e ha prodotto t = 21.77 - ed e' esattamente cosi' che
+si riconosce un look-ahead, non dal fatto che sia positivo ma dal fatto che
+sia impossibile.

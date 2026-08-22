@@ -184,6 +184,7 @@ input int             InpSweepDurMin    = 60;              // Finestra della cal
 input string          InpStopSweep      = "0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.25,1.4,1.6,1.8,2,2.25,2.5,2.75,3,3.5,4";  // Stop ancorati all'ATR: moltiplicatori dello stop base
 input string          InpStopSweepPt    = "30,40,50,60,70,80,90,100,115,130,145,160,180,200,225,250,280,320,360,400";   // Stop in PUNTI fissi (vuoto = non testarli)
 input string          InpOrbHorizons    = "30,60,120,240,480,960,1440,2880,4320,7200";  // Orizzonti in MINUTI di calendario da testare insieme (vuoto = non testarli)
+input string          InpExtraTfList    = "M10,M30,H1,H2,H4,H8,D1";  // Scale AGGIUNTIVE: RSI/CCI/Z al momento della rottura, solo come colonne per il cercatore
 
 input bool            InpDoStrength     = true;            // Forza relativa cross-sectional delle valute
 input ENUM_TIMEFRAMES InpStrTF          = PERIOD_H1;      // TF su cui misurare la forza
@@ -1867,6 +1868,10 @@ struct SBrk
    // rottura, gia' girata nel verso della rottura. Zero se il simbolo non
    // appartiene al complesso o le coppie mancano.
    float str;
+   // RSI/CCI/Z sulle scale aggiuntive, all'ultima barra chiusa prima
+   // della rottura. Materiale per il cercatore, non usati da nessuna
+   // tabella dello script.
+   float xr[EXT_MAXTF], xc[EXT_MAXTF], xz[EXT_MAXTF];
    char  resR[ORB_MAXRR];
    // volume profile del giorno precedente, letto al momento della rottura
    float vpPocDist;              // (entry - POC) in ATR, col segno della rottura
@@ -2388,6 +2393,55 @@ string HzLab(int h)
    return IntegerToString(m/1440)+"g ("+IntegerToString(m)+" min)";
 }
 
+//==================================================================
+// SCALE AGGIUNTIVE PER IL CERCATORE
+//------------------------------------------------------------------
+// Blocco deliberatamente ADDITIVO: non tocca la macchina a tre
+// timeframe che alimenta le tabelle degli indicatori e il modulo CCI.
+// Quella e' gia' stata misurata - 3 TF x 3 periodi x 6 rapporti, 51
+// righe negative su 54 - e riaprirla per infilarci sette scale in piu'
+// significherebbe rischiare ogni altra tabella per un modulo che
+// sappiamo gia' non funzionare.
+//
+// Qui si fa una cosa sola: leggere RSI, CCI e Z-Score su altre scale
+// all'ultima barra CHIUSA prima della rottura, e scriverli come colonne
+// in _orb_breakout.csv. La ricerca su quelle colonne non vive in MQL5:
+// vive sul CSV, dove una modifica costa un secondo invece di un
+// compile-and-rerun, e dove il giudice walk-forward e' gia' montato.
+#define EXT_MAXTF 8
+ENUM_TIMEFRAMES g_xTf[EXT_MAXTF]; string g_xName[EXT_MAXTF]; int g_nXtf=0;
+
+ENUM_TIMEFRAMES TfFromName(string t)
+{
+   StringToUpper(t); StringTrimLeft(t); StringTrimRight(t);
+   if(t=="M1")  return PERIOD_M1;   if(t=="M2")  return PERIOD_M2;
+   if(t=="M3")  return PERIOD_M3;   if(t=="M4")  return PERIOD_M4;
+   if(t=="M5")  return PERIOD_M5;   if(t=="M6")  return PERIOD_M6;
+   if(t=="M10") return PERIOD_M10;  if(t=="M12") return PERIOD_M12;
+   if(t=="M15") return PERIOD_M15;  if(t=="M20") return PERIOD_M20;
+   if(t=="M30") return PERIOD_M30;  if(t=="H1")  return PERIOD_H1;
+   if(t=="H2")  return PERIOD_H2;   if(t=="H3")  return PERIOD_H3;
+   if(t=="H4")  return PERIOD_H4;   if(t=="H6")  return PERIOD_H6;
+   if(t=="H8")  return PERIOD_H8;   if(t=="H12") return PERIOD_H12;
+   if(t=="D1")  return PERIOD_D1;   if(t=="W1")  return PERIOD_W1;
+   return PERIOD_CURRENT;
+}
+
+void XtfInit()
+{
+   g_nXtf=0;
+   string parts[]; int np=StringSplit(InpExtraTfList,',',parts);
+   for(int i=0;i<np && g_nXtf<EXT_MAXTF;i++)
+   {
+      string t=parts[i];
+      StringTrimLeft(t); StringTrimRight(t);
+      if(t=="") continue;
+      ENUM_TIMEFRAMES tf=TfFromName(t);
+      if(tf==PERIOD_CURRENT) continue;
+      g_xTf[g_nXtf]=tf; StringToUpper(t); g_xName[g_nXtf]=t; g_nXtf++;
+   }
+}
+
 bool g_bkCap=false;             // tetto ai record raggiunto: campione troncato
 int  g_orbSel=-1;               // finestra portata nella scheda operativa
 
@@ -2405,6 +2459,7 @@ void OrbInit()
    PvReset();
    SwReset();
    HzReset();
+   XtfInit();
 
    double rr[]; int nrr=ParseDoubles(InpOrbRR,rr);
    g_nRR=0;
@@ -3296,6 +3351,48 @@ bool ProcessSymbol(string sym)
          }
       }
 
+      //--- scale AGGIUNTIVE: solo materiale per il cercatore, nessuna
+      // tabella dello script le usa. Caricate a parte proprio per questo.
+      datetime xT[][EXT_MAXTF];
+      double   xR[][EXT_MAXTF], xC[][EXT_MAXTF], xZ[][EXT_MAXTF];
+      int      xN[EXT_MAXTF], xSec[EXT_MAXTF];
+      ArrayInitialize(xN,0); ArrayInitialize(xSec,0);
+      if(InpDoIndicators && InpDoOrb && g_nXtf>0)
+      {
+         MqlRates rx[]; double cx[], tx[], bx1[], bx2[], bx3[];
+         int allocX=0;
+         for(int t=0;t<g_nXtf;t++)
+         {
+            int sec=TFMinutes(g_xTf[t])*60;
+            if(sec<=0) continue;
+            xSec[t]=sec;
+            datetime xFrom=dStart-(datetime)((need*20+300)*sec);
+            int cnt=CopyRates(sym,g_xTf[t],xFrom,dEnd,rx);
+            if(cnt<=need*3) continue;
+            if(cnt>allocX)
+            {
+               ArrayResize(xT,cnt); ArrayResize(xR,cnt);
+               ArrayResize(xC,cnt); ArrayResize(xZ,cnt);
+               allocX=cnt;
+            }
+            ArrayResize(cx,cnt); ArrayResize(tx,cnt);
+            for(int i=0;i<cnt;i++)
+            {
+               cx[i]=rx[i].close;
+               tx[i]=(rx[i].high+rx[i].low+rx[i].close)/3.0;
+            }
+            CalcRSI(cx,cnt,InpRsiPeriod,bx1);
+            CalcCCI(tx,cnt,InpCciPeriod,bx2);
+            CalcZScore(cx,cnt,InpZsPeriod,bx3);
+            for(int i=0;i<cnt;i++)
+            {
+               xT[i][t]=rx[i].time; xR[i][t]=bx1[i];
+               xC[i][t]=bx2[i];     xZ[i][t]=bx3[i];
+            }
+            xN[t]=cnt;
+         }
+      }
+
       // mappa minuto del giorno -> primo indice di barra. Serve sia al
       // modulo delle finestre sia a quello delle uscite dal CCI.
       int minIdx[1442];
@@ -3996,6 +4093,24 @@ bool ProcessSymbol(string sym)
                g_bk[g_nBk].extRec=(char)extR;
                g_bk[g_nBk].ent  =(float)entV;
                g_bk[g_nBk].str  =(float)(g_csOk ? CsAt(r[kb].time)*dir : 0.0);
+               // ultima barra CHIUSA di ciascuna scala aggiuntiva
+               for(int t=0;t<EXT_MAXTF;t++)
+               { g_bk[g_nBk].xr[t]=0.0f; g_bk[g_nBk].xc[t]=0.0f; g_bk[g_nBk].xz[t]=0.0f; }
+               for(int t=0;t<g_nXtf;t++)
+               {
+                  if(xN[t]<=0 || xSec[t]<=0) continue;
+                  int lo=0, hi=xN[t]-1, bi=-1;
+                  while(lo<=hi)
+                  {
+                     int mid=(lo+hi)/2;
+                     if(xT[mid][t]+(datetime)xSec[t]<=r[kb].time){ bi=mid; lo=mid+1; }
+                     else hi=mid-1;
+                  }
+                  if(bi<0) continue;
+                  g_bk[g_nBk].xr[t]=(float)xR[bi][t];
+                  g_bk[g_nBk].xc[t]=(float)xC[bi][t];
+                  g_bk[g_nBk].xz[t]=(float)xZ[bi][t];
+               }
                g_bk[g_nBk].cost=(float)costAtr;
                g_bk[g_nBk].stopAtr=(float)stopAtr;
                g_bk[g_nBk].vpVolPos=(float)winVolPos;
@@ -7945,6 +8060,10 @@ void BuildOrb(string sym,string dir)
               "vp_stato;vp_dist_poc_atr;vp_larghezza_va_atr;vp_pos_volume");
          for(int z=0;z<g_nVa;z++) W(fF,";vp_stato_"+F(g_vaPct[z],0));
          for(int z=0;z<g_nVa;z++) W(fF,";vp_larghezza_"+F(g_vaPct[z],0));
+         // in coda: spostare le colonne esistenti romperebbe ogni analisi
+         // gia' scritta su questo file
+         for(int t=0;t<g_nXtf;t++)
+            W(fF,";rsi_"+g_xName[t]+";cci_"+g_xName[t]+";zs_"+g_xName[t]);
          W(fF,"\r\n");
          for(int q=0;q<nSel;q++)
          {
@@ -7966,6 +8085,8 @@ void BuildOrb(string sym,string dir)
             for(int z=0;z<g_nVa;z++)
                W(fF,";"+(g_bk[b].vpStateV[z]>=0?IntegerToString((int)g_bk[b].vpStateV[z]):""));
             for(int z=0;z<g_nVa;z++) W(fF,";"+F(g_bk[b].vpVaWidthV[z],4));
+            for(int t=0;t<g_nXtf;t++)
+               W(fF,";"+F(g_bk[b].xr[t],2)+";"+F(g_bk[b].xc[t],2)+";"+F(g_bk[b].xz[t],3));
             W(fF,"\r\n");
          }
          FileClose(fF);
