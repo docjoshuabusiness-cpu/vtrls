@@ -438,12 +438,22 @@ string F(double v,int d=2){ return DoubleToString(v,d); }
 string PadR(string x,int w){ while(StringLen(x)<w) x=x+" "; return x; }
 string PadL(string x,int w){ while(StringLen(x)<w) x=" "+x; return x; }
 
-int ParseDoubles(string src, double &out[])
+// IL TETTO ORA E' DI CHI CHIAMA, E SI FA SENTIRE.
+// Prima era 8 fisso qui dentro, messo per proteggere un tgt[16] a
+// duecento righe di distanza. Poi la lista degli stop e' passata a venti
+// valori per tipo e quella degli orizzonti a dieci: il parser ne teneva
+// otto e buttava via il resto in silenzio. La spazzata degli stop non ha
+// mai provato niente sopra 1.00 x base - cioe' esattamente la meta' che
+// interessava, visto che l'aspettativa saliva ancora all'ultimo valore
+// testato - e nessuno se ne e' accorto per tre versioni.
+// Un tetto silenzioso non e' una protezione: e' un risultato sbagliato
+// che si presenta come giusto.
+int ParseDoubles(string src, double &out[], int cap=8, string nome="")
 {
    string parts[];
    int k = StringSplit(src, StringGetCharacter(",",0), parts);
    ArrayResize(out,0);
-   int n=0;
+   int n=0, scartati=0;
    for(int i=0;i<k;i++)
    {
       string p = parts[i];
@@ -451,9 +461,14 @@ int ParseDoubles(string src, double &out[])
       if(StringLen(p)==0) continue;
       double v = StringToDouble(p);
       if(v<=0) continue;
-      if(n>=8) break;                 // hard cap: 8 soglie per tipo
+      if(n>=cap){ scartati++; continue; }
       ArrayResize(out,n+1); out[n]=v; n++;
    }
+   if(scartati>0)
+      PrintFormat("ATTENZIONE: la lista %s ha %d valori oltre il tetto di %d: "
+                  "TENUTI i primi %d, SCARTATI gli ultimi %d. "
+                  "I valori scartati non compaiono in nessuna tabella.",
+                  (nome!=""?nome:"in input"), n+scartati, cap, n, scartati);
    return n;
 }
 
@@ -1677,7 +1692,7 @@ int    g_vaMain=0;
 
 void VpInitVa()
 {
-   double v[]; int nv=ParseDoubles(InpVpVaList,v);
+   double v[]; int nv=ParseDoubles(InpVpVaList,v,VP_MAXVA,"InpVpVaList");
    g_nVa=0;
    for(int i=0;i<nv && g_nVa<VP_MAXVA;i++)
       if(v[i]>10.0 && v[i]<100.0){ g_vaPct[g_nVa]=v[i]; g_nVa++; }
@@ -2117,10 +2132,10 @@ void SwReset()
          for(int b=0;b<SW_NB;b++){ g_swW[m][z][b]=0; g_swL[m][z][b]=0; g_swF[m][z][b]=0; }
    }
    if(!InpDoStopSweep) return;
-   double v[]; int nv=ParseDoubles(InpStopSweep,v);
+   double v[]; int nv=ParseDoubles(InpStopSweep,v,SW_MAXST/2,"InpStopSweep");
    for(int i=0;i<nv && g_nSw<SW_MAXST;i++)
       if(v[i]>0.0){ g_swVal[g_nSw]=v[i]; g_swIsPt[g_nSw]=false; g_nSw++; }
-   double w[]; int nw=ParseDoubles(InpStopSweepPt,w);
+   double w[]; int nw=ParseDoubles(InpStopSweepPt,w,SW_MAXST/2,"InpStopSweepPt");
    for(int i=0;i<nw && g_nSw<SW_MAXST;i++)
       if(w[i]>0.0){ g_swVal[g_nSw]=w[i]; g_swIsPt[g_nSw]=true;  g_nSw++; }
 }
@@ -2216,7 +2231,7 @@ int      g_ladB[CS_MAXL]; int g_nLad=0;
 // dinamica. Quindi un array piatto con offset invece di una matrice: costa
 // la somma delle lunghezze, non il massimo moltiplicato per il numero di
 // scale, che su M1+M2+M5 sarebbe il triplo della memoria per niente.
-datetime g_sTime[]; float g_sDiff[];
+datetime g_sTime[]; float g_sDiff[]; uchar g_sOk[];
 int      g_sOff[CS_MAXTF], g_sLen[CS_MAXTF], g_sSec[CS_MAXTF];
 string   g_sName[CS_MAXTF]; int g_nStf=0;
 int      g_csN=0;
@@ -2272,7 +2287,7 @@ double CsTfAt(datetime t,int k,bool &ok)
       if(g_sTime[mid]+(datetime)g_sSec[k]<=t){ best=mid; lo=mid+1; }
       else hi=mid-1;
    }
-   if(best<0) return 0.0;
+   if(best<0 || g_sOk[best]==0) return 0.0;
    ok=true;
    return (double)g_sDiff[best];
 }
@@ -2283,14 +2298,14 @@ double CsTfAt(datetime t,int k,bool &ok)
 // duplicarlo significherebbe correggerlo una volta su due.
 int CsAxis(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to,
            string c1, string c2, string suf, int &nUsed,
-           datetime &oT[], float &oX1[], float &oX2[])
+           datetime &oT[], float &oX1[], float &oX2[], uchar &oOk[])
 {
    nUsed=0;
    MqlRates rr[];
    int nr=CopyRates(sym,tf,from,to,rr);
    if(nr<200) return 0;
 
-   ArrayResize(oT,nr); ArrayResize(oX1,nr); ArrayResize(oX2,nr);
+   ArrayResize(oT,nr); ArrayResize(oX1,nr); ArrayResize(oX2,nr); ArrayResize(oOk,nr);
    double sum1[], sum2[]; int cnt1[], cnt2[];
    ArrayResize(sum1,nr); ArrayResize(sum2,nr);
    ArrayResize(cnt1,nr); ArrayResize(cnt2,nr);
@@ -2364,7 +2379,14 @@ int CsAxis(string sym, ENUM_TIMEFRAMES tf, datetime from, datetime to,
    {
       oX1[i]=(float)(cnt1[i]>0 ? sum1[i]/cnt1[i] : 0.0);
       oX2[i]=(float)(cnt2[i]>0 ? sum2[i]/cnt2[i] : 0.0);
-      if(cnt2[i]>0){ occ+=cnt1[i]+cnt2[i]; nz++; }
+      // Una barra su cui nessuna coppia ha contribuito NON vale zero: vale
+      // niente. Il TSI e' ricorsivo e su un tratto vuoto decade verso zero,
+      // cioe' verso "forza neutra", che e' l'unica lettura che un lettore
+      // non puo' distinguere da un dato vero. Su M5 nei primi anni questo
+      // riguardava un quarto delle barre.
+      bool ok=(cnt2[i]>0 && (c1=="" || cnt1[i]>0));
+      oOk[i]=(uchar)(ok?1:0);
+      if(ok){ occ+=cnt1[i]+cnt2[i]; nz++; }
    }
    PrintFormat("[%s] forza %s: %d coppie caricate, %.1f contribuiscono in media per barra, "
                "%.1f%% delle barre ne ha almeno una",
@@ -2406,7 +2428,7 @@ bool CsBuild(string sym,datetime from,datetime to)
 {
    g_csN=0; g_csOk=false; g_nLad=0; g_nStf=0;
    ArrayResize(g_csTime,0); ArrayResize(g_csDiff,0); ArrayResize(g_csLad,0);
-   ArrayResize(g_sTime,0);  ArrayResize(g_sDiff,0);
+   ArrayResize(g_sTime,0);  ArrayResize(g_sDiff,0); ArrayResize(g_sOk,0);
    if(!InpDoStrength) return false;
    if(StringLen(sym)<6) return false;
 
@@ -2458,8 +2480,8 @@ bool CsBuild(string sym,datetime from,datetime to)
    if(!has2 || (c1!="" && !has1)) return false;
 
    //--- scala principale
-   float x1[], x2[]; int nUsed=0;
-   int nr=CsAxis(sym,InpStrTF,from,to,c1,c2,suf,nUsed,g_csTime,x1,x2);
+   float x1[], x2[]; uchar ok1[]; int nUsed=0;
+   int nr=CsAxis(sym,InpStrTF,from,to,c1,c2,suf,nUsed,g_csTime,x1,x2,ok1);
    if(nr<=0) return false;
    g_csSec=PeriodSeconds(InpStrTF);
    if(g_csSec<=0) g_csSec=3600;
@@ -2469,7 +2491,7 @@ bool CsBuild(string sym,datetime from,datetime to)
    //--- LA SCALA DELLE LUNGHEZZE. x1/x2 sono gia' fusi e in memoria: rifare
    // il TSI con lunghezze diverse costa una passata lineare l'una, contro 27
    // CopyRates per ogni timeframe in piu' se si fosse allargato di la'.
-   double lv[]; int nlv=ParseDoubles(InpStrLadder,lv);
+   double lv[]; int nlv=ParseDoubles(InpStrLadder,lv,CS_MAXL,"InpStrLadder");
    for(int k=0;k<nlv && g_nLad<CS_MAXL;k++)
       if(lv[k]>=2.0) g_ladB[g_nLad++]=(int)lv[k];
    if(g_nLad>0)
@@ -2518,13 +2540,28 @@ bool CsBuild(string sym,datetime from,datetime to)
          if(cut>f2) f2=cut;
       }
 
-      datetime aT[]; float a1[], a2[]; int nu2=0;
-      int n2=CsAxis(sym,tf,f2,to,c1,c2,suf,nu2,aT,a1,a2);
+      datetime aT[]; float a1[], a2[]; uchar ok2[]; int nu2=0;
+      int n2=CsAxis(sym,tf,f2,to,c1,c2,suf,nu2,aT,a1,a2,ok2);
       if(n2<=0){ PrintFormat("[%s] forza %s saltata: storico insufficiente",sym,tn); continue; }
 
       int k=g_nStf;
-      ArrayResize(g_sTime,tot+n2); ArrayResize(g_sDiff,tot+n2);
-      for(int q=0;q<n2;q++) g_sTime[tot+q]=aT[q];
+      ArrayResize(g_sTime,tot+n2); ArrayResize(g_sDiff,tot+n2); ArrayResize(g_sOk,tot+n2);
+      // Il TSI ha memoria lunga quanto il suo smoothing: una barra piena
+      // subito dopo un buco porta ancora dentro il buco. Vale solo se
+      // almeno meta' delle InpStrSm1 barre precedenti aveva dati.
+      int run=0, nOk=0;
+      for(int q=0;q<n2;q++)
+      {
+         run+=ok2[q];
+         if(q>=InpStrSm1) run-=ok2[q-InpStrSm1];
+         int span=(q<InpStrSm1 ? q+1 : InpStrSm1);
+         bool good=(ok2[q]!=0 && run*2>=span);
+         g_sOk[tot+q]=(uchar)(good?1:0);
+         if(good) nOk++;
+         g_sTime[tot+q]=aT[q];
+      }
+      PrintFormat("[%s] forza %s: %d barre su %d hanno dati sufficienti (%.1f%%)",
+                  sym, tn, nOk, n2, 100.0*nOk/n2);
       CsTsi(a1,a2,n2,InpStrSm1,InpStrSm2,(c1!=""),g_sDiff,tot);
       g_sOff[k]=tot; g_sLen[k]=n2; g_sSec[k]=psec;
       StringToUpper(tn); g_sName[k]=tn;
@@ -2572,7 +2609,7 @@ void HzReset()
       for(int z=0;z<ORB_MAXRR;z++)
          for(int b=0;b<SW_NB;b++){ g_hzW[h][z][b]=0; g_hzL[h][z][b]=0; g_hzF[h][z][b]=0; }
    }
-   double v[]; int nv=ParseDoubles(InpOrbHorizons,v);
+   double v[]; int nv=ParseDoubles(InpOrbHorizons,v,HZ_MAXH,"InpOrbHorizons");
    for(int i=0;i<nv && g_nHz<HZ_MAXH;i++)
       if(v[i]>=1.0){ g_hzMin[g_nHz]=(int)v[i]; g_nHz++; }
    // crescenti: il ciclo di accumulo si ferma al primo che non entra nei dati
@@ -2658,7 +2695,7 @@ void OrbInit()
    HzReset();
    XtfInit();
 
-   double rr[]; int nrr=ParseDoubles(InpOrbRR,rr);
+   double rr[]; int nrr=ParseDoubles(InpOrbRR,rr,ORB_MAXRR,"InpOrbRR");
    g_nRR=0;
    for(int i=0;i<nrr && g_nRR<ORB_MAXRR;i++)
       if(rr[i]>0.0){ g_rr[g_nRR]=rr[i]; g_nRR++; }
@@ -2666,7 +2703,7 @@ void OrbInit()
    g_rrMain=InpOrbRRMain-1;
    if(g_rrMain<0 || g_rrMain>=g_nRR) g_rrMain=0;
 
-   double dur[]; int nd=ParseDoubles(InpOrbDur,dur);
+   double dur[]; int nd=ParseDoubles(InpOrbDur,dur,16,"InpOrbDur");
    if(nd<=0) return;
    int step=(InpOrbStartStep>0?InpOrbStartStep:30);
    int h0=(int)MathMax(0,MathMin(23,InpOrbFirstHour));
@@ -6397,8 +6434,9 @@ void OnStart()
       Print("ERRORE: InpBaseTF deve essere compreso tra M1 e H1.");
       return;
    }
-   g_nPt =ParseDoubles(InpThrPoints,g_thrPt);
-   g_nAtr=ParseDoubles(InpThrATR,  g_thrAtr);
+   // tgt[16] in ResolveForward: le due liste insieme non possono superarlo
+   g_nPt =ParseDoubles(InpThrPoints,g_thrPt,8,"InpThrPoints");
+   g_nAtr=ParseDoubles(InpThrATR,  g_thrAtr,16-g_nPt,"InpThrATR");
    if(g_nPt==0 && g_nAtr==0){ Print("ERRORE: nessuna soglia valida."); return; }
    if(InpFrom>=InpTo){ Print("ERRORE: intervallo date non valido."); return; }
 
