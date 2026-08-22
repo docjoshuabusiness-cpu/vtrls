@@ -60,6 +60,7 @@ Puoi disattivare l'uno o l'altro.
 | `<SYM>_orb_regime.csv` | regime di volatilita' e livelli vergini: esito per regime col placebo appaiato, e curva rischio/rendimento spezzata per regime |
 | `<SYM>_cci_trade.csv` | uscita dalla banda CCI come ingresso: per periodo e per rapporto rischio/rendimento, con placebo appaiato; piu' la ripartizione per ora |
 | `<SYM>_orb_rr.csv` | curva rischio/rendimento della finestra selezionata: per ogni RR, win rate misurato contro il placebo (ingresso a caso, stesso rischio e stesso orizzonte), delta e z |
+| `<SYM>_orb_orizzonte.csv` | spazzata degli orizzonti sulla finestra dichiarata: da 30 minuti a 5 giorni x scala RR, per fascia di larghezza Value Area e per meta' del periodo |
 | `<SYM>_orb_stop.csv` | calibrazione dello stop sulla finestra DICHIARATA da input: stop ancorati all'ATR **e** stop in punti fissi, x scala RR, per fascia di larghezza Value Area e per meta' del periodo, con lo stop realmente applicato in ATR, l'aspettativa lorda, il costo in R e il netto |
 | `<SYM>_orb_tempi.csv` | quando arriva la rottura: per ora, per giorno x ora (griglia intera), per giorno, e la finestra migliore di ogni giorno della settimana su tutta la griglia. Stesse colonne di controllo del file condizioni |
 | `<SYM>_prev_range.csv` | range di IERI rotto OGGI: tre riferimenti fissi (giornata intera, notte 00:00-08:00, pomeriggio 16:00-24:00), scala RR, ampiezza del range D-1, ora della rottura, giorno, e la quota di giornate che si aprono gia' fuori dal range |
@@ -605,3 +606,30 @@ applicato**, non il moltiplicatore - e la tabella include le fasce
 punti migliore cambia fra le due meta', quel valore non si trasferisce in
 avanti e la scelta va fatta in ATR.** E' l'unico modo di rispondere alla
 domanda invece di sceglierne una a priori.
+
+
+## Orizzonti corti e lunghi insieme (`InpOrbHorizons`)
+
+Fino a ora tutto moriva a 240 minuti: un movimento che avrebbe funzionato in
+tre giorni risultava "irrisolto", cioe' indistinguibile da uno che non e'
+andato da nessuna parte.
+
+La misura **non costa una passata per orizzonte**. L'esito e' monotono nel
+tempo - una volta risolto resta risolto - quindi basta registrare in che
+minuto ogni rapporto si e' chiuso e con che segno: l'esito a qualunque
+orizzonte si ricava da quei due numeri. Una sola camminata sulle barre, fino
+al piu' lungo degli orizzonti richiesti.
+
+Due discipline, entrambe gia' costate care altrove:
+
+- I minuti sono di **calendario**, non barre. Un orizzonte di 1440 minuti
+  aperto venerdi' attraversa il fine settimana e trova poche barre: e' la
+  verita' operativa, e `perc_risolte` la mostra invece di nasconderla.
+- Una rottura entra nel conteggio di un orizzonte **solo se i dati si
+  estendono davvero fin li'**. Senza questo controllo le ultime giornate del
+  campione risulterebbero irrisolte per il bordo del file e non per il
+  mercato - lo stesso errore che gonfiava i target lontani.
+
+Come la calibrazione dello stop, gira **solo sulla finestra dichiarata**
+(`InpSweepStartMin` / `InpSweepDurMin`): estenderla a tutte le 154 finestre
+costerebbe trenta volte il tempo di tutto il resto dello script.
