@@ -668,7 +668,39 @@ si riconosce un look-ahead, non dal fatto che sia positivo ma dal fatto che
 sia impossibile.
 
 
-## La finestra della calibrazione non e' la finestra scelta
+## La calibrazione gira su dodici finestre insieme
+
+`InpSweepWindows` accetta una lista in formato `HH:MM-durata`. Default:
+
+```
+00:00-60, 02:00-120, 04:00-120, 06:00-120, 07:00-60, 08:00-60,
+09:00-60, 09:00-120, 10:00-30, 10:00-60, 13:30-60, 14:30-60
+```
+
+Copre le aperture che contano - Tokyo, Francoforte, Londra, la pre-apertura e
+l'apertura di New York - piu' le tre finestre che i simboli gia' analizzati
+hanno scelto da soli (EURJPY 04:00-06:00, EURUSD 09:00-10:00, GBPUSD
+10:00-10:30). `_orb_stop.csv` e `_orb_orizzonte.csv` hanno ora una colonna
+`finestra` e una colonna `scelta`, che vale `SCELTA` sulla riga della finestra
+che la classifica ha effettivamente eletto.
+
+Se la vincitrice non e' nella lista, il log e `_summary.txt` lo dicono con la
+stringa da aggiungere, gia' formattata.
+
+**Costo.** La spazzata risolve fino a 48 stop x 8 rapporti per ogni rottura, e
+la camminata degli orizzonti arriva fino a 7200 minuti di barre M1. Dodici
+finestre invece di una portano un run tipico da un minuto a **quattro o cinque
+minuti**. Se serve piu' corto: accorcia `InpSweepWindows`, oppure taglia
+`InpOrbHorizons` agli orizzonti che interessano davvero.
+
+**Perche' dodici e non tutte e 154.** Il numero di rotture da risolvere cresce
+linearmente con le finestre: 154 finestre sarebbero circa mezzo milione di
+rotture, ognuna con la camminata lunga. Sono ore, non minuti. Dodici e' il
+punto in cui la tabella smette di dipendere dall'aver indovinato l'orario
+prima di lanciare, senza che il run diventi qualcosa che si lancia la sera e
+si guarda la mattina.
+
+## Storia: la finestra della calibrazione non era la finestra scelta
 
 `InpSweepStartMin` / `InpSweepDurMin` sono numeri fissi, e devono esserlo: la
 finestra operativa la sceglie la classifica, che esiste solo dopo la camminata
@@ -679,14 +711,9 @@ rotture accumulare. Se i due non coincidono, `_orb_stop.csv` e
 Su EURJPY e' successo esattamente questo: finestra scelta 04:00-06:00, stop
 calibrato su 09:00-10:00. I numeri erano veri e non c'entravano niente.
 
-Il flusso corretto e' in due passate:
-
-1. lancia con i default, leggi la finestra scelta in `_summary.txt`;
-2. rilancia con `InpSweepStartMin` e `InpSweepDurMin` uguali a quella finestra.
-
-Lo script ora se ne accorge da solo: se le due finestre divergono scrive
-l'avviso nel log e in `_summary.txt`, con la riga di input gia' pronta da
-incollare.
+Risolto accumulando tutte le finestre della lista nella stessa passata, come
+descritto sopra. `InpSweepStartMin` e `InpSweepDurMin` restano solo come
+ripiego per quando `InpSweepWindows` e' vuoto.
 
 ## Perche' la calibrazione e' incrociata con la forza relativa
 

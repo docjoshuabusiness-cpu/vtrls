@@ -179,8 +179,9 @@ input double          InpPrevStopAtr    = 0.25;            // Stop in ATR(D-1): 
 input int             InpOrbExtBars     = 10;              // Barre indicatore in cui cercare un estremo RSI/Z PRIMA della rottura
 
 input bool            InpDoStopSweep    = true;            // Calibra lo stop sulla finestra dichiarata sotto
-input int             InpSweepStartMin  = 540;             // Finestra della calibrazione: inizio (minuti da mezzanotte)
-input int             InpSweepDurMin    = 60;              // Finestra della calibrazione: durata
+input string          InpSweepWindows   = "00:00-60,02:00-120,04:00-120,06:00-120,07:00-60,08:00-60,09:00-60,09:00-120,10:00-30,10:00-60,13:30-60,14:30-60";  // Finestre calibrate INSIEME, formato HH:MM-durata (vuoto = usa le due caselle sotto)
+input int             InpSweepStartMin  = 540;             // Finestra singola: inizio (usata solo se la lista sopra e' vuota)
+input int             InpSweepDurMin    = 60;              // Finestra singola: durata
 input string          InpStopSweep      = "0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.25,1.4,1.6,1.8,2,2.25,2.5,2.75,3,3.5,4";  // Stop ancorati all'ATR: moltiplicatori dello stop base
 input string          InpStopSweepPt    = "30,40,50,60,70,80,90,100,115,130,145,160,180,200,225,250,280,320,360,400";   // Stop in PUNTI fissi (vuoto = non testarli)
 input double          InpSweepStrTh     = 25.0;            // Soglia di forza relativa per le fasce concorde/contraria della calibrazione (0 = niente fasce)
@@ -2115,21 +2116,71 @@ string PvBinLab(int b)
                      // ATR: il costo si mangia il 19% del rischio e il netto
                      // torna a zero. La risposta non e' nel win rate, e'
                      // nell'incrocio fra win rate e ampiezza dello stop.
+int SwWinIdxRaw(int startMin,int durMin);
+
+// LA CALIBRAZIONE ORA GIRA SU PIU' FINESTRE INSIEME.
+// Il vincolo vero era uno solo: quale finestra vince lo decide la classifica,
+// che esiste solo DOPO la camminata sulle barre, mentre gli accumulatori
+// devono sapere PRIMA dove accumulare. Vale per UNA finestra. Non vale per
+// dodici: si accumulano tutte e dodici nella stessa passata e alla fine si
+// legge quella che ha vinto. Il costo e' lineare - la spazzata su una
+// finestra vale un paio di secondi - e in cambio la tabella non dipende piu'
+// dal fatto che l'utente abbia indovinato l'orario prima di lanciare.
+#define SW_MAXW 12
+int g_swStart[SW_MAXW], g_swDur[SW_MAXW]; int g_nSwW=0;
+
 double g_swVal[SW_MAXST]; bool g_swIsPt[SW_MAXST]; int g_nSw=0;
-int    g_swN[SW_MAXST][SW_NB];
-double g_swSumAtr[SW_MAXST][SW_NB];      // stop realizzato in ATR, per leggere i punti
-int g_swW[SW_MAXST][ORB_MAXRR][SW_NB];
-int g_swL[SW_MAXST][ORB_MAXRR][SW_NB];
-int g_swF[SW_MAXST][ORB_MAXRR][SW_NB];
+int    g_swN[SW_MAXW][SW_MAXST][SW_NB];
+double g_swSumAtr[SW_MAXW][SW_MAXST][SW_NB];   // stop realizzato in ATR, per leggere i punti
+int g_swW[SW_MAXW][SW_MAXST][ORB_MAXRR][SW_NB];
+int g_swL[SW_MAXW][SW_MAXST][ORB_MAXRR][SW_NB];
+int g_swF[SW_MAXW][SW_MAXST][ORB_MAXRR][SW_NB];
+
+void SwWinInit()
+{
+   g_nSwW=0;
+   string parts[]; int np=StringSplit(InpSweepWindows,',',parts);
+   for(int i=0;i<np && g_nSwW<SW_MAXW;i++)
+   {
+      string q=parts[i]; StringTrimLeft(q); StringTrimRight(q);
+      if(q=="") continue;
+      int dash=StringFind(q,"-");
+      if(dash<0) continue;
+      string a=StringSubstr(q,0,dash), b=StringSubstr(q,dash+1);
+      StringTrimLeft(a); StringTrimRight(a); StringTrimLeft(b); StringTrimRight(b);
+      int st=0, col=StringFind(a,":");
+      if(col>=0) st=(int)StringToInteger(StringSubstr(a,0,col))*60
+                   +(int)StringToInteger(StringSubstr(a,col+1));
+      else       st=(int)StringToInteger(a);
+      int du=(int)StringToInteger(b);
+      if(st<0 || st>=1440 || du<=0) continue;
+      if(SwWinIdxRaw(st,du)>=0) continue;            // duplicato nella lista
+      g_swStart[g_nSwW]=st; g_swDur[g_nSwW]=du; g_nSwW++;
+   }
+   if(g_nSwW==0){ g_swStart[0]=InpSweepStartMin; g_swDur[0]=InpSweepDurMin; g_nSwW=1; }
+   string el="";
+   for(int i=0;i<g_nSwW;i++)
+      el+=(i?", ":"")+D2(g_swStart[i]/60)+":"+D2(g_swStart[i]%60)+"+"+IntegerToString(g_swDur[i]);
+   PrintFormat("calibrazione stop e orizzonti su %d finestre: %s", g_nSwW, el);
+}
+
+int SwWinIdxRaw(int startMin,int durMin)
+{
+   for(int i=0;i<g_nSwW;i++)
+      if(g_swStart[i]==startMin && g_swDur[i]==durMin) return i;
+   return -1;
+}
 
 void SwReset()
 {
    g_nSw=0;
+   SwWinInit();
+   for(int i=0;i<SW_MAXW;i++)
    for(int m=0;m<SW_MAXST;m++)
    {
-      for(int b=0;b<SW_NB;b++){ g_swN[m][b]=0; g_swSumAtr[m][b]=0.0; }
+      for(int b=0;b<SW_NB;b++){ g_swN[i][m][b]=0; g_swSumAtr[i][m][b]=0.0; }
       for(int z=0;z<ORB_MAXRR;z++)
-         for(int b=0;b<SW_NB;b++){ g_swW[m][z][b]=0; g_swL[m][z][b]=0; g_swF[m][z][b]=0; }
+         for(int b=0;b<SW_NB;b++){ g_swW[i][m][z][b]=0; g_swL[i][m][z][b]=0; g_swF[i][m][z][b]=0; }
    }
    if(!InpDoStopSweep) return;
    double v[]; int nv=ParseDoubles(InpStopSweep,v,SW_MAXST/2,"InpStopSweep");
@@ -2595,19 +2646,20 @@ bool CsBuild(string sym,datetime from,datetime to)
 //    il mercato - lo stesso errore che gonfiava i target lontani.
 #define HZ_MAXH 12
 int g_hzMin[HZ_MAXH]; int g_nHz=0;
-int g_hzN[HZ_MAXH][SW_NB];
-int g_hzW[HZ_MAXH][ORB_MAXRR][SW_NB];
-int g_hzL[HZ_MAXH][ORB_MAXRR][SW_NB];
-int g_hzF[HZ_MAXH][ORB_MAXRR][SW_NB];
+int g_hzN[SW_MAXW][HZ_MAXH][SW_NB];
+int g_hzW[SW_MAXW][HZ_MAXH][ORB_MAXRR][SW_NB];
+int g_hzL[SW_MAXW][HZ_MAXH][ORB_MAXRR][SW_NB];
+int g_hzF[SW_MAXW][HZ_MAXH][ORB_MAXRR][SW_NB];
 
 void HzReset()
 {
    g_nHz=0;
+   for(int i=0;i<SW_MAXW;i++)
    for(int h=0;h<HZ_MAXH;h++)
    {
-      for(int b=0;b<SW_NB;b++) g_hzN[h][b]=0;
+      for(int b=0;b<SW_NB;b++) g_hzN[i][h][b]=0;
       for(int z=0;z<ORB_MAXRR;z++)
-         for(int b=0;b<SW_NB;b++){ g_hzW[h][z][b]=0; g_hzL[h][z][b]=0; g_hzF[h][z][b]=0; }
+         for(int b=0;b<SW_NB;b++){ g_hzW[i][h][z][b]=0; g_hzL[i][h][z][b]=0; g_hzF[i][h][z][b]=0; }
    }
    double v[]; int nv=ParseDoubles(InpOrbHorizons,v,HZ_MAXH,"InpOrbHorizons");
    for(int i=0;i<nv && g_nHz<HZ_MAXH;i++)
@@ -4055,11 +4107,12 @@ bool ProcessSymbol(string sym)
             bool doneR[ORB_MAXRR];
             for(int z=0;z<g_nRR;z++){ resR[z]=0; doneR[z]=false; }
 
-            // la calibrazione dello stop gira solo sulla finestra dichiarata
-            bool doSw=(g_nSw>0 && a0==InpSweepStartMin && g_orb[w].durMin==InpSweepDurMin);
-            // la camminata lunga gira solo sulla finestra dichiarata: estenderla
-            // a tutte le 154 costerebbe trenta volte il tempo di tutto il resto
-            bool doHz=(g_nHz>0 && a0==InpSweepStartMin && g_orb[w].durMin==InpSweepDurMin);
+            // Calibrazione e camminata lunga girano sulle finestre della lista,
+            // non su una sola. Estenderle a TUTTE le 154 costerebbe trenta
+            // volte il tempo di tutto il resto: dodici sono il compromesso.
+            int  iSw =SwWinIdxRaw(a0,g_orb[w].durMin);
+            bool doSw=(g_nSw>0 && iSw>=0);
+            bool doHz=(g_nHz>0 && iSw>=0);
             int  tRes[ORB_MAXRR]; int sRes[ORB_MAXRR];
             if(doHz) for(int z=0;z<g_nRR;z++){ tRes[z]=-1; sRes[z]=0; }
             int  swR[SW_MAXST][ORB_MAXRR]; bool swD[SW_MAXST][ORB_MAXRR];
@@ -4146,24 +4199,24 @@ bool ProcessSymbol(string sym)
                {
                   double sdA=(g_swIsPt[m] ? g_swVal[m]/atrPt : stopAtr*g_swVal[m]);
                   int xb=(vb>=0 ? (secondHalf?11:7)+vb : -1);   // VA incrociata con la meta'
-                  g_swN[m][4]++;  g_swSumAtr[m][4]+=sdA;
-                  g_swN[m][hb]++; g_swSumAtr[m][hb]+=sdA;
-                  if(vb>=0){ g_swN[m][vb]++;  g_swSumAtr[m][vb]+=sdA;
-                             g_swN[m][xb]++;  g_swSumAtr[m][xb]+=sdA; }
-                  if(sb>=0){ g_swN[m][sb]++;  g_swSumAtr[m][sb]+=sdA;
-                             g_swN[m][yb]++;  g_swSumAtr[m][yb]+=sdA; }
+                  g_swN[iSw][m][4]++;  g_swSumAtr[iSw][m][4]+=sdA;
+                  g_swN[iSw][m][hb]++; g_swSumAtr[iSw][m][hb]+=sdA;
+                  if(vb>=0){ g_swN[iSw][m][vb]++;  g_swSumAtr[iSw][m][vb]+=sdA;
+                             g_swN[iSw][m][xb]++;  g_swSumAtr[iSw][m][xb]+=sdA; }
+                  if(sb>=0){ g_swN[iSw][m][sb]++;  g_swSumAtr[iSw][m][sb]+=sdA;
+                             g_swN[iSw][m][yb]++;  g_swSumAtr[iSw][m][yb]+=sdA; }
                   for(int z=0;z<g_nRR;z++)
                   {
                      int rr2=swR[m][z];
-                     if(rr2>0)      { g_swW[m][z][4]++; g_swW[m][z][hb]++;
-                                      if(vb>=0){ g_swW[m][z][vb]++; g_swW[m][z][xb]++; }
-                                      if(sb>=0){ g_swW[m][z][sb]++; g_swW[m][z][yb]++; } }
-                     else if(rr2<0) { g_swL[m][z][4]++; g_swL[m][z][hb]++;
-                                      if(vb>=0){ g_swL[m][z][vb]++; g_swL[m][z][xb]++; }
-                                      if(sb>=0){ g_swL[m][z][sb]++; g_swL[m][z][yb]++; } }
-                     else           { g_swF[m][z][4]++; g_swF[m][z][hb]++;
-                                      if(vb>=0){ g_swF[m][z][vb]++; g_swF[m][z][xb]++; }
-                                      if(sb>=0){ g_swF[m][z][sb]++; g_swF[m][z][yb]++; } }
+                     if(rr2>0)      { g_swW[iSw][m][z][4]++; g_swW[iSw][m][z][hb]++;
+                                      if(vb>=0){ g_swW[iSw][m][z][vb]++; g_swW[iSw][m][z][xb]++; }
+                                      if(sb>=0){ g_swW[iSw][m][z][sb]++; g_swW[iSw][m][z][yb]++; } }
+                     else if(rr2<0) { g_swL[iSw][m][z][4]++; g_swL[iSw][m][z][hb]++;
+                                      if(vb>=0){ g_swL[iSw][m][z][vb]++; g_swL[iSw][m][z][xb]++; }
+                                      if(sb>=0){ g_swL[iSw][m][z][sb]++; g_swL[iSw][m][z][yb]++; } }
+                     else           { g_swF[iSw][m][z][4]++; g_swF[iSw][m][z][hb]++;
+                                      if(vb>=0){ g_swF[iSw][m][z][vb]++; g_swF[iSw][m][z][xb]++; }
+                                      if(sb>=0){ g_swF[iSw][m][z][sb]++; g_swF[iSw][m][z][yb]++; } }
                   }
                }
             }
@@ -4180,24 +4233,24 @@ bool ProcessSymbol(string sym)
                for(int h=0;h<g_nHz;h++)
                {
                   if(span<g_hzMin[h]) break;      // ordinati: da qui in poi nessuno entra
-                  g_hzN[h][4]++; g_hzN[h][hb2]++;
-                  if(vb2>=0){ g_hzN[h][vb2]++; g_hzN[h][xb2]++; }
-                  if(sb2>=0){ g_hzN[h][sb2]++; g_hzN[h][yb2]++; }
+                  g_hzN[iSw][h][4]++; g_hzN[iSw][h][hb2]++;
+                  if(vb2>=0){ g_hzN[iSw][h][vb2]++; g_hzN[iSw][h][xb2]++; }
+                  if(sb2>=0){ g_hzN[iSw][h][sb2]++; g_hzN[iSw][h][yb2]++; }
                   for(int z=0;z<g_nRR;z++)
                   {
                      int rz=((tRes[z]>=0 && tRes[z]<=g_hzMin[h]) ? sRes[z] : 0);
                      if(rz>0)
-                     { g_hzW[h][z][4]++; g_hzW[h][z][hb2]++;
-                       if(vb2>=0){ g_hzW[h][z][vb2]++; g_hzW[h][z][xb2]++; }
-                       if(sb2>=0){ g_hzW[h][z][sb2]++; g_hzW[h][z][yb2]++; } }
+                     { g_hzW[iSw][h][z][4]++; g_hzW[iSw][h][z][hb2]++;
+                       if(vb2>=0){ g_hzW[iSw][h][z][vb2]++; g_hzW[iSw][h][z][xb2]++; }
+                       if(sb2>=0){ g_hzW[iSw][h][z][sb2]++; g_hzW[iSw][h][z][yb2]++; } }
                      else if(rz<0)
-                     { g_hzL[h][z][4]++; g_hzL[h][z][hb2]++;
-                       if(vb2>=0){ g_hzL[h][z][vb2]++; g_hzL[h][z][xb2]++; }
-                       if(sb2>=0){ g_hzL[h][z][sb2]++; g_hzL[h][z][yb2]++; } }
+                     { g_hzL[iSw][h][z][4]++; g_hzL[iSw][h][z][hb2]++;
+                       if(vb2>=0){ g_hzL[iSw][h][z][vb2]++; g_hzL[iSw][h][z][xb2]++; }
+                       if(sb2>=0){ g_hzL[iSw][h][z][sb2]++; g_hzL[iSw][h][z][yb2]++; } }
                      else
-                     { g_hzF[h][z][4]++; g_hzF[h][z][hb2]++;
-                       if(vb2>=0){ g_hzF[h][z][vb2]++; g_hzF[h][z][xb2]++; }
-                       if(sb2>=0){ g_hzF[h][z][sb2]++; g_hzF[h][z][yb2]++; } }
+                     { g_hzF[iSw][h][z][4]++; g_hzF[iSw][h][z][hb2]++;
+                       if(vb2>=0){ g_hzF[iSw][h][z][vb2]++; g_hzF[iSw][h][z][xb2]++; }
+                       if(sb2>=0){ g_hzF[iSw][h][z][sb2]++; g_hzF[iSw][h][z][yb2]++; } }
                   }
                }
             }
@@ -5736,15 +5789,16 @@ bool ProcessSymbol(string sym)
             W(fT,L+"RANGE DI OSSERVAZIONE -> BREAKOUT"+L);
             W(fT,"  finestre testate       "+IntegerToString(g_nOrb)+L);
             W(fT,"  finestra migliore      "+OrbLab(i)+"  ("+IntegerToString(g_orb[i].durMin)+" min)"+L);
-            if(InpDoStopSweep &&
-               (g_orb[i].startMin!=InpSweepStartMin || g_orb[i].durMin!=InpSweepDurMin))
+            if(InpDoStopSweep && SwWinIdxRaw(g_orb[i].startMin,g_orb[i].durMin)<0)
             {
-               W(fT,"  !! _orb_stop.csv e _orb_orizzonte.csv NON parlano di questa finestra:"+L);
-               W(fT,"     girano su "+D2(InpSweepStartMin/60)+":"+D2(InpSweepStartMin%60)+
-                    " per "+IntegerToString(InpSweepDurMin)+" min, fissati a mano negli input."+L);
-               W(fT,"     Per calibrarli qui: InpSweepStartMin="+IntegerToString(g_orb[i].startMin)+
-                    "  InpSweepDurMin="+IntegerToString(g_orb[i].durMin)+" e rilancia."+L);
+               W(fT,"  !! questa finestra NON e' fra le "+IntegerToString(g_nSwW)+
+                    " calibrate: _orb_stop.csv e _orb_orizzonte.csv non la contengono."+L);
+               W(fT,"     Aggiungi \""+D2(g_orb[i].startMin/60)+":"+D2(g_orb[i].startMin%60)+
+                    "-"+IntegerToString(g_orb[i].durMin)+"\" a InpSweepWindows e rilancia."+L);
             }
+            else if(InpDoStopSweep)
+               W(fT,"  calibrazione stop     su "+IntegerToString(g_nSwW)+
+                    " finestre, questa inclusa (colonna 'scelta' = SCELTA)"+L);
             W(fT,"  giornate valide        "+IntegerToString(g_orb[i].n)+L);
             W(fT,"  range medio            "+F(g_orb[i].sRange/MathMax(1,g_orb[i].n),2)+" ATR"+L);
             W(fT,"  operabili              "+F(OrbTradePct(i),1)+"% delle giornate"+L);
@@ -8238,59 +8292,59 @@ void BuildOrb(string sym,string dir)
          //--- calibrazione dello stop
          if(g_nSw>0)
          {
-            int wi=-1;
-            for(int i=0;i<g_nOrb;i++)
-               if(g_orb[i].startMin==InpSweepStartMin && g_orb[i].durMin==InpSweepDurMin){ wi=i; break; }
-
-            // LA TRAPPOLA CHE HA GIA' MORSO SU EURJPY.
-            // La finestra operativa la sceglie la classifica, che esiste solo
-            // DOPO questa camminata; la calibrazione dello stop deve invece
-            // sapere prima su quale finestra girare, e quindi legge due input
-            // fissi. Se i due numeri non coincidono, questa tabella calibra
-            // lo stop di una finestra che non e' quella che poi si opera - e
-            // si finisce per leggere numeri veri di un setup inesistente.
-            // Non e' correggibile in una passata sola senza rifare tre volte
-            // il lavoro: e' correggibile rilanciando, e la riga da incollare
-            // sta qui sotto gia' pronta.
-            if(g_orbSel>=0 && wi!=g_orbSel)
-               PrintFormat("[%s] ATTENZIONE: _orb_stop.csv e' calibrato su %s, ma la finestra "
-                           "scelta e' %s. I due non c'entrano niente l'uno con l'altro. "
-                           "Rilancia con InpSweepStartMin=%d e InpSweepDurMin=%d.",
-                           sym,
-                           (wi>=0 ? OrbLab(wi) : D2(InpSweepStartMin/60)+":"+D2(InpSweepStartMin%60)),
-                           OrbLab(g_orbSel), g_orb[g_orbSel].startMin, g_orb[g_orbSel].durMin);
+            // La trappola che ha morso su EURJPY - tabella calibrata su
+            // 09:00-10:00 mentre la finestra scelta era 04:00-06:00 - non
+            // esiste piu' per costruzione: si accumulano tutte le finestre
+            // della lista e la colonna 'finestra' dice quale e' quale.
+            // Resta una sola cosa da dire, quando la vincitrice non e' fra
+            // quelle calibrate.
+            bool selIn=(g_orbSel>=0 &&
+                        SwWinIdxRaw(g_orb[g_orbSel].startMin,g_orb[g_orbSel].durMin)>=0);
+            if(g_orbSel>=0 && !selIn)
+               PrintFormat("[%s] ATTENZIONE: la finestra scelta %s NON e' fra le %d calibrate. "
+                           "Aggiungi \"%s-%d\" a InpSweepWindows e rilancia.",
+                           sym, OrbLab(g_orbSel), g_nSwW,
+                           D2(g_orb[g_orbSel].startMin/60)+":"+D2(g_orb[g_orbSel].startMin%60),
+                           g_orb[g_orbSel].durMin);
 
             int fS2=FileOpen(dir+fn+"_orb_stop.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
             if(fS2!=INVALID_HANDLE)
             {
-               W(fS2,"finestra;fascia;stop;ancoraggio;stop_medio_atr;rr;n;perc_risolte;"
+               W(fS2,"finestra;scelta;fascia;stop;ancoraggio;stop_medio_atr;rr;n;perc_risolte;"
                      "win_perc;wlow_perc;breakeven_perc;E_lordo_in_R;costo_in_R;E_netto_in_R\r\n");
-               // Il costo e' fisso in PUNTI, l'aspettativa e' in R: per
-               // confrontarli serve lo stop realmente applicato, in ATR.
-               // Per gli stop in punti quel numero cambia da un anno
-               // all'altro, ed e' esattamente il motivo per cui la colonna
-               // esiste invece di essere ricavata dal moltiplicatore.
-               double meanCost=(wi>=0 && g_orb[wi].nBrk>0 ? g_orb[wi].sCost/g_orb[wi].nBrk : 0.0);
-               string wlab=(wi>=0 ? OrbLab(wi)
-                                  : D2(InpSweepStartMin/60)+":"+D2(InpSweepStartMin%60));
-               for(int b=0;b<SW_NB;b++)
-               for(int m=0;m<g_nSw;m++)
+               for(int iw=0;iw<g_nSwW;iw++)
                {
-                  if(g_swN[m][b]<=0) continue;
-                  double stM=g_swSumAtr[m][b]/g_swN[m][b];
-                  double cR =(stM>0.0 ? meanCost/stM : 0.0);
-                  for(int z=0;z<g_nRR;z++)
+                  int wi=-1;
+                  for(int i=0;i<g_nOrb;i++)
+                     if(g_orb[i].startMin==g_swStart[iw] && g_orb[i].durMin==g_swDur[iw]){ wi=i; break; }
+                  // Il costo e' fisso in PUNTI, l'aspettativa e' in R: per
+                  // confrontarli serve lo stop realmente applicato, in ATR.
+                  // Per gli stop in punti quel numero cambia da un anno
+                  // all'altro, ed e' esattamente il motivo per cui la colonna
+                  // esiste invece di essere ricavata dal moltiplicatore.
+                  double meanCost=(wi>=0 && g_orb[wi].nBrk>0 ? g_orb[wi].sCost/g_orb[wi].nBrk : 0.0);
+                  string wlab=(wi>=0 ? OrbLab(wi)
+                                     : D2(g_swStart[iw]/60)+":"+D2(g_swStart[iw]%60));
+                  string sel=((wi>=0 && wi==g_orbSel) ? "SCELTA" : "");
+                  for(int b=0;b<SW_NB;b++)
+                  for(int m=0;m<g_nSw;m++)
                   {
-                     int wn=g_swW[m][z][b], ls=g_swL[m][z][b], fl=g_swF[m][z][b];
-                     int res=wn+ls, tot=res+fl;
-                     if(res<50) continue;
-                     double eR=(wn*g_rr[z]-ls)/(double)tot;
-                     W(fS2,wlab+";"+SwBinLab(b)+";"+SwStopLab(m)+";"+
-                           (g_swIsPt[m]?"punti":"ATR")+";"+F(stM,4)+";1:"+
-                           F(g_rr[z],2)+";"+IntegerToString(tot)+";"+
-                           F(100.0*res/tot,2)+";"+F(100.0*wn/res,2)+";"+
-                           F(100.0*WilsonLowInd(wn,res),2)+";"+F(RrNull(g_rr[z])*100.0,2)+";"+
-                           F(eR,4)+";"+F(cR,4)+";"+F(eR-cR,4)+"\r\n");
+                     if(g_swN[iw][m][b]<=0) continue;
+                     double stM=g_swSumAtr[iw][m][b]/g_swN[iw][m][b];
+                     double cR =(stM>0.0 ? meanCost/stM : 0.0);
+                     for(int z=0;z<g_nRR;z++)
+                     {
+                        int wn=g_swW[iw][m][z][b], ls=g_swL[iw][m][z][b], fl=g_swF[iw][m][z][b];
+                        int res=wn+ls, tot=res+fl;
+                        if(res<50) continue;
+                        double eR=(wn*g_rr[z]-ls)/(double)tot;
+                        W(fS2,wlab+";"+sel+";"+SwBinLab(b)+";"+SwStopLab(m)+";"+
+                              (g_swIsPt[m]?"punti":"ATR")+";"+F(stM,4)+";1:"+
+                              F(g_rr[z],2)+";"+IntegerToString(tot)+";"+
+                              F(100.0*res/tot,2)+";"+F(100.0*wn/res,2)+";"+
+                              F(100.0*WilsonLowInd(wn,res),2)+";"+F(RrNull(g_rr[z])*100.0,2)+";"+
+                              F(eR,4)+";"+F(cR,4)+";"+F(eR-cR,4)+"\r\n");
+                     }
                   }
                }
                FileClose(fS2);
@@ -8300,36 +8354,39 @@ void BuildOrb(string sym,string dir)
          //--- spazzata degli orizzonti
          if(g_nHz>0)
          {
-            int wj=-1;
-            for(int i=0;i<g_nOrb;i++)
-               if(g_orb[i].startMin==InpSweepStartMin && g_orb[i].durMin==InpSweepDurMin){ wj=i; break; }
-            double meanCost2=(wj>=0 && g_orb[wj].nBrk>0 ? g_orb[wj].sCost/g_orb[wj].nBrk : 0.0);
-            double baseStop2=(wj>=0 && g_rr[g_rrMain]>0 ? OrbTgt(wj)/g_rr[g_rrMain] : 0.0);
-            double cR2=(baseStop2>0.0 ? meanCost2/baseStop2 : 0.0);
-            string wl2=(wj>=0 ? OrbLab(wj)
-                              : D2(InpSweepStartMin/60)+":"+D2(InpSweepStartMin%60));
-
             int fH2=FileOpen(dir+fn+"_orb_orizzonte.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
             if(fH2!=INVALID_HANDLE)
             {
-               W(fH2,"finestra;fascia;orizzonte;minuti;rr;n;perc_risolte;win_perc;wlow_perc;"
+               W(fH2,"finestra;scelta;fascia;orizzonte;minuti;rr;n;perc_risolte;win_perc;wlow_perc;"
                      "breakeven_perc;E_lordo_in_R;costo_in_R;E_netto_in_R\r\n");
-               for(int b=0;b<SW_NB;b++)
-               for(int h=0;h<g_nHz;h++)
+               for(int iw=0;iw<g_nSwW;iw++)
                {
-                  if(g_hzN[h][b]<=0) continue;
-                  for(int z=0;z<g_nRR;z++)
+                  int wj=-1;
+                  for(int i=0;i<g_nOrb;i++)
+                     if(g_orb[i].startMin==g_swStart[iw] && g_orb[i].durMin==g_swDur[iw]){ wj=i; break; }
+                  double meanCost2=(wj>=0 && g_orb[wj].nBrk>0 ? g_orb[wj].sCost/g_orb[wj].nBrk : 0.0);
+                  double baseStop2=(wj>=0 && g_rr[g_rrMain]>0 ? OrbTgt(wj)/g_rr[g_rrMain] : 0.0);
+                  double cR2=(baseStop2>0.0 ? meanCost2/baseStop2 : 0.0);
+                  string wl2=(wj>=0 ? OrbLab(wj)
+                                    : D2(g_swStart[iw]/60)+":"+D2(g_swStart[iw]%60));
+                  string sel2=((wj>=0 && wj==g_orbSel) ? "SCELTA" : "");
+                  for(int b=0;b<SW_NB;b++)
+                  for(int h=0;h<g_nHz;h++)
                   {
-                     int wn=g_hzW[h][z][b], ls=g_hzL[h][z][b], fl=g_hzF[h][z][b];
-                     int res2=wn+ls, tot=res2+fl;
-                     if(res2<50) continue;
-                     double eR=(wn*g_rr[z]-ls)/(double)tot;
-                     W(fH2,wl2+";"+SwBinLab(b)+";"+HzLab(h)+";"+
-                           IntegerToString(g_hzMin[h])+";1:"+F(g_rr[z],2)+";"+
-                           IntegerToString(tot)+";"+F(100.0*res2/tot,2)+";"+
-                           F(100.0*wn/res2,2)+";"+F(100.0*WilsonLowInd(wn,res2),2)+";"+
-                           F(RrNull(g_rr[z])*100.0,2)+";"+F(eR,4)+";"+F(cR2,4)+";"+
-                           F(eR-cR2,4)+"\r\n");
+                     if(g_hzN[iw][h][b]<=0) continue;
+                     for(int z=0;z<g_nRR;z++)
+                     {
+                        int wn=g_hzW[iw][h][z][b], ls=g_hzL[iw][h][z][b], fl=g_hzF[iw][h][z][b];
+                        int res2=wn+ls, tot=res2+fl;
+                        if(res2<50) continue;
+                        double eR=(wn*g_rr[z]-ls)/(double)tot;
+                        W(fH2,wl2+";"+sel2+";"+SwBinLab(b)+";"+HzLab(h)+";"+
+                              IntegerToString(g_hzMin[h])+";1:"+F(g_rr[z],2)+";"+
+                              IntegerToString(tot)+";"+F(100.0*res2/tot,2)+";"+
+                              F(100.0*wn/res2,2)+";"+F(100.0*WilsonLowInd(wn,res2),2)+";"+
+                              F(RrNull(g_rr[z])*100.0,2)+";"+F(eR,4)+";"+F(cR2,4)+";"+
+                              F(eR-cR2,4)+"\r\n");
+                     }
                   }
                }
                FileClose(fH2);
