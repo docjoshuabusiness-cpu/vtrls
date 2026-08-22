@@ -803,3 +803,33 @@ forza PERIOD_M1: 26 coppie caricate, 8.3 contribuiscono in media per barra,
 Se il secondo numero crolla sotto 6, quella colonna non e' forza relativa: e'
 il rumore di quelle poche coppie che avevano un tick. Va letta come tale, o
 non letta.
+
+## Come si legge `perc_risolte` in `_orb_stop.csv`
+
+`E_lordo_in_R` conta le rotture IRRISOLTE come zero: la posizione e' ancora
+aperta quando l'orizzonte scade e si assume che si chiuda a pari. E'
+un'assunzione, non una misura, e pesa quanto le irrisolte sono tante.
+
+Con stop stretti non cambia niente: a 0.12 ATR si risolve il 90%. Con stop
+larghi cambia tutto: a 0.48 ATR su EURJPY si risolve il 14%, e allora l'86%
+della riga e' quell'assunzione. Le celle con `perc_risolte` sotto l'85% vanno
+lette come "non misurato", non come "misurato e positivo".
+
+Sul campione EURJPY questo separa nettamente: delle 331 celle di seconda meta'
+con netto positivo a costo realistico, solo **13** hanno `perc_risolte` sopra
+l'85%, e di quelle **una sola** ha lo stesso segno nella prima meta'.
+
+### Stop largo e orizzonte lungo si testano insieme, e si testano rilanciando
+
+La spazzata degli stop rispetta `InpOrbHorizonMin`: due lanci, uno a 240
+minuti e uno a 1440, danno la curva dello stop ai due orizzonti e coprono
+l'unica regione che i due sweep separati non toccano - stop largo con tempo
+per risolversi. Non serve incrociare le due tabelle nel codice.
+
+### Una finestra della lista puo' non esistere
+
+`InpSweepWindows` accetta qualunque orario, ma la classifica genera solo gli
+inizi sulla griglia di `InpOrbStartStep` fra `InpOrbFirstHour` e
+`InpOrbLastHour`, con le durate di `InpOrbDur`. Con `InpOrbStartStep=60` le
+finestre `13:30-60` e `14:30-60` del default non esistono e non producono
+righe. Ora il log lo dice invece di lasciarle sparire.

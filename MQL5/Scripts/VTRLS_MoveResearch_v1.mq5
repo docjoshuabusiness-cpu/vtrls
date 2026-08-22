@@ -8317,6 +8317,20 @@ void BuildOrb(string sym,string dir)
                   int wi=-1;
                   for(int i=0;i<g_nOrb;i++)
                      if(g_orb[i].startMin==g_swStart[iw] && g_orb[i].durMin==g_swDur[iw]){ wi=i; break; }
+                  // Una finestra della lista puo' semplicemente NON ESISTERE fra
+                  // le candidate: 13:30 non sta sulla griglia se InpOrbStartStep
+                  // e' 60, e una durata fuori da InpOrbDur non viene mai
+                  // generata. Sparivano senza una riga, e chi legge il CSV
+                  // contava dodici finestre e ne trovava dieci.
+                  if(wi<0)
+                  {
+                     PrintFormat("[%s] finestra %s+%d di InpSweepWindows NON esiste fra le candidate: "
+                                 "l'inizio deve stare sulla griglia di InpOrbStartStep=%d fra le %d e le %d, "
+                                 "e la durata deve comparire in InpOrbDur. Nessuna riga scritta per questa.",
+                                 sym, D2(g_swStart[iw]/60)+":"+D2(g_swStart[iw]%60), g_swDur[iw],
+                                 InpOrbStartStep, InpOrbFirstHour, InpOrbLastHour);
+                     continue;
+                  }
                   // Il costo e' fisso in PUNTI, l'aspettativa e' in R: per
                   // confrontarli serve lo stop realmente applicato, in ATR.
                   // Per gli stop in punti quel numero cambia da un anno
