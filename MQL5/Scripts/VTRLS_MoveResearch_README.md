@@ -61,7 +61,7 @@ Puoi disattivare l'uno o l'altro.
 | `<SYM>_cci_trade.csv` | uscita dalla banda CCI come ingresso: per periodo e per rapporto rischio/rendimento, con placebo appaiato; piu' la ripartizione per ora |
 | `<SYM>_orb_rr.csv` | curva rischio/rendimento della finestra selezionata: per ogni RR, win rate misurato contro il placebo (ingresso a caso, stesso rischio e stesso orizzonte), delta e z |
 | `<SYM>_orb_orizzonte.csv` | spazzata degli orizzonti sulla finestra dichiarata: da 30 minuti a 5 giorni x scala RR, per fascia di larghezza Value Area e per meta' del periodo |
-| `<SYM>_orb_stop.csv` | calibrazione dello stop sulla finestra DICHIARATA da input: stop ancorati all'ATR **e** stop in punti fissi, x scala RR, per fascia di larghezza Value Area e per meta' del periodo, con lo stop realmente applicato in ATR, l'aspettativa lorda, il costo in R e il netto |
+| `<SYM>_orb_stop.csv` | calibrazione dello stop sulla finestra DICHIARATA da input: stop ancorati all'ATR **e** stop in punti fissi, x scala RR, per fascia di larghezza Value Area, per meta' del periodo, **per forza relativa concorde/contraria** e per l'incrocio forza x meta', con lo stop realmente applicato in ATR, l'aspettativa lorda, il costo in R e il netto |
 | `<SYM>_orb_tempi.csv` | quando arriva la rottura: per ora, per giorno x ora (griglia intera), per giorno, e la finestra migliore di ogni giorno della settimana su tutta la griglia. Stesse colonne di controllo del file condizioni |
 | `<SYM>_prev_range.csv` | range di IERI rotto OGGI: tre riferimenti fissi (giornata intera, notte 00:00-08:00, pomeriggio 16:00-24:00), scala RR, ampiezza del range D-1, ora della rottura, giorno, e la quota di giornate che si aprono gia' fuori dal range |
 | `<SYM>_orb_condizioni.csv` | effetto di ogni filtro sulla rottura, con `perc_risolte`, `target_medio_atr` e il win rate nei due estremi (irrisolto contato come perdita / come vincita): serve a distinguere un gradiente vero da un effetto di troncamento dell'orizzonte |
@@ -666,3 +666,37 @@ l'ingresso, cioe' l'esito travestito da feature. Alla prima esecuzione il
 cercatore le ha scelte e ha prodotto t = 21.77 - ed e' esattamente cosi' che
 si riconosce un look-ahead, non dal fatto che sia positivo ma dal fatto che
 sia impossibile.
+
+
+## La finestra della calibrazione non e' la finestra scelta
+
+`InpSweepStartMin` / `InpSweepDurMin` sono numeri fissi, e devono esserlo: la
+finestra operativa la sceglie la classifica, che esiste solo dopo la camminata
+sulle barre, mentre la calibrazione dello stop deve sapere *prima* su quali
+rotture accumulare. Se i due non coincidono, `_orb_stop.csv` e
+`_orb_orizzonte.csv` descrivono un setup che non si opera.
+
+Su EURJPY e' successo esattamente questo: finestra scelta 04:00-06:00, stop
+calibrato su 09:00-10:00. I numeri erano veri e non c'entravano niente.
+
+Il flusso corretto e' in due passate:
+
+1. lancia con i default, leggi la finestra scelta in `_summary.txt`;
+2. rilancia con `InpSweepStartMin` e `InpSweepDurMin` uguali a quella finestra.
+
+Lo script ora se ne accorge da solo: se le due finestre divergono scrive
+l'avviso nel log e in `_summary.txt`, con la riga di input gia' pronta da
+incollare.
+
+## Perche' la calibrazione e' incrociata con la forza relativa
+
+Il costo di transazione e' fisso in punti, il rischio no. Con stop 0.12 ATR su
+EURJPY - il default `InpOrbStopMult=0.50` applicato a un range di due ore -
+2.5 pip di costo valgono il 19% del rischio: un vantaggio da +13 punti di win
+rate produce circa +0.19 R lordi e ne restituisce 0.19 al broker.
+
+Lo stesso vantaggio su uno stop di 0.40 ATR costa il 6% del rischio. La
+domanda non e' quindi "la forza relativa funziona", a cui i dati rispondono di
+si': e' "sopravvive quando lo stop e' largo abbastanza da pagare il costo". Le
+fasce 15-20 della calibrazione esistono per rispondere a quella, e per
+rispondere anche nella sola meta' recente del campione.

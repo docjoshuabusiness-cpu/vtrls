@@ -183,6 +183,7 @@ input int             InpSweepStartMin  = 540;             // Finestra della cal
 input int             InpSweepDurMin    = 60;              // Finestra della calibrazione: durata
 input string          InpStopSweep      = "0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.25,1.4,1.6,1.8,2,2.25,2.5,2.75,3,3.5,4";  // Stop ancorati all'ATR: moltiplicatori dello stop base
 input string          InpStopSweepPt    = "30,40,50,60,70,80,90,100,115,130,145,160,180,200,225,250,280,320,360,400";   // Stop in PUNTI fissi (vuoto = non testarli)
+input double          InpSweepStrTh     = 25.0;            // Soglia di forza relativa per le fasce concorde/contraria della calibrazione (0 = niente fasce)
 input string          InpOrbHorizons    = "30,60,120,240,480,960,1440,2880,4320,7200";  // Orizzonti in MINUTI di calendario da testare insieme (vuoto = non testarli)
 input string          InpExtraTfList    = "M10,M30,H1,H2,H4,H8,D1";  // Scale AGGIUNTIVE: RSI/CCI/Z al momento della rottura, solo come colonne per il cercatore
 
@@ -2070,11 +2071,21 @@ string PvBinLab(int b)
 // distribuzione nulla sta gia' intorno a z 2.9. La cella migliore SEMBRERA'
 // sempre buona. L'unica difesa e' che sia la stessa nelle due meta'.
 #define SW_MAXST 48
-#define SW_NB    15  // 0-3 fasce VA, 4 tutte, 5-6 meta' del periodo,
-                     // 7-10 VA x prima meta', 11-14 VA x seconda meta'.
+#define SW_NB    21  // 0-3 fasce VA, 4 tutte, 5-6 meta' del periodo,
+                     // 7-10 VA x prima meta', 11-14 VA x seconda meta',
+                     // 15-16 forza concorde/contraria, 17-20 forza x meta'.
                      // L'incrocio serve a una domanda sola: la larghezza
                      // della Value Area - l'unica condizione sopravvissuta
                      // su tre simboli - regge ancora nella meta' recente?
+                     // Le fasce di forza rispondono alla domanda che decide
+                     // se questa famiglia diventa una strategia: l'effetto
+                     // della forza relativa sopravvive quando lo stop e'
+                     // largo abbastanza da rendere il costo trascurabile?
+                     // Sulla finestra 04:00-06:00 di EURJPY l'effetto vale
+                     // +13 punti di win rate ma lo stop di default e' 0.12
+                     // ATR: il costo si mangia il 19% del rischio e il netto
+                     // torna a zero. La risposta non e' nel win rate, e'
+                     // nell'incrocio fra win rate e ampiezza dello stop.
 double g_swVal[SW_MAXST]; bool g_swIsPt[SW_MAXST]; int g_nSw=0;
 int    g_swN[SW_MAXST][SW_NB];
 double g_swSumAtr[SW_MAXST][SW_NB];      // stop realizzato in ATR, per leggere i punti
@@ -2121,7 +2132,21 @@ string SwBinLab(int b)
    if(b==5) return "prima meta' del periodo";
    if(b==6) return "seconda meta' del periodo";
    if(b<=10) return SwBinLab(b-7)+" | prima meta'";
-   return SwBinLab(b-11)+" | seconda meta'";
+   if(b<=14) return SwBinLab(b-11)+" | seconda meta'";
+   if(b==15) return "forza CONCORDE oltre soglia";
+   if(b==16) return "forza CONTRARIA oltre soglia";
+   if(b<=18) return SwBinLab(15+(b-17))+" | prima meta'";
+   return SwBinLab(15+(b-19))+" | seconda meta'";
+}
+
+// La forza e' gia' orientata nel verso della rottura quando arriva qui:
+// positiva = la valuta che sale e' quella comprata dalla rottura.
+int StrBin(double str, bool ok)
+{
+   if(!ok || InpSweepStrTh<=0.0) return -1;
+   if(str >=  InpSweepStrTh) return 15;
+   if(str <= -InpSweepStrTh) return 16;
+   return -1;
 }
 
 string SwStopLab(int m)
@@ -3921,6 +3946,8 @@ bool ProcessSymbol(string sym)
             {
                int vb=SwBin(vpOk ? vpVaAtr[g_vaMain] : 0.0);
                int hb=(secondHalf ? 6 : 5);
+               int sb=StrBin(g_csOk ? CsAt(r[kb].time)*dir : 0.0, g_csOk);
+               int yb=(sb>=0 ? (secondHalf?19:17)+(sb-15) : -1);  // forza incrociata con la meta'
                for(int m=0;m<g_nSw;m++)
                {
                   double sdA=(g_swIsPt[m] ? g_swVal[m]/atrPt : stopAtr*g_swVal[m]);
@@ -3929,15 +3956,20 @@ bool ProcessSymbol(string sym)
                   g_swN[m][hb]++; g_swSumAtr[m][hb]+=sdA;
                   if(vb>=0){ g_swN[m][vb]++;  g_swSumAtr[m][vb]+=sdA;
                              g_swN[m][xb]++;  g_swSumAtr[m][xb]+=sdA; }
+                  if(sb>=0){ g_swN[m][sb]++;  g_swSumAtr[m][sb]+=sdA;
+                             g_swN[m][yb]++;  g_swSumAtr[m][yb]+=sdA; }
                   for(int z=0;z<g_nRR;z++)
                   {
                      int rr2=swR[m][z];
                      if(rr2>0)      { g_swW[m][z][4]++; g_swW[m][z][hb]++;
-                                      if(vb>=0){ g_swW[m][z][vb]++; g_swW[m][z][xb]++; } }
+                                      if(vb>=0){ g_swW[m][z][vb]++; g_swW[m][z][xb]++; }
+                                      if(sb>=0){ g_swW[m][z][sb]++; g_swW[m][z][yb]++; } }
                      else if(rr2<0) { g_swL[m][z][4]++; g_swL[m][z][hb]++;
-                                      if(vb>=0){ g_swL[m][z][vb]++; g_swL[m][z][xb]++; } }
+                                      if(vb>=0){ g_swL[m][z][vb]++; g_swL[m][z][xb]++; }
+                                      if(sb>=0){ g_swL[m][z][sb]++; g_swL[m][z][yb]++; } }
                      else           { g_swF[m][z][4]++; g_swF[m][z][hb]++;
-                                      if(vb>=0){ g_swF[m][z][vb]++; g_swF[m][z][xb]++; } }
+                                      if(vb>=0){ g_swF[m][z][vb]++; g_swF[m][z][xb]++; }
+                                      if(sb>=0){ g_swF[m][z][sb]++; g_swF[m][z][yb]++; } }
                   }
                }
             }
@@ -3947,6 +3979,8 @@ bool ProcessSymbol(string sym)
                int vb2=SwBin(vpOk ? vpVaAtr[g_vaMain] : 0.0);
                int hb2=(secondHalf?6:5);
                int xb2=(vb2>=0 ? (secondHalf?11:7)+vb2 : -1);
+               int sb2=StrBin(g_csOk ? CsAt(r[kb].time)*dir : 0.0, g_csOk);
+               int yb2=(sb2>=0 ? (secondHalf?19:17)+(sb2-15) : -1);
                // fin dove arrivano davvero i dati dopo questa rottura
                int span=(int)((r[nAll-1].time-r[kb].time)/60);
                for(int h=0;h<g_nHz;h++)
@@ -3954,18 +3988,22 @@ bool ProcessSymbol(string sym)
                   if(span<g_hzMin[h]) break;      // ordinati: da qui in poi nessuno entra
                   g_hzN[h][4]++; g_hzN[h][hb2]++;
                   if(vb2>=0){ g_hzN[h][vb2]++; g_hzN[h][xb2]++; }
+                  if(sb2>=0){ g_hzN[h][sb2]++; g_hzN[h][yb2]++; }
                   for(int z=0;z<g_nRR;z++)
                   {
                      int rz=((tRes[z]>=0 && tRes[z]<=g_hzMin[h]) ? sRes[z] : 0);
                      if(rz>0)
                      { g_hzW[h][z][4]++; g_hzW[h][z][hb2]++;
-                       if(vb2>=0){ g_hzW[h][z][vb2]++; g_hzW[h][z][xb2]++; } }
+                       if(vb2>=0){ g_hzW[h][z][vb2]++; g_hzW[h][z][xb2]++; }
+                       if(sb2>=0){ g_hzW[h][z][sb2]++; g_hzW[h][z][yb2]++; } }
                      else if(rz<0)
                      { g_hzL[h][z][4]++; g_hzL[h][z][hb2]++;
-                       if(vb2>=0){ g_hzL[h][z][vb2]++; g_hzL[h][z][xb2]++; } }
+                       if(vb2>=0){ g_hzL[h][z][vb2]++; g_hzL[h][z][xb2]++; }
+                       if(sb2>=0){ g_hzL[h][z][sb2]++; g_hzL[h][z][yb2]++; } }
                      else
                      { g_hzF[h][z][4]++; g_hzF[h][z][hb2]++;
-                       if(vb2>=0){ g_hzF[h][z][vb2]++; g_hzF[h][z][xb2]++; } }
+                       if(vb2>=0){ g_hzF[h][z][vb2]++; g_hzF[h][z][xb2]++; }
+                       if(sb2>=0){ g_hzF[h][z][sb2]++; g_hzF[h][z][yb2]++; } }
                   }
                }
             }
@@ -5490,6 +5528,15 @@ bool ProcessSymbol(string sym)
             W(fT,L+"RANGE DI OSSERVAZIONE -> BREAKOUT"+L);
             W(fT,"  finestre testate       "+IntegerToString(g_nOrb)+L);
             W(fT,"  finestra migliore      "+OrbLab(i)+"  ("+IntegerToString(g_orb[i].durMin)+" min)"+L);
+            if(InpDoStopSweep &&
+               (g_orb[i].startMin!=InpSweepStartMin || g_orb[i].durMin!=InpSweepDurMin))
+            {
+               W(fT,"  !! _orb_stop.csv e _orb_orizzonte.csv NON parlano di questa finestra:"+L);
+               W(fT,"     girano su "+D2(InpSweepStartMin/60)+":"+D2(InpSweepStartMin%60)+
+                    " per "+IntegerToString(InpSweepDurMin)+" min, fissati a mano negli input."+L);
+               W(fT,"     Per calibrarli qui: InpSweepStartMin="+IntegerToString(g_orb[i].startMin)+
+                    "  InpSweepDurMin="+IntegerToString(g_orb[i].durMin)+" e rilancia."+L);
+            }
             W(fT,"  giornate valide        "+IntegerToString(g_orb[i].n)+L);
             W(fT,"  range medio            "+F(g_orb[i].sRange/MathMax(1,g_orb[i].n),2)+" ATR"+L);
             W(fT,"  operabili              "+F(OrbTradePct(i),1)+"% delle giornate"+L);
@@ -7985,6 +8032,24 @@ void BuildOrb(string sym,string dir)
             int wi=-1;
             for(int i=0;i<g_nOrb;i++)
                if(g_orb[i].startMin==InpSweepStartMin && g_orb[i].durMin==InpSweepDurMin){ wi=i; break; }
+
+            // LA TRAPPOLA CHE HA GIA' MORSO SU EURJPY.
+            // La finestra operativa la sceglie la classifica, che esiste solo
+            // DOPO questa camminata; la calibrazione dello stop deve invece
+            // sapere prima su quale finestra girare, e quindi legge due input
+            // fissi. Se i due numeri non coincidono, questa tabella calibra
+            // lo stop di una finestra che non e' quella che poi si opera - e
+            // si finisce per leggere numeri veri di un setup inesistente.
+            // Non e' correggibile in una passata sola senza rifare tre volte
+            // il lavoro: e' correggibile rilanciando, e la riga da incollare
+            // sta qui sotto gia' pronta.
+            if(g_orbSel>=0 && wi!=g_orbSel)
+               PrintFormat("[%s] ATTENZIONE: _orb_stop.csv e' calibrato su %s, ma la finestra "
+                           "scelta e' %s. I due non c'entrano niente l'uno con l'altro. "
+                           "Rilancia con InpSweepStartMin=%d e InpSweepDurMin=%d.",
+                           sym,
+                           (wi>=0 ? OrbLab(wi) : D2(InpSweepStartMin/60)+":"+D2(InpSweepStartMin%60)),
+                           OrbLab(g_orbSel), g_orb[g_orbSel].startMin, g_orb[g_orbSel].durMin);
 
             int fS2=FileOpen(dir+fn+"_orb_stop.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
             if(fS2!=INVALID_HANDLE)
