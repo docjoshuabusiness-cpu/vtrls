@@ -833,3 +833,55 @@ inizi sulla griglia di `InpOrbStartStep` fra `InpOrbFirstHour` e
 `InpOrbLastHour`, con le durate di `InpOrbDur`. Con `InpOrbStartStep=60` le
 finestre `13:30-60` e `14:30-60` del default non esistono e non producono
 righe. Ora il log lo dice invece di lasciarle sparire.
+
+## `_orb_gestione.csv` — breakeven, trailing, uscita parziale
+
+Dodici regole confrontate con "non toccare niente", sulle stesse dodici
+finestre, le stesse 21 fasce e gli stessi rapporti:
+
+| # | regola |
+|---|---|
+| 0 | nessuna gestione (riferimento) |
+| 1-4 | stop a pari armato a 0.50R / 0.75R / 1.00R / 1.50R |
+| 5-8 | trailing 0.50R / 1.00R / 1.50R da 1.00R, e 1.00R da 1.50R |
+| 9 | 50% chiuso a 1.00R poi stop a pari |
+| 10 | 50% chiuso a 1.00R poi trailing 1.00R |
+| 11 | stop a pari + costo armato a 1.00R |
+
+La colonna che conta e' l'ultima: `delta_su_nessuna_gestione`, cioe' quanto
+la regola aggiunge o toglie rispetto al non fare niente, a parita' di tutto.
+
+### Perche' non basta guardare MFE e MAE
+
+`mfe_atr` e `mae_atr` in `_orb_breakout.csv` NON sono troncati alla
+risoluzione: misurano l'escursione su tutto l'orizzonte, anche dopo che stop
+o target sono scattati. Su EURJPY questo produce due letture che sembrano
+decisive e non lo sono:
+
+* le operazioni chiuse in STOP hanno MFE medio **1.26R** - sembra dire che il
+  perdente medio era prima andato a favore di una volta il rischio, cioe' che
+  un breakeven lo avrebbe salvato. Ma quella escursione puo' essere arrivata
+  DOPO lo stop;
+* le operazioni chiuse in TARGET hanno MFE medio **3.62R** contro un target a
+  2R - sembra dire che un trailing avrebbe raccolto molto di piu'. Stesso
+  problema.
+
+L'unico modo di rispondere e' rifare la camminata barra per barra con la
+regola attiva. E' quello che fa questa tabella.
+
+### L'ordine dentro la barra, che e' dove si bara
+
+1. lo stop si verifica con il livello che aveva **prima** di questa barra;
+2. il target vale solo dalla barra successiva alla rottura;
+3. solo alla fine la regola arma o trascina, e il livello nuovo vale **dalla
+   barra dopo**.
+
+Stringere lo stop usando il massimo della stessa barra che poi lo colpisce
+significa usare due volte la stessa informazione, ed e' il modo standard di
+far sembrare geniale un trailing su dati storici.
+
+### Il costo non cambia con l'uscita parziale
+
+Lo spread si paga sulla dimensione: mezza posizione chiusa due volte costa
+quanto una intera chiusa una volta. La colonna `costo_in_R` e' la stessa per
+tutte le regole, e questo e' voluto.

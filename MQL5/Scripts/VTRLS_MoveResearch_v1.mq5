@@ -178,6 +178,7 @@ input double          InpPrevStopAtr    = 0.25;            // Stop in ATR(D-1): 
 
 input int             InpOrbExtBars     = 10;              // Barre indicatore in cui cercare un estremo RSI/Z PRIMA della rottura
 
+input bool            InpDoManage       = true;            // Testa breakeven, trailing e uscita parziale contro il "non toccare niente"
 input bool            InpDoStopSweep    = true;            // Calibra lo stop sulla finestra dichiarata sotto
 input string          InpSweepWindows   = "00:00-60,02:00-120,04:00-120,06:00-120,07:00-60,08:00-60,09:00-60,09:00-120,10:00-30,10:00-60,13:30-60,14:30-60";  // Finestre calibrate INSIEME, formato HH:MM-durata (vuoto = usa le due caselle sotto)
 input int             InpSweepStartMin  = 540;             // Finestra singola: inizio (usata solo se la lista sopra e' vuota)
@@ -2129,6 +2130,56 @@ int SwWinIdxRaw(int startMin,int durMin);
 #define SW_MAXW 12
 int g_swStart[SW_MAXW], g_swDur[SW_MAXW]; int g_nSwW=0;
 
+//==================================================================
+// GESTIONE DELLA POSIZIONE
+//------------------------------------------------------------------
+// Breakeven e trailing si difendono da soli in ogni forum e non si
+// misurano quasi mai. Su un processo senza deriva NON possono cambiare
+// l'aspettativa: spostano la forma della distribuzione, non la media, e
+// sottraggono attrito. Possono guadagnare solo se esiste struttura
+// CONDIZIONALE - se cioe' la probabilita' di continuare, dato che il
+// prezzo e' gia' andato a favore di X, e' diversa da quella
+// incondizionata. E' una domanda empirica, e questa tabella la pone.
+//
+// Il sospetto, prima di guardare: la curva dello stop di EURJPY dice che
+// stringere il rischio distrugge. Da 0.119 a 0.036 ATR il win rate cade
+// da 40.45% a 27.83% e l'aspettativa lorda da +0.192 a -0.165 R. Un
+// breakeven E' uno stop che a meta' operazione diventa strettissimo. La
+// curva dei rapporti dice il resto: E in R fa il massimo a 1:2 e crolla
+// a 1:3 e 1:4, cioe' i target lontani NON pagano - e un trailing e'
+// l'estremo di quella curva.
+//
+// Due indizi contro. Nessuna misura. Quindi si misura.
+#define MG_MAXR 12
+// arm = quanto deve andare a favore, in R, perche' la regola scatti
+// tr   = -1 stop a pari, -2 stop a pari + costo, >0 distanza del trailing in R
+// part = frazione chiusa al livello di arm (0 = niente uscita parziale)
+double g_mgArm[MG_MAXR]  = {0.00, 0.50, 0.75, 1.00, 1.50, 1.00, 1.00, 1.00, 1.50, 1.00, 1.00, 1.00};
+double g_mgTr [MG_MAXR]  = {0.00,-1.00,-1.00,-1.00,-1.00, 0.50, 1.00, 1.50, 1.00,-1.00, 1.00,-2.00};
+double g_mgPart[MG_MAXR] = {0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.50, 0.50, 0.00};
+
+string MgLab(int i)
+{
+   if(i==0) return "nessuna gestione (riferimento)";
+   string q=(g_mgTr[i]<-1.5 ? "stop a pari + costo"
+            :(g_mgTr[i]<0.0 ? "stop a pari"
+                            : "trailing "+F(g_mgTr[i],2)+"R"));
+   string pz=(g_mgPart[i]>0.0 ? F(100.0*g_mgPart[i],0)+"% chiuso e " : "");
+   return pz+q+" da "+F(g_mgArm[i],2)+"R";
+}
+
+double g_mgSum[SW_MAXW][MG_MAXR][ORB_MAXRR][SW_NB];
+int    g_mgN  [SW_MAXW][MG_MAXR][ORB_MAXRR][SW_NB];
+int    g_mgRes[SW_MAXW][MG_MAXR][ORB_MAXRR][SW_NB];
+
+void MgReset()
+{
+   for(int i=0;i<SW_MAXW;i++)
+   for(int k=0;k<MG_MAXR;k++)
+   for(int z=0;z<ORB_MAXRR;z++)
+   for(int b=0;b<SW_NB;b++){ g_mgSum[i][k][z][b]=0.0; g_mgN[i][k][z][b]=0; g_mgRes[i][k][z][b]=0; }
+}
+
 double g_swVal[SW_MAXST]; bool g_swIsPt[SW_MAXST]; int g_nSw=0;
 int    g_swN[SW_MAXW][SW_MAXST][SW_NB];
 double g_swSumAtr[SW_MAXW][SW_MAXST][SW_NB];   // stop realizzato in ATR, per leggere i punti
@@ -2744,6 +2795,7 @@ void OrbInit()
    CxReset();
    PvReset();
    SwReset();
+   MgReset();
    HzReset();
    XtfInit();
 
@@ -4119,6 +4171,16 @@ bool ProcessSymbol(string sym)
             if(doSw)
                for(int m=0;m<g_nSw;m++)
                   for(int z=0;z<g_nRR;z++){ swR[m][z]=0; swD[m][z]=false; }
+
+            bool doMg=(InpDoManage && iSw>=0);
+            double mgR[MG_MAXR][ORB_MAXRR], mgSz[MG_MAXR][ORB_MAXRR], mgSl[MG_MAXR][ORB_MAXRR];
+            bool   mgD[MG_MAXR][ORB_MAXRR], mgA[MG_MAXR][ORB_MAXRR];
+            double mgTop=0.0;                       // estremo a favore, in prezzo
+            if(doMg)
+               for(int k=0;k<MG_MAXR;k++)
+                  for(int z=0;z<g_nRR;z++)
+                  { mgR[k][z]=0.0; mgSz[k][z]=1.0; mgSl[k][z]=stp;
+                    mgD[k][z]=false; mgA[k][z]=false; }
             bool rev=false;
             double mfe=0.0, mae=0.0;
             datetime hWalk=(doHz ? r[kb].time+(datetime)(HzMax()*60) : hEnd);
@@ -4175,6 +4237,59 @@ bool ProcessSymbol(string sym)
                   if(q>kb && (dir>0 ? r[q].high>=tgtL[z] : r[q].low<=tgtL[z]))
                   { resR[z]=+1; doneR[z]=true; }
                }
+
+               //--- GESTIONE. L'ordine e' quello che rende onesto il conto:
+               // 1) lo stop si verifica con il livello che aveva PRIMA di
+               //    questa barra. Dentro una barra non si sa l'ordine dei
+               //    prezzi: stringere lo stop con il massimo della stessa
+               //    barra che poi lo colpisce e' guadagnare due volte sulla
+               //    stessa informazione, ed e' il modo standard di far
+               //    sembrare geniale un trailing.
+               // 2) il target vale solo dalla barra dopo la rottura, come
+               //    ovunque nello script.
+               // 3) solo alla fine la regola arma o trascina, e il livello
+               //    nuovo entra in vigore dalla barra successiva.
+               if(doMg)
+               {
+                  double favB=(q>kb ? (dir>0 ? r[q].high-entry : entry-r[q].low) : 0.0);
+                  if(favB>mgTop) mgTop=favB;
+                  for(int k=0;k<MG_MAXR;k++)
+                  {
+                     for(int z=0;z<g_nRR;z++)
+                     {
+                        if(mgD[k][z]) continue;
+                        double sl=mgSl[k][z];
+                        if(dir>0 ? r[q].low<=sl : r[q].high>=sl)
+                        {
+                           mgR[k][z]+=mgSz[k][z]*((sl-entry)*dir/stpD);
+                           mgD[k][z]=true; continue;
+                        }
+                        if(q>kb && (dir>0 ? r[q].high>=tgtL[z] : r[q].low<=tgtL[z]))
+                        {
+                           mgR[k][z]+=mgSz[k][z]*g_rr[z];
+                           mgD[k][z]=true; continue;
+                        }
+                        if(k==0 || stpD<=0.0) continue;      // riferimento: mai toccato
+                        double favR=mgTop/stpD;
+                        if(!mgA[k][z])
+                        {
+                           if(favR<g_mgArm[k]) continue;
+                           mgA[k][z]=true;
+                           if(g_mgPart[k]>0.0)
+                           {
+                              mgR[k][z]+=g_mgPart[k]*g_mgArm[k];
+                              mgSz[k][z]-=g_mgPart[k];
+                           }
+                        }
+                        double nsl;
+                        if(g_mgTr[k]<-1.5)      nsl=entry+dir*costAtr*atrPt*g_point;
+                        else if(g_mgTr[k]<0.0)  nsl=entry;
+                        else                    nsl=entry+dir*(mgTop-g_mgTr[k]*stpD);
+                        // lo stop non torna mai indietro
+                        if(dir>0 ? nsl>mgSl[k][z] : nsl<mgSl[k][z]) mgSl[k][z]=nsl;
+                     }
+                  }
+               }
                }
                if(doHz)
                {
@@ -4219,6 +4334,28 @@ bool ProcessSymbol(string sym)
                                       if(sb>=0){ g_swF[iSw][m][z][sb]++; g_swF[iSw][m][z][yb]++; } }
                   }
                }
+            }
+
+            if(doMg)
+            {
+               int vbM=SwBin(vpOk ? vpVaAtr[g_vaMain] : 0.0);
+               int hbM=(secondHalf ? 6 : 5);
+               int sbM=StrBin(g_csOk ? CsAt(r[kb].time)*dir : 0.0, g_csOk);
+               int xbM=(vbM>=0 ? (secondHalf?11:7)+vbM : -1);
+               int ybM=(sbM>=0 ? (secondHalf?19:17)+(sbM-15) : -1);
+               int bs[6]; int nb=0;
+               bs[nb++]=4; bs[nb++]=hbM;
+               if(vbM>=0){ bs[nb++]=vbM; bs[nb++]=xbM; }
+               if(sbM>=0){ bs[nb++]=sbM; bs[nb++]=ybM; }
+               for(int k=0;k<MG_MAXR;k++)
+                  for(int z=0;z<g_nRR;z++)
+                     for(int t=0;t<nb;t++)
+                     {
+                        int b=bs[t];
+                        g_mgSum[iSw][k][z][b]+=mgR[k][z];
+                        g_mgN  [iSw][k][z][b]++;
+                        if(mgD[k][z]) g_mgRes[iSw][k][z][b]++;
+                     }
             }
 
             if(doHz)
@@ -8362,6 +8499,51 @@ void BuildOrb(string sym,string dir)
                   }
                }
                FileClose(fS2);
+            }
+         }
+
+         //--- gestione della posizione: breakeven, trailing, uscita parziale
+         if(InpDoManage)
+         {
+            int fG=FileOpen(dir+fn+"_orb_gestione.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+            if(fG!=INVALID_HANDLE)
+            {
+               W(fG,"finestra;scelta;fascia;gestione;rr;n;perc_risolte;"
+                    "E_lordo_in_R;costo_in_R;E_netto_in_R;delta_su_nessuna_gestione\r\n");
+               for(int iw=0;iw<g_nSwW;iw++)
+               {
+                  int wg=-1;
+                  for(int i=0;i<g_nOrb;i++)
+                     if(g_orb[i].startMin==g_swStart[iw] && g_orb[i].durMin==g_swDur[iw]){ wg=i; break; }
+                  if(wg<0) continue;
+                  double mc=(g_orb[wg].nBrk>0 ? g_orb[wg].sCost/g_orb[wg].nBrk : 0.0);
+                  double bs=(g_rr[g_rrMain]>0 ? OrbTgt(wg)/g_rr[g_rrMain] : 0.0);
+                  // Il costo NON cambia con l'uscita parziale: lo spread si
+                  // paga sulla dimensione, e mezza posizione chiusa due volte
+                  // costa quanto una intera chiusa una volta.
+                  double cRg=(bs>0.0 ? mc/bs : 0.0);
+                  string wl=OrbLab(wg);
+                  string sg=((wg==g_orbSel) ? "SCELTA" : "");
+                  for(int b=0;b<SW_NB;b++)
+                  for(int z=0;z<g_nRR;z++)
+                  {
+                     int n0=g_mgN[iw][0][z][b];
+                     if(n0<100) continue;
+                     double e0=g_mgSum[iw][0][z][b]/n0-cRg;
+                     for(int k=0;k<MG_MAXR;k++)
+                     {
+                        int nk=g_mgN[iw][k][z][b];
+                        if(nk<100) continue;
+                        double eK=g_mgSum[iw][k][z][b]/nk;
+                        W(fG,wl+";"+sg+";"+SwBinLab(b)+";"+MgLab(k)+";1:"+F(g_rr[z],2)+";"+
+                             IntegerToString(nk)+";"+
+                             F(100.0*g_mgRes[iw][k][z][b]/nk,2)+";"+
+                             F(eK,4)+";"+F(cRg,4)+";"+F(eK-cRg,4)+";"+
+                             F(eK-cRg-e0,4)+"\r\n");
+                     }
+                  }
+               }
+               FileClose(fG);
             }
          }
 
