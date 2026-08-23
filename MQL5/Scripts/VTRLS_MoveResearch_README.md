@@ -913,3 +913,52 @@ e la colonna `perc_chiuse_a_mercato` dice quanto pesa quella chiusura.
 Lo spread si paga sulla dimensione: mezza posizione chiusa due volte costa
 quanto una intera chiusa una volta. La colonna `costo_in_R` e' la stessa per
 tutte le regole, e questo e' voluto.
+
+
+## Un lancio, tutti i parametri: costi e orizzonti insieme
+
+Due impostazioni hanno fatto perdere quattro lanci di fila perche' erano
+numeri singoli e non liste.
+
+### Il costo: `InpCostPtList = "0,7,15,25,40"`
+
+Il costo e' una **sottrazione lineare**. Cambiare spread non cambia quale
+operazione vince, cambia solo quanto resta. Non c'e' nessuna ragione per
+rilanciare lo script, e c'era una ragione molto concreta per non farlo:
+`InpOrbCostPt` e' rimasto a 7 punti per quattro lanci mentre il costo vero su
+EURJPY e' 25, e ogni colonna netta usciva ottimista di tre volte e mezzo.
+
+Adesso `_orb_stop.csv`, `_orb_gestione.csv`, `_orb_orizzonte.csv` e
+`_orb_stop_orizzonte.csv` hanno una colonna `E_netto_Npt` per ogni valore
+della lista, calcolata riscalando la media di 1/ATR sulle rotture di quella
+finestra. Costo zero in tempo di calcolo.
+
+### Gli orizzonti: `InpSweepHorizons = "60,120,240,480,1440"`
+
+Stop e orizzonte **non sono due domande separate**. Uno stop largo con target
+a 1:2 ha bisogno di tempo per risolversi: su EURJPY a 240 minuti il
+`4.00 x base` risolveva il 14% delle rotture e il resto restava aperto. La
+curva dello stop e quella dell'orizzonte, misurate separatamente, non possono
+rispondere a "stop largo **con** tempo".
+
+Ora la spazzata registra il **minuto** in cui ogni combinazione stop x
+rapporto si risolve, e da quello ricava tutti gli orizzonti senza rifare la
+camminata. La gestione fa lo stesso con una fotografia dello stato a ogni
+confine di orizzonte.
+
+Escono cosi':
+
+* `_orb_stop.csv` — dodici finestre, orizzonte base (come prima);
+* `_orb_stop_orizzonte.csv` — **nuovo**, la sola finestra scelta, ogni stop x
+  ogni rapporto x ogni orizzonte;
+* `_orb_gestione.csv` — colonne `orizzonte` e `minuti`: tutte le finestre
+  all'orizzonte base, la finestra scelta a tutti gli orizzonti.
+
+L'incrocio completo su tutte e dodici le finestre sarebbe oltre un milione di
+righe. La replica fra finestre vive nella tabella all'orizzonte base;
+l'incrocio serve ad approfondire la finestra che ha vinto.
+
+**Costo in tempo.** La camminata ora arriva fino al piu' lungo degli
+orizzonti incrociati invece che a quello base. Con la lista di default si
+arriva a 1440 minuti: da un run di circa un minuto si passa a **cinque o sei**.
+Per accorciarlo, taglia `InpSweepHorizons`, non le finestre.

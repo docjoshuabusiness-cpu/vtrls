@@ -146,6 +146,7 @@ input double          InpOrbRsiConf     = 50.0;            // RSI: soglia di con
 input double          InpOrbZsConf      = 0.0;             // Z-Score: soglia di conferma nel verso della rottura
 input double          InpOrbCciConf     = 40.0;            // CCI: soglia di conferma nel verso della rottura
 input double          InpOrbCostPt      = 7.0;             // Costo andata+ritorno in PUNTI (spread+commissioni). A zero la colonna netta e' una copia della lorda
+input string          InpCostPtList     = "0,7,15,25,40";   // Costi ALTERNATIVI in punti: una colonna netta per ognuno, nella stessa passata (vuoto = solo quello sopra)
 input double          InpOrbBufferAtr   = 0.03;            // Margine oltre il livello perche' la rottura conti
 input double          InpOrbMinResolved = 60.0;            // % minima di rotture risolte perche' la finestra entri in classifica
 input double          InpOrbMinTradePct = 80.0;            // % minima di giornate realmente operabili (stop sopra il minimo)
@@ -187,6 +188,7 @@ input string          InpStopSweep      = "0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.2
 input string          InpStopSweepPt    = "30,40,50,60,70,80,90,100,115,130,145,160,180,200,225,250,280,320,360,400";   // Stop in PUNTI fissi (vuoto = non testarli)
 input double          InpSweepStrTh     = 25.0;            // Soglia di forza relativa per le fasce concorde/contraria della calibrazione (0 = niente fasce)
 input string          InpOrbHorizons    = "30,60,120,240,480,960,1440,2880,4320,7200";  // Orizzonti in MINUTI di calendario da testare insieme (vuoto = non testarli)
+input string          InpSweepHorizons  = "60,120,240,480,1440";  // Orizzonti incrociati CON la spazzata degli stop e con la gestione (vuoto = solo quello base)
 input string          InpExtraTfList    = "M10,M30,H1,H2,H4,H8,D1";  // Scale AGGIUNTIVE: RSI/CCI/Z al momento della rottura, solo come colonne per il cercatore
 
 input bool            InpDoStrength     = true;            // Forza relativa cross-sectional delle valute
@@ -829,6 +831,7 @@ string BinLabel(int b, const double &edges[], string unit)
 
 //--- prototipi (le definizioni sono piu' avanti nel file)
 ENUM_TIMEFRAMES TfFromName(string t);
+int    OrbHorizon();
 void   BuildConditions(string sym,string dir);
 void   BuildOrb(string sym,string dir);
 void   WriteCells(string path,string keyHeader,const int &basePt[],const int &baseAtr[],
@@ -2130,6 +2133,86 @@ int SwWinIdxRaw(int startMin,int durMin);
 #define SW_MAXW 12
 int g_swStart[SW_MAXW], g_swDur[SW_MAXW]; int g_nSwW=0;
 
+// GLI ORIZZONTI ENTRANO NELLA SPAZZATA, NON IN UN SECONDO LANCIO.
+// Stop e orizzonte non sono due domande separate: uno stop largo con un
+// target a 1:2 ha bisogno di tempo per risolversi, e su EURJPY a 240 minuti
+// il 4.00 x base risolveva il 14% delle rotture - il resto restava aperto e
+// veniva contato zero. La curva dello stop e quella dell'orizzonte, misurate
+// separatamente, non possono rispondere a "stop largo CON tempo".
+// La cella 0 e' sempre l'orizzonte base; le altre vengono dalla lista.
+#define SH_MAXH  8
+#define SH_SLOTS (SH_MAXH+1)
+#define SW_WH    (SW_MAXW*SH_SLOTS)
+int g_shMin[SH_SLOTS]; int g_nSh=0;      // g_shMin[0] riempito a runtime
+
+void ShInit()
+{
+   g_nSh=0;
+   g_shMin[0]=OrbHorizon();          // la cella 0 e' sempre l'orizzonte base
+   double v[]; int nv=ParseDoubles(InpSweepHorizons,v,SH_MAXH,"InpSweepHorizons");
+   for(int i=0;i<nv && g_nSh<SH_MAXH;i++)
+      if(v[i]>=1.0) g_shMin[++g_nSh]=(int)v[i];
+   for(int i=1;i<g_nSh;i++)
+      for(int j=1;j<g_nSh+1-i;j++)
+         if(g_shMin[j]>g_shMin[j+1]){ int t=g_shMin[j]; g_shMin[j]=g_shMin[j+1]; g_shMin[j+1]=t; }
+}
+int ShMax(){ int m=0; for(int i=1;i<=g_nSh;i++) if(g_shMin[i]>m) m=g_shMin[i]; return m; }
+string ShLab(int h)
+{
+   int m=g_shMin[h];
+   if(h==0)    return "base ("+IntegerToString(m)+" min)";
+   if(m<60)    return IntegerToString(m)+" min";
+   if(m<1440)  return IntegerToString(m/60)+"h";
+   return IntegerToString(m/1440)+"g ("+IntegerToString(m)+" min)";
+}
+int WhIdx(int iw,int hs){ return iw*SH_SLOTS+hs; }
+
+// IL COSTO NON RICHIEDE UNA SECONDA CAMMINATA.
+// E' una sottrazione lineare: cambiare spread non cambia quale operazione
+// vince, cambia solo quanto resta. Quindi non c'e' ragione di rilanciare lo
+// script per provarne un altro, e c'e' una ragione molto concreta per non
+// farlo: l'impostazione e' rimasta a 7 punti per quattro lanci di fila
+// mentre il costo vero su EURJPY e' 25, e ogni colonna netta usciva
+// ottimista di tre volte e mezzo.
+#define COST_MAXN 6
+double g_costPt[COST_MAXN]; int g_nCost=0;
+
+void CostInit()
+{
+   g_nCost=0;
+   string parts[]; int np=StringSplit(InpCostPtList,',',parts);
+   for(int i=0;i<np && g_nCost<COST_MAXN;i++)
+   {
+      string q=parts[i]; StringTrimLeft(q); StringTrimRight(q);
+      if(q=="") continue;
+      double v=StringToDouble(q);
+      if(v<0.0) continue;
+      bool dup=false;
+      for(int j=0;j<g_nCost;j++) if(MathAbs(g_costPt[j]-v)<1e-9) dup=true;
+      if(!dup) g_costPt[g_nCost++]=v;
+   }
+}
+
+// intestazione e celle delle colonne nette alternative
+string CostHdr()
+{
+   string h="";
+   for(int i=0;i<g_nCost;i++) h+=";E_netto_"+F(g_costPt[i],0)+"pt";
+   return h;
+}
+// eR = lordo in R; invAtr = media di 1/ATR_in_punti sulle rotture della
+// finestra; stopAtr = stop realmente applicato, in ATR
+string CostCells(double eR, double invAtr, double stopAtr)
+{
+   string o="";
+   for(int i=0;i<g_nCost;i++)
+   {
+      double c=(stopAtr>0.0 ? g_costPt[i]*invAtr/stopAtr : 0.0);
+      o+=";"+F(eR-c,4);
+   }
+   return o;
+}
+
 //==================================================================
 // GESTIONE DELLA POSIZIONE
 //------------------------------------------------------------------
@@ -2168,24 +2251,24 @@ string MgLab(int i)
    return pz+q+" da "+F(g_mgArm[i],2)+"R";
 }
 
-double g_mgSum[SW_MAXW][MG_MAXR][ORB_MAXRR][SW_NB];
-int    g_mgN  [SW_MAXW][MG_MAXR][ORB_MAXRR][SW_NB];
-int    g_mgRes[SW_MAXW][MG_MAXR][ORB_MAXRR][SW_NB];
+double g_mgSum[SW_WH][MG_MAXR][ORB_MAXRR][SW_NB];
+int    g_mgN  [SW_WH][MG_MAXR][ORB_MAXRR][SW_NB];
+int    g_mgRes[SW_WH][MG_MAXR][ORB_MAXRR][SW_NB];
 
 void MgReset()
 {
-   for(int i=0;i<SW_MAXW;i++)
+   for(int i=0;i<SW_WH;i++)
    for(int k=0;k<MG_MAXR;k++)
    for(int z=0;z<ORB_MAXRR;z++)
    for(int b=0;b<SW_NB;b++){ g_mgSum[i][k][z][b]=0.0; g_mgN[i][k][z][b]=0; g_mgRes[i][k][z][b]=0; }
 }
 
 double g_swVal[SW_MAXST]; bool g_swIsPt[SW_MAXST]; int g_nSw=0;
-int    g_swN[SW_MAXW][SW_MAXST][SW_NB];
-double g_swSumAtr[SW_MAXW][SW_MAXST][SW_NB];   // stop realizzato in ATR, per leggere i punti
-int g_swW[SW_MAXW][SW_MAXST][ORB_MAXRR][SW_NB];
-int g_swL[SW_MAXW][SW_MAXST][ORB_MAXRR][SW_NB];
-int g_swF[SW_MAXW][SW_MAXST][ORB_MAXRR][SW_NB];
+int    g_swN[SW_WH][SW_MAXST][SW_NB];
+double g_swSumAtr[SW_WH][SW_MAXST][SW_NB];   // stop realizzato in ATR, per leggere i punti
+int g_swW[SW_WH][SW_MAXST][ORB_MAXRR][SW_NB];
+int g_swL[SW_WH][SW_MAXST][ORB_MAXRR][SW_NB];
+int g_swF[SW_WH][SW_MAXST][ORB_MAXRR][SW_NB];
 
 void SwWinInit()
 {
@@ -2226,7 +2309,8 @@ void SwReset()
 {
    g_nSw=0;
    SwWinInit();
-   for(int i=0;i<SW_MAXW;i++)
+   ShInit();
+   for(int i=0;i<SW_WH;i++)
    for(int m=0;m<SW_MAXST;m++)
    {
       for(int b=0;b<SW_NB;b++){ g_swN[i][m][b]=0; g_swSumAtr[i][m][b]=0.0; }
@@ -2796,6 +2880,7 @@ void OrbInit()
    PvReset();
    SwReset();
    MgReset();
+   CostInit();
    HzReset();
    XtfInit();
 
@@ -4168,15 +4253,22 @@ bool ProcessSymbol(string sym)
             int  tRes[ORB_MAXRR]; int sRes[ORB_MAXRR];
             if(doHz) for(int z=0;z<g_nRR;z++){ tRes[z]=-1; sRes[z]=0; }
             int  swR[SW_MAXST][ORB_MAXRR]; bool swD[SW_MAXST][ORB_MAXRR];
-            if(doSw)
-               for(int m=0;m<g_nSw;m++)
-                  for(int z=0;z<g_nRR;z++){ swR[m][z]=0; swD[m][z]=false; }
+            int  swT[SW_MAXST][ORB_MAXRR];   // minuti alla risoluzione: da qui
+            if(doSw)                         // si ricavano TUTTI gli orizzonti
+               for(int m=0;m<g_nSw;m++)      // senza rifare la camminata
+                  for(int z=0;z<g_nRR;z++){ swR[m][z]=0; swD[m][z]=false; swT[m][z]=-1; }
 
             bool doMg=(InpDoManage && iSw>=0);
             double mgR[MG_MAXR][ORB_MAXRR], mgSz[MG_MAXR][ORB_MAXRR], mgSl[MG_MAXR][ORB_MAXRR];
             bool   mgD[MG_MAXR][ORB_MAXRR], mgA[MG_MAXR][ORB_MAXRR];
             double mgTop=0.0;                       // estremo a favore, in prezzo
-            double mgLast=entry;                    // ultimo prezzo dentro l'orizzonte
+            double mgLast=entry;                    // ultimo prezzo visto
+            // fotografia dello stato a ogni confine di orizzonte: realizzato
+            // piu' quel che resta aperto valutato all'ultimo prezzo
+            double mgSnap[SH_SLOTS][MG_MAXR][ORB_MAXRR];
+            bool   mgSnapD[SH_SLOTS][MG_MAXR][ORB_MAXRR];
+            bool   mgSnapOk[SH_SLOTS];
+            if(doMg) for(int h=0;h<SH_SLOTS;h++) mgSnapOk[h]=false;
             if(doMg)
                for(int k=0;k<MG_MAXR;k++)
                   for(int z=0;z<g_nRR;z++)
@@ -4184,14 +4276,44 @@ bool ProcessSymbol(string sym)
                     mgD[k][z]=false; mgA[k][z]=false; }
             bool rev=false;
             double mfe=0.0, mae=0.0;
+            // La spazzata e la gestione ora devono arrivare fin dove arriva
+            // il piu' lungo degli orizzonti incrociati, non solo fino a quello
+            // base: e' l'intero punto dell'incrocio.
+            int  shTop=(int)MathMax(OrbHorizon(),ShMax());
+            datetime hSw=r[kb].time+(datetime)(shTop*60);
             datetime hWalk=(doHz ? r[kb].time+(datetime)(HzMax()*60) : hEnd);
             if(hWalk<hEnd) hWalk=hEnd;
+            if(hWalk<hSw)  hWalk=hSw;
             for(int q=kb; q<nAll && r[q].time<=hWalk; q++)
             {
+               int elM=(int)((r[q].time-r[kb].time)/60);
+               bool inS=(r[q].time<=hSw);
+               // la fotografia si scatta PRIMA di elaborare la barra che
+               // supera il confine, cosi' contiene solo barre interamente
+               // dentro l'orizzonte
+               if(doMg)
+                  for(int h=0;h<SH_SLOTS;h++)
+                  {
+                     if(mgSnapOk[h] || h>g_nSh) continue;
+                     if(elM<=g_shMin[h]) continue;
+                     for(int k=0;k<MG_MAXR;k++)
+                        for(int z=0;z<g_nRR;z++)
+                        {
+                           mgSnap[h][k][z]=mgR[k][z]
+                              +(mgD[k][z]?0.0:mgSz[k][z]*((mgLast-entry)*dir/MathMax(1e-12,stpD)));
+                           mgSnapD[h][k][z]=mgD[k][z];
+                        }
+                     mgSnapOk[h]=true;
+                  }
                // oltre hEnd si continua a camminare SOLO per registrare i tempi:
                // mfe, mae, ritorni ed esiti restano quelli di prima, altrimenti
                // allungare l'orizzonte cambierebbe di riflesso ogni altra tabella
                bool inH=(r[q].time<=hEnd);
+               if(inH || inS)
+               {
+               // Misure, ritorni ed esiti restano legati all'orizzonte BASE:
+               // allungarlo per la spazzata non deve cambiare di riflesso
+               // ogni altra tabella dello script.
                if(inH)
                {
                // La barra della rottura conta solo contro di noi: dentro una
@@ -4211,9 +4333,18 @@ bool ProcessSymbol(string sym)
                // ancora aperti, nello stesso istante
                bool hs=(dir>0 ? r[q].low<=stp : r[q].high>=stp);
 
+               for(int z=0;z<g_nRR;z++)
+               {
+                  if(doneR[z]) continue;
+                  if(hs){ resR[z]=-1; doneR[z]=true; continue; }
+                  if(q>kb && (dir>0 ? r[q].high>=tgtL[z] : r[q].low<=tgtL[z]))
+                  { resR[z]=+1; doneR[z]=true; }
+               }
+               }
+
                // stessa barra, stop diversi: costa qualche confronto in piu',
                // non una seconda lettura dei dati
-               if(doSw)
+               if(inS && doSw)
                   for(int m=0;m<g_nSw;m++)
                   {
                      double sdM=(g_swIsPt[m] ? g_swVal[m]*g_point : stpD*g_swVal[m]);
@@ -4222,22 +4353,15 @@ bool ProcessSymbol(string sym)
                      for(int z=0;z<g_nRR;z++)
                      {
                         if(swD[m][z]) continue;
-                        if(hsM){ swR[m][z]=-1; swD[m][z]=true; continue; }
+                        if(hsM){ swR[m][z]=-1; swD[m][z]=true; swT[m][z]=elM; continue; }
                         if(q>kb)
                         {
                            double tg=entry+dir*sdM*g_rr[z];
-                           if(dir>0 ? r[q].high>=tg : r[q].low<=tg){ swR[m][z]=+1; swD[m][z]=true; }
+                           if(dir>0 ? r[q].high>=tg : r[q].low<=tg)
+                           { swR[m][z]=+1; swD[m][z]=true; swT[m][z]=elM; }
                         }
                      }
                   }
-
-               for(int z=0;z<g_nRR;z++)
-               {
-                  if(doneR[z]) continue;
-                  if(hs){ resR[z]=-1; doneR[z]=true; continue; }
-                  if(q>kb && (dir>0 ? r[q].high>=tgtL[z] : r[q].low<=tgtL[z]))
-                  { resR[z]=+1; doneR[z]=true; }
-               }
 
                //--- GESTIONE. L'ordine e' quello che rende onesto il conto:
                // 1) lo stop si verifica con il livello che aveva PRIMA di
@@ -4250,7 +4374,7 @@ bool ProcessSymbol(string sym)
                //    ovunque nello script.
                // 3) solo alla fine la regola arma o trascina, e il livello
                //    nuovo entra in vigore dalla barra successiva.
-               if(doMg)
+               if(inS && doMg)
                {
                   double favB=(q>kb ? (dir>0 ? r[q].high-entry : entry-r[q].low) : 0.0);
                   if(favB>mgTop) mgTop=favB;
@@ -4306,40 +4430,66 @@ bool ProcessSymbol(string sym)
                   }
                }
             }
+            // quanto lontano arrivano davvero i dati dopo questa rottura:
+            // un orizzonte lungo non puo' contare su giornate che finiscono
+            // prima, altrimenti sembrerebbe risolvere meno per colpa del
+            // calendario invece che del mercato
+            int spanB=(int)((r[nAll-1].time-r[kb].time)/60);
+
             if(doSw)
             {
                int vb=SwBin(vpOk ? vpVaAtr[g_vaMain] : 0.0);
                int hb=(secondHalf ? 6 : 5);
                int sb=StrBin(g_csOk ? CsAt(r[kb].time)*dir : 0.0, g_csOk);
                int yb=(sb>=0 ? (secondHalf?19:17)+(sb-15) : -1);  // forza incrociata con la meta'
-               for(int m=0;m<g_nSw;m++)
+               int xb=(vb>=0 ? (secondHalf?11:7)+vb : -1);        // VA incrociata con la meta'
+               int bb[6]; int nbb=0;
+               bb[nbb++]=4; bb[nbb++]=hb;
+               if(vb>=0){ bb[nbb++]=vb; bb[nbb++]=xb; }
+               if(sb>=0){ bb[nbb++]=sb; bb[nbb++]=yb; }
+               for(int hs=0; hs<=g_nSh; hs++)
                {
-                  double sdA=(g_swIsPt[m] ? g_swVal[m]/atrPt : stopAtr*g_swVal[m]);
-                  int xb=(vb>=0 ? (secondHalf?11:7)+vb : -1);   // VA incrociata con la meta'
-                  g_swN[iSw][m][4]++;  g_swSumAtr[iSw][m][4]+=sdA;
-                  g_swN[iSw][m][hb]++; g_swSumAtr[iSw][m][hb]+=sdA;
-                  if(vb>=0){ g_swN[iSw][m][vb]++;  g_swSumAtr[iSw][m][vb]+=sdA;
-                             g_swN[iSw][m][xb]++;  g_swSumAtr[iSw][m][xb]+=sdA; }
-                  if(sb>=0){ g_swN[iSw][m][sb]++;  g_swSumAtr[iSw][m][sb]+=sdA;
-                             g_swN[iSw][m][yb]++;  g_swSumAtr[iSw][m][yb]+=sdA; }
-                  for(int z=0;z<g_nRR;z++)
+                  if(spanB<g_shMin[hs]) continue;
+                  int iwh=WhIdx(iSw,hs);
+                  for(int m=0;m<g_nSw;m++)
                   {
-                     int rr2=swR[m][z];
-                     if(rr2>0)      { g_swW[iSw][m][z][4]++; g_swW[iSw][m][z][hb]++;
-                                      if(vb>=0){ g_swW[iSw][m][z][vb]++; g_swW[iSw][m][z][xb]++; }
-                                      if(sb>=0){ g_swW[iSw][m][z][sb]++; g_swW[iSw][m][z][yb]++; } }
-                     else if(rr2<0) { g_swL[iSw][m][z][4]++; g_swL[iSw][m][z][hb]++;
-                                      if(vb>=0){ g_swL[iSw][m][z][vb]++; g_swL[iSw][m][z][xb]++; }
-                                      if(sb>=0){ g_swL[iSw][m][z][sb]++; g_swL[iSw][m][z][yb]++; } }
-                     else           { g_swF[iSw][m][z][4]++; g_swF[iSw][m][z][hb]++;
-                                      if(vb>=0){ g_swF[iSw][m][z][vb]++; g_swF[iSw][m][z][xb]++; }
-                                      if(sb>=0){ g_swF[iSw][m][z][sb]++; g_swF[iSw][m][z][yb]++; } }
+                     double sdA=(g_swIsPt[m] ? g_swVal[m]/atrPt : stopAtr*g_swVal[m]);
+                     for(int t=0;t<nbb;t++){ g_swN[iwh][m][bb[t]]++; g_swSumAtr[iwh][m][bb[t]]+=sdA; }
+                     for(int z=0;z<g_nRR;z++)
+                     {
+                        // stesso esito, letto a orizzonti diversi: quello che
+                        // si risolve dopo il confine, a quell'orizzonte, e'
+                        // semplicemente ancora aperto
+                        int rr2=((swT[m][z]>=0 && swT[m][z]<=g_shMin[hs]) ? swR[m][z] : 0);
+                        for(int t=0;t<nbb;t++)
+                        {
+                           int b=bb[t];
+                           if(rr2>0)      g_swW[iwh][m][z][b]++;
+                           else if(rr2<0) g_swL[iwh][m][z][b]++;
+                           else           g_swF[iwh][m][z][b]++;
+                        }
+                     }
                   }
                }
             }
 
             if(doMg)
             {
+               // le fotografie non ancora scattate (orizzonte oltre i dati
+               // disponibili, oppure camminata finita prima) prendono lo
+               // stato finale
+               for(int h=0;h<=g_nSh;h++)
+               {
+                  if(mgSnapOk[h]) continue;
+                  for(int k=0;k<MG_MAXR;k++)
+                     for(int z=0;z<g_nRR;z++)
+                     {
+                        mgSnap[h][k][z]=mgR[k][z]
+                           +(mgD[k][z]?0.0:mgSz[k][z]*((mgLast-entry)*dir/MathMax(1e-12,stpD)));
+                        mgSnapD[h][k][z]=mgD[k][z];
+                     }
+                  mgSnapOk[h]=true;
+               }
                // CHIUSURA A MERCATO, E VALE ANCHE PER IL RIFERIMENTO.
                // Senza questa riga la tabella misurava un'altra cosa: le
                // regole CHIUDONO cio' che il riferimento lascia aperto, e
@@ -4353,12 +4503,6 @@ bool ProcessSymbol(string sym)
                // Adesso tutto quello che e' ancora aperto quando scade
                // l'orizzonte viene chiuso all'ultimo prezzo, per ogni regola
                // e per il riferimento allo stesso modo.
-               if(stpD>0.0)
-                  for(int k=0;k<MG_MAXR;k++)
-                     for(int z=0;z<g_nRR;z++)
-                        if(!mgD[k][z])
-                           mgR[k][z]+=mgSz[k][z]*((mgLast-entry)*dir/stpD);
-
                int vbM=SwBin(vpOk ? vpVaAtr[g_vaMain] : 0.0);
                int hbM=(secondHalf ? 6 : 5);
                int sbM=StrBin(g_csOk ? CsAt(r[kb].time)*dir : 0.0, g_csOk);
@@ -4368,15 +4512,20 @@ bool ProcessSymbol(string sym)
                bs[nb++]=4; bs[nb++]=hbM;
                if(vbM>=0){ bs[nb++]=vbM; bs[nb++]=xbM; }
                if(sbM>=0){ bs[nb++]=sbM; bs[nb++]=ybM; }
-               for(int k=0;k<MG_MAXR;k++)
-                  for(int z=0;z<g_nRR;z++)
-                     for(int t=0;t<nb;t++)
-                     {
-                        int b=bs[t];
-                        g_mgSum[iSw][k][z][b]+=mgR[k][z];
-                        g_mgN  [iSw][k][z][b]++;
-                        if(mgD[k][z]) g_mgRes[iSw][k][z][b]++;
-                     }
+               for(int h=0; h<=g_nSh; h++)
+               {
+                  if(spanB<g_shMin[h]) continue;
+                  int iwh=WhIdx(iSw,h);
+                  for(int k=0;k<MG_MAXR;k++)
+                     for(int z=0;z<g_nRR;z++)
+                        for(int t=0;t<nb;t++)
+                        {
+                           int b=bs[t];
+                           g_mgSum[iwh][k][z][b]+=mgSnap[h][k][z];
+                           g_mgN  [iwh][k][z][b]++;
+                           if(mgSnapD[h][k][z]) g_mgRes[iwh][k][z][b]++;
+                        }
+               }
             }
 
             if(doHz)
@@ -8469,7 +8618,8 @@ void BuildOrb(string sym,string dir)
             if(fS2!=INVALID_HANDLE)
             {
                W(fS2,"finestra;scelta;fascia;stop;ancoraggio;stop_medio_atr;rr;n;perc_risolte;"
-                     "win_perc;wlow_perc;breakeven_perc;E_lordo_in_R;costo_in_R;E_netto_in_R\r\n");
+                     "win_perc;wlow_perc;breakeven_perc;E_lordo_in_R;costo_in_R;E_netto_in_R"
+                     +CostHdr()+"\r\n");
                for(int iw=0;iw<g_nSwW;iw++)
                {
                   int wi=-1;
@@ -8495,18 +8645,25 @@ void BuildOrb(string sym,string dir)
                   // all'altro, ed e' esattamente il motivo per cui la colonna
                   // esiste invece di essere ricavata dal moltiplicatore.
                   double meanCost=(wi>=0 && g_orb[wi].nBrk>0 ? g_orb[wi].sCost/g_orb[wi].nBrk : 0.0);
+                  // media di 1/ATR sulle rotture di questa finestra: serve a
+                  // riscalare il costo su qualunque valore in punti senza
+                  // ricamminare le barre. sCost e' la somma di
+                  // InpOrbCostPt/atrPt, quindi dividerlo per il costo
+                  // impostato lascia esattamente quella media.
+                  double invAtr=(InpOrbCostPt>0.0 ? meanCost/InpOrbCostPt : 0.0);
                   string wlab=(wi>=0 ? OrbLab(wi)
                                      : D2(g_swStart[iw]/60)+":"+D2(g_swStart[iw]%60));
                   string sel=((wi>=0 && wi==g_orbSel) ? "SCELTA" : "");
                   for(int b=0;b<SW_NB;b++)
                   for(int m=0;m<g_nSw;m++)
                   {
-                     if(g_swN[iw][m][b]<=0) continue;
-                     double stM=g_swSumAtr[iw][m][b]/g_swN[iw][m][b];
+                     int iw0=WhIdx(iw,0);
+                     if(g_swN[iw0][m][b]<=0) continue;
+                     double stM=g_swSumAtr[iw0][m][b]/g_swN[iw0][m][b];
                      double cR =(stM>0.0 ? meanCost/stM : 0.0);
                      for(int z=0;z<g_nRR;z++)
                      {
-                        int wn=g_swW[iw][m][z][b], ls=g_swL[iw][m][z][b], fl=g_swF[iw][m][z][b];
+                        int wn=g_swW[iw0][m][z][b], ls=g_swL[iw0][m][z][b], fl=g_swF[iw0][m][z][b];
                         int res=wn+ls, tot=res+fl;
                         if(res<50) continue;
                         double eR=(wn*g_rr[z]-ls)/(double)tot;
@@ -8515,11 +8672,61 @@ void BuildOrb(string sym,string dir)
                               F(g_rr[z],2)+";"+IntegerToString(tot)+";"+
                               F(100.0*res/tot,2)+";"+F(100.0*wn/res,2)+";"+
                               F(100.0*WilsonLowInd(wn,res),2)+";"+F(RrNull(g_rr[z])*100.0,2)+";"+
-                              F(eR,4)+";"+F(cR,4)+";"+F(eR-cR,4)+"\r\n");
+                              F(eR,4)+";"+F(cR,4)+";"+F(eR-cR,4)+
+                              CostCells(eR,invAtr,stM)+"\r\n");
                      }
                   }
                }
                FileClose(fS2);
+            }
+         }
+
+         //--- stop INCROCIATO con l'orizzonte, sulla sola finestra scelta.
+         // Su tutte e dodici sarebbero oltre un milione di righe: la replica
+         // fra finestre vive nella tabella sopra, all'orizzonte base, mentre
+         // l'incrocio serve ad approfondire quella che ha vinto.
+         if(g_nSw>0 && g_nSh>0 && g_orbSel>=0)
+         {
+            int iwS=SwWinIdxRaw(g_orb[g_orbSel].startMin,g_orb[g_orbSel].durMin);
+            if(iwS>=0)
+            {
+               int fSH=FileOpen(dir+fn+"_orb_stop_orizzonte.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+               if(fSH!=INVALID_HANDLE)
+               {
+                  W(fSH,"finestra;fascia;stop;ancoraggio;stop_medio_atr;orizzonte;minuti;rr;n;"
+                        "perc_risolte;win_perc;wlow_perc;breakeven_perc;E_lordo_in_R;costo_in_R;"
+                        "E_netto_in_R"+CostHdr()+"\r\n");
+                  double mcS=(g_orb[g_orbSel].nBrk>0 ? g_orb[g_orbSel].sCost/g_orb[g_orbSel].nBrk : 0.0);
+                  double ivS=(InpOrbCostPt>0.0 ? mcS/InpOrbCostPt : 0.0);
+                  string wlS=OrbLab(g_orbSel);
+                  for(int hs=0; hs<=g_nSh; hs++)
+                  {
+                     int iwh=WhIdx(iwS,hs);
+                     for(int b=0;b<SW_NB;b++)
+                     for(int m=0;m<g_nSw;m++)
+                     {
+                        if(g_swN[iwh][m][b]<=0) continue;
+                        double stM=g_swSumAtr[iwh][m][b]/g_swN[iwh][m][b];
+                        double cR =(stM>0.0 ? mcS/stM : 0.0);
+                        for(int z=0;z<g_nRR;z++)
+                        {
+                           int wn=g_swW[iwh][m][z][b], ls=g_swL[iwh][m][z][b], fl=g_swF[iwh][m][z][b];
+                           int res=wn+ls, tot=res+fl;
+                           if(res<50) continue;
+                           double eR=(wn*g_rr[z]-ls)/(double)tot;
+                           W(fSH,wlS+";"+SwBinLab(b)+";"+SwStopLab(m)+";"+
+                                 (g_swIsPt[m]?"punti":"ATR")+";"+F(stM,4)+";"+
+                                 ShLab(hs)+";"+IntegerToString(g_shMin[hs])+";1:"+
+                                 F(g_rr[z],2)+";"+IntegerToString(tot)+";"+
+                                 F(100.0*res/tot,2)+";"+F(100.0*wn/res,2)+";"+
+                                 F(100.0*WilsonLowInd(wn,res),2)+";"+F(RrNull(g_rr[z])*100.0,2)+";"+
+                                 F(eR,4)+";"+F(cR,4)+";"+F(eR-cR,4)+
+                                 CostCells(eR,ivS,stM)+"\r\n");
+                        }
+                     }
+                  }
+                  FileClose(fSH);
+               }
             }
          }
 
@@ -8529,9 +8736,9 @@ void BuildOrb(string sym,string dir)
             int fG=FileOpen(dir+fn+"_orb_gestione.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
             if(fG!=INVALID_HANDLE)
             {
-               W(fG,"finestra;scelta;fascia;gestione;rr;n;perc_risolte;"
+               W(fG,"finestra;scelta;fascia;gestione;orizzonte;minuti;rr;n;perc_risolte;"
                     "perc_chiuse_a_mercato;E_lordo_in_R;costo_in_R;E_netto_in_R;"
-                    "delta_su_nessuna_gestione\r\n");
+                    "delta_su_nessuna_gestione"+CostHdr()+"\r\n");
                for(int iw=0;iw<g_nSwW;iw++)
                {
                   int wg=-1;
@@ -8544,25 +8751,35 @@ void BuildOrb(string sym,string dir)
                   // paga sulla dimensione, e mezza posizione chiusa due volte
                   // costa quanto una intera chiusa una volta.
                   double cRg=(bs>0.0 ? mc/bs : 0.0);
+                  double invA=(InpOrbCostPt>0.0 ? mc/InpOrbCostPt : 0.0);
                   string wl=OrbLab(wg);
                   string sg=((wg==g_orbSel) ? "SCELTA" : "");
-                  for(int b=0;b<SW_NB;b++)
-                  for(int z=0;z<g_nRR;z++)
+                  // tutte le finestre all'orizzonte base; la sola finestra
+                  // scelta anche a tutti gli altri, per non moltiplicare per
+                  // sei un file che serve gia' cosi'
+                  for(int h=0; h<=g_nSh; h++)
                   {
-                     int n0=g_mgN[iw][0][z][b];
-                     if(n0<100) continue;
-                     double e0=g_mgSum[iw][0][z][b]/n0-cRg;
-                     for(int k=0;k<MG_MAXR;k++)
+                     if(h>0 && wg!=g_orbSel) continue;
+                     int iwh=WhIdx(iw,h);
+                     for(int b=0;b<SW_NB;b++)
+                     for(int z=0;z<g_nRR;z++)
                      {
-                        int nk=g_mgN[iw][k][z][b];
-                        if(nk<100) continue;
-                        double eK=g_mgSum[iw][k][z][b]/nk;
-                        W(fG,wl+";"+sg+";"+SwBinLab(b)+";"+MgLab(k)+";1:"+F(g_rr[z],2)+";"+
-                             IntegerToString(nk)+";"+
-                             F(100.0*g_mgRes[iw][k][z][b]/nk,2)+";"+
-                             F(100.0-100.0*g_mgRes[iw][k][z][b]/nk,2)+";"+
-                             F(eK,4)+";"+F(cRg,4)+";"+F(eK-cRg,4)+";"+
-                             F(eK-cRg-e0,4)+"\r\n");
+                        int n0=g_mgN[iwh][0][z][b];
+                        if(n0<100) continue;
+                        double e0=g_mgSum[iwh][0][z][b]/n0-cRg;
+                        for(int k=0;k<MG_MAXR;k++)
+                        {
+                           int nk=g_mgN[iwh][k][z][b];
+                           if(nk<100) continue;
+                           double eK=g_mgSum[iwh][k][z][b]/nk;
+                           W(fG,wl+";"+sg+";"+SwBinLab(b)+";"+MgLab(k)+";"+
+                                ShLab(h)+";"+IntegerToString(g_shMin[h])+";1:"+F(g_rr[z],2)+";"+
+                                IntegerToString(nk)+";"+
+                                F(100.0*g_mgRes[iwh][k][z][b]/nk,2)+";"+
+                                F(100.0-100.0*g_mgRes[iwh][k][z][b]/nk,2)+";"+
+                                F(eK,4)+";"+F(cRg,4)+";"+F(eK-cRg,4)+";"+
+                                F(eK-cRg-e0,4)+CostCells(eK,invA,bs)+"\r\n");
+                        }
                      }
                   }
                }
@@ -8577,7 +8794,7 @@ void BuildOrb(string sym,string dir)
             if(fH2!=INVALID_HANDLE)
             {
                W(fH2,"finestra;scelta;fascia;orizzonte;minuti;rr;n;perc_risolte;win_perc;wlow_perc;"
-                     "breakeven_perc;E_lordo_in_R;costo_in_R;E_netto_in_R\r\n");
+                     "breakeven_perc;E_lordo_in_R;costo_in_R;E_netto_in_R"+CostHdr()+"\r\n");
                for(int iw=0;iw<g_nSwW;iw++)
                {
                   int wj=-1;
@@ -8586,6 +8803,7 @@ void BuildOrb(string sym,string dir)
                   double meanCost2=(wj>=0 && g_orb[wj].nBrk>0 ? g_orb[wj].sCost/g_orb[wj].nBrk : 0.0);
                   double baseStop2=(wj>=0 && g_rr[g_rrMain]>0 ? OrbTgt(wj)/g_rr[g_rrMain] : 0.0);
                   double cR2=(baseStop2>0.0 ? meanCost2/baseStop2 : 0.0);
+                  double invA2=(InpOrbCostPt>0.0 ? meanCost2/InpOrbCostPt : 0.0);
                   string wl2=(wj>=0 ? OrbLab(wj)
                                     : D2(g_swStart[iw]/60)+":"+D2(g_swStart[iw]%60));
                   string sel2=((wj>=0 && wj==g_orbSel) ? "SCELTA" : "");
@@ -8604,7 +8822,7 @@ void BuildOrb(string sym,string dir)
                               IntegerToString(tot)+";"+F(100.0*res2/tot,2)+";"+
                               F(100.0*wn/res2,2)+";"+F(100.0*WilsonLowInd(wn,res2),2)+";"+
                               F(RrNull(g_rr[z])*100.0,2)+";"+F(eR,4)+";"+F(cR2,4)+";"+
-                              F(eR-cR2,4)+"\r\n");
+                              F(eR-cR2,4)+CostCells(eR,invA2,baseStop2)+"\r\n");
                      }
                   }
                }
