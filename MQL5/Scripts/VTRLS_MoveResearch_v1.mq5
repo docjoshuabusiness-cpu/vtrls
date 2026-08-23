@@ -146,7 +146,7 @@ input double          InpOrbRsiConf     = 50.0;            // RSI: soglia di con
 input double          InpOrbZsConf      = 0.0;             // Z-Score: soglia di conferma nel verso della rottura
 input double          InpOrbCciConf     = 40.0;            // CCI: soglia di conferma nel verso della rottura
 input double          InpOrbCostPt      = 7.0;             // Costo andata+ritorno in PUNTI (spread+commissioni). A zero la colonna netta e' una copia della lorda
-input string          InpCostPtList     = "0,7,15,25,40";   // Costi ALTERNATIVI in punti: una colonna netta per ognuno, nella stessa passata (vuoto = solo quello sopra)
+input string          InpCostPtList     = "0,5,7,10,15,20,25,30,40,55";  // Costi ALTERNATIVI in punti: una colonna netta per ognuno, nella stessa passata (vuoto = solo quello sopra)
 input double          InpOrbBufferAtr   = 0.03;            // Margine oltre il livello perche' la rottura conti
 input double          InpOrbMinResolved = 60.0;            // % minima di rotture risolte perche' la finestra entri in classifica
 input double          InpOrbMinTradePct = 80.0;            // % minima di giornate realmente operabili (stop sopra il minimo)
@@ -179,6 +179,7 @@ input double          InpPrevStopAtr    = 0.25;            // Stop in ATR(D-1): 
 
 input int             InpOrbExtBars     = 10;              // Barre indicatore in cui cercare un estremo RSI/Z PRIMA della rottura
 
+input bool            InpBrkAllWindows  = true;            // _orb_breakout.csv contiene TUTTE le finestre calibrate, non solo quella scelta (file ~5 volte piu' grande)
 input bool            InpDoManage       = true;            // Testa breakeven, trailing e uscita parziale contro il "non toccare niente"
 input bool            InpDoStopSweep    = true;            // Calibra lo stop sulla finestra dichiarata sotto
 input string          InpSweepWindows   = "00:00-60,02:00-120,04:00-120,06:00-120,07:00-60,08:00-60,09:00-60,09:00-120,10:00-30,10:00-60,13:30-60,14:30-60";  // Finestre calibrate INSIEME, formato HH:MM-durata (vuoto = usa le due caselle sotto)
@@ -188,7 +189,7 @@ input string          InpStopSweep      = "0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.2
 input string          InpStopSweepPt    = "30,40,50,60,70,80,90,100,115,130,145,160,180,200,225,250,280,320,360,400";   // Stop in PUNTI fissi (vuoto = non testarli)
 input double          InpSweepStrTh     = 25.0;            // Soglia di forza relativa per le fasce concorde/contraria della calibrazione (0 = niente fasce)
 input string          InpOrbHorizons    = "30,60,120,240,480,960,1440,2880,4320,7200";  // Orizzonti in MINUTI di calendario da testare insieme (vuoto = non testarli)
-input string          InpSweepHorizons  = "60,120,240,480,1440";  // Orizzonti incrociati CON la spazzata degli stop e con la gestione (vuoto = solo quello base)
+input string          InpSweepHorizons  = "1,5,10,15,30,60,120,240,480,1440";  // Orizzonti incrociati CON la spazzata degli stop e con la gestione (vuoto = solo quello base)
 input string          InpExtraTfList    = "M10,M30,H1,H2,H4,H8,D1";  // Scale AGGIUNTIVE: RSI/CCI/Z al momento della rottura, solo come colonne per il cercatore
 
 input bool            InpDoStrength     = true;            // Forza relativa cross-sectional delle valute
@@ -2140,7 +2141,7 @@ int g_swStart[SW_MAXW], g_swDur[SW_MAXW]; int g_nSwW=0;
 // veniva contato zero. La curva dello stop e quella dell'orizzonte, misurate
 // separatamente, non possono rispondere a "stop largo CON tempo".
 // La cella 0 e' sempre l'orizzonte base; le altre vengono dalla lista.
-#define SH_MAXH  8
+#define SH_MAXH  12
 #define SH_SLOTS (SH_MAXH+1)
 #define SW_WH    (SW_MAXW*SH_SLOTS)
 int g_shMin[SH_SLOTS]; int g_nSh=0;      // g_shMin[0] riempito a runtime
@@ -2157,6 +2158,13 @@ void ShInit()
          if(g_shMin[j]>g_shMin[j+1]){ int t=g_shMin[j]; g_shMin[j]=g_shMin[j+1]; g_shMin[j+1]=t; }
 }
 int ShMax(){ int m=0; for(int i=1;i<=g_nSh;i++) if(g_shMin[i]>m) m=g_shMin[i]; return m; }
+// A un minuto o cinque non si sta misurando un'operazione, si sta misurando
+// la DERIVA IMMEDIATA dopo la rottura: quasi niente si risolve, e il valore
+// della riga e' quasi tutto prezzo di mercato al confine. E' esattamente
+// l'informazione che serve per decidere se l'ingresso va messo sul livello
+// con un ordine stop o piu' indietro con un limite - ma va letta come deriva,
+// non come aspettativa di una strategia. La colonna perc_risolte lo dice.
+
 string ShLab(int h)
 {
    int m=g_shMin[h];
@@ -2174,7 +2182,7 @@ int WhIdx(int iw,int hs){ return iw*SH_SLOTS+hs; }
 // farlo: l'impostazione e' rimasta a 7 punti per quattro lanci di fila
 // mentre il costo vero su EURJPY e' 25, e ogni colonna netta usciva
 // ottimista di tre volte e mezzo.
-#define COST_MAXN 6
+#define COST_MAXN 12
 double g_costPt[COST_MAXN]; int g_nCost=0;
 
 void CostInit()
@@ -7431,9 +7439,29 @@ void BuildOrb(string sym,string dir)
       {
          int rN[4], rW[4], rL[4];
          ArrayInitialize(rN,0); ArrayInitialize(rW,0); ArrayInitialize(rL,0);
-         for(int q=0;q<nSel;q++)
+         // Il cercatore walk-forward gira su QUESTO file. Finche' conteneva
+         // solo la finestra eletta, ogni analisi per anno o per regime su
+         // un'altra finestra andava fatta a mano su numeri aggregati, e la
+         // replica fra finestre restava confinata alle medie. I record ci
+         // sono gia' tutti in memoria: cambia solo quali si scrivono.
+         int selC[]; int nSelC=0; ArrayResize(selC,0);
+         if(InpBrkAllWindows)
          {
-            int b=sel[q];
+            for(int i=0;i<g_nBk;i++)
+               if(SwWinIdxRaw(g_orb[(int)g_bk[i].w].startMin,g_orb[(int)g_bk[i].w].durMin)>=0)
+               { ArrayResize(selC,nSelC+1,8192); selC[nSelC]=i; nSelC++; }
+         }
+         else
+         {
+            ArrayResize(selC,nSel);
+            for(int i=0;i<nSel;i++) selC[i]=sel[i];
+            nSelC=nSel;
+         }
+         PrintFormat("[%s] _orb_breakout.csv: %d rotture su %d finestre",
+                     sym, nSelC, (InpBrkAllWindows?g_nSwW:1));
+         for(int q=0;q<nSelC;q++)
+         {
+            int b=selC[q];
             int k=OrbConfirmRev((int)g_bk[b].dir,g_bk[b].cci,g_bk[b].rsi,g_bk[b].zs);
             rN[k]++;
             if(g_bk[b].res>0) rW[k]++; else if(g_bk[b].res<0) rL[k]++;
@@ -8838,7 +8866,7 @@ void BuildOrb(string sym,string dir)
       int fF=FileOpen(dir+fn+"_orb_breakout.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
       if(fF!=INVALID_HANDLE)
       {
-         W(fF,"finestra;giorno;ora;direzione;esito;anno;clv;espansione_tr;ombra;volume_rel;estremo_recente;entropia;forza_relativa;range_atr;compressione;target_atr;intensita_atr;"
+         W(fF,"finestra;scelta;giorno;ora;direzione;esito;anno;clv;espansione_tr;ombra;volume_rel;estremo_recente;entropia;forza_relativa;range_atr;compressione;target_atr;intensita_atr;"
               "volatilita_atr;cci;rsi;zscore;mfe_atr;mae_atr;min_alla_rottura;"
               "vp_stato;vp_dist_poc_atr;vp_larghezza_va_atr;vp_pos_volume");
          for(int z=0;z<g_nVa;z++) W(fF,";vp_stato_"+F(g_vaPct[z],0));
@@ -8855,7 +8883,9 @@ void BuildOrb(string sym,string dir)
          for(int q=0;q<nSel;q++)
          {
             int b=sel[q];
-            W(fF,OrbLab(g_orbSel)+";"+DowIT((int)g_bk[b].dow)+";"+D2((int)g_bk[b].hour)+":00;"+
+            W(fF,OrbLab((int)g_bk[b].w)+";"+
+                 ((int)g_bk[b].w==g_orbSel?"SCELTA":"")+";"+
+                 DowIT((int)g_bk[b].dow)+";"+D2((int)g_bk[b].hour)+":00;"+
                  (g_bk[b].dir>0?"UP":"DOWN")+";"+
                  (g_bk[b].res>0?"TARGET":(g_bk[b].res<0?"STOP":"IRRISOLTO"))+";"+
                  IntegerToString(g_bk[b].year)+";"+F(g_bk[b].clv,4)+";"+F(g_bk[b].expTr,4)+";"+F(g_bk[b].wick,4)+";"+

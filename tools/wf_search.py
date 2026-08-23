@@ -56,6 +56,20 @@ def carica(path, cost):
         righe = [r for r in rd
                  if r and r[0] != "finestra" and len(r) >= len(hdr)]
 
+        # Il file puo' contenere piu' finestre. Mischiarle sarebbe un errore
+        # silenzioso: le rotture di finestre diverse cadono in giornate
+        # sovrapposte e il percentile causale scorrerebbe avanti e indietro
+        # nel tempo. Si tiene una finestra sola - quella eletta se c'e'.
+        if "scelta" in ix:
+            sc = [r for r in righe if r[ix["scelta"]].strip()]
+            if sc:
+                righe = sc
+        fin = {r[0] for r in righe}
+        if len(fin) > 1:
+            w = sorted(fin)[0]
+            print(f"  {path}: {len(fin)} finestre, tengo {w}")
+            righe = [r for r in righe if r[0] == w]
+
         # Le feature si deducono dall'intestazione - cosi' le colonne nuove
         # entrano nella ricerca senza toccare questo file - ma NON dalla prima
         # riga sola. Le scale fini della forza partono da meta' campione e

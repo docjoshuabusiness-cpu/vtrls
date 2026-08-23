@@ -962,3 +962,32 @@ l'incrocio serve ad approfondire la finestra che ha vinto.
 orizzonti incrociati invece che a quello base. Con la lista di default si
 arriva a 1440 minuti: da un run di circa un minuto si passa a **cinque o sei**.
 Per accorciarlo, taglia `InpSweepHorizons`, non le finestre.
+
+## Liste allargate, e il file dei breakout che copre tutte le finestre
+
+`InpSweepHorizons = "1,5,10,15,30,60,120,240,480,1440"` — dieci orizzonti,
+dal minuto alla giornata. `InpCostPtList = "0,5,7,10,15,20,25,30,40,55"` —
+dieci colonne nette per tabella.
+
+**A un minuto o cinque non si misura un'operazione, si misura la deriva
+immediata dopo la rottura.** Quasi niente si risolve e il valore della riga e'
+quasi tutto prezzo di mercato al confine. E' proprio l'informazione che serve
+per decidere se l'ingresso va messo sul livello con un ordine stop o piu'
+indietro con un limite - ma va letta come deriva, non come aspettativa. La
+colonna `perc_risolte` lo dice a colpo d'occhio; in `_orb_stop_orizzonte.csv`
+gli orizzonti brevissimi spariranno quasi del tutto per il filtro dei 50
+esiti risolti, mentre in `_orb_gestione.csv` ci sono tutti.
+
+### `InpBrkAllWindows`
+
+`_orb_breakout.csv` conteneva solo la finestra eletta. Il cercatore
+walk-forward gira su quel file, quindi ogni analisi per anno, per regime o
+per direzione su un'altra finestra andava fatta a mano su numeri aggregati.
+I record erano gia' tutti in memoria: ora il file copre **tutte le finestre
+calibrate**, con una colonna `scelta` che marca quella eletta. Circa cinque
+volte piu' righe.
+
+`wf_search.py` tiene una finestra sola - quella marcata `SCELTA` se c'e' -
+perche' mischiarle sarebbe un errore silenzioso: rotture di finestre diverse
+cadono in giornate sovrapposte e il percentile causale scorrerebbe avanti e
+indietro nel tempo.
