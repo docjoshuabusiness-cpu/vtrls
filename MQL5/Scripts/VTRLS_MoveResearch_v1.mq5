@@ -146,6 +146,7 @@ input double          InpOrbRsiConf     = 50.0;            // RSI: soglia di con
 input double          InpOrbZsConf      = 0.0;             // Z-Score: soglia di conferma nel verso della rottura
 input double          InpOrbCciConf     = 40.0;            // CCI: soglia di conferma nel verso della rottura
 input double          InpOrbCostPt      = 7.0;             // Costo andata+ritorno in PUNTI (spread+commissioni). A zero la colonna netta e' una copia della lorda
+input double          InpSwapPtDay      = 0.0;             // Finanziamento in PUNTI al giorno (negativo = lo paghi): entra nelle colonne nette moltiplicato per i giorni di durata
 input string          InpCostPtList     = "0,5,7,10,15,20,25,30,40,55";  // Costi ALTERNATIVI in punti: una colonna netta per ognuno, nella stessa passata (vuoto = solo quello sopra)
 input double          InpOrbBufferAtr   = 0.03;            // Margine oltre il livello perche' la rottura conti
 input double          InpOrbMinResolved = 60.0;            // % minima di rotture risolte perche' la finestra entri in classifica
@@ -2210,12 +2211,21 @@ string CostHdr()
 }
 // eR = lordo in R; invAtr = media di 1/ATR_in_punti sulle rotture della
 // finestra; stopAtr = stop realmente applicato, in ATR
-string CostCells(double eR, double invAtr, double stopAtr)
+// IL COSTO DI UN'OPERAZIONE DI CINQUE GIORNI NON E' LO SPREAD.
+// Lo spread si paga una volta; il finanziamento si paga ogni notte, e su un
+// cross con differenziale di tassi e' asimmetrico fra long e short. Finche'
+// gli orizzonti erano di ore non cambiava niente. Con gli orizzonti a uno e
+// cinque giorni cambia tutto: su EURJPY uno swap di 10 punti al giorno per
+// cinque giorni vale 50 punti, cioe' piu' di dieci volte l'unica aspettativa
+// positiva che questa ricerca abbia prodotto nella meta' recente.
+// minuti = durata dell'orizzonte della riga; a zero la colonna resta com'era.
+string CostCells(double eR, double invAtr, double stopAtr, int minuti=0)
 {
    string o="";
+   double sw=(minuti>0 ? InpSwapPtDay*((double)minuti/1440.0) : 0.0);
    for(int i=0;i<g_nCost;i++)
    {
-      double c=(stopAtr>0.0 ? g_costPt[i]*invAtr/stopAtr : 0.0);
+      double c=(stopAtr>0.0 ? (g_costPt[i]-sw)*invAtr/stopAtr : 0.0);
       o+=";"+F(eR-c,4);
    }
    return o;
@@ -8701,7 +8711,7 @@ void BuildOrb(string sym,string dir)
                               F(100.0*res/tot,2)+";"+F(100.0*wn/res,2)+";"+
                               F(100.0*WilsonLowInd(wn,res),2)+";"+F(RrNull(g_rr[z])*100.0,2)+";"+
                               F(eR,4)+";"+F(cR,4)+";"+F(eR-cR,4)+
-                              CostCells(eR,invAtr,stM)+"\r\n");
+                              CostCells(eR,invAtr,stM,OrbHorizon())+"\r\n");
                      }
                   }
                }
@@ -8749,7 +8759,7 @@ void BuildOrb(string sym,string dir)
                                  F(100.0*res/tot,2)+";"+F(100.0*wn/res,2)+";"+
                                  F(100.0*WilsonLowInd(wn,res),2)+";"+F(RrNull(g_rr[z])*100.0,2)+";"+
                                  F(eR,4)+";"+F(cR,4)+";"+F(eR-cR,4)+
-                                 CostCells(eR,ivS,stM)+"\r\n");
+                                 CostCells(eR,ivS,stM,g_shMin[hs])+"\r\n");
                         }
                      }
                   }
@@ -8806,7 +8816,7 @@ void BuildOrb(string sym,string dir)
                                 F(100.0*g_mgRes[iwh][k][z][b]/nk,2)+";"+
                                 F(100.0-100.0*g_mgRes[iwh][k][z][b]/nk,2)+";"+
                                 F(eK,4)+";"+F(cRg,4)+";"+F(eK-cRg,4)+";"+
-                                F(eK-cRg-e0,4)+CostCells(eK,invA,bs)+"\r\n");
+                                F(eK-cRg-e0,4)+CostCells(eK,invA,bs,g_shMin[h])+"\r\n");
                         }
                      }
                   }
@@ -8850,7 +8860,7 @@ void BuildOrb(string sym,string dir)
                               IntegerToString(tot)+";"+F(100.0*res2/tot,2)+";"+
                               F(100.0*wn/res2,2)+";"+F(100.0*WilsonLowInd(wn,res2),2)+";"+
                               F(RrNull(g_rr[z])*100.0,2)+";"+F(eR,4)+";"+F(cR2,4)+";"+
-                              F(eR-cR2,4)+CostCells(eR,invA2,baseStop2)+"\r\n");
+                              F(eR-cR2,4)+CostCells(eR,invA2,baseStop2,g_hzMin[h])+"\r\n");
                      }
                   }
                }

@@ -991,3 +991,24 @@ volte piu' righe.
 perche' mischiarle sarebbe un errore silenzioso: rotture di finestre diverse
 cadono in giornate sovrapposte e il percentile causale scorrerebbe avanti e
 indietro nel tempo.
+
+## `InpSwapPtDay` — il costo che compare solo agli orizzonti lunghi
+
+Lo spread si paga una volta. Il **finanziamento** si paga ogni notte, ed e'
+asimmetrico fra long e short su qualunque coppia con differenziale di tassi.
+
+Finche' gli orizzonti erano di ore non cambiava niente e la colonna non
+serviva. Con orizzonti a uno e cinque giorni cambia il verdetto: su EURJPY
+uno swap di 10 punti al giorno per cinque giorni vale 50 punti, cioe' **piu'
+di dieci volte** l'unica aspettativa positiva che questa ricerca abbia
+prodotto nella meta' recente del campione.
+
+`InpSwapPtDay` in punti al giorno (negativo = lo paghi) entra in tutte le
+colonne `E_netto_Npt` moltiplicato per la durata dell'orizzonte di quella
+riga. A zero le colonne restano quelle di prima.
+
+Il valore va letto dalla specifica del broker, non stimato: su FP Markets sta
+in Vista -> Simboli -> EURJPY, campi Swap Long e Swap Short. Se i due segni
+sono opposti, va misurato separatamente per direzione - questa colonna ne
+applica uno solo, ed e' la lettura pessimistica se ci si mette il lato che
+paga.
