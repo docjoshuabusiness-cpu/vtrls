@@ -1012,3 +1012,71 @@ in Vista -> Simboli -> EURJPY, campi Swap Long e Swap Short. Se i due segni
 sono opposti, va misurato separatamente per direzione - questa colonna ne
 applica uno solo, ed e' la lettura pessimistica se ci si mette il lato che
 paga.
+
+# Il modulo SWING sul paniere
+
+## Perche' esiste
+
+La forza relativa e' l'unica cosa sopravvissuta a ogni controllo di questo
+progetto: replica su dieci finestre orarie indipendenti, su tre simboli, su
+quattro blocchi di quattro anni, in entrambe le direzioni, e assorbe ogni
+indicatore a strumento singolo. Vale fra sei e dieci punti di win rate,
+stabilmente, dal 2014 a oggi.
+
+E non paga, perche' il contenitore e' sbagliato:
+
+| | ORB intraday | swing |
+|---|---|---|
+| stop | 26 pip | 110 pip (1 ATR D1) |
+| spread + commissioni | **0.19 R** | 0.023 R |
+| finanziamento (3 giorni) | — | 0.027 R |
+| costo totale | **0.19 R** | **0.05 R** |
+| +6 punti di win rate a 1:2 | +0.18 R lordi | +0.18 R lordi |
+| netto | **-0.01** | **+0.13** |
+
+L'incrocio stop x orizzonte lo aveva gia' detto da solo: l'aspettativa
+cresce in modo monotono fino a un giorno e oltre, e la cresta sta a
+2.0-2.5 volte lo stop base con ventiquattro ore di tempo. Il segnale e'
+multi-giorno e lo stavamo misurando con un cronometro da quattro ore.
+
+E c'e' un secondo motivo, piu' banale e altrettanto decisivo: quarantacinque
+operazioni l'anno su un simbolo non decidono niente. **Ventotto coppie si.**
+
+## Cosa produce
+
+| file | contenuto |
+|---|---|
+| `SWING_paniere.csv` | 11 fasce x stop x rapporti x orizzonti, con `delta_su_opposta` e una colonna netta per ogni costo |
+| `SWING_simboli.csv` | la stessa misura coppia per coppia: serve a vedere se l'effetto e' del paniere o di due coppie fortunate |
+| `SWING_trade.csv` | una riga per operazione, per l'analisi fuori da MQL5 |
+
+Le fasce: tutte, prima/seconda meta', quattro bande di `|forza|`, **direzione
+OPPOSTA** (stesso giorno, stesso stop, stesso target, solo il segno cambia),
+opposta x meta', e **placebo** a direzione casuale deterministica.
+
+`delta_su_opposta` e' la colonna che conta. Se e' zero, il segnale non porta
+direzione: porta solo esposizione, e l'esposizione la si compra gratis.
+
+## Le difese, che sono le stesse di sempre
+
+* **ingresso all'apertura del giorno DOPO il segnale**, mai sulla barra che lo
+  genera;
+* **leave-one-out esatto** sulla coppia operata, fatto sui rendimenti grezzi
+  *prima* del TSI - toglierlo dopo sarebbe impossibile, il filtro e'
+  ricorsivo;
+* controllo a **direzione opposta** sullo stesso istante e **placebo** a
+  direzione casuale;
+* spaccatura del periodo a meta';
+* costo e finanziamento in lista, con il finanziamento moltiplicato per i
+  giorni realmente tenuti.
+
+## Cosa e' piu' grossolano, e va detto
+
+La camminata e' su **barre giornaliere**. Dentro una giornata l'ordine dei
+prezzi non si conosce, quindi quando stop e target cadono nello stesso giorno
+vince lo stop. E' la stessa convenzione del resto dello script, ma qui morde
+di piu' perche' le barre sono grandi: **il numero che ne esce e' un limite
+inferiore, non una stima centrale.**
+
+Le operazioni ancora aperte a scadenza si chiudono all'ultimo prezzo, non a
+zero - la stessa correzione imparata sulla tabella della gestione.

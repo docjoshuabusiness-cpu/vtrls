@@ -190,6 +190,19 @@ input string          InpStopSweep      = "0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.2
 input string          InpStopSweepPt    = "30,40,50,60,70,80,90,100,115,130,145,160,180,200,225,250,280,320,360,400";   // Stop in PUNTI fissi (vuoto = non testarli)
 input double          InpSweepStrTh     = 25.0;            // Soglia di forza relativa per le fasce concorde/contraria della calibrazione (0 = niente fasce)
 input string          InpOrbHorizons    = "30,60,120,240,480,960,1440,2880,4320,7200";  // Orizzonti in MINUTI di calendario da testare insieme (vuoto = non testarli)
+input string          sSwg              = "=== SWING SUL PANIERE (forza relativa su D1) ===";
+input bool            InpDoSwing        = true;            // Testa la forza relativa come segnale MULTI-GIORNO su tutte le 28 coppie
+input string          InpSwgStopAtr     = "0.5,0.75,1.0,1.25,1.5,2.0";  // Stop in ATR(D-1)
+input string          InpSwgRR          = "1,1.5,2,3,4";   // Rapporti rendimento/rischio
+input string          InpSwgDays        = "2,3,5,8,13,21"; // Orizzonti in GIORNI di calendario
+input double          InpSwgTh          = 25.0;            // Soglia |forza| perche' il segnale sia valido
+input int             InpSwgAtrPer      = 14;              // Periodo ATR giornaliero
+input int             InpSwgWarm        = 60;              // Giorni iniziali riservati al warm-up del TSI
+input int             InpSwgStMain      = 3;               // Quale stop alimenta la tabella per simbolo (1 = il primo)
+input int             InpSwgRrMain      = 3;               // Quale rapporto
+input int             InpSwgHzMain      = 4;               // Quale orizzonte
+input bool            InpSwgTrades      = true;            // Scrive anche SWING_trade.csv, una riga per operazione
+
 input string          InpSweepHorizons  = "1,5,10,15,30,60,120,240,480,1440";  // Orizzonti incrociati CON la spazzata degli stop e con la gestione (vuoto = solo quello base)
 input string          InpExtraTfList    = "M10,M30,H1,H2,H4,H8,D1";  // Scale AGGIUNTIVE: RSI/CCI/Z al momento della rottura, solo come colonne per il cercatore
 
@@ -2496,6 +2509,41 @@ double CsTfAt(datetime t,int k,bool &ok)
    return (double)g_sDiff[best];
 }
 
+// La risoluzione del suffisso vive qui perche' la usano in due: il modulo
+// della forza sul simbolo operato e quello swing sull'intero paniere. Averla
+// in due copie significava correggerla una volta su due.
+string CsSuffix(string sym, int &bestHit)
+{
+   string cand[8]; int nCand=0;
+   if(InpStrSuffix!="AUTO"){ cand[0]=InpStrSuffix; nCand=1; }
+   else
+   {
+      string t=StringSubstr(sym,6);
+      cand[nCand++]=t;
+      while(nCand<7)
+      {
+         int cut=-1;
+         for(int q=StringLen(t)-1;q>=0;q--) if(StringSubstr(t,q,1)=="_"){ cut=q; break; }
+         if(cut<0) break;
+         t=StringSubstr(t,0,cut);
+         cand[nCand++]=t;
+      }
+      cand[nCand++]="";
+   }
+   string suf=cand[0]; bestHit=-1;
+   for(int k=0;k<nCand;k++)
+   {
+      int hit=0;
+      for(int p=0;p<CS_NP;p++)
+         if(SymbolSelect(g_csPair[p]+cand[k],true)) hit++;
+      if(hit>bestHit){ bestHit=hit; suf=cand[k]; }
+      if(hit>=20) break;                       // complesso completo, inutile cercare oltre
+   }
+   PrintFormat("[%s] suffisso del paniere: '%s' (%d coppie su %d selezionabili)",
+               sym, suf, bestHit, CS_NP);
+   return suf;
+}
+
 // L'ASSE E LE DUE GAMBE, per un timeframe qualunque.
 // Era il corpo di CsBuild; ora e' una funzione perche' la forza non si
 // misura piu' su una scala sola. Un solo posto in cui vive il leave-one-out:
@@ -2642,34 +2690,8 @@ bool CsBuild(string sym,datetime from,datetime to)
    // su un set sintetico tipo "EURUSD.r_QDM" le maggiori restano "EURUSD.r".
    // Si prova il suffisso pieno, poi lo si accorcia a ogni "_", poi vuoto, e
    // si tiene quello con piu' simboli realmente selezionabili.
-   string cand[8]; int nCand=0;
-   if(InpStrSuffix!="AUTO"){ cand[0]=InpStrSuffix; nCand=1; }
-   else
-   {
-      string t=StringSubstr(sym,6);
-      cand[nCand++]=t;
-      while(nCand<7)
-      {
-         int cut=-1;
-         for(int q=StringLen(t)-1;q>=0;q--) if(StringSubstr(t,q,1)=="_"){ cut=q; break; }
-         if(cut<0) break;
-         t=StringSubstr(t,0,cut);
-         cand[nCand++]=t;
-      }
-      cand[nCand++]="";
-   }
-
-   string suf=cand[0]; int bestHit=-1;
-   for(int k=0;k<nCand;k++)
-   {
-      int hit=0;
-      for(int p=0;p<CS_NP;p++)
-         if(SymbolSelect(g_csPair[p]+cand[k],true)) hit++;
-      if(hit>bestHit){ bestHit=hit; suf=cand[k]; }
-      if(hit>=20) break;                       // complesso completo, inutile cercare oltre
-   }
-   PrintFormat("[%s] forza relativa: suffisso scelto '%s' (%d coppie su %d selezionabili)",
-               sym, suf, bestHit, CS_NP);
+   int bestHit=0;
+   string suf=CsSuffix(sym,bestHit);
    bool metal=(c1=="XAU" || c1=="XAG");
    // sull'oro non esiste una "gamba XAU": conta solo quanto e' forte il
    // dollaro, con il segno girato (oro su = dollaro debole)
@@ -6805,6 +6827,402 @@ void WriteCells(string path,string keyHeader,const int &basePt[],const int &base
 //==================================================================
 //  ENTRY POINT
 //==================================================================
+//==================================================================
+// SWING SUL PANIERE
+//------------------------------------------------------------------
+// PERCHE' ESISTE.
+// La forza relativa e' l'unica cosa sopravvissuta a ogni controllo di
+// questo progetto: replica su dieci finestre orarie indipendenti, su
+// tre simboli, su quattro blocchi di quattro anni, in entrambe le
+// direzioni, e assorbe ogni indicatore a strumento singolo. Vale fra
+// sei e dieci punti di win rate, stabilmente, dal 2014 a oggi.
+//
+// E non paga, perche' il contenitore e' sbagliato. Sullo stop dell'ORB
+// - tredici pip su EURJPY - due pip e mezzo di costo valgono il 19% del
+// rischio, e nessun vantaggio da sei punti di win rate sopravvive a
+// quel rapporto. La tabella degli orizzonti dice la stessa cosa da
+// un'altra angolazione: l'aspettativa cresce in modo monotono fino a
+// un giorno e oltre. Il segnale e' multi-giorno e lo stavamo misurando
+// con un cronometro da quattro ore.
+//
+// Qui lo stesso segnale va in un contenitore dove il costo e' il 2% del
+// rischio: stop di un ATR giornaliero, posizione tenuta giorni, e
+// soprattutto TUTTE le 28 coppie del paniere insieme invece di una alla
+// volta. Quarantacinque operazioni l'anno su un simbolo non decidono
+// niente; ventotto simboli si.
+//
+// COSA NON CAMBIA. Le difese sono le stesse, perche' sono l'unica cosa
+// che ha impedito a questa ricerca di trovare venti edge inesistenti:
+// ingresso all'apertura del giorno DOPO il segnale, mai sulla barra che
+// lo genera; leave-one-out esatto sulla coppia operata; controllo a
+// direzione opposta sullo stesso istante; placebo a direzione casuale;
+// spaccatura del periodo a meta'; costo e finanziamento in lista.
+//
+// COSA E' PIU' GROSSOLANO, e va detto. La camminata e' su barre
+// giornaliere: dentro una giornata l'ordine dei prezzi non si conosce,
+// quindi quando stop e target cadono nello stesso giorno vince lo stop.
+// E' la stessa convenzione del resto dello script, ma qui morde di piu'
+// perche' le barre sono grandi. Il numero che ne esce e' un limite
+// inferiore, non una stima centrale.
+#define SWG_MAXST 8
+#define SWG_MAXH  8
+#define SWG_NB   11   // 0 tutte, 1-2 meta', 3-6 fasce di |forza|,
+                      // 7 direzione OPPOSTA, 8-9 opposta x meta', 10 placebo
+
+double g_wgStop[SWG_MAXST]; int g_nWgSt=0;
+double g_wgRR[ORB_MAXRR];   int g_nWgRR=0;
+int    g_wgDay[SWG_MAXH];   int g_nWgH=0;
+
+double g_wgSum [SWG_MAXST][ORB_MAXRR][SWG_MAXH][SWG_NB];
+int    g_wgN   [SWG_MAXST][ORB_MAXRR][SWG_MAXH][SWG_NB];
+int    g_wgRes [SWG_MAXST][ORB_MAXRR][SWG_MAXH][SWG_NB];
+double g_wgHeld[SWG_MAXST][ORB_MAXRR][SWG_MAXH][SWG_NB];
+double g_wgCost[SWG_MAXST][ORB_MAXRR][SWG_MAXH][SWG_NB];  // costo in R, medio
+// per simbolo, alla sola configurazione principale: serve a vedere se
+// l'effetto e' del paniere o di due coppie fortunate
+double g_wgSymSum[CS_NP][4]; int g_wgSymN[CS_NP][4];
+int g_wgStMain=0, g_wgRrMain=0, g_wgHzMain=0;
+void WgWrite(string dir);
+
+string WgBinLab(int b)
+{
+   if(b==0) return "tutte (segnale)";
+   if(b==1) return "prima meta'";
+   if(b==2) return "seconda meta'";
+   if(b==3) return "forza "+F(InpSwgTh,0)+" - 50";
+   if(b==4) return "forza 50 - 100";
+   if(b==5) return "forza 100 - 150";
+   if(b==6) return "forza oltre 150";
+   if(b==7) return "DIREZIONE OPPOSTA (controllo)";
+   if(b==8) return "opposta | prima meta'";
+   if(b==9) return "opposta | seconda meta'";
+   return "PLACEBO (direzione a sorte)";
+}
+
+void WgReset()
+{
+   g_nWgSt=0; g_nWgRR=0; g_nWgH=0;
+   double v[]; int nv=ParseDoubles(InpSwgStopAtr,v,SWG_MAXST,"InpSwgStopAtr");
+   for(int i=0;i<nv && g_nWgSt<SWG_MAXST;i++) if(v[i]>0.0) g_wgStop[g_nWgSt++]=v[i];
+   double w[]; int nw=ParseDoubles(InpSwgRR,w,ORB_MAXRR,"InpSwgRR");
+   for(int i=0;i<nw && g_nWgRR<ORB_MAXRR;i++) if(w[i]>0.0) g_wgRR[g_nWgRR++]=w[i];
+   double d[]; int nd=ParseDoubles(InpSwgDays,d,SWG_MAXH,"InpSwgDays");
+   for(int i=0;i<nd && g_nWgH<SWG_MAXH;i++) if(d[i]>=1.0) g_wgDay[g_nWgH++]=(int)d[i];
+   for(int a=0;a<SWG_MAXST;a++)
+   for(int b=0;b<ORB_MAXRR;b++)
+   for(int c=0;c<SWG_MAXH;c++)
+   for(int e=0;e<SWG_NB;e++)
+   { g_wgSum[a][b][c][e]=0.0; g_wgN[a][b][c][e]=0;
+     g_wgRes[a][b][c][e]=0; g_wgHeld[a][b][c][e]=0.0; g_wgCost[a][b][c][e]=0.0; }
+   for(int p=0;p<CS_NP;p++)
+      for(int k=0;k<4;k++){ g_wgSymSum[p][k]=0.0; g_wgSymN[p][k]=0; }
+}
+
+// una sola simulazione, riusata dal segnale, dal controllo opposto e dal
+// placebo: se la logica dell'uscita fosse scritta tre volte, i tre numeri
+// smetterebbero di essere confrontabili al primo ritocco
+void WgTrade(const double &op[][CS_NP], const double &hi[][CS_NP],
+             const double &lo[][CS_NP], const double &cl[][CS_NP],
+             int n, int p, int i0, int dir, double atrPx, double pointSz,
+             int st, int rr, int hz, const int &bins[], int nb, const int &sbin[], int nsb)
+{
+   double entry=op[i0][p];
+   double sd=g_wgStop[st]*atrPx;
+   if(sd<=0.0) return;
+   double sl=entry-dir*sd, tg=entry+dir*sd*g_wgRR[rr];
+   int    hEnd=(int)MathMin(n-1, i0+g_wgDay[hz]-1);
+   double R=0.0; bool done=false; int held=g_wgDay[hz];
+   for(int j=i0;j<=hEnd;j++)
+   {
+      bool hs=(dir>0 ? lo[j][p]<=sl : hi[j][p]>=sl);
+      if(hs){ R=-1.0; done=true; held=j-i0+1; break; }
+      // la giornata d'ingresso conta solo contro: dentro una barra
+      // giornaliera l'ordine dei prezzi e' del tutto ignoto
+      if(j>i0 && (dir>0 ? hi[j][p]>=tg : lo[j][p]<=tg))
+      { R=g_wgRR[rr]; done=true; held=j-i0+1; break; }
+   }
+   if(!done){ R=(cl[hEnd][p]-entry)*dir/sd; held=hEnd-i0+1; }
+   // costo: spread una volta, finanziamento ogni notte
+   double cR=(sd>0.0 ? (InpOrbCostPt-InpSwapPtDay*held)*pointSz/sd : 0.0);
+   for(int b=0;b<nb;b++)
+   {
+      int e=bins[b];
+      g_wgSum [st][rr][hz][e]+=R;
+      g_wgN   [st][rr][hz][e]++;
+      if(done) g_wgRes[st][rr][hz][e]++;
+      g_wgHeld[st][rr][hz][e]+=held;
+      g_wgCost[st][rr][hz][e]+=cR;
+   }
+   if(st==g_wgStMain && rr==g_wgRrMain && hz==g_wgHzMain)
+      for(int b=0;b<nsb;b++){ g_wgSymSum[p][sbin[b]]+=R-cR; g_wgSymN[p][sbin[b]]++; }
+}
+
+void BuildSwing(string sym, string dir)
+{
+   if(!InpDoSwing) return;
+   WgReset();
+   if(g_nWgSt<=0 || g_nWgRR<=0 || g_nWgH<=0){ Print("SWING: liste vuote, saltato."); return; }
+   g_wgStMain=(int)MathMax(0,MathMin(g_nWgSt-1,InpSwgStMain-1));
+   g_wgRrMain=(int)MathMax(0,MathMin(g_nWgRR-1,InpSwgRrMain-1));
+   g_wgHzMain=(int)MathMax(0,MathMin(g_nWgH -1,InpSwgHzMain-1));
+
+   int hit=0; string suf=CsSuffix(sym,hit);
+
+   //--- asse comune: le barre D1 del simbolo operato
+   MqlRates ax[];
+   int n=CopyRates(sym,PERIOD_D1,InpFrom,InpTo,ax);
+   if(n<InpSwgWarm+60){ PrintFormat("SWING: solo %d barre D1, saltato.",n); return; }
+
+   // dichiarate una per riga: MQL5 accetta la forma compatta per gli array
+   // a una dimensione, non sempre per quelli a due
+   double po[][CS_NP];
+   double ph[][CS_NP];
+   double pl[][CS_NP];
+   double pc[][CS_NP];
+   double pa[][CS_NP];
+   double pr[][CS_NP];
+   ArrayResize(po,n); ArrayResize(ph,n); ArrayResize(pl,n);
+   ArrayResize(pc,n); ArrayResize(pa,n); ArrayResize(pr,n);
+   double pPoint[CS_NP]; bool pOk[CS_NP];
+   for(int p=0;p<CS_NP;p++)
+   {
+      pPoint[p]=0.0; pOk[p]=false;
+      for(int i=0;i<n;i++){ po[i][p]=0; ph[i][p]=0; pl[i][p]=0; pc[i][p]=0; pa[i][p]=0; pr[i][p]=0; }
+   }
+
+   int nUsed=0;
+   for(int p=0;p<CS_NP;p++)
+   {
+      string pn=g_csPair[p]+suf;
+      if(!SymbolInfoInteger(pn,SYMBOL_SELECT)) SymbolSelect(pn,true);
+      MqlRates rp[]; int np=0;
+      for(int att=0; att<6; att++)
+      {
+         np=CopyRates(pn,PERIOD_D1,InpFrom,InpTo,rp);
+         if(np>=200) break;
+         Sleep(300);
+      }
+      if(np<200) continue;
+      pPoint[p]=SymbolInfoDouble(pn,SYMBOL_POINT);
+      if(pPoint[p]<=0.0) continue;
+      int j=0, matched=0;
+      for(int i=0;i<n;i++)
+      {
+         while(j<np && rp[j].time<ax[i].time) j++;
+         if(j>=np) break;
+         if(rp[j].time!=ax[i].time) continue;
+         po[i][p]=rp[j].open; ph[i][p]=rp[j].high;
+         pl[i][p]=rp[j].low;  pc[i][p]=rp[j].close;
+         if(rp[j].open>0.0) pr[i][p]=rp[j].close/rp[j].open-1.0;
+         matched++;
+      }
+      if(matched<200) continue;
+      // ATR giornaliero, la stessa unita' di misura del resto dello script
+      double tr=0.0; int cnt=0;
+      for(int i=1;i<n;i++)
+      {
+         if(ph[i][p]<=0.0 || pc[i-1][p]<=0.0){ pa[i][p]=pa[i-1][p]; continue; }
+         double t=MathMax(ph[i][p]-pl[i][p],
+                  MathMax(MathAbs(ph[i][p]-pc[i-1][p]),MathAbs(pl[i][p]-pc[i-1][p])));
+         if(cnt<InpSwgAtrPer){ tr+=t; cnt++; pa[i][p]=(cnt>0?tr/cnt:0.0); }
+         else                 pa[i][p]=pa[i-1][p]+(t-pa[i-1][p])/InpSwgAtrPer;
+      }
+      pOk[p]=true; nUsed++;
+   }
+   PrintFormat("SWING: %d coppie su %d con storico D1 utilizzabile, %d barre",nUsed,CS_NP,n);
+   if(nUsed<10){ Print("SWING: troppe poche coppie, saltato."); return; }
+
+   //--- somme per VALUTA, una volta sola
+   string ccy[8]={"EUR","USD","JPY","GBP","CHF","AUD","CAD","NZD"};
+   double sc[][8];
+   int    cc[][8];
+   ArrayResize(sc,n); ArrayResize(cc,n);
+   for(int i=0;i<n;i++) for(int c=0;c<8;c++){ sc[i][c]=0.0; cc[i][c]=0; }
+   for(int p=0;p<CS_NP;p++)
+   {
+      if(!pOk[p]) continue;
+      for(int c=0;c<8;c++)
+      {
+         int sg=CsSign(p,ccy[c]);
+         if(sg==0) continue;
+         for(int i=0;i<n;i++)
+            if(po[i][p]>0.0){ sc[i][c]+=sg*pr[i][p]; cc[i][c]++; }
+      }
+   }
+
+   //--- forza per coppia, con leave-one-out ESATTO fatto prima del filtro:
+   // togliere il contributo dopo il TSI sarebbe impossibile, il TSI e'
+   // ricorsivo. Toglierlo prima costa una divisione.
+   double str[][CS_NP];
+   ArrayResize(str,n);
+   for(int i=0;i<n;i++) for(int p=0;p<CS_NP;p++) str[i][p]=0.0;
+   float f1[]; float f2[]; float fo[];
+   ArrayResize(f1,n); ArrayResize(f2,n); ArrayResize(fo,n);
+   for(int p=0;p<CS_NP;p++)
+   {
+      if(!pOk[p]) continue;
+      int ib=-1, iq=-1;
+      for(int c=0;c<8;c++)
+      {
+         if(StringSubstr(g_csPair[p],0,3)==ccy[c]) ib=c;
+         if(StringSubstr(g_csPair[p],3,3)==ccy[c]) iq=c;
+      }
+      if(ib<0 || iq<0) continue;
+      for(int i=0;i<n;i++)
+      {
+         int nb=cc[i][ib]-1, nq=cc[i][iq]-1;
+         f1[i]=(float)(nb>0 ? (sc[i][ib]-pr[i][p])/nb : 0.0);
+         f2[i]=(float)(nq>0 ? (sc[i][iq]+pr[i][p])/nq : 0.0);
+      }
+      CsTsi(f1,f2,n,InpStrSm1,InpStrSm2,true,fo,0);
+      for(int i=0;i<n;i++) str[i][p]=(double)fo[i];
+   }
+
+   //--- simulazione
+   int fH=INVALID_HANDLE;
+   if(InpSwgTrades)
+   {
+      fH=FileOpen(dir+"SWING_trade.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+      if(fH!=INVALID_HANDLE)
+         W(fH,"simbolo;data;anno;direzione;esito;forza;forza_ass;atr_punti;giorni_tenuti;R_lordo\r\n");
+   }
+   datetime mid=ax[0].time+(datetime)((ax[n-1].time-ax[0].time)/2);
+   int nSig=0;
+   for(int p=0;p<CS_NP;p++)
+   {
+      if(!pOk[p]) continue;
+      for(int i=InpSwgWarm;i<n-1;i++)
+      {
+         if(po[i][p]<=0.0 || po[i+1][p]<=0.0 || pa[i][p]<=0.0) continue;
+         double sv=str[i][p];
+         if(MathAbs(sv)<InpSwgTh) continue;
+         int d=(sv>0?+1:-1);
+         bool second=(ax[i+1].time>=mid);
+         double aa=MathAbs(sv);
+         int fb=(aa<50?3:(aa<100?4:(aa<150?5:6)));
+         int bins[4]; int nb=0;
+         bins[nb++]=0; bins[nb++]=(second?2:1); bins[nb++]=fb;
+         int sb[2]; int nsb=0; sb[nsb++]=0; if(second) sb[nsb++]=2;
+         int obins[3]; int onb=0;
+         obins[onb++]=7; obins[onb++]=(second?9:8);
+         int osb[2]; int onsb=0; osb[onsb++]=1; if(second) osb[onsb++]=3;
+         uint hsh=(uint)((uint)(ax[i].time/86400)*2654435761 + (uint)p*40503);
+         int  pd =(((hsh>>13)&1)==0 ? +1 : -1);
+         int pbins[1]; pbins[0]=10;
+         int nul[1]; nul[0]=0;
+         for(int st=0;st<g_nWgSt;st++)
+         for(int rr=0;rr<g_nWgRR;rr++)
+         for(int hz=0;hz<g_nWgH;hz++)
+         {
+            WgTrade(po,ph,pl,pc,n,p,i+1, d,pa[i][p],pPoint[p],st,rr,hz,bins ,nb ,sb ,nsb);
+            WgTrade(po,ph,pl,pc,n,p,i+1,-d,pa[i][p],pPoint[p],st,rr,hz,obins,onb,osb,onsb);
+            WgTrade(po,ph,pl,pc,n,p,i+1,pd,pa[i][p],pPoint[p],st,rr,hz,pbins,1  ,nul,0);
+         }
+         nSig++;
+         if(fH!=INVALID_HANDLE)
+         {
+            // l'esito scritto e' quello della configurazione principale
+            double sd=g_wgStop[g_wgStMain]*pa[i][p];
+            double entry=po[i+1][p], slp=entry-d*sd, tgp=entry+d*sd*g_wgRR[g_wgRrMain];
+            int he=(int)MathMin(n-1,i+1+g_wgDay[g_wgHzMain]-1);
+            string es="IRRISOLTO"; int hd=he-i; double Rl=0.0;
+            for(int j=i+1;j<=he;j++)
+            {
+               if(d>0 ? pl[j][p]<=slp : ph[j][p]>=slp){ es="STOP"; Rl=-1.0; hd=j-i; break; }
+               if(j>i+1 && (d>0 ? ph[j][p]>=tgp : pl[j][p]<=tgp))
+               { es="TARGET"; Rl=g_wgRR[g_wgRrMain]; hd=j-i; break; }
+            }
+            if(es=="IRRISOLTO" && sd>0.0) Rl=(pc[he][p]-entry)*d/sd;
+            MqlDateTime dt; TimeToStruct(ax[i+1].time,dt);
+            W(fH,g_csPair[p]+";"+TimeToString(ax[i+1].time,TIME_DATE)+";"+
+                 IntegerToString(dt.year)+";"+(d>0?"UP":"DOWN")+";"+es+";"+
+                 F(sv,2)+";"+F(MathAbs(sv),2)+";"+F(pa[i][p]/pPoint[p],0)+";"+
+                 IntegerToString(hd)+";"+F(Rl,4)+"\r\n");
+         }
+      }
+   }
+   if(fH!=INVALID_HANDLE) FileClose(fH);
+   PrintFormat("SWING: %d segnali oltre soglia |forza|>%.0f su %d coppie",nSig,InpSwgTh,nUsed);
+   WgWrite(dir);
+}
+
+// Qui il costo in R non e' uno solo: cambia con lo stop, con l'ATR della
+// coppia e con i giorni tenuti. cR e' la sua media effettiva su quella
+// cella, quindi le colonne alternative si ottengono riscalando quella -
+// non ricalcolandola da un ATR che in un paniere di 28 coppie non esiste.
+string WgCostCells(double eR, double cR)
+{
+   string o="";
+   double base=InpOrbCostPt;
+   for(int i=0;i<g_nCost;i++)
+   {
+      double c=(base>0.0 ? cR*g_costPt[i]/base : 0.0);
+      o+=";"+F(eR-c,4);
+   }
+   return o;
+}
+
+void WgWrite(string dir)
+{
+   int f=FileOpen(dir+"SWING_paniere.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+   if(f!=INVALID_HANDLE)
+   {
+      W(f,"fascia;stop_atr;rr;giorni;n;perc_risolte;giorni_medi_tenuti;"
+          "E_lordo_in_R;costo_medio_in_R;E_netto_in_R;delta_su_opposta"+CostHdr()+"\r\n");
+      for(int e=0;e<SWG_NB;e++)
+      for(int st=0;st<g_nWgSt;st++)
+      for(int rr=0;rr<g_nWgRR;rr++)
+      for(int hz=0;hz<g_nWgH;hz++)
+      {
+         int nn=g_wgN[st][rr][hz][e];
+         if(nn<200) continue;
+         double eR=g_wgSum[st][rr][hz][e]/nn;
+         double cR=g_wgCost[st][rr][hz][e]/nn;
+         // il confronto che conta: la stessa cella a direzione invertita,
+         // stesso giorno, stesso stop, stesso target. Se il delta e' zero
+         // il segnale non porta direzione, porta solo esposizione.
+         int eo=(e==0?7:(e==1?8:(e==2?9:-1)));
+         string dl="";
+         if(eo>=0 && g_wgN[st][rr][hz][eo]>0)
+            dl=F(eR-cR-(g_wgSum[st][rr][hz][eo]/g_wgN[st][rr][hz][eo]
+                        -g_wgCost[st][rr][hz][eo]/g_wgN[st][rr][hz][eo]),4);
+         W(f,WgBinLab(e)+";"+F(g_wgStop[st],2)+";1:"+F(g_wgRR[rr],2)+";"+
+             IntegerToString(g_wgDay[hz])+";"+IntegerToString(nn)+";"+
+             F(100.0*g_wgRes[st][rr][hz][e]/nn,2)+";"+
+             F(g_wgHeld[st][rr][hz][e]/nn,2)+";"+
+             F(eR,4)+";"+F(cR,4)+";"+F(eR-cR,4)+";"+dl+
+             WgCostCells(eR,cR)+"\r\n");
+      }
+      FileClose(f);
+   }
+   int g=FileOpen(dir+"SWING_simboli.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+   if(g!=INVALID_HANDLE)
+   {
+      W(g,"coppia;n_segnale;E_netto_segnale;n_opposta;E_netto_opposta;delta;"
+          "n_segnale_2a;E_netto_segnale_2a;n_opposta_2a;E_netto_opposta_2a;delta_2a\r\n");
+      for(int p=0;p<CS_NP;p++)
+      {
+         if(g_wgSymN[p][0]<50) continue;
+         double a=g_wgSymSum[p][0]/g_wgSymN[p][0];
+         double b=(g_wgSymN[p][1]>0 ? g_wgSymSum[p][1]/g_wgSymN[p][1] : 0.0);
+         string s2="", o2="", d2="";
+         if(g_wgSymN[p][2]>=30 && g_wgSymN[p][3]>=30)
+         {
+            double c=g_wgSymSum[p][2]/g_wgSymN[p][2];
+            double e=g_wgSymSum[p][3]/g_wgSymN[p][3];
+            s2=F(c,4); o2=F(e,4); d2=F(c-e,4);
+         }
+         W(g,g_csPair[p]+";"+IntegerToString(g_wgSymN[p][0])+";"+F(a,4)+";"+
+             IntegerToString(g_wgSymN[p][1])+";"+F(b,4)+";"+F(a-b,4)+";"+
+             IntegerToString(g_wgSymN[p][2])+";"+s2+";"+
+             IntegerToString(g_wgSymN[p][3])+";"+o2+";"+d2+"\r\n");
+      }
+      FileClose(g);
+   }
+   Print("SWING: scritti SWING_paniere.csv, SWING_simboli.csv"
+         +(InpSwgTrades?" e SWING_trade.csv":""));
+}
+
 void OnStart()
 {
    g_tfMin=TFMinutes(InpBaseTF);
@@ -6875,6 +7293,15 @@ void OnStart()
    uint t0=GetTickCount();
    for(int i=0;i<ArraySize(syms);i++)
       ProcessSymbol(syms[i]);
+
+   // Il modulo swing NON e' per simbolo: opera l'intero paniere, quindi
+   // gira una volta sola. Il simbolo passato serve solo a dedurre il
+   // suffisso e l'asse dei giorni.
+   if(InpDoSwing && ArraySize(syms)>0)
+   {
+      string sdir=InpOutDir+"\\";
+      BuildSwing(syms[0],sdir);
+   }
 
    PrintFormat("=== completato in %.1f s. Output in MQL5/Files/%s ===",
                (GetTickCount()-t0)/1000.0, InpOutDir);
