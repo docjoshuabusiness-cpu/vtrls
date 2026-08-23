@@ -4176,6 +4176,7 @@ bool ProcessSymbol(string sym)
             double mgR[MG_MAXR][ORB_MAXRR], mgSz[MG_MAXR][ORB_MAXRR], mgSl[MG_MAXR][ORB_MAXRR];
             bool   mgD[MG_MAXR][ORB_MAXRR], mgA[MG_MAXR][ORB_MAXRR];
             double mgTop=0.0;                       // estremo a favore, in prezzo
+            double mgLast=entry;                    // ultimo prezzo dentro l'orizzonte
             if(doMg)
                for(int k=0;k<MG_MAXR;k++)
                   for(int z=0;z<g_nRR;z++)
@@ -4253,6 +4254,7 @@ bool ProcessSymbol(string sym)
                {
                   double favB=(q>kb ? (dir>0 ? r[q].high-entry : entry-r[q].low) : 0.0);
                   if(favB>mgTop) mgTop=favB;
+                  mgLast=r[q].close;
                   for(int k=0;k<MG_MAXR;k++)
                   {
                      for(int z=0;z<g_nRR;z++)
@@ -4338,6 +4340,25 @@ bool ProcessSymbol(string sym)
 
             if(doMg)
             {
+               // CHIUSURA A MERCATO, E VALE ANCHE PER IL RIFERIMENTO.
+               // Senza questa riga la tabella misurava un'altra cosa: le
+               // regole CHIUDONO cio' che il riferimento lascia aperto, e
+               // un'operazione aperta valeva zero per assunzione mentre
+               // l'uscita della regola valeva il suo prezzo. Risultato:
+               // undici regole su undici positive, con il vantaggio che
+               // cresceva esattamente come la quota di irrisolte - +0.0024
+               // dove il riferimento risolveva tutto, +0.2651 dove ne
+               // lasciava aperte oltre un quarto. Non era gestione: era il
+               // confronto fra una misura e un'assunzione.
+               // Adesso tutto quello che e' ancora aperto quando scade
+               // l'orizzonte viene chiuso all'ultimo prezzo, per ogni regola
+               // e per il riferimento allo stesso modo.
+               if(stpD>0.0)
+                  for(int k=0;k<MG_MAXR;k++)
+                     for(int z=0;z<g_nRR;z++)
+                        if(!mgD[k][z])
+                           mgR[k][z]+=mgSz[k][z]*((mgLast-entry)*dir/stpD);
+
                int vbM=SwBin(vpOk ? vpVaAtr[g_vaMain] : 0.0);
                int hbM=(secondHalf ? 6 : 5);
                int sbM=StrBin(g_csOk ? CsAt(r[kb].time)*dir : 0.0, g_csOk);
@@ -8509,7 +8530,8 @@ void BuildOrb(string sym,string dir)
             if(fG!=INVALID_HANDLE)
             {
                W(fG,"finestra;scelta;fascia;gestione;rr;n;perc_risolte;"
-                    "E_lordo_in_R;costo_in_R;E_netto_in_R;delta_su_nessuna_gestione\r\n");
+                    "perc_chiuse_a_mercato;E_lordo_in_R;costo_in_R;E_netto_in_R;"
+                    "delta_su_nessuna_gestione\r\n");
                for(int iw=0;iw<g_nSwW;iw++)
                {
                   int wg=-1;
@@ -8538,6 +8560,7 @@ void BuildOrb(string sym,string dir)
                         W(fG,wl+";"+sg+";"+SwBinLab(b)+";"+MgLab(k)+";1:"+F(g_rr[z],2)+";"+
                              IntegerToString(nk)+";"+
                              F(100.0*g_mgRes[iw][k][z][b]/nk,2)+";"+
+                             F(100.0-100.0*g_mgRes[iw][k][z][b]/nk,2)+";"+
                              F(eK,4)+";"+F(cRg,4)+";"+F(eK-cRg,4)+";"+
                              F(eK-cRg-e0,4)+"\r\n");
                      }

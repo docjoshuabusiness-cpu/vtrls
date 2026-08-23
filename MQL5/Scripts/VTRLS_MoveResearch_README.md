@@ -880,6 +880,34 @@ Stringere lo stop usando il massimo della stessa barra che poi lo colpisce
 significa usare due volte la stessa informazione, ed e' il modo standard di
 far sembrare geniale un trailing su dati storici.
 
+### La riga che rendeva la tabella una bugia
+
+Alla prima esecuzione TUTTE E UNDICI le regole uscivano positive. Undici su
+undici non e' una scoperta, e' una firma.
+
+Il motivo: le regole CHIUDONO cio' che il riferimento lascia aperto.
+Un'operazione ancora aperta a scadenza valeva zero per assunzione, mentre
+l'uscita della regola valeva il suo prezzo vero. Si confrontava una misura
+con un'assunzione.
+
+La diagnosi si legge in una riga sola - il vantaggio del trailing, per quota
+di irrisolte del riferimento:
+
+| irrisolte del riferimento | delta del trailing |
+|---|---|
+| 0-2% | **+0.0024** |
+| 2-10% | +0.0453 |
+| 10-25% | +0.1659 |
+| oltre 25% | +0.2651 |
+
+E al rapporto 1:0.50, dove il 99% si risolve, il delta di ogni regola era
+**+0.0000 esatto**. Cioe' il risultato teorico: su un processo senza deriva
+la gestione non sposta l'aspettativa di un punto base.
+
+Ora tutto quello che e' ancora aperto quando scade l'orizzonte viene chiuso
+all'ultimo prezzo, **per ogni regola e per il riferimento allo stesso modo**,
+e la colonna `perc_chiuse_a_mercato` dice quanto pesa quella chiusura.
+
 ### Il costo non cambia con l'uscita parziale
 
 Lo spread si paga sulla dimensione: mezza posizione chiusa due volte costa
