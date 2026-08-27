@@ -35,6 +35,7 @@ input int    InpMaxHoldBars    = 1440;   // orizzonte massimo (M1: 1440 = 24h)
 input double InpCostPoints     = 0;      // 0 = usa lo spread reale della barra; >0 = costo fisso in punti
 input double InpExtraCostPts   = 0;      // commissione/slippage extra in punti (round turn)
 input bool   InpOnePosAtTime   = false;  // true = scarta segnali sovrapposti al trade aperto
+input int    InpCooldownBars   = 0;      // scarta un segnale se ne e' gia' uscito uno da meno di N barre (stessa direzione)
 
 input group "=== MODALITA GRIGLIA ==="
 input bool   InpGridFromATR = true;   // true = griglia in multipli di ATR mediano (auto-scala su ogni simbolo)
@@ -386,6 +387,7 @@ void OnStart()
    ArrayResize(g_tAdv, reserve * g_nSL);
 
    datetime busyUntil = 0;
+   int lastBarBuy = -1000000, lastBarSell = -1000000;
    uint t0 = GetTickCount();
 
    for(int i = minBars; i < g_bars - InpEntryDelayBars - 1; i++)
@@ -399,6 +401,12 @@ void OnStart()
       int entryBar = i + InpEntryDelayBars;
       if(entryBar >= g_bars) break;
       if(InpOnePosAtTime && g_r[entryBar].time < busyUntil) continue;
+      if(InpCooldownBars > 0)
+        {
+         if(dir > 0 && i - lastBarBuy  < InpCooldownBars) continue;
+         if(dir < 0 && i - lastBarSell < InpCooldownBars) continue;
+        }
+      if(dir > 0) lastBarBuy = i; else lastBarSell = i;
 
       double costPts = (InpCostPoints > 0 ? InpCostPoints : (double)g_r[entryBar].spread) + InpExtraCostPts;
       double entryEff = (dir > 0) ? g_r[entryBar].open + costPts * g_pt
