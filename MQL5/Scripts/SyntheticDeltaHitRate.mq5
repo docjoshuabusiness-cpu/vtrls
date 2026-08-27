@@ -48,6 +48,12 @@ input group "=== CLASSIFICA ORARI ==="
 input int      InpRefSL         = 0;      // SL di riferimento per la classifica (0 = usa il migliore dello sweep)
 input int      InpBucketMin     = 30;     // ampiezza bucket in minuti per la classifica fine (15/30/60)
 
+input group "=== SCANSIONE SOGLIA ==="
+input bool     InpThresholdScan = true;   // ignora SignalThreshold e produce la curva edge-vs-soglia
+input double   InpScanMinDelta  = 0.05;   // delta minimo catturato durante la scansione
+input double   InpScanMaxDelta  = 0.80;   // estremo alto della curva
+input int      InpScanSteps     = 16;     // punti della curva
+
 input group "=== TEST DEL SEGNALE ==="
 input bool     InpInvertSignals = false;  // inverte ogni segnale (per testare se l'edge e' al contrario)
 input int      InpOnlyDir       = 0;      // 0 = entrambi, 1 = solo buy, -1 = solo sell
@@ -79,6 +85,7 @@ double   s_maeFull[];    // MAE su tutto l'orizzonte
 double   s_mfe[];        // MFE su tutto l'orizzonte
 double   s_endPts[];     // P/L a scadenza orizzonte
 double   s_cost[];       // costo (spread+extra) in punti pagato all'ingresso
+double   s_delta[];      // normalizedDelta al segnale
 int      s_tSL[];        // [s*g_nSL + k] primo tocco livello SL k
 int      g_n = 0;
 
@@ -137,8 +144,9 @@ bool CopyAll(int h, int total, double &dst[])
 //+------------------------------------------------------------------+
 //| Logica identica a SyntheticDelta v2.1                            |
 //+------------------------------------------------------------------+
-int EvalSignal(int i)
+int EvalSignal(int i, double &outDelta)
   {
+   outDelta = 0.0;
    if(g_atr[i] <= 0.0) return 0;
    double range = g_r[i].high - g_r[i].low;
    if(range <= 0.0) return 0;
@@ -157,6 +165,7 @@ int EvalSignal(int i)
    double volW   = (volAvg > 0) ? MathMin(tickVol / volAvg, 3.0) : 1.0;
 
    double delta = (fracBuy * (1.0 + bullsN) * volW - fracSell * (1.0 + bearsN) * volW) / 6.0;
+   outDelta = delta;
 
    if(UseADXFilter && g_adx[i] < ADX_MinLevel) return 0;
 
@@ -170,8 +179,9 @@ int EvalSignal(int i)
            g_r[i].close > res || g_r[i].close < sup)) return 0;
      }
 
-   if(delta >  SignalThreshold) return  1;
-   if(delta < -SignalThreshold) return -1;
+   double thr = InpThresholdScan ? InpScanMinDelta : SignalThreshold;
+   if(delta >  thr) return  1;
+   if(delta < -thr) return -1;
    return 0;
   }
 
@@ -223,7 +233,7 @@ void OnStart()
    int cap = 8192;
    ArrayResize(s_time, cap); ArrayResize(s_dir, cap); ArrayResize(s_tTP, cap);
    ArrayResize(s_maeAtTP, cap); ArrayResize(s_maeFull, cap); ArrayResize(s_mfe, cap);
-   ArrayResize(s_endPts, cap); ArrayResize(s_cost, cap); ArrayResize(s_tSL, cap * g_nSL);
+   ArrayResize(s_endPts, cap); ArrayResize(s_cost, cap); ArrayResize(s_delta, cap); ArrayResize(s_tSL, cap * g_nSL);
 
    int lastB = -1000000, lastS = -1000000;
    uint t0 = GetTickCount();
@@ -231,7 +241,8 @@ void OnStart()
    for(int i = minBars; i < g_bars - InpEntryDelay - 1; i++)
      {
       if(g_r[i].time < InpFrom || g_r[i].time > InpTo) continue;
-      int dir = EvalSignal(i);
+      double dlt;
+      int dir = EvalSignal(i, dlt);
       if(dir == 0) continue;
       if(InpInvertSignals) dir = -dir;
       if(InpOnlyDir != 0 && dir != InpOnlyDir) continue;
@@ -253,7 +264,7 @@ void OnStart()
          cap = g_n + 8192;
          ArrayResize(s_time, cap); ArrayResize(s_dir, cap); ArrayResize(s_tTP, cap);
          ArrayResize(s_maeAtTP, cap); ArrayResize(s_maeFull, cap); ArrayResize(s_mfe, cap);
-         ArrayResize(s_endPts, cap); ArrayResize(s_cost, cap); ArrayResize(s_tSL, cap * g_nSL);
+         ArrayResize(s_endPts, cap); ArrayResize(s_cost, cap); ArrayResize(s_delta, cap); ArrayResize(s_tSL, cap * g_nSL);
         }
 
       //--- walk forward
@@ -283,6 +294,7 @@ void OnStart()
       s_maeFull[g_n] = mae;
       s_mfe[g_n]     = mfe;
       s_cost[g_n]    = cost;
+      s_delta[g_n]   = dlt;
       s_endPts[g_n]  = (dir > 0) ? (g_r[last].close - E) / g_pt : (E - g_r[last].close) / g_pt;
       g_n++;
      }
@@ -587,6 +599,127 @@ void WriteReport()
                         g_sl[bestK], InpTPpoints, (double)InpTPpoints/g_sl[bestK], bestExp);
 
 //--- ============================================================
+//    CURVA EDGE vs SOGLIA  (un solo run, tutte le soglie)
+//--- ============================================================
+   if(InpThresholdScan)
+     {
+      int refK = -1;
+      if(InpRefSL > 0)
+        { int bd = BIG;
+          for(int k = 0; k < g_nSL; k++)
+             if(MathAbs(g_sl[k] - InpRefSL) < bd) { bd = MathAbs(g_sl[k] - InpRefSL); refK = k; } }
+      else refK = bestK;
+      int SLr = (refK >= 0) ? g_sl[refK] : InpTPpoints;
+
+      //--- giorni di trading coperti, per normalizzare la frequenza
+      int nDays = 0;
+        {
+         long prev = -1;
+         for(int s2 = 0; s2 < g_n; s2++)
+           {
+            long day = (long)s_time[s2] / 86400;
+            if(day != prev) { nDays++; prev = day; }
+           }
+         if(nDays < 1) nDays = 1;
+        }
+
+      h += "<h2>Curva edge vs soglia &mdash; il delta contiene informazione?</h2>";
+      h += "<div class='note'><b>Come si legge, in una riga:</b> se alzando la soglia l'edge <b>cresce in modo "
+           "monotono</b>, il delta misura qualcosa di reale e vale la pena filtrare. Se resta piatto o oscilla "
+           "senza direzione, il delta e' rumore e nessuna soglia lo salvera'.<br><br>"
+           "<b>solo-fav</b> = tocca il TP senza mai toccare la barriera opposta. <b>solo-contro</b> = viceversa. "
+           "Sono mutuamente esclusivi, quindi il loro confronto e' un test pulito, indipendente da ipotesi sul "
+           "tie-break. <b>z</b> = significativita' della differenza: sotto |2| non e' distinguibile da zero, e "
+           "testando " + IntegerToString(InpScanSteps) + " soglie ci si aspetta qualche |z| vicino a 2 per puro caso.</div>";
+
+      h += "<table><tr><th>Soglia |delta|</th><th>Segnali</th><th>al giorno</th><th>% del totale</th>"
+           "<th>solo-fav</th><th>solo-contro</th><th>edge (pp)</th><th>z</th>"
+           "<th>Exp pt (SL " + IntegerToString(SLr) + ")</th><th>t</th></tr>";
+
+      int nst = MathMax(InpScanSteps, 2);
+      for(int k = 0; k < nst; k++)
+        {
+         double thr = InpScanMinDelta + (InpScanMaxDelta - InpScanMinDelta) * k / (nst - 1.0);
+         int n = 0, favOnly = 0, advOnly = 0;
+         double sum = 0, sum2 = 0;
+         for(int s2 = 0; s2 < g_n; s2++)
+           {
+            if(MathAbs(s_delta[s2]) < thr) continue;
+            n++;
+            bool fav = (s_tTP[s2] != BIG);
+            bool adv = (s_maeFull[s2] >= (double)InpTPpoints);
+            if(fav && !adv) favOnly++;
+            if(adv && !fav) advOnly++;
+            double p;
+            if(refK >= 0)
+              {
+               int ta = s_tSL[s2 * g_nSL + refK], tf = s_tTP[s2];
+               if(tf == BIG && ta == BIG) p = s_endPts[s2];
+               else if(ta <= tf)          p = -(double)SLr;
+               else                       p = (double)InpTPpoints;
+              }
+            else p = s_endPts[s2];
+            sum += p; sum2 += p*p;
+           }
+         if(n == 0) continue;
+         double mean = sum/n;
+         double var  = (n > 1) ? (sum2 - n*mean*mean)/(n-1) : 0;
+         double sd   = (var > 0) ? MathSqrt(var) : 0;
+         double tst  = (sd > 0 && n > 1) ? mean/(sd/MathSqrt((double)n)) : 0;
+         double z    = (favOnly + advOnly > 0) ? (favOnly - advOnly)/MathSqrt((double)(favOnly + advOnly)) : 0;
+         double edge = 100.0*(favOnly - advOnly)/n;
+         string cls  = (n < InpMinPerBucket) ? " class='thin'" : "";
+         h += StringFormat("<tr%s><td><b>%.3f</b></td><td>%d</td><td>%.1f</td><td>%.1f%%</td>"
+                           "<td>%.1f%%</td><td>%.1f%%</td><td style='color:%s'><b>%+.1f</b></td>"
+                           "<td style='color:%s'>%+.2f</td><td style='color:%s'>%.1f</td><td>%.2f</td></tr>",
+                           cls, thr, n, (double)n/nDays, 100.0*n/g_n,
+                           100.0*favOnly/n, 100.0*advOnly/n,
+                           edge > 0 ? "#a3be8c" : "#bf616a", edge,
+                           MathAbs(z) > 2.0 ? "#ebcb8b" : "#7b8794", z,
+                           mean > 0 ? "#a3be8c" : "#bf616a", mean, tst);
+        }
+      h += "</table>";
+
+      //--- decili di |delta|: la stessa domanda, a campioni di uguale dimensione
+      h += "<h3 style='color:#88c0d0;font-size:13px'>Stessa domanda per decili di |delta| (campioni di pari numerosita')</h3>";
+      h += "<div class='note'>Le soglie cumulative sopra condividono i dati fra righe, quindi le righe non sono "
+           "indipendenti. Qui invece ogni decile e' un gruppo <b>disgiunto</b> di uguale dimensione: se il delta "
+           "informa, l'edge deve salire dal decile 1 al decile 10.</div>";
+        {
+         double sorted[]; ArrayResize(sorted, g_n);
+         for(int s2 = 0; s2 < g_n; s2++) sorted[s2] = MathAbs(s_delta[s2]);
+         ArraySort(sorted);
+         h += "<table><tr><th>Decile |delta|</th><th>Intervallo</th><th>Segnali</th>"
+              "<th>solo-fav</th><th>solo-contro</th><th>edge (pp)</th><th>z</th></tr>";
+         for(int d2 = 0; d2 < 10; d2++)
+           {
+            double lo = sorted[(int)((d2/10.0)*(g_n-1))];
+            double hi = sorted[(int)(((d2+1)/10.0)*(g_n-1))];
+            int n = 0, fo = 0, ao = 0;
+            for(int s2 = 0; s2 < g_n; s2++)
+              {
+               double a = MathAbs(s_delta[s2]);
+               if(a < lo || (d2 < 9 && a >= hi)) continue;
+               n++;
+               bool fav = (s_tTP[s2] != BIG);
+               bool adv = (s_maeFull[s2] >= (double)InpTPpoints);
+               if(fav && !adv) fo++;
+               if(adv && !fav) ao++;
+              }
+            if(n == 0) continue;
+            double z = (fo + ao > 0) ? (fo - ao)/MathSqrt((double)(fo + ao)) : 0;
+            double edge = 100.0*(fo - ao)/n;
+            h += StringFormat("<tr><td>%d</td><td>%.3f &ndash; %.3f</td><td>%d</td><td>%.1f%%</td><td>%.1f%%</td>"
+                              "<td style='color:%s'><b>%+.1f</b></td><td style='color:%s'>%+.2f</td></tr>",
+                              d2+1, lo, hi, n, 100.0*fo/n, 100.0*ao/n,
+                              edge > 0 ? "#a3be8c" : "#bf616a", edge,
+                              MathAbs(z) > 2.0 ? "#ebcb8b" : "#7b8794", z);
+           }
+         h += "</table>";
+        }
+     }
+
+//--- ============================================================
 //    CLASSIFICA ORARI PER EXPECTANCY NETTA (non solo hit rate)
 //--- ============================================================
      {
@@ -731,7 +864,7 @@ void WriteCSV()
    string fn = "HitRate_" + _Symbol + "_TP" + IntegerToString(InpTPpoints) + ".csv";
    int f = FileOpen(fn, FILE_WRITE|FILE_TXT|FILE_ANSI);
    if(f == INVALID_HANDLE) return;
-   FileWriteString(f, "time;dir;hour;minute;dow;hit;bars_to_tp;mae_at_tp;mae_full;mfe;end_pts;cost_pts\n");
+   FileWriteString(f, "time;dir;hour;minute;dow;hit;bars_to_tp;mae_at_tp;mae_full;mfe;end_pts;cost_pts;delta\n");
    for(int s = 0; s < g_n; s++)
      {
       MqlDateTime dt; TimeToStruct(s_time[s], dt);
@@ -739,7 +872,7 @@ void WriteCSV()
       FileWriteString(f, StringFormat("%s;%d;%d;%d;%d;%d;%s;%s;%.1f;%.1f;%.1f;%.1f\n",
          TimeToString(s_time[s], TIME_DATE|TIME_MINUTES), s_dir[s], dt.hour, dt.min, dt.day_of_week,
          hit ? 1 : 0, hit ? IntegerToString(s_tTP[s]) : "", hit ? DoubleToString(s_maeAtTP[s],1) : "",
-         s_maeFull[s], s_mfe[s], s_endPts[s], s_cost[s]));
+         s_maeFull[s], s_mfe[s], s_endPts[s], s_cost[s], s_delta[s]));
      }
    FileClose(f);
    Print("CSV: MQL5/Files/", fn);
