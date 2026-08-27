@@ -15,7 +15,7 @@ input ENUM_TIMEFRAMES InpTF = PERIOD_M1;  // timeframe ANALIZZATO (indipendente 
 
 input group "=== LA DOMANDA ==="
 input int      InpTPpoints      = 2000;   // punti da raggiungere dopo il segnale
-input int      InpMaxBars       = 300;    // entro quante barre
+input int      InpMaxBars       = 60;     // entro quante barre (scalping M1: 15-60, NON 300)
 input int      InpEntryDelay    = 1;      // 1 = entra all'open della barra dopo il segnale
 
 input group "=== PERIODO ==="
@@ -44,6 +44,10 @@ input int      SR_Lookback      = 15;
 input double   SR_Proximity     = 0.5;
 input int      ATR_Period       = 14;
 
+input group "=== CLASSIFICA ORARI ==="
+input int      InpRefSL         = 0;      // SL di riferimento per la classifica (0 = usa il migliore dello sweep)
+input int      InpBucketMin     = 30;     // ampiezza bucket in minuti per la classifica fine (15/30/60)
+
 input group "=== ALTRO ==="
 input int      InpCooldownBars  = 0;      // scarta segnali stessa direzione entro N barre
 input int      InpMinPerBucket  = 30;     // sotto questa soglia il bucket e' rumore
@@ -70,6 +74,7 @@ double   s_maeAtTP[];    // MAE (punti) accumulato fino al tocco del TP
 double   s_maeFull[];    // MAE su tutto l'orizzonte
 double   s_mfe[];        // MFE su tutto l'orizzonte
 double   s_endPts[];     // P/L a scadenza orizzonte
+double   s_cost[];       // costo (spread+extra) in punti pagato all'ingresso
 int      s_tSL[];        // [s*g_nSL + k] primo tocco livello SL k
 int      g_n = 0;
 
@@ -214,7 +219,7 @@ void OnStart()
    int cap = 8192;
    ArrayResize(s_time, cap); ArrayResize(s_dir, cap); ArrayResize(s_tTP, cap);
    ArrayResize(s_maeAtTP, cap); ArrayResize(s_maeFull, cap); ArrayResize(s_mfe, cap);
-   ArrayResize(s_endPts, cap); ArrayResize(s_tSL, cap * g_nSL);
+   ArrayResize(s_endPts, cap); ArrayResize(s_cost, cap); ArrayResize(s_tSL, cap * g_nSL);
 
    int lastB = -1000000, lastS = -1000000;
    uint t0 = GetTickCount();
@@ -242,7 +247,7 @@ void OnStart()
          cap = g_n + 8192;
          ArrayResize(s_time, cap); ArrayResize(s_dir, cap); ArrayResize(s_tTP, cap);
          ArrayResize(s_maeAtTP, cap); ArrayResize(s_maeFull, cap); ArrayResize(s_mfe, cap);
-         ArrayResize(s_endPts, cap); ArrayResize(s_tSL, cap * g_nSL);
+         ArrayResize(s_endPts, cap); ArrayResize(s_cost, cap); ArrayResize(s_tSL, cap * g_nSL);
         }
 
       //--- walk forward
@@ -271,6 +276,7 @@ void OnStart()
       s_maeAtTP[g_n] = maeAtTP;
       s_maeFull[g_n] = mae;
       s_mfe[g_n]     = mfe;
+      s_cost[g_n]    = cost;
       s_endPts[g_n]  = (dir > 0) ? (g_r[last].close - E) / g_pt : (E - g_r[last].close) / g_pt;
       g_n++;
      }
@@ -295,15 +301,23 @@ double Pctl(double &a[], int n, double p)
   }
 
 //+------------------------------------------------------------------+
-void HitRow(string &html, string label, int n, int hits, double sumBars)
+void HitRow(string &html, string label, int n, int hits, double sumBars, double sumSpread = -1)
   {
    double hr = (n > 0) ? 100.0 * hits / n : 0;
    double ab = (hits > 0) ? sumBars / hits : 0;
    // errore standard della proporzione -> quanto e' affidabile
    double se = (n > 0) ? 100.0 * MathSqrt((hr/100.0) * (1 - hr/100.0) / n) : 0;
    string cls = (n < InpMinPerBucket) ? " class='thin'" : "";
-   html += StringFormat("<tr%s><td>%s</td><td>%d</td><td>%d</td><td><b>%.1f%%</b></td><td>&plusmn;%.1f</td><td>%.0f</td></tr>\n",
-                        cls, label, n, hits, hr, se, ab);
+   string sp  = "";
+   if(sumSpread >= 0 && n > 0)
+     {
+      double av = sumSpread / n;
+      sp = StringFormat("<td>%.0f</td><td style='color:%s'>%.1f%%</td>", av,
+                        (InpTPpoints > 0 && av/InpTPpoints > 0.15) ? "#bf616a" : "#7b8794",
+                        InpTPpoints > 0 ? 100.0*av/InpTPpoints : 0);
+     }
+   html += StringFormat("<tr%s><td>%s</td><td>%d</td><td>%d</td><td><b>%.1f%%</b></td><td>&plusmn;%.1f</td><td>%.0f</td>%s</tr>\n",
+                        cls, label, n, hits, hr, se, ab, sp);
   }
 
 //+------------------------------------------------------------------+
@@ -313,10 +327,12 @@ void WriteReport()
    int    mN[60], mH[60];  double mB[60];
    int    dN[7],  dH[7];   double dB[7];
    int    qN[1440], qH[1440];
+   double hSpread[24]; double qSpread[1440];
    ArrayInitialize(hN,0); ArrayInitialize(hH,0); ArrayInitialize(hB,0);
    ArrayInitialize(mN,0); ArrayInitialize(mH,0); ArrayInitialize(mB,0);
    ArrayInitialize(dN,0); ArrayInitialize(dH,0); ArrayInitialize(dB,0);
    ArrayInitialize(qN,0); ArrayInitialize(qH,0);
+   ArrayInitialize(hSpread,0); ArrayInitialize(qSpread,0);
 
    int totHit = 0, nBuy = 0, nSell = 0, hBuy = 0, hSell = 0;
    double sumBars = 0;
@@ -331,6 +347,7 @@ void WriteReport()
 
       int q = dt.hour * 60 + dt.min;
       hN[dt.hour]++; mN[dt.min]++; dN[dt.day_of_week]++; qN[q]++;
+      hSpread[dt.hour] += s_cost[s]; qSpread[q] += s_cost[s];
       if(hit)
         {
          totHit++; sumBars += bt;
@@ -387,6 +404,13 @@ void WriteReport()
                      DoubleToString(InpTPpoints * g_pt, _Digits), g_atrMed > 0 ? InpTPpoints / g_atrMed : 0);
    h += StringFormat("<div class='kpi'><span>TP per 1 lotto</span><b>%.0f %s</b></div>",
                      InpTPpoints * g_ptValue, AccountInfoString(ACCOUNT_CURRENCY));
+     {
+      double totCost = 0;
+      for(int s2 = 0; s2 < g_n; s2++) totCost += s_cost[s2];
+      double avc = totCost / g_n;
+      h += StringFormat("<div class='kpi'><span>Costo medio ingresso</span><b>%.0f pt</b>%.1f%% del TP</div>",
+                        avc, InpTPpoints > 0 ? 100.0*avc/InpTPpoints : 0);
+     }
    h += StringFormat("<div class='kpi'><span>Buy hit / Sell hit</span><b>%.1f%% / %.1f%%</b>%d / %d segnali</div>",
                      nBuy > 0 ? 100.0*hBuy/nBuy : 0, nSell > 0 ? 100.0*hSell/nSell : 0, nBuy, nSell);
 
@@ -394,8 +418,36 @@ void WriteReport()
         "2 volte il loro &plusmn;, <b>non sono diverse</b>: e' rumore. Le righe grigie hanno meno di "
         + IntegerToString(InpMinPerBucket) + " segnali e vanno ignorate.</div>";
 
-   h += "<h2>Per ORA del segnale</h2><table><tr><th>Ora</th><th>Segnali</th><th>Hit</th><th>Hit rate</th><th>&plusmn;</th><th>Barre medie al TP</th></tr>";
-   for(int i = 0; i < 24; i++) HitRow(h, StringFormat("%02d:00", i), hN[i], hH[i], hB[i]);
+//--- curva di raggiungimento: quanto in fretta arriva il target
+   h += "<h2>In quanto tempo arriva il target? (curva cumulativa)</h2>";
+   h += "<div class='note'>Serve a scegliere l'orizzonte. Un target raggiunto dopo 200 barre <b>non e' uno scalp</b>: "
+        "e' un trade intraday che hai contato come successo. Cerca il punto in cui la curva si appiattisce: "
+        "oltre quello stai solo aspettando, non guadagnando.</div>";
+   h += "<table><tr><th>Entro N barre</th><th>Hit cumulati</th><th>% sul totale segnali</th><th>% degli hit totali</th><th>Guadagno marginale</th></tr>";
+     {
+      int hz[10] = {1,3,5,10,15,30,60,120,240,600};
+      double prevPct = 0;
+      for(int k = 0; k < 10; k++)
+        {
+         if(hz[k] > InpMaxBars && k > 0 && hz[k-1] >= InpMaxBars) break;
+         int c = 0;
+         for(int s2 = 0; s2 < g_n; s2++) if(s_tTP[s2] != BIG && s_tTP[s2] < hz[k]) c++;
+         double pct = 100.0 * c / g_n;
+         h += StringFormat("<tr><td>%d</td><td>%d</td><td><b>%.1f%%</b></td><td>%.1f%%</td><td>%+.1f pp</td></tr>",
+                           MathMin(hz[k], InpMaxBars), c, pct,
+                           totHit > 0 ? 100.0*c/totHit : 0, pct - prevPct);
+         prevPct = pct;
+         if(hz[k] >= InpMaxBars) break;
+        }
+     }
+   h += "</table>";
+
+   h += "<div class='note'>La colonna <b>costo</b> e' lo spread medio effettivamente pagato in quell'ora. "
+        "In rosso quando supera il 15% del target: in quelle ore il broker si prende una fetta del tuo edge "
+        "prima ancora che il trade inizi.</div>";
+   h += "<table><tr><th>Ora</th><th>Segnali</th><th>Hit</th><th>Hit rate</th><th>&plusmn;</th><th>Barre medie al TP</th>"
+        "<th>Costo medio (pt)</th><th>% del TP</th></tr>";
+   for(int i = 0; i < 24; i++) HitRow(h, StringFormat("%02d:00", i), hN[i], hH[i], hB[i], hSpread[i]);
    h += "</table>";
 
    h += "<h2>Per GIORNO</h2><table><tr><th>Giorno</th><th>Segnali</th><th>Hit</th><th>Hit rate</th><th>&plusmn;</th><th>Barre medie</th></tr>";
@@ -450,7 +502,7 @@ void WriteReport()
            {
             int show = MathMin(nq, 30);
             h += StringFormat("<h3 style='color:#a3be8c;font-size:13px'>Migliori %d slot (su %d qualificati)</h3>", show, nq);
-            h += "<table><tr><th>Slot</th><th>Segnali</th><th>Hit</th><th>Hit rate</th><th>&plusmn;</th><th>Scarto vs media</th></tr>";
+            h += "<table><tr><th>Slot</th><th>Segnali</th><th>Hit</th><th>Hit rate</th><th>&plusmn;</th><th>Scarto vs media</th><th>Costo medio</th></tr>";
             for(int k = 0; k < show; k++)
               {
                int i = idx[k];
@@ -458,13 +510,13 @@ void WriteReport()
                double se = 100.0*MathSqrt((hr/100.0)*(1-hr/100.0)/qN[i]);
                double z  = (se > 0) ? (hr - hrTot)/se : 0;
                h += StringFormat("<tr><td>%02d:%02d</td><td>%d</td><td>%d</td><td><b>%.1f%%</b></td>"
-                                 "<td>&plusmn;%.1f</td><td style='color:%s'>%+.1f sigma</td></tr>",
+                                 "<td>&plusmn;%.1f</td><td style='color:%s'>%+.1f sigma</td><td>%.0f</td></tr>",
                                  i/60, i%60, qN[i], qH[i], hr, se,
-                                 MathAbs(z) > 2.5 ? "#ebcb8b" : "#7b8794", z);
+                                 MathAbs(z) > 2.5 ? "#ebcb8b" : "#7b8794", z, qSpread[i]/qN[i]);
               }
             h += "</table>";
             h += "<h3 style='color:#bf616a;font-size:13px'>Peggiori 15 slot</h3>";
-            h += "<table><tr><th>Slot</th><th>Segnali</th><th>Hit</th><th>Hit rate</th><th>&plusmn;</th><th>Scarto vs media</th></tr>";
+            h += "<table><tr><th>Slot</th><th>Segnali</th><th>Hit</th><th>Hit rate</th><th>&plusmn;</th><th>Scarto vs media</th><th>Costo medio</th></tr>";
             for(int k = MathMax(0, nq - 15); k < nq; k++)
               {
                int i = idx[k];
@@ -472,9 +524,9 @@ void WriteReport()
                double se = 100.0*MathSqrt((hr/100.0)*(1-hr/100.0)/qN[i]);
                double z  = (se > 0) ? (hr - hrTot)/se : 0;
                h += StringFormat("<tr><td>%02d:%02d</td><td>%d</td><td>%d</td><td><b>%.1f%%</b></td>"
-                                 "<td>&plusmn;%.1f</td><td style='color:%s'>%+.1f sigma</td></tr>",
+                                 "<td>&plusmn;%.1f</td><td style='color:%s'>%+.1f sigma</td><td>%.0f</td></tr>",
                                  i/60, i%60, qN[i], qH[i], hr, se,
-                                 MathAbs(z) > 2.5 ? "#ebcb8b" : "#7b8794", z);
+                                 MathAbs(z) > 2.5 ? "#ebcb8b" : "#7b8794", z, qSpread[i]/qN[i]);
               }
             h += "</table>";
            }
@@ -528,6 +580,130 @@ void WriteReport()
                         "(<b>plateau</b>); se e' un picco isolato circondato da valori negativi, e' overfitting.</div>",
                         g_sl[bestK], InpTPpoints, (double)InpTPpoints/g_sl[bestK], bestExp);
 
+//--- ============================================================
+//    CLASSIFICA ORARI PER EXPECTANCY NETTA (non solo hit rate)
+//--- ============================================================
+     {
+      int useK = -1;
+      if(InpRefSL > 0)
+        { int bd = BIG;
+          for(int k = 0; k < g_nSL; k++)
+             if(MathAbs(g_sl[k] - InpRefSL) < bd) { bd = MathAbs(g_sl[k] - InpRefSL); useK = k; } }
+      else useK = bestK;
+
+      if(useK >= 0)
+        {
+         int SLref = g_sl[useK];
+         h += StringFormat("<h2>Classifica ORARI per expectancy netta (TP %d / SL %d)</h2>",
+                           InpTPpoints, SLref);
+         h += "<div class='note'>Questa e' la tabella che risponde a <b>&quot;in quali orari conviene operare&quot;</b>. "
+              "L'hit rate da solo non basta: un'ora con hit rate alto ma spread doppio puo' rendere meno di una con "
+              "hit rate mediocre e spread stretto. Qui il costo e' gia' dentro. "
+              "<b>t-stat</b> sotto 2 = non distinguibile da zero, qualunque sia l'expectancy.</div>";
+
+         //--- per ora
+         double eSum[24], eSum2[24]; int eN[24];
+         ArrayInitialize(eSum,0); ArrayInitialize(eSum2,0); ArrayInitialize(eN,0);
+         //--- per bucket fine
+         int nb = 1440 / MathMax(InpBucketMin, 1);
+         double bSum[]; double bSum2[]; int bN[];
+         ArrayResize(bSum, nb); ArrayResize(bSum2, nb); ArrayResize(bN, nb);
+         ArrayInitialize(bSum,0); ArrayInitialize(bSum2,0); ArrayInitialize(bN,0);
+
+         for(int s2 = 0; s2 < g_n; s2++)
+           {
+            int ta = s_tSL[s2 * g_nSL + useK], tf = s_tTP[s2];
+            double p;
+            if(tf == BIG && ta == BIG) p = s_endPts[s2];
+            else if(ta <= tf)          p = -(double)SLref;
+            else                       p = (double)InpTPpoints;
+
+            MqlDateTime dt; TimeToStruct(s_time[s2], dt);
+            eN[dt.hour]++; eSum[dt.hour] += p; eSum2[dt.hour] += p*p;
+            int b = (dt.hour * 60 + dt.min) / MathMax(InpBucketMin, 1);
+            if(b >= 0 && b < nb) { bN[b]++; bSum[b] += p; bSum2[b] += p*p; }
+           }
+
+         //--- ordina le ore per expectancy
+         int oi[24]; double ok[24];
+         for(int i = 0; i < 24; i++) { oi[i] = i; ok[i] = (eN[i] > 0) ? eSum[i]/eN[i] : -DBL_MAX; }
+         for(int a = 0; a < 23; a++)
+            for(int b3 = a + 1; b3 < 24; b3++)
+               if(ok[b3] > ok[a])
+                 { double t1 = ok[a]; ok[a] = ok[b3]; ok[b3] = t1;
+                   int t2 = oi[a]; oi[a] = oi[b3]; oi[b3] = t2; }
+
+         h += "<table><tr><th>#</th><th>Ora</th><th>Segnali</th><th>Expectancy pt</th><th>Net pt</th>"
+              "<th>Net " + AccountInfoString(ACCOUNT_CURRENCY) + "/lotto</th><th>t-stat</th></tr>";
+         for(int k = 0; k < 24; k++)
+           {
+            int i = oi[k];
+            if(eN[i] == 0) continue;
+            double mean = eSum[i]/eN[i];
+            double var  = (eN[i] > 1) ? (eSum2[i] - eN[i]*mean*mean)/(eN[i]-1) : 0;
+            double sd   = (var > 0) ? MathSqrt(var) : 0;
+            double tst  = (sd > 0 && eN[i] > 1) ? mean/(sd/MathSqrt((double)eN[i])) : 0;
+            string cls  = (eN[i] < InpMinPerBucket) ? " class='thin'" : "";
+            h += StringFormat("<tr%s><td>%d</td><td>%02d:00</td><td>%d</td>"
+                              "<td style='color:%s'><b>%.1f</b></td><td>%.0f</td><td>%.0f</td>"
+                              "<td style='color:%s'>%.2f</td></tr>",
+                              cls, k+1, i, eN[i],
+                              mean > 0 ? "#a3be8c" : "#bf616a", mean, eSum[i], eSum[i]*g_ptValue,
+                              MathAbs(tst) > 2.0 ? "#ebcb8b" : "#7b8794", tst);
+           }
+         h += "</table>";
+
+         //--- bucket fine, solo i migliori
+         int bi2[]; double bk[]; int nbq = 0;
+         ArrayResize(bi2, nb); ArrayResize(bk, nb);
+         for(int i = 0; i < nb; i++)
+            if(bN[i] >= InpMinPerBucket) { bi2[nbq] = i; bk[nbq] = bSum[i]/bN[i]; nbq++; }
+         for(int a = 0; a < nbq - 1; a++)
+            for(int b3 = a + 1; b3 < nbq; b3++)
+               if(bk[b3] > bk[a])
+                 { double t1 = bk[a]; bk[a] = bk[b3]; bk[b3] = t1;
+                   int t2 = bi2[a]; bi2[a] = bi2[b3]; bi2[b3] = t2; }
+
+         h += StringFormat("<h2>Finestre da %d minuti &mdash; migliori e peggiori</h2>", InpBucketMin);
+         h += StringFormat("<div class='note'>Bucket da %d minuti: compromesso fra risoluzione e rumore. "
+              "Molto piu' affidabile della tabella HH:MM al minuto singolo, che con 1440 celle produce "
+              "falsi positivi a raffica. Una finestra e' credibile se anche le finestre <b>adiacenti</b> "
+              "vanno nella stessa direzione.</div>", InpBucketMin);
+         if(nbq == 0)
+            h += "<div class='note'>Nessuna finestra raggiunge " + IntegerToString(InpMinPerBucket) + " segnali.</div>";
+         else
+           {
+            h += "<table><tr><th>Finestra</th><th>Segnali</th><th>Expectancy pt</th><th>Net pt</th><th>t-stat</th></tr>";
+            int show2 = MathMin(nbq, 12);
+            for(int k = 0; k < show2; k++)
+              {
+               int i = bi2[k]; int st = i * InpBucketMin, en = st + InpBucketMin - 1;
+               double mean = bSum[i]/bN[i];
+               double var  = (bN[i] > 1) ? (bSum2[i] - bN[i]*mean*mean)/(bN[i]-1) : 0;
+               double sd   = (var > 0) ? MathSqrt(var) : 0;
+               double tst  = (sd > 0 && bN[i] > 1) ? mean/(sd/MathSqrt((double)bN[i])) : 0;
+               h += StringFormat("<tr><td>%02d:%02d - %02d:%02d</td><td>%d</td><td style='color:#a3be8c'><b>%.1f</b></td>"
+                                 "<td>%.0f</td><td style='color:%s'>%.2f</td></tr>",
+                                 st/60, st%60, en/60, en%60, bN[i], mean, bSum[i],
+                                 MathAbs(tst) > 2.0 ? "#ebcb8b" : "#7b8794", tst);
+              }
+            for(int k = MathMax(show2, nbq - 6); k < nbq; k++)
+              {
+               int i = bi2[k]; int st = i * InpBucketMin, en = st + InpBucketMin - 1;
+               double mean = bSum[i]/bN[i];
+               double var  = (bN[i] > 1) ? (bSum2[i] - bN[i]*mean*mean)/(bN[i]-1) : 0;
+               double sd   = (var > 0) ? MathSqrt(var) : 0;
+               double tst  = (sd > 0 && bN[i] > 1) ? mean/(sd/MathSqrt((double)bN[i])) : 0;
+               h += StringFormat("<tr><td>%02d:%02d - %02d:%02d</td><td>%d</td><td style='color:#bf616a'><b>%.1f</b></td>"
+                                 "<td>%.0f</td><td style='color:%s'>%.2f</td></tr>",
+                                 st/60, st%60, en/60, en%60, bN[i], mean, bSum[i],
+                                 MathAbs(tst) > 2.0 ? "#ebcb8b" : "#7b8794", tst);
+              }
+            h += "</table>";
+           }
+        }
+     }
+
    h += "<div class='note'>Nota: se SL e TP cadono nella stessa barra M1 viene contato lo <b>stop</b> (ipotesi pessimista). "
         "Ingresso all'open della barra +" + IntegerToString(InpEntryDelay) + ", costi gia' dedotti dal prezzo di ingresso. "
         "I trade \"scaduti\" sono chiusi al close dell'ultima barra dell'orizzonte.</div>";
@@ -549,7 +725,7 @@ void WriteCSV()
    string fn = "HitRate_" + _Symbol + "_TP" + IntegerToString(InpTPpoints) + ".csv";
    int f = FileOpen(fn, FILE_WRITE|FILE_TXT|FILE_ANSI);
    if(f == INVALID_HANDLE) return;
-   FileWriteString(f, "time;dir;hour;minute;dow;hit;bars_to_tp;mae_at_tp;mae_full;mfe;end_pts\n");
+   FileWriteString(f, "time;dir;hour;minute;dow;hit;bars_to_tp;mae_at_tp;mae_full;mfe;end_pts;cost_pts\n");
    for(int s = 0; s < g_n; s++)
      {
       MqlDateTime dt; TimeToStruct(s_time[s], dt);
@@ -557,7 +733,7 @@ void WriteCSV()
       FileWriteString(f, StringFormat("%s;%d;%d;%d;%d;%d;%s;%s;%.1f;%.1f;%.1f\n",
          TimeToString(s_time[s], TIME_DATE|TIME_MINUTES), s_dir[s], dt.hour, dt.min, dt.day_of_week,
          hit ? 1 : 0, hit ? IntegerToString(s_tTP[s]) : "", hit ? DoubleToString(s_maeAtTP[s],1) : "",
-         s_maeFull[s], s_mfe[s], s_endPts[s]));
+         s_maeFull[s], s_mfe[s], s_endPts[s], s_cost[s]));
      }
    FileClose(f);
    Print("CSV: MQL5/Files/", fn);
