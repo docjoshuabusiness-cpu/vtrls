@@ -48,6 +48,10 @@ input group "=== CLASSIFICA ORARI ==="
 input int      InpRefSL         = 0;      // SL di riferimento per la classifica (0 = usa il migliore dello sweep)
 input int      InpBucketMin     = 30;     // ampiezza bucket in minuti per la classifica fine (15/30/60)
 
+input group "=== TEST DEL SEGNALE ==="
+input bool     InpInvertSignals = false;  // inverte ogni segnale (per testare se l'edge e' al contrario)
+input int      InpOnlyDir       = 0;      // 0 = entrambi, 1 = solo buy, -1 = solo sell
+
 input group "=== ALTRO ==="
 input int      InpCooldownBars  = 0;      // scarta segnali stessa direzione entro N barre
 input int      InpMinPerBucket  = 30;     // sotto questa soglia il bucket e' rumore
@@ -229,6 +233,8 @@ void OnStart()
       if(g_r[i].time < InpFrom || g_r[i].time > InpTo) continue;
       int dir = EvalSignal(i);
       if(dir == 0) continue;
+      if(InpInvertSignals) dir = -dir;
+      if(InpOnlyDir != 0 && dir != InpOnlyDir) continue;
       if(InpCooldownBars > 0)
         {
          if(dir > 0 && i - lastB < InpCooldownBars) continue;
@@ -730,7 +736,7 @@ void WriteCSV()
      {
       MqlDateTime dt; TimeToStruct(s_time[s], dt);
       bool hit = (s_tTP[s] != BIG);
-      FileWriteString(f, StringFormat("%s;%d;%d;%d;%d;%d;%s;%s;%.1f;%.1f;%.1f\n",
+      FileWriteString(f, StringFormat("%s;%d;%d;%d;%d;%d;%s;%s;%.1f;%.1f;%.1f;%.1f\n",
          TimeToString(s_time[s], TIME_DATE|TIME_MINUTES), s_dir[s], dt.hour, dt.min, dt.day_of_week,
          hit ? 1 : 0, hit ? IntegerToString(s_tTP[s]) : "", hit ? DoubleToString(s_maeAtTP[s],1) : "",
          s_maeFull[s], s_mfe[s], s_endPts[s], s_cost[s]));
