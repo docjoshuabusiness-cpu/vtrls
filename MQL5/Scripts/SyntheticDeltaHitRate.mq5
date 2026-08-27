@@ -61,7 +61,7 @@ input int      InpOnlyDir       = 0;      // 0 = entrambi, 1 = solo buy, -1 = so
 input group "=== ALTRO ==="
 input int      InpCooldownBars  = 0;      // scarta segnali stessa direzione entro N barre
 input int      InpMinPerBucket  = 30;     // sotto questa soglia il bucket e' rumore
-input bool     InpExportCSV     = true;
+input bool     InpExportCSV     = false;  // il digest sostituisce il CSV; attivalo solo per analisi offline
 
 #define BIG 2147483647
 
@@ -90,6 +90,7 @@ int      s_tSL[];        // [s*g_nSL + k] primo tocco livello SL k
 int      g_n = 0;
 
 //--- prototipi
+string BuildDigest();
 void   WriteReport();
 void   WriteCSV();
 
@@ -336,6 +337,242 @@ void HitRow(string &html, string label, int n, int hits, double sumBars, double 
      }
    html += StringFormat("<tr%s><td>%s</td><td>%d</td><td>%d</td><td><b>%.1f%%</b></td><td>&plusmn;%.1f</td><td>%.0f</td>%s</tr>\n",
                         cls, label, n, hits, hr, se, ab, sp);
+  }
+
+
+//+------------------------------------------------------------------+
+//| DIGEST: tutte le statistiche in ~80 righe di testo, da incollare  |
+//| in chat al posto del CSV completo.                                |
+//+------------------------------------------------------------------+
+string BuildDigest()
+  {
+   string d = "### SYNTHDELTA DIGEST v1\n";
+
+//--- contesto
+   d += StringFormat("SYM|%s|digits|%d|point|%s|ptval|%.5f|ccy|%s\n",
+                     _Symbol, _Digits, DoubleToString(g_pt, 8), g_ptValue, AccountInfoString(ACCOUNT_CURRENCY));
+   d += StringFormat("TF|%s|bars|%d|from|%s|to|%s|atrmed|%.0f\n",
+                     EnumToString(InpTF), g_bars,
+                     TimeToString(g_r[0].time, TIME_DATE|TIME_MINUTES),
+                     TimeToString(g_r[g_bars-1].time, TIME_DATE|TIME_MINUTES), g_atrMed);
+   d += StringFormat("PAR|tp|%d|maxbars|%d|delay|%d|cooldown|%d|invert|%d|onlydir|%d|costfix|%.0f|costextra|%.0f|tzoff|%d\n",
+                     InpTPpoints, InpMaxBars, InpEntryDelay, InpCooldownBars,
+                     InpInvertSignals ? 1 : 0, InpOnlyDir, InpCostPoints, InpExtraCostPts, InpTimeOffsetH);
+   d += StringFormat("IND|ema|%d|volavg|%d|thr|%.3f|adx|%d|adxp|%d|adxmin|%.1f|sr|%d|srlb|%d|srprox|%.2f|atrp|%d|scan|%d|smin|%.3f|smax|%.3f|steps|%d\n",
+                     EmaPeriod, VolAvgPeriod, SignalThreshold, UseADXFilter ? 1 : 0, ADX_Period, ADX_MinLevel,
+                     UseSRFilter ? 1 : 0, SR_Lookback, SR_Proximity, ATR_Period,
+                     InpThresholdScan ? 1 : 0, InpScanMinDelta, InpScanMaxDelta, InpScanSteps);
+
+//--- globali
+   int nDays = 0; long prevDay = -1;
+   double totCost = 0;
+   int hits = 0;
+   for(int s = 0; s < g_n; s++)
+     {
+      long day = (long)s_time[s] / 86400;
+      if(day != prevDay) { nDays++; prevDay = day; }
+      totCost += s_cost[s];
+      if(s_tTP[s] != BIG) hits++;
+     }
+   if(nDays < 1) nDays = 1;
+   d += StringFormat("GLOB|n|%d|days|%d|perday|%.1f|hit_pct|%.2f|cost_mean|%.0f|cost_pct_tp|%.1f\n",
+                     g_n, nDays, (double)g_n/nDays, 100.0*hits/g_n, totCost/g_n,
+                     InpTPpoints > 0 ? 100.0*(totCost/g_n)/InpTPpoints : 0);
+
+//--- simmetria (test pulito)
+   int fo = 0, ao = 0, both = 0, neither = 0;
+   for(int s = 0; s < g_n; s++)
+     {
+      bool f = (s_tTP[s] != BIG);
+      bool a = (s_maeFull[s] >= (double)InpTPpoints);
+      if(f && a) both++; else if(f) fo++; else if(a) ao++; else neither++;
+     }
+   double zg = (fo + ao > 0) ? (fo - ao)/MathSqrt((double)(fo + ao)) : 0;
+   d += StringFormat("SYMM|favonly|%d|advonly|%d|both|%d|neither|%d|z|%.2f\n", fo, ao, both, neither, zg);
+
+//--- curva tempo->target
+   d += "TTT";
+   int hz[9] = {1,3,5,10,15,30,60,120,240};
+   for(int k = 0; k < 9; k++)
+     {
+      if(hz[k] > InpMaxBars) break;
+      int c = 0;
+      for(int s = 0; s < g_n; s++) if(s_tTP[s] != BIG && s_tTP[s] < hz[k]) c++;
+      d += StringFormat("|%d|%.1f", hz[k], 100.0*c/g_n);
+     }
+   d += "\n";
+
+//--- MAE prima del TP
+     {
+      double mw[]; int nw = 0; ArrayResize(mw, g_n);
+      for(int s = 0; s < g_n; s++) if(s_tTP[s] != BIG) mw[nw++] = s_maeAtTP[s];
+      if(nw > 0)
+        {
+         ArrayResize(mw, nw); ArraySort(mw);
+         double q[6] = {0.25, 0.50, 0.75, 0.90, 0.95, 0.99};
+         d += StringFormat("MAEWIN|n|%d", nw);
+         for(int k = 0; k < 6; k++) d += StringFormat("|p%d|%.0f", (int)(q[k]*100), mw[(int)(q[k]*(nw-1))]);
+         d += StringFormat("|max|%.0f\n", mw[nw-1]);
+        }
+     }
+
+//--- sweep SL
+   for(int k = 0; k < g_nSL; k++)
+     {
+      int wT = 0, wS = 0, wO = 0; double sum = 0, sum2 = 0;
+      for(int s = 0; s < g_n; s++)
+        {
+         int ta = s_tSL[s * g_nSL + k], tf = s_tTP[s];
+         double p;
+         if(tf == BIG && ta == BIG) { wO++; p = s_endPts[s]; }
+         else if(ta <= tf)          { wS++; p = -(double)g_sl[k]; }
+         else                       { wT++; p = (double)InpTPpoints; }
+         sum += p; sum2 += p*p;
+        }
+      double m = sum/g_n;
+      double v = (g_n > 1) ? (sum2 - g_n*m*m)/(g_n-1) : 0;
+      double sd = (v > 0) ? MathSqrt(v) : 0;
+      double t = (sd > 0) ? m/(sd/MathSqrt((double)g_n)) : 0;
+      d += StringFormat("SL|%d|tp|%.1f|sl|%.1f|to|%.1f|exp|%.1f|t|%.2f\n",
+                        g_sl[k], 100.0*wT/g_n, 100.0*wS/g_n, 100.0*wO/g_n, m, t);
+     }
+
+//--- SL di riferimento per le expectancy successive
+   int refK = 0; double bestM = -DBL_MAX;
+   for(int k = 0; k < g_nSL; k++)
+     {
+      double sum = 0;
+      for(int s = 0; s < g_n; s++)
+        {
+         int ta = s_tSL[s * g_nSL + k], tf = s_tTP[s];
+         if(tf == BIG && ta == BIG) sum += s_endPts[s];
+         else if(ta <= tf)          sum -= (double)g_sl[k];
+         else                       sum += (double)InpTPpoints;
+        }
+      if(sum/g_n > bestM) { bestM = sum/g_n; refK = k; }
+     }
+   d += StringFormat("REFSL|%d|exp|%.1f\n", g_sl[refK], bestM);
+
+//--- per ora
+   for(int hh = 0; hh < 24; hh++)
+     {
+      int n = 0, hi = 0, f2 = 0, a2 = 0; double sum = 0, sum2 = 0, cst = 0;
+      for(int s = 0; s < g_n; s++)
+        {
+         MqlDateTime dt; TimeToStruct(s_time[s], dt);
+         if(dt.hour != hh) continue;
+         n++; cst += s_cost[s];
+         bool f = (s_tTP[s] != BIG);
+         bool a = (s_maeFull[s] >= (double)InpTPpoints);
+         if(f) hi++;
+         if(f && !a) f2++;
+         if(a && !f) a2++;
+         int ta = s_tSL[s * g_nSL + refK];
+         double p;
+         if(!f && ta == BIG)          p = s_endPts[s];
+         else if(ta <= (f ? s_tTP[s] : BIG)) p = -(double)g_sl[refK];
+         else                          p = (double)InpTPpoints;
+         sum += p; sum2 += p*p;
+        }
+      if(n == 0) continue;
+      double m = sum/n;
+      double v = (n > 1) ? (sum2 - n*m*m)/(n-1) : 0;
+      double sd = (v > 0) ? MathSqrt(v) : 0;
+      double t = (sd > 0) ? m/(sd/MathSqrt((double)n)) : 0;
+      double z = (f2 + a2 > 0) ? (f2 - a2)/MathSqrt((double)(f2 + a2)) : 0;
+      d += StringFormat("HOUR|%d|n|%d|hit|%.1f|fo|%.1f|ao|%.1f|z|%.2f|exp|%.1f|t|%.2f|cost|%.0f\n",
+                        hh, n, 100.0*hi/n, 100.0*f2/n, 100.0*a2/n, z, m, t, cst/n);
+     }
+
+//--- giorno e direzione
+   for(int dd = 0; dd < 7; dd++)
+     {
+      int n = 0, f2 = 0, a2 = 0;
+      for(int s = 0; s < g_n; s++)
+        {
+         MqlDateTime dt; TimeToStruct(s_time[s], dt);
+         if(dt.day_of_week != dd) continue;
+         n++;
+         bool f = (s_tTP[s] != BIG); bool a = (s_maeFull[s] >= (double)InpTPpoints);
+         if(f && !a) f2++; if(a && !f) a2++;
+        }
+      if(n == 0) continue;
+      double z = (f2 + a2 > 0) ? (f2 - a2)/MathSqrt((double)(f2 + a2)) : 0;
+      d += StringFormat("DOW|%d|n|%d|fo|%.1f|ao|%.1f|z|%.2f\n", dd, n, 100.0*f2/n, 100.0*a2/n, z);
+     }
+   for(int k = 0; k < 2; k++)
+     {
+      int want = (k == 0) ? 1 : -1;
+      int n = 0, f2 = 0, a2 = 0;
+      for(int s = 0; s < g_n; s++)
+        {
+         if(s_dir[s] != want) continue;
+         n++;
+         bool f = (s_tTP[s] != BIG); bool a = (s_maeFull[s] >= (double)InpTPpoints);
+         if(f && !a) f2++; if(a && !f) a2++;
+        }
+      if(n == 0) continue;
+      double z = (f2 + a2 > 0) ? (f2 - a2)/MathSqrt((double)(f2 + a2)) : 0;
+      d += StringFormat("DIR|%d|n|%d|fo|%.1f|ao|%.1f|z|%.2f\n", want, n, 100.0*f2/n, 100.0*a2/n, z);
+     }
+
+//--- curva soglia e decili
+   if(InpThresholdScan)
+     {
+      int nst = MathMax(InpScanSteps, 2);
+      for(int k = 0; k < nst; k++)
+        {
+         double thr = InpScanMinDelta + (InpScanMaxDelta - InpScanMinDelta) * k / (nst - 1.0);
+         int n = 0, f2 = 0, a2 = 0; double sum = 0, sum2 = 0;
+         for(int s = 0; s < g_n; s++)
+           {
+            if(MathAbs(s_delta[s]) < thr) continue;
+            n++;
+            bool f = (s_tTP[s] != BIG); bool a = (s_maeFull[s] >= (double)InpTPpoints);
+            if(f && !a) f2++; if(a && !f) a2++;
+            int ta = s_tSL[s * g_nSL + refK];
+            double p;
+            if(!f && ta == BIG)                 p = s_endPts[s];
+            else if(ta <= (f ? s_tTP[s] : BIG)) p = -(double)g_sl[refK];
+            else                                p = (double)InpTPpoints;
+            sum += p; sum2 += p*p;
+           }
+         if(n == 0) continue;
+         double m = sum/n;
+         double v = (n > 1) ? (sum2 - n*m*m)/(n-1) : 0;
+         double sd = (v > 0) ? MathSqrt(v) : 0;
+         double t = (sd > 0) ? m/(sd/MathSqrt((double)n)) : 0;
+         double z = (f2 + a2 > 0) ? (f2 - a2)/MathSqrt((double)(f2 + a2)) : 0;
+         d += StringFormat("THR|%.3f|n|%d|perday|%.1f|fo|%.1f|ao|%.1f|edge|%.1f|z|%.2f|exp|%.1f|t|%.2f\n",
+                           thr, n, (double)n/nDays, 100.0*f2/n, 100.0*a2/n,
+                           100.0*(f2-a2)/n, z, m, t);
+        }
+
+      double srt[]; ArrayResize(srt, g_n);
+      for(int s = 0; s < g_n; s++) srt[s] = MathAbs(s_delta[s]);
+      ArraySort(srt);
+      for(int q = 0; q < 10; q++)
+        {
+         double lo = srt[(int)((q/10.0)*(g_n-1))];
+         double hi2 = srt[(int)(((q+1)/10.0)*(g_n-1))];
+         int n = 0, f2 = 0, a2 = 0;
+         for(int s = 0; s < g_n; s++)
+           {
+            double a3 = MathAbs(s_delta[s]);
+            if(a3 < lo || (q < 9 && a3 >= hi2)) continue;
+            n++;
+            bool f = (s_tTP[s] != BIG); bool a = (s_maeFull[s] >= (double)InpTPpoints);
+            if(f && !a) f2++; if(a && !f) a2++;
+           }
+         if(n == 0) continue;
+         double z = (f2 + a2 > 0) ? (f2 - a2)/MathSqrt((double)(f2 + a2)) : 0;
+         d += StringFormat("DEC|%d|lo|%.4f|hi|%.4f|n|%d|fo|%.1f|ao|%.1f|edge|%.1f|z|%.2f\n",
+                           q+1, lo, hi2, n, 100.0*f2/n, 100.0*a2/n, 100.0*(f2-a2)/n, z);
+        }
+     }
+
+   d += "### END\n";
+   return d;
   }
 
 //+------------------------------------------------------------------+
@@ -847,6 +1084,21 @@ void WriteReport()
         "Ingresso all'open della barra +" + IntegerToString(InpEntryDelay) + ", costi gia' dedotti dal prezzo di ingresso. "
         "I trade \"scaduti\" sono chiusi al close dell'ultima barra dell'orizzonte.</div>";
 
+//--- DIGEST da incollare in chat
+   string dg = BuildDigest();
+   h += "<h2>Digest da copiare</h2>";
+   h += "<div class='note'>Seleziona tutto il blocco qui sotto e incollalo in chat: contiene ogni statistica "
+        "del report in forma compatta. Sostituisce il CSV completo, che con decine di migliaia di righe "
+        "e' inutilizzabile in conversazione. Lo stesso testo e' salvato in <b>MQL5/Files/"
+        "SynthDelta_digest.txt</b>.</div>";
+   h += "<pre style='background:#0f1114;border:1px solid #2e3440;border-radius:6px;padding:14px;"
+        "overflow-x:auto;font:11px/1.45 ui-monospace,Consolas,monospace;color:#d8dee9;white-space:pre'>";
+   string esc = dg;
+   StringReplace(esc, "&", "&amp;");
+   StringReplace(esc, "<", "&lt;");
+   h += esc;
+   h += "</pre>";
+
    h += "</body></html>";
 
    string fn = "HitRate_" + _Symbol + "_TP" + IntegerToString(InpTPpoints) + ".html";
@@ -855,6 +1107,11 @@ void WriteReport()
    FileWriteString(f, h);
    FileClose(f);
    Print("Report: MQL5/Files/", fn);
+     {
+      string dfn = "SynthDelta_digest.txt";
+      int df = FileOpen(dfn, FILE_WRITE|FILE_TXT|FILE_ANSI);
+      if(df != INVALID_HANDLE) { FileWriteString(df, dg); FileClose(df); Print("Digest: MQL5/Files/", dfn); }
+     }
    Print("Hit rate globale: ", DoubleToString(hrTot, 1), "% (", totHit, "/", g_n, ")");
   }
 
