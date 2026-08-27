@@ -36,12 +36,21 @@ input double InpCostPoints     = 0;      // 0 = usa lo spread reale della barra;
 input double InpExtraCostPts   = 0;      // commissione/slippage extra in punti (round turn)
 input bool   InpOnePosAtTime   = false;  // true = scarta segnali sovrapposti al trade aperto
 
-input group "=== GRIGLIA STOP LOSS (punti) ==="
+input group "=== MODALITA GRIGLIA ==="
+input bool   InpGridFromATR = true;   // true = griglia in multipli di ATR mediano (auto-scala su ogni simbolo)
+input double InpSLatrMin    = 0.5;    // SL minimo in multipli di ATR
+input double InpSLatrMax    = 6.0;    // SL massimo in multipli di ATR
+input int    InpSLatrSteps  = 10;
+input double InpTPatrMin    = 0.5;    // TP minimo in multipli di ATR
+input double InpTPatrMax    = 10.0;   // TP massimo in multipli di ATR
+input int    InpTPatrSteps  = 10;
+
+input group "=== GRIGLIA STOP LOSS (punti, solo se InpGridFromATR=false) ==="
 input int    InpSLMin  = 200;
 input int    InpSLMax  = 2000;
 input int    InpSLStep = 200;
 
-input group "=== GRIGLIA TAKE PROFIT (punti) ==="
+input group "=== GRIGLIA TAKE PROFIT (punti, solo se InpGridFromATR=false) ==="
 input int    InpTPMin  = 250;
 input int    InpTPMax  = 2500;
 input int    InpTPStep = 250;
@@ -78,8 +87,13 @@ MqlRates  g_r[];
 double    g_ema[], g_atr[], g_adx[];
 int       g_bars = 0;
 double    g_pt;
+double    g_atrMedPts = 0;   // ATR mediano in punti sul periodo analizzato
+double    g_ptValue   = 0;   // valore di 1 punto per 1 lotto, in valuta conto
 
 //--- prototipi
+void   BuildGrids();
+void   ComputeMedianATR();
+void   ComputePointValue();
 void   WriteReport(int bi, int bj);
 void   WriteCSV();
 void   ComboStats(int iSL, int jTP, double &net, double &pf, double &wr, double &expc, double &maxDD);
@@ -120,12 +134,65 @@ bool CopyChunked(int h, int buf, int total, double &dst[])
   }
 
 //+------------------------------------------------------------------+
+void AddLevel(int &arr[], int &n, int v)
+  {
+   if(v < 1) v = 1;
+   if(n > 0 && arr[n-1] >= v) return;   // scarta duplicati/non crescenti
+   ArrayResize(arr, n + 1);
+   arr[n++] = v;
+  }
+
+//+------------------------------------------------------------------+
 void BuildGrids()
   {
-   for(int v = InpSLMin; v <= InpSLMax; v += InpSLStep)
-     { ArrayResize(g_slLev, g_nSL + 1); g_slLev[g_nSL++] = v; }
-   for(int v = InpTPMin; v <= InpTPMax; v += InpTPStep)
-     { ArrayResize(g_tpLev, g_nTP + 1); g_tpLev[g_nTP++] = v; }
+   if(InpGridFromATR && g_atrMedPts > 0)
+     {
+      int nS = MathMax(InpSLatrSteps, 2), nT = MathMax(InpTPatrSteps, 2);
+      for(int k = 0; k < nS; k++)
+        {
+         double mult = InpSLatrMin + (InpSLatrMax - InpSLatrMin) * k / (nS - 1.0);
+         AddLevel(g_slLev, g_nSL, (int)MathRound(mult * g_atrMedPts));
+        }
+      for(int k = 0; k < nT; k++)
+        {
+         double mult = InpTPatrMin + (InpTPatrMax - InpTPatrMin) * k / (nT - 1.0);
+         AddLevel(g_tpLev, g_nTP, (int)MathRound(mult * g_atrMedPts));
+        }
+     }
+   else
+     {
+      for(int v = InpSLMin; v <= InpSLMax; v += InpSLStep) AddLevel(g_slLev, g_nSL, v);
+      for(int v = InpTPMin; v <= InpTPMax; v += InpTPStep) AddLevel(g_tpLev, g_nTP, v);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| ATR mediano in punti sulla finestra di analisi                   |
+//+------------------------------------------------------------------+
+void ComputeMedianATR()
+  {
+   double tmp[]; int n = 0;
+   ArrayResize(tmp, g_bars);
+   for(int i = 0; i < g_bars; i++)
+     {
+      if(g_r[i].time < InpFrom || g_r[i].time > InpTo) continue;
+      if(g_atr[i] <= 0) continue;
+      tmp[n++] = g_atr[i] / g_pt;
+     }
+   if(n == 0) { g_atrMedPts = 0; return; }
+   ArrayResize(tmp, n);
+   ArraySort(tmp);
+   g_atrMedPts = (n % 2) ? tmp[n/2] : 0.5 * (tmp[n/2 - 1] + tmp[n/2]);
+  }
+
+//+------------------------------------------------------------------+
+//| Valore in valuta conto di 1 punto per 1 lotto                    |
+//+------------------------------------------------------------------+
+void ComputePointValue()
+  {
+   double tickVal  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   g_ptValue = (tickSize > 0) ? tickVal * (g_pt / tickSize) : 0.0;
   }
 
 //+------------------------------------------------------------------+
@@ -277,9 +344,6 @@ void OnStart()
       Print("ATTENZIONE: timeframe corrente ", EnumToString((ENUM_TIMEFRAMES)_Period),
             " - lo studio e' pensato per M1.");
 
-   BuildGrids();
-   Print("Griglia: ", g_nSL, " livelli SL x ", g_nTP, " livelli TP = ", g_nSL*g_nTP, " combinazioni");
-
 //--- dati
    ArraySetAsSeries(g_r, false);
    g_bars = CopyRates(_Symbol, _Period, 0, TerminalInfoInteger(TERMINAL_MAXBARS), g_r);
@@ -298,6 +362,21 @@ void OnStart()
    if(!CopyChunked(hAtr, 0, g_bars, g_atr)) return;
    if(UseADXFilter) { if(!CopyChunked(hAdx, 0, g_bars, g_adx)) return; }
    else { ArrayResize(g_adx, g_bars); ArrayInitialize(g_adx, 100.0); }
+
+//--- griglia auto-scalante sulla volatilita' dello strumento
+   ComputeMedianATR();
+   ComputePointValue();
+   BuildGrids();
+   Print("--- ", _Symbol, " | Digits=", _Digits, " | Point=", DoubleToString(g_pt, 8),
+         " | 1 pt x 1 lotto = ", DoubleToString(g_ptValue, 4), " ", AccountInfoString(ACCOUNT_CURRENCY));
+   Print("ATR(", ATR_Period, ") M1 mediano = ", DoubleToString(g_atrMedPts, 1), " punti = ",
+         DoubleToString(g_atrMedPts * g_pt, _Digits), " in prezzo");
+   string sSL = "", sTP = "";
+   for(int k = 0; k < g_nSL; k++) sSL += IntegerToString(g_slLev[k]) + " ";
+   for(int k = 0; k < g_nTP; k++) sTP += IntegerToString(g_tpLev[k]) + " ";
+   Print("Griglia SL (pt): ", sSL);
+   Print("Griglia TP (pt): ", sTP);
+   Print("Combinazioni: ", g_nSL * g_nTP);
 
 //--- scansione segnali
    int minBars = MathMax(MathMax(EmaPeriod, VolAvgPeriod), MathMax(ATR_Period, SR_Lookback)) + 2;
@@ -418,7 +497,13 @@ void WriteReport(int bi, int bj)
    ArrayInitialize(dN,0); ArrayInitialize(dS,0); ArrayInitialize(dS2,0); ArrayInitialize(dW,0); ArrayInitialize(dGP,0); ArrayInitialize(dGL,0);
 
    int nBuy = 0, nSell = 0; double sBuy = 0, sSell = 0;
-   double thr[8] = {250,500,750,1000,1500,2000,2500,3000};
+   double thr[8];
+   if(InpGridFromATR && g_atrMedPts > 0)
+     { double mm[8] = {0.5,1,2,3,5,8,12,20};
+       for(int k=0;k<8;k++) thr[k] = MathRound(mm[k]*g_atrMedPts); }
+   else
+     { double ff[8] = {250,500,750,1000,1500,2000,2500,3000};
+       for(int k=0;k<8;k++) thr[k] = ff[k]; }
    int    reach[8]; ArrayInitialize(reach, 0);
    double barsToReach[8]; ArrayInitialize(barsToReach, 0);
 
@@ -452,7 +537,7 @@ void WriteReport(int bi, int bj)
    html += "th{background:#1e222a;color:#8fbcbb;font-weight:600}td:first-child,th:first-child{text-align:left}";
    html += ".pos td{color:#a3be8c}.neg td{color:#bf616a}.thin td{color:#4c566a;font-style:italic}";
    html += ".kpi{display:inline-block;background:#1e222a;border:1px solid #2e3440;border-radius:6px;padding:10px 16px;margin:4px 8px 4px 0;min-width:110px}";
-   html += ".kpi b{display:block;font-size:19px;color:#eceff4}.kpi span{font-size:11px;color:#7b8794;text-transform:uppercase;letter-spacing:.5px}";
+   html += ".kpi b{display:block;font-size:19px;color:#eceff4}.kpi{font-size:11px;color:#7b8794}.kpi span{font-size:11px;color:#7b8794;text-transform:uppercase;letter-spacing:.5px}";
    html += ".note{background:#1e222a;border-left:3px solid #ebcb8b;padding:10px 14px;margin:12px 0;color:#c8ccd4}";
    html += "</style></head><body>";
 
@@ -461,12 +546,25 @@ void WriteReport(int bi, int bj)
          + TimeToString(g_sig[0].t, TIME_DATE) + " &rarr; " + TimeToString(g_sig[g_nSig-1].t, TIME_DATE)
          + " | offset ore " + IntegerToString(InpTimeOffsetHours) + "</div>";
 
+   html += "<h2>Strumento</h2><table>";
+   html += StringFormat("<tr><th>Digits</th><td>%d</td><th>Point</th><td>%s</td></tr>", _Digits, DoubleToString(g_pt,8));
+   html += StringFormat("<tr><th>1 punto x 1 lotto</th><td>%.4f %s</td><th>ATR(%d) M1 mediano</th><td>%.0f pt (%s in prezzo)</td></tr>",
+                        g_ptValue, AccountInfoString(ACCOUNT_CURRENCY), ATR_Period, g_atrMedPts,
+                        DoubleToString(g_atrMedPts*g_pt, _Digits));
+   html += StringFormat("<tr><th>Griglia</th><td colspan='3'>%s</td></tr>",
+                        InpGridFromATR ? "multipli di ATR mediano (auto-scalante)" : "punti fissi");
+   html += "</table>";
+
    html += "<h2>Combinazione migliore per expectancy</h2>";
-   html += StringFormat("<div class='kpi'><span>Stop Loss</span><b>%d pt</b></div>", SL);
-   html += StringFormat("<div class='kpi'><span>Take Profit</span><b>%d pt</b></div>", TP);
+   html += StringFormat("<div class='kpi'><span>Stop Loss</span><b>%d pt</b>%s | %.1f ATR</div>",
+                        SL, DoubleToString(SL*g_pt,_Digits), g_atrMedPts>0 ? SL/g_atrMedPts : 0);
+   html += StringFormat("<div class='kpi'><span>Take Profit</span><b>%d pt</b>%s | %.1f ATR</div>",
+                        TP, DoubleToString(TP*g_pt,_Digits), g_atrMedPts>0 ? TP/g_atrMedPts : 0);
+   html += StringFormat("<div class='kpi'><span>R multiplo</span><b>%.2f</b>TP/SL</div>", SL>0 ? (double)TP/SL : 0);
    html += StringFormat("<div class='kpi'><span>Segnali</span><b>%d</b></div>", g_nSig);
    html += StringFormat("<div class='kpi'><span>Expectancy</span><b>%.1f pt</b></div>", gEXP);
-   html += StringFormat("<div class='kpi'><span>Net</span><b>%.0f pt</b></div>", gNet);
+   html += StringFormat("<div class='kpi'><span>Net</span><b>%.0f pt</b>%.0f %s / lotto</div>",
+                        gNet, gNet*g_ptValue, AccountInfoString(ACCOUNT_CURRENCY));
    html += StringFormat("<div class='kpi'><span>Profit Factor</span><b>%.2f</b></div>", gPF);
    html += StringFormat("<div class='kpi'><span>Win Rate</span><b>%.1f%%</b></div>", gWR);
    html += StringFormat("<div class='kpi'><span>Max DD</span><b>%.0f pt</b></div>", gDD);
@@ -479,12 +577,13 @@ void WriteReport(int bi, int bj)
 
 //--- MFE
    html += "<h2>Il prezzo arriva davvero a target? (MFE post-segnale, orizzonte "
-         + IntegerToString(InpMaxHoldBars) + " barre)</h2><table><tr><th>Target</th><th>Segnali che lo toccano</th><th>%</th><th>Barre medie al tocco</th></tr>";
+         + IntegerToString(InpMaxHoldBars) + " barre)</h2><table><tr><th>Target (punti | prezzo | ATR)</th><th>Segnali che lo toccano</th><th>%</th><th>Barre medie al tocco</th></tr>";
    for(int k = 0; k < 8; k++)
      {
       double pct = 100.0 * reach[k] / g_nSig;
       double avb = (reach[k] > 0) ? barsToReach[k] / reach[k] : 0;
-      html += StringFormat("<tr><td>%.0f pt</td><td>%d</td><td>%.1f%%</td><td>%.0f</td></tr>", thr[k], reach[k], pct, avb);
+      html += StringFormat("<tr><td>%.0f pt (%s | %.1f ATR)</td><td>%d</td><td>%.1f%%</td><td>%.0f</td></tr>",
+                           thr[k], DoubleToString(thr[k]*g_pt,_Digits), g_atrMedPts>0?thr[k]/g_atrMedPts:0, reach[k], pct, avb);
      }
    html += "</table>";
 
