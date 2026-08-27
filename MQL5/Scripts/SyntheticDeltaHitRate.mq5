@@ -10,14 +10,17 @@
 #property script_show_inputs
 #property strict
 
+input group "=== DATI ==="
+input ENUM_TIMEFRAMES InpTF = PERIOD_M1;  // timeframe ANALIZZATO (indipendente dal grafico su cui trascini lo script)
+
 input group "=== LA DOMANDA ==="
 input int      InpTPpoints      = 2000;   // punti da raggiungere dopo il segnale
 input int      InpMaxBars       = 300;    // entro quante barre
 input int      InpEntryDelay    = 1;      // 1 = entra all'open della barra dopo il segnale
 
 input group "=== PERIODO ==="
-input datetime InpFrom          = D'2025.01.01 00:00';
-input datetime InpTo            = D'2026.12.31 00:00';
+input datetime InpFrom          = D'2015.01.01 00:00';
+input datetime InpTo            = D'2026.07.15 00:00';
 input int      InpTimeOffsetH   = 0;      // shift ore server -> fuso desiderato
 
 input group "=== COSTI ==="
@@ -73,6 +76,29 @@ int      g_n = 0;
 //--- prototipi
 void   WriteReport();
 void   WriteCSV();
+
+//+------------------------------------------------------------------+
+//| Carica le barre forzando la sincronizzazione dello storico       |
+//+------------------------------------------------------------------+
+int LoadRates()
+  {
+   int maxb = (int)TerminalInfoInteger(TERMINAL_MAXBARS);
+   int got = 0;
+   for(int attempt = 0; attempt < 60; attempt++)
+     {
+      got = CopyRates(_Symbol, InpTF, 0, maxb, g_r);
+      if(got > 0 && SeriesInfoInteger(_Symbol, InpTF, SERIES_SYNCHRONIZED)) break;
+      Sleep(500);   // il terminale sta scaricando lo storico dal server
+     }
+   long serverBars = SeriesInfoInteger(_Symbol, InpTF, SERIES_BARS_COUNT);
+   datetime first  = (datetime)SeriesInfoInteger(_Symbol, InpTF, SERIES_FIRSTDATE);
+   Print("Storico ", EnumToString(InpTF), ": disponibili ", serverBars,
+         " barre da ", first, " | caricate ", got, " | TERMINAL_MAXBARS=", maxb);
+   if(serverBars > maxb)
+      Print("!!! LIMITE: il terminale espone solo ", maxb, " barre su ", serverBars,
+            ". Strumenti > Opzioni > Grafici > 'Max barre nel grafico' = Illimitato, poi riavvia MT5.");
+   return got;
+  }
 
 //+------------------------------------------------------------------+
 bool WaitH(int h, string nm)
@@ -148,12 +174,12 @@ void OnStart()
      { ArrayResize(g_sl, g_nSL + 1); g_sl[g_nSL++] = v; }
 
    ArraySetAsSeries(g_r, false);
-   g_bars = CopyRates(_Symbol, _Period, 0, TerminalInfoInteger(TERMINAL_MAXBARS), g_r);
+   g_bars = LoadRates();
    if(g_bars <= 0) { Print("CopyRates fallita: ", GetLastError()); return; }
 
-   int hE = iMA(_Symbol, _Period, EmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
-   int hA = iATR(_Symbol, _Period, ATR_Period);
-   int hD = UseADXFilter ? iADX(_Symbol, _Period, ADX_Period) : INVALID_HANDLE;
+   int hE = iMA(_Symbol, InpTF, EmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   int hA = iATR(_Symbol, InpTF, ATR_Period);
+   int hD = UseADXFilter ? iADX(_Symbol, InpTF, ADX_Period) : INVALID_HANDLE;
    if(!WaitH(hE, "EMA") || !WaitH(hA, "ATR")) return;
    if(UseADXFilter && !WaitH(hD, "ADX")) return;
    if(!CopyAll(hE, g_bars, g_ema) || !CopyAll(hA, g_bars, g_atr)) return;
@@ -170,12 +196,18 @@ void OnStart()
          if(g_r[i].time >= InpFrom && g_r[i].time <= InpTo && g_atr[i] > 0) tmp[n++] = g_atr[i] / g_pt;
       if(n > 0) { ArrayResize(tmp, n); ArraySort(tmp); g_atrMed = tmp[n/2]; }
      }
-   Print("=== ", _Symbol, " ", EnumToString((ENUM_TIMEFRAMES)_Period),
+   Print("=== ", _Symbol, " ", EnumToString(InpTF),
          " | Digits=", _Digits, " | Point=", DoubleToString(g_pt, 8));
    Print("1 punto x 1 lotto = ", DoubleToString(g_ptValue, 4), " ", AccountInfoString(ACCOUNT_CURRENCY),
-         " | ATR(", ATR_Period, ") M1 mediano = ", DoubleToString(g_atrMed, 1), " pt");
+         " | ATR(", ATR_Period, ") mediano = ", DoubleToString(g_atrMed, 1), " pt");
    Print("TP richiesto = ", InpTPpoints, " pt = ", DoubleToString(InpTPpoints * g_pt, _Digits),
-         " in prezzo = ", DoubleToString(g_atrMed > 0 ? InpTPpoints / g_atrMed : 0, 1), " x ATR M1");
+         " in prezzo = ", DoubleToString(g_atrMed > 0 ? InpTPpoints / g_atrMed : 0, 1), " x ATR");
+
+//--- guardia timeframe
+   if(InpTF >= PERIOD_D1)
+      Print("!!! ATTENZIONE: TF ", EnumToString(InpTF), " - ogni barra ha timestamp 00:00. "
+            "L'analisi per ora e per minuto sara' priva di significato. Usa M1/M5/M15.");
+   Print("Barre analizzate: ", g_bars, " da ", g_r[0].time, " a ", g_r[g_bars-1].time);
 
 //--- scansione
    int minBars = MathMax(MathMax(EmaPeriod, VolAvgPeriod), MathMax(ATR_Period, SR_Lookback)) + 2;
@@ -280,9 +312,11 @@ void WriteReport()
    int    hN[24], hH[24];  double hB[24];
    int    mN[60], mH[60];  double mB[60];
    int    dN[7],  dH[7];   double dB[7];
+   int    qN[1440], qH[1440];
    ArrayInitialize(hN,0); ArrayInitialize(hH,0); ArrayInitialize(hB,0);
    ArrayInitialize(mN,0); ArrayInitialize(mH,0); ArrayInitialize(mB,0);
    ArrayInitialize(dN,0); ArrayInitialize(dH,0); ArrayInitialize(dB,0);
+   ArrayInitialize(qN,0); ArrayInitialize(qH,0);
 
    int totHit = 0, nBuy = 0, nSell = 0, hBuy = 0, hSell = 0;
    double sumBars = 0;
@@ -295,11 +329,12 @@ void WriteReport()
       bool hit = (s_tTP[s] != BIG);
       double bt = hit ? (double)s_tTP[s] : 0;
 
-      hN[dt.hour]++; mN[dt.min]++; dN[dt.day_of_week]++;
+      int q = dt.hour * 60 + dt.min;
+      hN[dt.hour]++; mN[dt.min]++; dN[dt.day_of_week]++; qN[q]++;
       if(hit)
         {
          totHit++; sumBars += bt;
-         hH[dt.hour]++; mH[dt.min]++; dH[dt.day_of_week]++;
+         hH[dt.hour]++; mH[dt.min]++; dH[dt.day_of_week]++; qH[q]++;
          hB[dt.hour] += bt; mB[dt.min] += bt; dB[dt.day_of_week] += bt;
          maeWin[nWin++] = s_maeAtTP[s];
          barsArr[nBA++] = bt;
@@ -326,17 +361,29 @@ void WriteReport()
    h += "</style></head><body>";
 
    h += "<h1>Il prezzo raggiunge " + IntegerToString(InpTPpoints) + " punti dopo il segnale?</h1>";
-   h += "<div style='color:#7b8794'>" + _Symbol + " " + EnumToString((ENUM_TIMEFRAMES)_Period)
+   h += "<div style='color:#7b8794'>" + _Symbol + " " + EnumToString(InpTF)
       + " | orizzonte " + IntegerToString(InpMaxBars) + " barre | "
       + TimeToString(s_time[0], TIME_DATE) + " &rarr; " + TimeToString(s_time[g_n-1], TIME_DATE)
       + " | offset ore " + IntegerToString(InpTimeOffsetH) + "</div>";
+
+   h += "<h2>Dati analizzati</h2><table>";
+   h += StringFormat("<tr><th>Timeframe</th><td>%s</td><th>Barre</th><td>%d</td></tr>",
+                     EnumToString(InpTF), g_bars);
+   h += StringFormat("<tr><th>Prima barra</th><td>%s</td><th>Ultima barra</th><td>%s</td></tr>",
+                     TimeToString(g_r[0].time), TimeToString(g_r[g_bars-1].time));
+   h += StringFormat("<tr><th>Digits / Point</th><td>%d / %s</td><th>1 pt x 1 lotto</th><td>%.4f %s</td></tr>",
+                     _Digits, DoubleToString(g_pt,8), g_ptValue, AccountInfoString(ACCOUNT_CURRENCY));
+   h += StringFormat("<tr><th>ATR(%d) mediano</th><td>%.0f pt</td><th>TP richiesto</th><td>%d pt = %s = %.1f x ATR</td></tr>",
+                     ATR_Period, g_atrMed, InpTPpoints, DoubleToString(InpTPpoints*g_pt,_Digits),
+                     g_atrMed > 0 ? InpTPpoints/g_atrMed : 0);
+   h += "</table>";
 
    h += "<h2>Risposta</h2>";
    h += StringFormat("<div class='kpi'><span>Segnali</span><b>%d</b></div>", g_n);
    h += StringFormat("<div class='kpi'><span>Raggiungono il TP</span><b>%.1f%%</b>%d su %d</div>", hrTot, totHit, g_n);
    h += StringFormat("<div class='kpi'><span>Barre mediane al TP</span><b>%.0f</b>%s</div>",
-                     Pctl(barsArr, nBA, 0.50), "minuti su M1");
-   h += StringFormat("<div class='kpi'><span>TP in prezzo</span><b>%s</b>%.1f x ATR M1</div>",
+                     Pctl(barsArr, nBA, 0.50), (InpTF==PERIOD_M1 ? "minuti" : "barre"));
+   h += StringFormat("<div class='kpi'><span>TP in prezzo</span><b>%s</b>%.1f x ATR</div>",
                      DoubleToString(InpTPpoints * g_pt, _Digits), g_atrMed > 0 ? InpTPpoints / g_atrMed : 0);
    h += StringFormat("<div class='kpi'><span>TP per 1 lotto</span><b>%.0f %s</b></div>",
                      InpTPpoints * g_ptValue, AccountInfoString(ACCOUNT_CURRENCY));
@@ -362,11 +409,83 @@ void WriteReport()
    for(int i = 0; i < 60; i++) HitRow(h, StringFormat(":%02d", i), mN[i], mH[i], mB[i]);
    h += "</table>";
 
+//--- slot orari HH:MM
+     {
+      int distinctH = 0, distinctQ = 0;
+      for(int i = 0; i < 24; i++)   if(hN[i] > 0) distinctH++;
+      for(int i = 0; i < 1440; i++) if(qN[i] > 0) distinctQ++;
+
+      h += "<h2>Slot orari HH:MM &mdash; classifica</h2>";
+      if(distinctH <= 1)
+        {
+         h += "<div class='note' style='border-color:#bf616a'><b>DATI NON UTILIZZABILI PER L'ANALISI ORARIA.</b> "
+              "Tutti i segnali cadono in una sola ora (" + IntegerToString(distinctH) + " ora distinta, "
+              + IntegerToString(distinctQ) + " slot HH:MM distinti). "
+              "Quasi certamente stai analizzando un timeframe giornaliero o superiore: imposta <b>InpTF = PERIOD_M1</b>.</div>";
+        }
+      else
+        {
+         h += StringFormat("<div class='note'>%d ore distinte, %d slot HH:MM distinti popolati. "
+              "Sono mostrati solo gli slot con almeno %d segnali. <b>Attenzione al multiple testing:</b> "
+              "su %d slot testati, per puro caso ~%d supereranno il 95%% di confidenza. "
+              "Uno slot conta solo se (a) ha molti segnali, (b) e' affiancato da slot vicini con risultati simili, "
+              "(c) ha una spiegazione strutturale (apertura sessione, news, rollover).</div>",
+              distinctH, distinctQ, InpMinPerBucket, distinctQ, (int)MathRound(distinctQ*0.05));
+
+         //--- ordina per hit rate
+         int    idx[]; double key[]; int nq = 0;
+         ArrayResize(idx, 1440); ArrayResize(key, 1440);
+         for(int i = 0; i < 1440; i++)
+            if(qN[i] >= InpMinPerBucket) { idx[nq] = i; key[nq] = 100.0*qH[i]/qN[i]; nq++; }
+         for(int a = 0; a < nq - 1; a++)
+            for(int b2 = a + 1; b2 < nq; b2++)
+               if(key[b2] > key[a])
+                 { double tk = key[a]; key[a] = key[b2]; key[b2] = tk;
+                   int ti = idx[a]; idx[a] = idx[b2]; idx[b2] = ti; }
+
+         if(nq == 0)
+            h += "<div class='note'>Nessuno slot HH:MM raggiunge " + IntegerToString(InpMinPerBucket)
+               + " segnali. Allunga il periodo, abbassa InpMinPerBucket, oppure aggrega su bucket piu' larghi.</div>";
+         else
+           {
+            int show = MathMin(nq, 30);
+            h += StringFormat("<h3 style='color:#a3be8c;font-size:13px'>Migliori %d slot (su %d qualificati)</h3>", show, nq);
+            h += "<table><tr><th>Slot</th><th>Segnali</th><th>Hit</th><th>Hit rate</th><th>&plusmn;</th><th>Scarto vs media</th></tr>";
+            for(int k = 0; k < show; k++)
+              {
+               int i = idx[k];
+               double hr = 100.0*qH[i]/qN[i];
+               double se = 100.0*MathSqrt((hr/100.0)*(1-hr/100.0)/qN[i]);
+               double z  = (se > 0) ? (hr - hrTot)/se : 0;
+               h += StringFormat("<tr><td>%02d:%02d</td><td>%d</td><td>%d</td><td><b>%.1f%%</b></td>"
+                                 "<td>&plusmn;%.1f</td><td style='color:%s'>%+.1f sigma</td></tr>",
+                                 i/60, i%60, qN[i], qH[i], hr, se,
+                                 MathAbs(z) > 2.5 ? "#ebcb8b" : "#7b8794", z);
+              }
+            h += "</table>";
+            h += "<h3 style='color:#bf616a;font-size:13px'>Peggiori 15 slot</h3>";
+            h += "<table><tr><th>Slot</th><th>Segnali</th><th>Hit</th><th>Hit rate</th><th>&plusmn;</th><th>Scarto vs media</th></tr>";
+            for(int k = MathMax(0, nq - 15); k < nq; k++)
+              {
+               int i = idx[k];
+               double hr = 100.0*qH[i]/qN[i];
+               double se = 100.0*MathSqrt((hr/100.0)*(1-hr/100.0)/qN[i]);
+               double z  = (se > 0) ? (hr - hrTot)/se : 0;
+               h += StringFormat("<tr><td>%02d:%02d</td><td>%d</td><td>%d</td><td><b>%.1f%%</b></td>"
+                                 "<td>&plusmn;%.1f</td><td style='color:%s'>%+.1f sigma</td></tr>",
+                                 i/60, i%60, qN[i], qH[i], hr, se,
+                                 MathAbs(z) > 2.5 ? "#ebcb8b" : "#7b8794", z);
+              }
+            h += "</table>";
+           }
+        }
+     }
+
 //--- MAE sui vincenti: quanto SL serve per non farsi buttare fuori
    h += "<h2>Quanto SL serve? Sofferenza massima PRIMA di toccare il TP</h2>";
    h += "<div class='note'>Calcolato solo sui " + IntegerToString(nWin) + " segnali che il TP lo raggiungono. "
         "Uno SL sotto il 90&deg; percentile ti butta fuori da almeno il 10% dei trade che sarebbero andati a target.</div>";
-   h += "<table><tr><th>Percentile</th><th>MAE (punti)</th><th>in prezzo</th><th>x ATR M1</th></tr>";
+   h += "<table><tr><th>Percentile</th><th>MAE (punti)</th><th>in prezzo</th><th>x ATR</th></tr>";
    double pc[7] = {0.50, 0.75, 0.90, 0.95, 0.99, 1.00, 0.25};
    string pn[7] = {"50&deg; (mediana)","75&deg;","90&deg;","95&deg;","99&deg;","massimo","25&deg;"};
    int order[7] = {6, 0, 1, 2, 3, 4, 5};

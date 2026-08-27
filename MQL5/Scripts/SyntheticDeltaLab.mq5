@@ -13,8 +13,8 @@
 
 //--- ================================================================
 input group "=== PERIODO DI ANALISI ==="
-input datetime InpFrom            = D'2024.01.01 00:00';
-input datetime InpTo              = D'2026.01.01 00:00';
+input datetime InpFrom            = D'2015.01.01 00:00';
+input datetime InpTo              = D'2026.07.15 00:00';
 input int      InpTimeOffsetHours = 0;      // shift ore server -> fuso desiderato
 
 input group "=== PARAMETRI INDICATORE (identici a SyntheticDelta) ==="
