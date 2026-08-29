@@ -54,7 +54,7 @@ input int      InpCooldownBars   = 0;      // scarta segnali ravvicinati (stessa
 input group "=== SWEEP STOP LOSS ==="
 input int      InpSLfrom         = 100;
 input int      InpSLto           = 3000;
-input int      InpSLstep         = 100;
+input int      InpSLstep         = 200;   // griglia usata sia per gli stop sia per i target
 
 input group "=== VALIDAZIONE ==="
 input int      InpSplitPct       = 70;     // % iniziale usata come in-sample
@@ -115,7 +115,8 @@ int      s_dir[];
 int      s_tTP[];
 double   s_maeAtTP[], s_maeFull[], s_mfe[], s_endPts[], s_cost[], s_score[];
 double   c_vol[], c_tr[], c_ent[], c_fas[];   // condizionatori al momento del segnale
-int      s_tSL[];
+int      s_tSL[];   // primo tocco del livello avverso k
+int      s_tFav[];  // primo tocco del livello favorevole k (stessa griglia)
 int      g_n = 0;
 
 //--- prototipi
@@ -237,8 +238,12 @@ void BuildVolPercentile()
       pv[i] = v;
       run += v;
       if(i >= InpVolAtrLen) run -= pv[i - InpVolAtrLen];
+      if(run < 0.0) run = 0.0;   // l'errore di arrotondamento della somma mobile puo' renderla
+                                 // negativa di 1e-24: MathSqrt restituirebbe NaN, e l'EMA sotto
+                                 // propagherebbe NaN a tutte le barre successive, azzerando il
+                                 // percentile per il resto della serie
       int n = MathMin(i + 1, InpVolAtrLen);
-      double parkVol = (n > 0) ? MathSqrt(run / n) * 100.0 : 0.0;
+      double parkVol = MathSqrt(run / n) * 100.0;
       double atrPct  = (g_r[i].close != 0) ? (g_atr[i] / g_r[i].close) * 100.0 : 0.0;
       comp[i] = (atrPct + parkVol) / 2.0;
      }
@@ -246,8 +251,12 @@ void BuildVolPercentile()
    //--- EMA
    double a = 2.0 / (InpVolEmaSmooth + 1.0);
    double sm[]; ArrayResize(sm, g_bars);
-   sm[0] = comp[0];
-   for(int i = 1; i < g_bars; i++) sm[i] = sm[i-1] + a * (comp[i] - sm[i-1]);
+   sm[0] = MathIsValidNumber(comp[0]) ? comp[0] : 0.0;
+   for(int i = 1; i < g_bars; i++)
+     {
+      double c = MathIsValidNumber(comp[i]) ? comp[i] : sm[i-1];
+      sm[i] = sm[i-1] + a * (c - sm[i-1]);
+     }
 
    //--- percentile rank sulla finestra
    ArrayResize(g_volPct, g_bars);
@@ -527,7 +536,7 @@ void OnStart()
    ArrayResize(s_maeAtTP, cap); ArrayResize(s_maeFull, cap); ArrayResize(s_mfe, cap);
    ArrayResize(s_endPts, cap); ArrayResize(s_cost, cap); ArrayResize(s_score, cap);
    ArrayResize(c_vol, cap); ArrayResize(c_tr, cap); ArrayResize(c_ent, cap); ArrayResize(c_fas, cap);
-   ArrayResize(s_tSL, cap * g_nSL);
+   ArrayResize(s_tSL, cap * g_nSL); ArrayResize(s_tFav, cap * g_nSL);
 
    int lastB = -1000000, lastS = -1000000;
    uint t0 = GetTickCount();
@@ -567,13 +576,13 @@ void OnStart()
          ArrayResize(s_maeAtTP, cap); ArrayResize(s_maeFull, cap); ArrayResize(s_mfe, cap);
          ArrayResize(s_endPts, cap); ArrayResize(s_cost, cap); ArrayResize(s_score, cap);
          ArrayResize(c_vol, cap); ArrayResize(c_tr, cap); ArrayResize(c_ent, cap); ArrayResize(c_fas, cap);
-         ArrayResize(s_tSL, cap * g_nSL);
+         ArrayResize(s_tSL, cap * g_nSL); ArrayResize(s_tFav, cap * g_nSL);
         }
 
       int base = g_n * g_nSL;
-      for(int k = 0; k < g_nSL; k++) s_tSL[base + k] = BIG;
+      for(int k = 0; k < g_nSL; k++) { s_tSL[base + k] = BIG; s_tFav[base + k] = BIG; }
       double mfe = 0, mae = 0, maeAtTP = -1;
-      int tTP = BIG, pa = 0, last = eb;
+      int tTP = BIG, pa = 0, pf = 0, last = eb;
       int endB = MathMin(eb + InpMaxBars, g_bars - 1);
 
       for(int k = eb; k <= endB; k++)
@@ -583,10 +592,11 @@ void OnStart()
          else        { fav = (E - g_r[k].low)  / g_pt; adv = (g_r[k].high - E) / g_pt; }
          if(fav > mfe) mfe = fav;
          if(adv > mae) mae = adv;
-         while(pa < g_nSL && mae >= (double)g_sl[pa]) { s_tSL[base + pa] = k - eb; pa++; }
+         while(pa < g_nSL && mae >= (double)g_sl[pa]) { s_tSL[base + pa]  = k - eb; pa++; }
+         while(pf < g_nSL && mfe >= (double)g_sl[pf]) { s_tFav[base + pf] = k - eb; pf++; }
          if(tTP == BIG && mfe >= (double)InpTPpoints) { tTP = k - eb; maeAtTP = mae; }
          last = k;
-         if(tTP != BIG && pa >= g_nSL) break;
+         if(tTP != BIG && pa >= g_nSL && pf >= g_nSL) break;
         }
 
       s_time[g_n]    = tShift;
@@ -1111,6 +1121,50 @@ void WriteReport()
      }
    h += "</table>";
 
+//--- ============================================================
+//    EDGE E NETTO IN FUNZIONE DEL TARGET
+//    L'edge cresce col target, il costo no: e' li' che si vince o si perde.
+//--- ============================================================
+   string tpDig = "";
+   h += "<h2>Edge e netto in funzione del target</h2>";
+   h += "<div class='note'><b>Il punto decisivo.</b> L'edge direzionale si misura in punti percentuali, "
+        "quindi in punti vale <i>edge x target</i>: <b>cresce col target</b>. Il costo di ingresso invece "
+        "e' fisso, lo paghi uguale su un target da 500 o da 5000. Ne segue che un segnale con edge reale "
+        "ma target troppo piccolo perde per costruzione, e lo stesso segnale su un target piu' ampio puo' "
+        "diventare profittevole. La colonna <b>netto</b> e' l'unica che conta; il segno di <b>z</b> dice "
+        "se il segnale va preso cosi' com'e' o invertito.</div>";
+   h += "<table><tr><th>Target</th><th>x ATR</th><th>fav%</th><th>avv%</th><th>edge pp</th><th>z</th>"
+        "<th>lordo pt</th><th>costo pt</th><th>netto pt</th><th>netto/lotto</th><th>decisi %</th></tr>";
+   for(int k = 0; k < g_nSL; k++)
+     {
+      int lev = g_sl[k];
+      int fo2 = 0, ao2 = 0;
+      for(int s = 0; s < g_n; s++)
+        {
+         bool f = (s_tFav[s*g_nSL+k] != BIG);
+         bool a = (s_tSL [s*g_nSL+k] != BIG);
+         if(f && !a) fo2++;
+         if(a && !f) ao2++;
+        }
+      double edge = 100.0*(fo2-ao2)/g_n;
+      double z2   = (fo2+ao2 > 0) ? (fo2-ao2)/MathSqrt((double)(fo2+ao2)) : 0;
+      double gross = MathAbs(edge)/100.0*lev;
+      double net   = gross - avgCost;
+      h += StringFormat("<tr><td>%d</td><td>%.1f</td><td>%.1f</td><td>%.1f</td>"
+                        "<td style='color:%s'>%+.2f</td><td style='color:%s'>%+.2f</td>"
+                        "<td>%.0f</td><td>%.0f</td><td style='color:%s'><b>%+.0f</b></td>"
+                        "<td>%.0f</td><td>%.1f</td></tr>",
+                        lev, g_atrMed > 0 ? lev/g_atrMed : 0, 100.0*fo2/g_n, 100.0*ao2/g_n,
+                        edge > 0 ? "#a3be8c" : "#bf616a", edge,
+                        MathAbs(z2) > 2.0 ? "#ebcb8b" : "#7b8794", z2,
+                        gross, avgCost, net > 0 ? "#a3be8c" : "#bf616a", net,
+                        net*g_ptValue, 100.0*(fo2+ao2)/g_n);
+      tpDig += StringFormat("TPS|%d|fo|%.2f|ao|%.2f|edge|%.2f|z|%.2f|gross|%.0f|cost|%.0f|net|%.0f|dec|%.1f\n",
+                            lev, 100.0*fo2/g_n, 100.0*ao2/g_n, edge, z2, gross, avgCost, net,
+                            100.0*(fo2+ao2)/g_n);
+     }
+   h += "</table>";
+
 //--- condizionatori
    string condDig = "";
    if(InpUseConditioners)
@@ -1147,7 +1201,7 @@ void WriteReport()
      }
 
 //--- digest
-   string dg = BuildDigest() + condDig + "### END\n";
+   string dg = BuildDigest() + tpDig + condDig + "### END\n";
    h += "<h2>Digest da copiare</h2>";
    h += "<div class='note'>Seleziona e incolla in chat. Stesso testo in <b>MQL5/Files/SignalLab_digest.txt</b>.</div>";
    string esc = dg;
