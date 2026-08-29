@@ -65,11 +65,14 @@ erTrend  = input.float(0.42, "ER sopra cui il mercato e' TREND",     minval = 0.
 extHi    = input.float(80.0, "Percentile estensione alta", minval = 50.0, maxval = 100.0, group = grpT)
 extLo    = input.float(20.0, "Percentile estensione bassa", minval = 0.0, maxval = 50.0,  group = grpT)
 coolDown = input.int(3, "Barre minime tra segnali omologhi", minval = 1, group = grpT)
-clvRej   = input.float(0.45, "Soglia chiusura respinta (climax)", minval = 0.1, maxval = 0.5, step = 0.05, group = grpT)
+clvRej    = input.float(0.45, "Soglia chiusura respinta (climax)", minval = 0.1, maxval = 0.5, step = 0.05, group = grpT)
+iniRegime = input.string("Sempre", "Initiative: regime richiesto", options = ["Sempre", "Solo trend", "Solo range"], group = grpT, tooltip = "Initiative e' il segnale di CONTINUAZIONE. Il gate 'Solo trend' lo rendeva raro e lasciava il grafico dominato dalle inversioni.")
+iniClv    = input.float(0.60, "Initiative: chiusura minima nel range", minval = 0.50, maxval = 1.0, step = 0.05, group = grpT, tooltip = "0.50 = nessun requisito di qualita' sulla chiusura, equivalente alla bubble v1. 0.70 = solo chiusure sull'estremo della barra.")
 
 grpD = "4 - Divergenze CVD"
 useDiv = input.bool(true, "Attiva divergenze", group = grpD)
 pivL   = input.int(5, "Pivot left",  minval = 1, group = grpD)
+divRange = input.bool(true, "Divergenze solo fuori dal trend", group = grpD, tooltip = "Una divergenza dentro un trend forte e' la trappola classica: il CVD diverge per meta' movimento mentre il prezzo continua. Senza questo gate la divergenza spara sistematicamente contro la direzione giusta.")
 pivR   = input.int(3, "Pivot right", minval = 1, group = grpD, tooltip = "La divergenza si conferma pivR barre DOPO l'estremo. E' lag dichiarato, non repaint.")
 
 grpF = "5 - Filtro sessione"
@@ -219,11 +222,31 @@ rawBullExh = ok and isTrend and vz > vzClimax and newHi and ext > extHi and clvP
 rawBearExh = ok and isTrend and vz > vzClimax and newLo and ext < extLo and clvPos > 1.0 - clvRej and imbOrtho >  orthoMin
 
 // ---- INITIATIVE : flusso e prezzo allineati in TREND, chiusura forte --------
-rawBullIni = ok and isTrend and vz > vzMin and imb >  imbMin and res >  resMin and clvPos > 0.70
-rawBearIni = ok and isTrend and vz > vzMin and imb < -imbMin and res < -resMin and clvPos < 0.30
+// Il gate isTrend rendeva Initiative quasi inosservabile e lasciava la v2
+// dominata da segnali di inversione (Absorption, Exhaustion, Divergence: tre
+// famiglie su quattro). La continuazione e' un fenomeno reale e distinto -
+// lo sbilanciamento di flusso a breve orizzonte e' autocorrelato - e merita
+// di essere misurata senza essere strozzata da un filtro di regime.
+// Con iniRegime = "Sempre" e iniClv = 0.50 questo e' l'equivalente pulito
+// della "bubble" v1: partecipazione + sbilanciamento + displacement, senza
+// z-score contaminato e senza doppio conteggio del volume.
+iniOk = iniRegime == "Sempre" ? true : iniRegime == "Solo trend" ? isTrend : isRange
+rawBullIni = ok and iniOk and vz > vzMin and imb >  imbMin and res >  resMin and clvPos > iniClv
+rawBearIni = ok and iniOk and vz > vzMin and imb < -imbMin and res < -resMin and clvPos < 1.0 - iniClv
 
 // ---- DIVERGENCE : CVD normalizzato vs prezzo su pivot confermati ------------
-cvdN = f_rz(cvd, statLen)
+cvdN = f_rz(cvd, statLen)                  // solo per il plot: scala confrontabile
+
+// BUG CORRETTO: i due pivot venivano confrontati sui loro z-score rolling.
+// La finestra di normalizzazione si sposta tra un pivot e l'altro, quindi due
+// z presi in istanti diversi NON sono confrontabili: un CVD in salita puo'
+// mostrare uno z in discesa se la mediana locale e' salita piu' in fretta.
+// Il confronto va fatto sui LIVELLI di CVD, e solo se i due pivot cadono
+// nella stessa sessione (il CVD si azzera a inizio giornata).
+var int dayN = 0
+if newDay
+    dayN += 1
+divOk = not divRange or not isTrend
 ph = ta.pivothigh(high, pivL, pivR)
 pl = ta.pivotlow(low,  pivL, pivR)
 
@@ -235,20 +258,28 @@ var float lastPL  = na
 var float prevPL  = na
 var float lastPLc = na
 var float prevPLc = na
+var int   lastPHd = 0
+var int   prevPHd = 0
+var int   lastPLd = 0
+var int   prevPLd = 0
 
 if not na(ph)
     prevPH  := lastPH
     prevPHc := lastPHc
+    prevPHd := lastPHd
     lastPH  := ph
-    lastPHc := cvdN[pivR]
+    lastPHc := cvd[pivR]
+    lastPHd := dayN
 if not na(pl)
     prevPL  := lastPL
     prevPLc := lastPLc
+    prevPLd := lastPLd
     lastPL  := pl
-    lastPLc := cvdN[pivR]
+    lastPLc := cvd[pivR]
+    lastPLd := dayN
 
-rawBearDiv = useDiv and ok and not na(ph) and not na(prevPH) and lastPH > prevPH and lastPHc < prevPHc
-rawBullDiv = useDiv and ok and not na(pl) and not na(prevPL) and lastPL < prevPL and lastPLc > prevPLc
+rawBearDiv = useDiv and ok and divOk and not na(ph) and not na(prevPH) and lastPHd == prevPHd and lastPH > prevPH and lastPHc < prevPHc
+rawBullDiv = useDiv and ok and divOk and not na(pl) and not na(prevPL) and lastPLd == prevPLd and lastPL < prevPL and lastPLc > prevPLc
 
 // ---- de-duplica temporale (ogni call-site ha il proprio stato) --------------
 f_gate(bool raw) =>
