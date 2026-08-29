@@ -768,6 +768,15 @@ string BuildDigest()
    d += StringFormat("SYMM|fo|%d|ao|%d|both|%d|neither|%d|edge_pp|%.2f|z|%.2f\n",
                      fo, ao, both, neither, 100.0*(fo-ao)/g_n,
                      (fo+ao > 0) ? (fo-ao)/MathSqrt((double)(fo+ao)) : 0);
+     {
+      double dec2 = fo + ao;
+      double obs2 = (dec2 > 0) ? 100.0*fo/dec2 : 0;
+      double null2 = (InpTPpoints > 0) ? 100.0*(InpTPpoints - totCost/g_n)/(2.0*InpTPpoints) : 0;
+      double se2  = (dec2 > 0) ? 100.0*MathSqrt((obs2/100.0)*(1-obs2/100.0)/dec2) : 0;
+      d += StringFormat("NULL|favobs|%.2f|favnull|%.2f|exc|%.2f|zexc|%.2f|ev|%.0f\n",
+                        obs2, null2, obs2-null2, (se2 > 0) ? (obs2-null2)/se2 : 0,
+                        dec2/g_n * InpTPpoints * 2.0 * ((obs2-null2)/100.0));
+     }
 
 //--- curva tempo->target: dove si appiattisce, li' sta l'orizzonte utile
    d += "TTT";
@@ -990,20 +999,38 @@ void WriteReport()
    h += StringFormat("<div class='kpi'><span>Expectancy (SL %d)</span><b>%.1f pt</b>t = %.2f</div>",
                      g_sl[refK], eA, tA);
 
-   double netto = MathAbs(fA - aA)/100.0*InpTPpoints - avgCost;
-   if(MathAbs(zA) < 2.0)
-      h += "<div class='note ko'><b>NESSUN EDGE.</b> La differenza fra tocchi favorevoli e avversi non e' "
-           "distinguibile dal caso. Nessuna soglia, nessun orario e nessuno stop possono creare un edge "
-           "che nei dati non esiste.</div>";
+   //--- il verdetto va dato sull'eccesso rispetto al null implicito dal costo, non sull'edge grezzo
+   double decAll = fA + aA;
+   double obsFavAll  = (decAll > 0) ? 100.0*fA/decAll : 0;
+   double nullFavAll = (InpTPpoints > 0) ? 100.0*(InpTPpoints - avgCost)/(2.0*InpTPpoints) : 0;
+   double excessAll  = obsFavAll - nullFavAll;
+   double seAll      = (decAll > 0) ? 100.0*MathSqrt((obsFavAll/100.0)*(1-obsFavAll/100.0)/(g_n*decAll/100.0)) : 0;
+   double zExcAll    = (seAll > 0) ? excessAll/seAll : 0;
+   double netto = decAll/100.0 * InpTPpoints * 2.0 * (excessAll/100.0);
+
+   h += StringFormat("<div class='kpi'><span>Quota fav. osservata</span><b>%.2f%%</b>su %.1f%% decisi</div>",
+                     obsFavAll, decAll);
+   h += StringFormat("<div class='kpi'><span>Attesa dal solo costo</span><b>%.2f%%</b>null senza direzione</div>",
+                     nullFavAll);
+   h += StringFormat("<div class='kpi'><span>Eccesso sul null</span><b>%+.2f pp</b>z = %+.2f</div>",
+                     excessAll, zExcAll);
+   if(MathAbs(zExcAll) < 2.0)
+      h += StringFormat("<div class='note ko'><b>NESSUN EDGE OLTRE IL COSTO.</b> La quota di esiti favorevoli "
+           "(%.2f%%) coincide con quella che produrrebbe un percorso senza alcuna direzione pagando lo stesso "
+           "costo (%.2f%%): eccesso %+.2f pp, z = %+.2f. L'edge grezzo di %+.2f pp e' quasi tutto artefatto "
+           "della barriera avversa piu' vicina, non informazione. Nessuna soglia, nessun orario e nessuno stop "
+           "creano un edge che non c'e'.</div>", obsFavAll, nullFavAll, excessAll, zExcAll, fA - aA);
    else if(netto <= 0)
-      h += StringFormat("<div class='note ko'><b>EDGE REALE MA NON MONETIZZABILE.</b> z = %.2f su %d segnali: "
-           "l'asimmetria esiste. Ma vale %.0f punti lordi contro %.0f punti di costo medio: netto <b>%+.0f</b>. "
-           "%s</div>", zA, g_n, MathAbs(fA-aA)/100.0*InpTPpoints, avgCost, netto,
-           zA < 0 ? "Il segno e' invertito: rilancia con InpInvert=true prima di scartarlo." : "");
+      h += StringFormat("<div class='note ko'><b>SEGNALE INFORMATIVO MA DAL LATO SBAGLIATO.</b> Eccesso "
+           "%+.2f pp sul null (z = %+.2f): il segnale contiene informazione, ma nella direzione opposta a "
+           "quella dichiarata. Valore atteso %+.0f punti per segnale. Rilancia con <b>InpInvert=true</b>: "
+           "attenzione, invertendo non ottieni il segno opposto, perche' il costo penalizza entrambe le "
+           "direzioni e va rimisurato.</div>", excessAll, zExcAll, netto);
    else
-      h += StringFormat("<div class='note ok'><b>EDGE POTENZIALMENTE MONETIZZABILE.</b> %.0f punti lordi contro "
-           "%.0f di costo: netto <b>%+.0f</b> per segnale. Ora conta solo una cosa: <b>tiene fuori campione?</b> "
-           "Guarda la sezione sotto.</div>", MathAbs(fA-aA)/100.0*InpTPpoints, avgCost, netto);
+      h += StringFormat("<div class='note ok'><b>EDGE REALE OLTRE IL COSTO.</b> Quota favorevole %.2f%% contro "
+           "%.2f%% attesa dal solo costo: eccesso <b>%+.2f pp</b> (z = %+.2f), pari a <b>%+.0f punti</b> per "
+           "segnale gia' al netto di tutto. Ora conta una cosa sola: <b>tiene fuori campione?</b></div>",
+           obsFavAll, nullFavAll, excessAll, zExcAll, netto);
 
 //--- IS/OOS
    h += "<h2>In-sample vs out-of-sample</h2>";
@@ -1127,14 +1154,20 @@ void WriteReport()
 //--- ============================================================
    string tpDig = "";
    h += "<h2>Edge e netto in funzione del target</h2>";
-   h += "<div class='note'><b>Il punto decisivo.</b> L'edge direzionale si misura in punti percentuali, "
-        "quindi in punti vale <i>edge x target</i>: <b>cresce col target</b>. Il costo di ingresso invece "
-        "e' fisso, lo paghi uguale su un target da 500 o da 5000. Ne segue che un segnale con edge reale "
-        "ma target troppo piccolo perde per costruzione, e lo stesso segnale su un target piu' ampio puo' "
-        "diventare profittevole. La colonna <b>netto</b> e' l'unica che conta; il segno di <b>z</b> dice "
-        "se il segnale va preso cosi' com'e' o invertito.</div>";
-   h += "<table><tr><th>Target</th><th>x ATR</th><th>fav%</th><th>avv%</th><th>edge pp</th><th>z</th>"
-        "<th>lordo pt</th><th>costo pt</th><th>netto pt</th><th>netto/lotto</th><th>decisi %</th></tr>";
+   h += "<div class='note ko'><b>Leggere prima le ultime due colonne, non l'edge grezzo.</b> "
+        "Il costo sposta il prezzo di ingresso contro di te, quindi la barriera avversa finisce piu' vicina "
+        "di quella favorevole di <b>2 x costo</b>. Su un percorso senza alcuna direzione &mdash; un lancio di "
+        "moneta &mdash; questo produce da solo un edge apparentemente negativo: con target T e costo c, la "
+        "quota attesa di esiti favorevoli e' <b>(T - c) / 2T</b>, non il 50%. Un edge grezzo negativo quindi "
+        "<b>non dimostra nulla</b>: va confrontato con quel valore atteso. "
+        "<b>eccesso</b> = quota favorevole osservata meno quota attesa dal solo costo. E' li' che vive "
+        "l'informazione del segnale, e <b>solo li'</b>.</div>";
+   h += "<div class='note'>Il null teorico assume percorso senza deriva e orizzonte illimitato. Quello "
+        "empirico esatto lo produce <b>SIG_RANDOM</b> con gli stessi costi, target e orizzonte: lancialo "
+        "e confronta riga per riga. Se il segnale non batte il random, non e' un segnale.</div>";
+   h += "<table><tr><th>Target</th><th>x ATR</th><th>decisi %</th><th>fav oss %</th><th>fav null %</th>"
+        "<th>eccesso pp</th><th>EV eccesso pt</th><th>edge grezzo pp</th><th>z grezzo</th>"
+        "<th>costo pt</th><th>EV totale pt</th></tr>";
    for(int k = 0; k < g_nSL; k++)
      {
       int lev = g_sl[k];
@@ -1148,20 +1181,31 @@ void WriteReport()
         }
       double edge = 100.0*(fo2-ao2)/g_n;
       double z2   = (fo2+ao2 > 0) ? (fo2-ao2)/MathSqrt((double)(fo2+ao2)) : 0;
-      double gross = MathAbs(edge)/100.0*lev;
-      double net   = gross - avgCost;
-      h += StringFormat("<tr><td>%d</td><td>%.1f</td><td>%.1f</td><td>%.1f</td>"
-                        "<td style='color:%s'>%+.2f</td><td style='color:%s'>%+.2f</td>"
-                        "<td>%.0f</td><td>%.0f</td><td style='color:%s'><b>%+.0f</b></td>"
-                        "<td>%.0f</td><td>%.1f</td></tr>",
-                        lev, g_atrMed > 0 ? lev/g_atrMed : 0, 100.0*fo2/g_n, 100.0*ao2/g_n,
-                        edge > 0 ? "#a3be8c" : "#bf616a", edge,
-                        MathAbs(z2) > 2.0 ? "#ebcb8b" : "#7b8794", z2,
-                        gross, avgCost, net > 0 ? "#a3be8c" : "#bf616a", net,
-                        net*g_ptValue, 100.0*(fo2+ao2)/g_n);
-      tpDig += StringFormat("TPS|%d|fo|%.2f|ao|%.2f|edge|%.2f|z|%.2f|gross|%.0f|cost|%.0f|net|%.0f|dec|%.1f\n",
-                            lev, 100.0*fo2/g_n, 100.0*ao2/g_n, edge, z2, gross, avgCost, net,
-                            100.0*(fo2+ao2)/g_n);
+      int    dec  = fo2 + ao2;
+      double decPct = 100.0*dec/g_n;
+      //--- quota favorevole osservata fra gli esiti decisi
+      double obsFav = (dec > 0) ? 100.0*fo2/dec : 0;
+      //--- quota attesa su percorso senza direzione: il costo avvicina la barriera avversa di 2c
+      double nullFav = (lev > 0) ? 100.0*(lev - avgCost)/(2.0*lev) : 0;
+      double excess  = obsFav - nullFav;
+      //--- errore standard della quota, per capire se l'eccesso e' distinguibile da zero
+      double seFav = (dec > 0) ? 100.0*MathSqrt((obsFav/100.0)*(1-obsFav/100.0)/dec) : 0;
+      double zExc  = (seFav > 0) ? excess/seFav : 0;
+      double evExc = decPct/100.0 * lev * 2.0 * (excess/100.0);
+      double evTot = decPct/100.0 * lev * (2.0*obsFav/100.0 - 1.0);
+
+      h += StringFormat("<tr><td>%d</td><td>%.1f</td><td>%.1f</td><td>%.2f</td><td>%.2f</td>"
+                        "<td style='color:%s'><b>%+.2f</b>%s</td><td style='color:%s'><b>%+.0f</b></td>"
+                        "<td>%+.2f</td><td>%+.1f</td><td>%.0f</td><td style='color:%s'>%+.0f</td></tr>",
+                        lev, g_atrMed > 0 ? lev/g_atrMed : 0, decPct, obsFav, nullFav,
+                        excess > 0 ? "#a3be8c" : "#bf616a", excess,
+                        MathAbs(zExc) > 2.0 ? " *" : "",
+                        evExc > 0 ? "#a3be8c" : "#bf616a", evExc,
+                        edge, z2, avgCost,
+                        evTot > 0 ? "#a3be8c" : "#bf616a", evTot);
+      tpDig += StringFormat("TPS|%d|dec|%.1f|favobs|%.2f|favnull|%.2f|exc|%.2f|zexc|%.2f|evexc|%.0f|"
+                            "edge|%.2f|z|%.2f|cost|%.0f|evtot|%.0f\n",
+                            lev, decPct, obsFav, nullFav, excess, zExc, evExc, edge, z2, avgCost, evTot);
      }
    h += "</table>";
 
@@ -1220,8 +1264,9 @@ void WriteReport()
    int df = FileOpen("SignalLab_digest.txt", FILE_WRITE|FILE_TXT|FILE_ANSI);
    if(df != INVALID_HANDLE) { FileWriteString(df, dg); FileClose(df); Print("Digest: MQL5/Files/SignalLab_digest.txt"); }
 
-   Print("VERDETTO ", SignalName(), ": edge ", DoubleToString(fA-aA,2), " pp | z ", DoubleToString(zA,2),
-         " | lordo ", DoubleToString(MathAbs(fA-aA)/100.0*InpTPpoints,0), " pt | costo ",
-         DoubleToString(avgCost,0), " pt | netto ", DoubleToString(netto,0), " pt");
+   Print("VERDETTO ", SignalName(), ": fav oss ", DoubleToString(obsFavAll,2),
+         "% vs null ", DoubleToString(nullFavAll,2), "% | eccesso ", DoubleToString(excessAll,2),
+         " pp (z ", DoubleToString(zExcAll,2), ") | EV ", DoubleToString(netto,0),
+         " pt | edge grezzo ", DoubleToString(fA-aA,2), " pp | costo ", DoubleToString(avgCost,0), " pt");
   }
 //+------------------------------------------------------------------+
