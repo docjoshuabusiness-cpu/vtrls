@@ -81,6 +81,9 @@ sessStr  = input.session("0700-2000", "Sessione attiva", group = grpF)
 skipRoll = input.bool(true, "Escludi rollover broker", group = grpF)
 rollStr  = input.session("2255-0105", "Finestra rollover da escludere", group = grpF)
 
+grpX = "11 - Export per meta-labeling"
+useExport = input.bool(false, "Modalita' export (feature vector)", group = grpX, tooltip = "Aggiunge le colonne del feature vector al Data Window. Poi: click destro sul grafico > Esporta dati del grafico > CSV. Le colonne finiscono nel file e vengono lette dallo script Python di training. Le etichette NON si esportano: le calcola Python dalle OHLC, cosi' la definizione delle barriere resta in un posto solo.")
+
 grpQ = "5b - Qualita' (filtri ORTOGONALI al flusso)"
 useGate  = input.bool(true, "Applica il gate di qualita'", group = grpQ, tooltip = "Spegnilo e riaccendilo guardando la tabella EDGE: se il gate non alza 'vs base', sta solo riducendo N senza migliorare nulla. Un filtro che non alza l'expectancy va tolto.")
 useCusum = input.bool(true,  "1. Campionamento CUSUM", group = grpQ, tooltip = "Invece di 'z sopra soglia su UNA barra', accumula la deviazione di flusso e genera un evento solo quando la somma cumulata supera h, poi azzera. Cattura il flusso PERSISTENTE (qualcuno che lavora un ordine) invece del singolo spike. E' il campionamento a eventi di Lopez de Prado.")
@@ -693,3 +696,44 @@ if bullDiv
     alert(f_json("BULL_DIVERGENCE", 1), alert.freq_once_per_bar_close)
 if bearDiv
     alert(f_json("BEAR_DIVERGENCE", -1), alert.freq_once_per_bar_close)
+
+// ============================================================================
+// 13) EXPORT  ·  feature vector per meta-labeling
+// ============================================================================
+//  Le feature sono lo STATO AL MOMENTO DEL SEGNALE. Nessuna etichetta qui:
+//  l'esito a barriere lo ricostruisce Python dalle OHLC dello stesso CSV,
+//  cosi' la definizione di SL/TP/orizzonte vive in un posto solo e non puo'
+//  divergere tra ricerca e produzione.
+//
+//  sig: codifica famiglia x direzione. Positivo = trade LONG, negativo = SHORT.
+//    1 BuyAbs   -1 SellAbs
+//    2 BearExh  -2 BullExh
+//    3 BullIni  -3 BearIni
+//    4 BullDiv  -4 BearDiv
+// ============================================================================
+sigCode = buyAbs ? 1 : sellAbs ? -1 : bearExh ? 2 : bullExh ? -2 : bullIni ? 3 : bearIni ? -3 : bullDiv ? 4 : bearDiv ? -4 : 0
+
+// raw = segnale PRIMA del gate di qualita'. Serve a far imparare al modello
+// cosa il gate scarta a ragione e cosa scarta per niente.
+rawCode = rawBuyAbs ? 1 : rawSellAbs ? -1 : rawBearExh ? 2 : rawBullExh ? -2 : rawBullIni ? 3 : rawBearIni ? -3 : rawBullDiv ? 4 : rawBearDiv ? -4 : 0
+
+dd = display.data_window
+plot(useExport ? sigCode       : na, "x_sig",     display = dd)
+plot(useExport ? rawCode       : na, "x_sigraw",  display = dd)
+plot(useExport ? vz            : na, "x_vz",      display = dd)
+plot(useExport ? dz            : na, "x_dz",      display = dd)
+plot(useExport ? imb           : na, "x_imb",     display = dd)
+plot(useExport ? imbOrtho      : na, "x_ortho",   display = dd)
+plot(useExport ? res           : na, "x_res",     display = dd)
+plot(useExport ? clvPos        : na, "x_clv",     display = dd)
+plot(useExport ? er            : na, "x_er",      display = dd)
+plot(useExport ? ext           : na, "x_ext",     display = dd)
+plot(useExport ? vwZ           : na, "x_vwz",     display = dd)
+plot(useExport ? cvdN          : na, "x_cvdz",    display = dd)
+plot(useExport ? atrS          : na, "x_atr",     display = dd)
+plot(useExport ? (htfUp ? 1 : 0) : na, "x_htf",   display = dd)
+plot(useExport ? nz(sinceCusum, 9999) : na, "x_cusumage", display = dd)
+plot(useExport ? (hour + minute / 60.0) : na, "x_hour", display = dd)
+plot(useExport ? dayofweek     : na, "x_dow",     display = dd)
+plot(useExport ? score         : na, "x_score",   display = dd)
+plot(useExport ? (ltfOk ? 1 : 0) : na, "x_ltf",   display = dd)

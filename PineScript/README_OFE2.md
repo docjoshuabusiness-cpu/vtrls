@@ -71,3 +71,74 @@ Gli alert emettono JSON, non testo:
 ```
 
 Il campo `score` e' continuo in `[-1,1]` e puo' essere usato come input di sizing invece di un ingresso binario.
+
+---
+
+# Meta-labeling
+
+## Cosa il DOM non e', in Pine
+
+Pine Script **non ha accesso al book**. Nessuna profondita', nessun bid/ask, nessun
+lato aggressore per trade. Non dipende dall'abbonamento: non esiste nel linguaggio.
+Il DOM del widget TradingView arriva dall'integrazione broker e non e' raggiungibile
+da uno script.
+
+Cosa l'abbonamento CME da' davvero, ed e' comunque molto:
+
+- **volume reale in contratti**, non tick count (su FX il volume e' il numero di tick)
+- **dati al secondo**, quindi la modalita' LTF funziona su grafici a 15s
+
+Il massimo ottenibile in Pine resta: spezzare la barra in sotto-barre da 1 secondo e
+classificarle per close vs open. Buona approssimazione del lato aggressore, ma
+approssimazione. Il DOM vero richiede un feed futures diretto (Rithmic, CQG,
+Tradovate, IQFeed) con MQL5 o C++. **Non i CFD di FP Markets**: li' il book e' del
+broker e non ha relazione con la liquidita' reale del CME.
+
+## La pipeline
+
+```
+Pine (useExport = true)  ->  Esporta dati del grafico (CSV)
+   ->  research/meta_label.py  ->  coefficienti  ->  Pine / MQL5
+```
+
+Il segnale primario **non si stringe**. Resta generoso. Un secondo modello impara
+soltanto PRENDERE / SALTARE, addestrato sull'esito a barriere dei segnali primari.
+Separa "dove guardare" da "quando vale la pena" - il punto esatto in cui i filtri a
+soglia falliscono, perche' una soglia si muove lungo la stessa distribuzione mentre
+un meta-modello usa la combinazione di assi che la soglia non vede.
+
+## Comando
+
+```bash
+python3 research/meta_label.py export.csv \
+    --mintick 0.25 --cost-ticks 2 --sl-atr 1.5 --tp-atr 2.5 --max-bars 20 --raw
+```
+
+`--raw` usa i segnali **prima** del gate di qualita': piu' campione, e il modello
+impara da solo cosa scartare invece di ereditare le mie soglie.
+
+Requisiti: solo `numpy` e `pandas`.
+
+## Cosa esce
+
+1. **muR e hit rate per famiglia** - quali dei quattro eventi sopravvivono
+2. **muR per fascia oraria** - spesso tutto l'edge sta in due ore e il resto lo divora
+3. **Curva soglia -> expectanza out-of-sample**, con la colonna `vs base`
+4. **Coefficienti** ordinati per importanza, gia' pronti da incollare in Pine
+
+## Perche' la disciplina statistica qui non e' decorazione
+
+I trade **si sovrappongono nel tempo**. Una k-fold normale mette in train campioni
+che condividono barre col test: leakage garantito e AUC gonfiata. Lo script usa
+**purged k-fold con embargo** (Lopez de Prado, AFML cap. 7) e **pesi di unicita'**:
+un trade che condivide 19 barre su 20 con un altro non vale un'osservazione
+indipendente.
+
+E si valuta in **expectancy (R per trade)**, mai in accuracy. Un modello al 75% di
+accuracy che scarta i pochi vincitori grossi e' peggio di niente.
+
+## Avvertenza sul campione
+
+Sotto ~300 segnali il meta-modello si adatta al rumore, e lo script lo dice.
+La soglia scelta guardando la curva e' essa stessa una decisione in-sample:
+va verificata su un periodo non usato per addestrare.
