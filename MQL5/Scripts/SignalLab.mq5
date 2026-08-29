@@ -25,7 +25,8 @@ enum ENUM_SIGNAL
    SIG_VWAP_DEV   = 1,  // Deviazione dal VWAP di sessione (reversal)
    SIG_EXPANSION  = 2,  // Espansione di range con volume (continuazione)
    SIG_SYNTHDELTA = 3,  // SyntheticDelta - controllo negativo noto
-   SIG_RANDOM     = 4   // Casuale - controllo nullo, deve dare z ~ 0
+   SIG_RANDOM     = 4,  // Casuale - controllo nullo, deve dare z ~ 0
+   SIG_FAS        = 5   // FAS: semivarianza up/down su finestra (momentum)
   };
 
 input group "=== SEGNALE ==="
@@ -79,6 +80,18 @@ input int      InpSdEmaPeriod    = 13;
 input int      InpSdVolAvg       = 20;
 input double   InpSdThreshold    = 0.15;
 
+input group "=== SIG_FAS ==="
+input int      InpFasLen         = 13;     // finestra FAS
+input double   InpFasUpper       = 2.0;    // soglia rialzista (non-log)
+input double   InpFasLower       = 0.5;    // soglia ribassista (non-log)
+
+input group "=== CONDIZIONATORI (misurati, non filtrati) ==="
+input bool     InpUseConditioners = true;  // calcola e stratifica l'edge per condizionatore
+input int      InpVolAtrLen       = 14;    // ATR per la volatilita' composita
+input int      InpVolLookback     = 100;   // finestra del percentile di volatilita'
+input int      InpVolEmaSmooth    = 3;
+input int      InpEntropyWin      = 20;    // finestra entropia di Shannon sul segno
+
 input group "=== COMUNE ==="
 input int      InpATRPeriod      = 14;
 input int      InpVolAvgPeriod   = 20;
@@ -89,6 +102,7 @@ input int      InpRandomSeed     = 12345;
 //--- dati
 MqlRates g_r[];
 double   g_atr[], g_ema[], g_vwap[], g_volAvg[];
+double   g_volPct[], g_trAtr[], g_entropy[], g_fas[];
 int      g_bars = 0;
 double   g_pt, g_atrMed = 0, g_ptValue = 0;
 
@@ -100,6 +114,7 @@ datetime s_time[];
 int      s_dir[];
 int      s_tTP[];
 double   s_maeAtTP[], s_maeFull[], s_mfe[], s_endPts[], s_cost[], s_score[];
+double   c_vol[], c_tr[], c_ent[], c_fas[];   // condizionatori al momento del segnale
 int      s_tSL[];
 int      g_n = 0;
 
@@ -182,6 +197,126 @@ void BuildVolAvg()
       int n = MathMin(i + 1, InpVolAvgPeriod);
       g_volAvg[i] = (n > 0) ? run / n : (double)g_r[i].tick_volume;
      }
+  }
+
+//+------------------------------------------------------------------+
+//| CONDIZIONATORI                                                    |
+//| Non generano segnali. Descrivono lo stato del mercato al momento  |
+//| del segnale, per stratificare l'edge e scoprire DOVE funziona.    |
+//+------------------------------------------------------------------+
+
+//--- TR/ATR della barra: stato di espansione/compressione (logica Ferro)
+void BuildTrAtr()
+  {
+   ArrayResize(g_trAtr, g_bars);
+   for(int i = 0; i < g_bars; i++)
+     {
+      double tr;
+      if(i == 0) tr = g_r[i].high - g_r[i].low;
+      else tr = MathMax(g_r[i].high - g_r[i].low,
+                MathMax(MathAbs(g_r[i].high - g_r[i-1].close),
+                        MathAbs(g_r[i].low  - g_r[i-1].close)));
+      g_trAtr[i] = (g_atr[i] > 0) ? tr / g_atr[i] : 0.0;
+     }
+  }
+
+//--- Percentile di volatilita' composita ATR% + Parkinson, poi EMA (logica Ferro)
+void BuildVolPercentile()
+  {
+   double comp[]; ArrayResize(comp, g_bars);
+   double parkFactor = 1.0 / (4.0 * MathLog(2.0));
+
+   //--- somma mobile della varianza di Parkinson
+   double run = 0;
+   double pv[]; ArrayResize(pv, g_bars);
+   for(int i = 0; i < g_bars; i++)
+     {
+      double v = 0;
+      if(g_r[i].low > 0 && g_r[i].high > 0)
+        { double lr = MathLog(g_r[i].high / g_r[i].low); v = parkFactor * lr * lr; }
+      pv[i] = v;
+      run += v;
+      if(i >= InpVolAtrLen) run -= pv[i - InpVolAtrLen];
+      int n = MathMin(i + 1, InpVolAtrLen);
+      double parkVol = (n > 0) ? MathSqrt(run / n) * 100.0 : 0.0;
+      double atrPct  = (g_r[i].close != 0) ? (g_atr[i] / g_r[i].close) * 100.0 : 0.0;
+      comp[i] = (atrPct + parkVol) / 2.0;
+     }
+
+   //--- EMA
+   double a = 2.0 / (InpVolEmaSmooth + 1.0);
+   double sm[]; ArrayResize(sm, g_bars);
+   sm[0] = comp[0];
+   for(int i = 1; i < g_bars; i++) sm[i] = sm[i-1] + a * (comp[i] - sm[i-1]);
+
+   //--- percentile rank sulla finestra
+   ArrayResize(g_volPct, g_bars);
+   for(int i = 0; i < g_bars; i++)
+     {
+      if(i < InpVolLookback) { g_volPct[i] = 50.0; continue; }
+      int lower = 0;
+      for(int k = i - InpVolLookback; k < i; k++) if(sm[k] <= sm[i]) lower++;
+      g_volPct[i] = 100.0 * lower / InpVolLookback;
+     }
+  }
+
+//--- Entropia di Shannon sul segno dei delta: 0 = direzionale, 1 = caos
+void BuildEntropy()
+  {
+   ArrayResize(g_entropy, g_bars);
+   double log2 = MathLog(2.0);
+   for(int i = 0; i < g_bars; i++)
+     {
+      if(i < InpEntropyWin) { g_entropy[i] = 1.0; continue; }
+      int up = 0, dn = 0;
+      for(int m = i - InpEntropyWin + 1; m <= i; m++)
+        {
+         if(m < 1) continue;
+         double d = g_r[m].close - g_r[m-1].close;
+         if(d > 0) up++; else if(d < 0) dn++;
+        }
+      int n = up + dn;
+      if(n < 2) { g_entropy[i] = 1.0; continue; }
+      double pu = (double)up/n, pd = (double)dn/n, H = 0;
+      if(pu > 0) H -= pu * (MathLog(pu)/log2);
+      if(pd > 0) H -= pd * (MathLog(pd)/log2);
+      g_entropy[i] = H;
+     }
+  }
+
+//--- FAS: log10(semivarianza up) - log10(semivarianza down)
+void BuildFas()
+  {
+   ArrayResize(g_fas, g_bars);
+   double eps = 1e-8;
+   for(int i = 0; i < g_bars; i++)
+     {
+      if(i < InpFasLen) { g_fas[i] = 0; continue; }
+      double pos = 0, neg = 0;
+      for(int m = i - InpFasLen + 1; m <= i; m++)
+        {
+         if(m < 1) continue;
+         double d = g_r[m].close - g_r[m-1].close;
+         if(d > 0) pos += d*d; else neg += d*d;
+        }
+      g_fas[i] = MathLog10(pos + eps) - MathLog10(neg + eps);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| SEGNALE 6 - FAS: asimmetria fra semivarianza up e down           |
+//| Meccanismo: misura se il moto recente e' stato dominato da        |
+//| variazioni positive o negative, pesate al quadrato.               |
+//| Forza = |FAS log|.                                                |
+//+------------------------------------------------------------------+
+int Sig_Fas(int i, double &score)
+  {
+   score = MathAbs(g_fas[i]);
+   double up = (InpFasUpper > 0) ? MathLog10(InpFasUpper) : 0;
+   double dn = (InpFasLower > 0) ? MathLog10(InpFasLower) : 0;
+   if(g_fas[i] > up) return  1;
+   if(g_fas[i] < dn) return -1;
+   return 0;
   }
 
 //+------------------------------------------------------------------+
@@ -314,6 +449,7 @@ int Dispatch(int i, double &score)
       case SIG_EXPANSION:  return Sig_Expansion(i, score);
       case SIG_SYNTHDELTA: return Sig_SynthDelta(i, score);
       case SIG_RANDOM:     return Sig_Random(i, score);
+      case SIG_FAS:        return Sig_Fas(i, score);
      }
    return 0;
   }
@@ -328,6 +464,7 @@ string SignalName()
       case SIG_EXPANSION:  return "EXPANSION";
       case SIG_SYNTHDELTA: return "SYNTHDELTA";
       case SIG_RANDOM:     return "RANDOM";
+      case SIG_FAS:        return "FAS";
      }
    return "?";
   }
@@ -356,6 +493,17 @@ void OnStart()
    BuildVolAvg();
    if(InpSignal == SIG_VWAP_DEV) BuildVWAP(); else ArrayResize(g_vwap, g_bars);
 
+   BuildTrAtr();
+   BuildFas();
+   if(InpUseConditioners || InpSignal == SIG_FAS)
+     {
+      uint tc = GetTickCount();
+      BuildVolPercentile();
+      BuildEntropy();
+      Print("Condizionatori calcolati in ", (GetTickCount()-tc)/1000.0, " s");
+     }
+   else { ArrayResize(g_volPct, g_bars); ArrayResize(g_entropy, g_bars); }
+
 //--- diagnostica strumento
    double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
@@ -378,6 +526,7 @@ void OnStart()
    ArrayResize(s_time, cap); ArrayResize(s_dir, cap); ArrayResize(s_tTP, cap);
    ArrayResize(s_maeAtTP, cap); ArrayResize(s_maeFull, cap); ArrayResize(s_mfe, cap);
    ArrayResize(s_endPts, cap); ArrayResize(s_cost, cap); ArrayResize(s_score, cap);
+   ArrayResize(c_vol, cap); ArrayResize(c_tr, cap); ArrayResize(c_ent, cap); ArrayResize(c_fas, cap);
    ArrayResize(s_tSL, cap * g_nSL);
 
    int lastB = -1000000, lastS = -1000000;
@@ -417,6 +566,7 @@ void OnStart()
          ArrayResize(s_time, cap); ArrayResize(s_dir, cap); ArrayResize(s_tTP, cap);
          ArrayResize(s_maeAtTP, cap); ArrayResize(s_maeFull, cap); ArrayResize(s_mfe, cap);
          ArrayResize(s_endPts, cap); ArrayResize(s_cost, cap); ArrayResize(s_score, cap);
+         ArrayResize(c_vol, cap); ArrayResize(c_tr, cap); ArrayResize(c_ent, cap); ArrayResize(c_fas, cap);
          ArrayResize(s_tSL, cap * g_nSL);
         }
 
@@ -447,6 +597,10 @@ void OnStart()
       s_mfe[g_n]     = mfe;
       s_cost[g_n]    = cost;
       s_score[g_n]   = sc;
+      c_vol[g_n]     = g_volPct[i];
+      c_tr[g_n]      = g_trAtr[i];
+      c_ent[g_n]     = g_entropy[i];
+      c_fas[g_n]     = g_fas[i] * dir;   // >0 = il FAS concorda con la direzione del segnale
       s_endPts[g_n]  = (dir > 0) ? (g_r[last].close - E) / g_pt : (E - g_r[last].close) / g_pt;
       g_n++;
      }
@@ -493,6 +647,53 @@ void EdgeStats(int lo, int hi, int refK, int &n, double &foPct, double &aoPct,
    double v = (n > 1) ? (sum2 - n*expc*expc)/(n-1) : 0;
    double sd = (v > 0) ? MathSqrt(v) : 0;
    t = (sd > 0) ? expc/(sd/MathSqrt((double)n)) : 0;
+  }
+
+//+------------------------------------------------------------------+
+//| Stratifica l'edge per quintili di un condizionatore.              |
+//| Risponde a: "il segnale funziona meglio quando questa variabile   |
+//| e' alta o bassa?" senza scegliere soglie a posteriori.            |
+//+------------------------------------------------------------------+
+void CondStrat(const double &val[], int nb, int refK, string tag, string &html, string &dig)
+  {
+   double srt[]; ArrayResize(srt, g_n);
+   for(int s = 0; s < g_n; s++) srt[s] = val[s];
+   ArraySort(srt);
+
+   html += "<table><tr><th>Quintile</th><th>Intervallo</th><th>Segnali</th><th>fav%</th><th>avv%</th>"
+           "<th>edge pp</th><th>z</th><th>Exp pt</th><th>costo pt</th><th>netto pt</th></tr>";
+
+   for(int q = 0; q < nb; q++)
+     {
+      double lo = srt[(int)(((double)q/nb)*(g_n-1))];
+      double hi = srt[(int)(((double)(q+1)/nb)*(g_n-1))];
+      int n = 0, fo = 0, ao = 0; double sum = 0, cst = 0;
+      for(int s = 0; s < g_n; s++)
+        {
+         double v = val[s];
+         if(v < lo || (q < nb-1 && v >= hi)) continue;
+         n++; cst += s_cost[s];
+         bool f = (s_tTP[s] != BIG), a = (s_maeFull[s] >= (double)InpTPpoints);
+         if(f && !a) fo++;
+         if(a && !f) ao++;
+         sum += Outcome(s, refK);
+        }
+      if(n == 0) continue;
+      double edge = 100.0*(fo-ao)/n;
+      double z    = (fo+ao > 0) ? (fo-ao)/MathSqrt((double)(fo+ao)) : 0;
+      double net  = MathAbs(edge)/100.0*InpTPpoints - cst/n;
+      string cls  = (n < InpMinPerBucket) ? " class='thin'" : "";
+      html += StringFormat("<tr%s><td>%d</td><td>%.3f &ndash; %.3f</td><td>%d</td><td>%.1f</td><td>%.1f</td>"
+                           "<td style='color:%s'><b>%+.1f</b></td><td style='color:%s'>%+.2f</td>"
+                           "<td>%.1f</td><td>%.0f</td><td style='color:%s'><b>%+.0f</b></td></tr>",
+                           cls, q+1, lo, hi, n, 100.0*fo/n, 100.0*ao/n,
+                           edge > 0 ? "#a3be8c" : "#bf616a", edge,
+                           MathAbs(z) > 2.0 ? "#ebcb8b" : "#7b8794", z,
+                           sum/n, cst/n, net > 0 ? "#a3be8c" : "#bf616a", net);
+      dig += StringFormat("COND|%s|%d|lo|%.4f|hi|%.4f|n|%d|fo|%.1f|ao|%.1f|edge|%.2f|z|%.2f|exp|%.1f|cost|%.0f\n",
+                          tag, q+1, lo, hi, n, 100.0*fo/n, 100.0*ao/n, edge, z, sum/n, cst/n);
+     }
+   html += "</table>";
   }
 
 //+------------------------------------------------------------------+
@@ -822,8 +1023,43 @@ void WriteReport()
      }
    h += "</table>";
 
+//--- condizionatori
+   string condDig = "";
+   if(InpUseConditioners)
+     {
+      h += "<h2>Condizionatori &mdash; dove funziona il segnale</h2>";
+      h += "<div class='note'>Ogni tabella stratifica lo <b>stesso</b> insieme di segnali per quintili di una "
+           "variabile di stato. Non e' un filtro applicato: e' una misura. Un condizionatore e' utile solo se "
+           "l'edge cambia <b>in modo monotono</b> lungo i quintili e la colonna <b>netto</b> (edge meno costo "
+           "reale) diventa positiva da qualche parte. Un singolo quintile buono in mezzo a quintili neutri e' "
+           "rumore: con 4 condizionatori x 5 quintili si testano 20 celle, e 1 su 20 supera z=2 per caso.</div>";
+
+      h += "<h3 style='color:#88c0d0;font-size:13px'>1. Espansione della candela (TR/ATR)</h3>";
+      h += "<div class='note'>Quintile 5 = candela in forte espansione, quintile 1 = compressione. "
+           "Se la <b>continuazione</b> esiste, l'edge deve salire verso il quintile 5. Se sale in negativo, "
+           "l'espansione produce <b>reversione</b> e il segnale va invertito in quel regime.</div>";
+      CondStrat(c_tr, 5, refK, "TRATR", h, condDig);
+
+      h += "<h3 style='color:#88c0d0;font-size:13px'>2. Regime di volatilita' (percentile 0-100)</h3>";
+      h += "<div class='note'>Quintile 5 = volatilita' nel percentile alto rispetto alle ultime "
+           + IntegerToString(InpVolLookback) + " barre. Attenzione: alta volatilita' significa anche "
+             "spread piu' largo, ed e' per questo che qui la colonna costo va letta insieme all'edge.</div>";
+      CondStrat(c_vol, 5, refK, "VOLPCT", h, condDig);
+
+      h += "<h3 style='color:#88c0d0;font-size:13px'>3. Entropia del segno (0 = direzionale, 1 = caos)</h3>";
+      h += "<div class='note'>Quintile 1 = moto recente fortemente direzionale, quintile 5 = alternanza "
+             "casuale di barre su e giu'. Se il segnale vive di trend, l'edge deve stare nei quintili bassi.</div>";
+      CondStrat(c_ent, 5, refK, "ENTROPY", h, condDig);
+
+      h += "<h3 style='color:#88c0d0;font-size:13px'>4. Accordo con il FAS (segno concorde alla direzione)</h3>";
+      h += "<div class='note'>Valore positivo = la semivarianza recente spinge nella stessa direzione del "
+             "segnale, negativo = ci va contro. Se l'edge cresce col quintile, il segnale funziona quando "
+             "asseconda il momentum; se decresce, funziona quando lo contraddice.</div>";
+      CondStrat(c_fas, 5, refK, "FASAGREE", h, condDig);
+     }
+
 //--- digest
-   string dg = BuildDigest();
+   string dg = BuildDigest() + condDig + "### END COND\n";
    h += "<h2>Digest da copiare</h2>";
    h += "<div class='note'>Seleziona e incolla in chat. Stesso testo in <b>MQL5/Files/SignalLab_digest.txt</b>.</div>";
    string esc = dg;
