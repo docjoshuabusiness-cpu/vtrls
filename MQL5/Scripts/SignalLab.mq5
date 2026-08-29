@@ -872,10 +872,16 @@ string BuildDigest()
       double m = sum/n;
       double v = (n > 1) ? (sum2 - n*m*m)/(n-1) : 0;
       double sd = (v > 0) ? MathSqrt(v) : 0;
-      d += StringFormat("HOUR|%d|n|%d|hit|%.1f|fo|%.1f|ao|%.1f|z|%.2f|exp|%.1f|t|%.2f|cost|%.0f\n",
-                        hh, n, 100.0*hi2/n, 100.0*f3/n, 100.0*a3/n,
-                        (f3+a3 > 0) ? (f3-a3)/MathSqrt((double)(f3+a3)) : 0, m,
-                        (sd > 0) ? m/(sd/MathSqrt((double)n)) : 0, cst/n);
+      double cH = cst/n;
+      int    dH = f3 + a3;
+      double oH = (dH > 0) ? 100.0*(double)f3/dH : 0;
+      double nH = (InpTPpoints > 0) ? 100.0*(InpTPpoints - cH)/(2.0*InpTPpoints) : 0;
+      double sH = (dH > 0) ? 100.0*MathSqrt((oH/100.0)*(1-oH/100.0)/dH) : 0;
+      double tH = (InpTPpoints > 0) ? 100.0*cH/(2.0*InpTPpoints) : 0;
+      d += StringFormat("HOUR|%d|n|%d|hit|%.1f|fo|%.1f|ao|%.1f|favobs|%.2f|favnull|%.2f|exc|%.2f|"
+                        "zexc|%.2f|thr|%.2f|margin|%.2f|exp|%.1f|cost|%.0f\n",
+                        hh, n, 100.0*hi2/n, 100.0*f3/n, 100.0*a3/n, oH, nH, oH-nH,
+                        (sH > 0) ? (oH-nH)/sH : 0, tH, MathAbs(oH-nH)-tH, m, cH);
      }
 
 //--- direzione: un lato sistematicamente peggiore e' un segnale forte
@@ -1077,11 +1083,14 @@ void WriteReport()
 
 //--- profilo orario
    h += "<h2>Profilo orario</h2>";
-   h += "<div class='note'>La colonna <b>netto</b> e' l'edge lordo dell'ora meno il costo reale pagato in "
-        "quell'ora. E' l'unico numero che dice se in quell'ora si guadagna. Un edge grande in un'ora con "
-        "spread largo vale zero.</div>";
-   h += "<table><tr><th>Ora</th><th>Segnali</th><th>fav%</th><th>avv%</th><th>edge pp</th><th>z</th>"
-        "<th>edge pt</th><th>costo pt</th><th>netto pt</th><th>Exp pt</th></tr>";
+   h += "<div class='note'>Il costo puo' variare di <b>quattro volte</b> fra sessione liquida e ore sottili, "
+        "e con esso il null. Per questo qui null, eccesso e soglia sono calcolati con il costo effettivo "
+        "<b>di ciascuna ora</b>, non con la media. Guarda la colonna <b>margine</b>: e' l'unica che dice se "
+        "in quell'ora resta qualcosa dopo aver pagato. Un eccesso grande in un'ora con spread largo vale "
+        "zero, ed e' un errore classico leggerlo come un orario buono.</div>";
+   h += "<table><tr><th>Ora</th><th>Segnali</th><th>decisi%</th><th>fav oss%</th><th>fav null%</th>"
+        "<th>eccesso pp</th><th>z ecc</th><th>soglia pp</th><th>margine pp</th><th>costo pt</th>"
+        "<th>edge grezzo</th><th>Exp pt</th></tr>";
    for(int hh = 0; hh < 24; hh++)
      {
       int n = 0, f3 = 0, a3 = 0; double sum = 0, cst = 0;
@@ -1097,17 +1106,25 @@ void WriteReport()
         }
       if(n == 0) continue;
       double edgePP = 100.0*(f3-a3)/n;
-      double zz = (f3+a3 > 0) ? (f3-a3)/MathSqrt((double)(f3+a3)) : 0;
-      double edgePt = MathAbs(edgePP)/100.0*InpTPpoints;
-      double net = edgePt - cst/n;
+      double cAvgH  = cst/n;
+      //--- il costo varia fino a 4x fra le ore: il null va calcolato con il costo DI QUELL'ORA
+      int    decH   = f3 + a3;
+      double obsH   = (decH > 0) ? 100.0*(double)f3/decH : 0;
+      double nullH  = (InpTPpoints > 0) ? 100.0*(InpTPpoints - cAvgH)/(2.0*InpTPpoints) : 0;
+      double excH   = obsH - nullH;
+      double seH    = (decH > 0) ? 100.0*MathSqrt((obsH/100.0)*(1-obsH/100.0)/decH) : 0;
+      double zExcH  = (seH > 0) ? excH/seH : 0;
+      double thrH   = (InpTPpoints > 0) ? 100.0*cAvgH/(2.0*InpTPpoints) : 0;
+      double marH   = MathAbs(excH) - thrH;
       string cls = (n < InpMinPerBucket) ? " class='thin'" : "";
-      h += StringFormat("<tr%s><td>%02d:00</td><td>%d</td><td>%.1f</td><td>%.1f</td>"
-                        "<td style='color:%s'>%+.1f</td><td style='color:%s'>%+.2f</td>"
-                        "<td>%.0f</td><td>%.0f</td><td style='color:%s'><b>%+.0f</b></td><td>%.1f</td></tr>",
-                        cls, hh, n, 100.0*f3/n, 100.0*a3/n,
-                        edgePP > 0 ? "#a3be8c" : "#bf616a", edgePP,
-                        MathAbs(zz) > 2.0 ? "#ebcb8b" : "#7b8794", zz,
-                        edgePt, cst/n, net > 0 ? "#a3be8c" : "#bf616a", net, sum/n);
+      h += StringFormat("<tr%s><td>%02d:00</td><td>%d</td><td>%.1f</td><td>%.2f</td><td>%.2f</td>"
+                        "<td style='color:%s'>%+.2f</td><td style='color:%s'>%+.1f</td><td>%.2f</td>"
+                        "<td style='color:%s'><b>%+.2f</b></td><td>%.0f</td><td>%+.1f</td><td>%.1f</td></tr>",
+                        cls, hh, n, 100.0*decH/n, obsH, nullH,
+                        excH > 0 ? "#a3be8c" : "#bf616a", excH,
+                        MathAbs(zExcH) > 2.0 ? "#ebcb8b" : "#7b8794", zExcH, thrH,
+                        marH > 0 ? "#a3be8c" : "#bf616a", marH,
+                        cAvgH, edgePP, sum/n);
      }
    h += "</table>";
 
@@ -1161,13 +1178,17 @@ void WriteReport()
         "quota attesa di esiti favorevoli e' <b>(T - c) / 2T</b>, non il 50%. Un edge grezzo negativo quindi "
         "<b>non dimostra nulla</b>: va confrontato con quel valore atteso. "
         "<b>eccesso</b> = quota favorevole osservata meno quota attesa dal solo costo. E' li' che vive "
-        "l'informazione del segnale, e <b>solo li'</b>.</div>";
+        "l'informazione del segnale, e <b>solo li'</b>.<br><br>"
+        "<b>soglia</b> = 100 x costo / (2 x target): quanto eccesso serve perche' l'informazione valga "
+        "piu' di quello che paghi. <b>margine</b> = |eccesso| meno soglia. Solo un margine <b>positivo</b> "
+        "descrive qualcosa di operabile. Nota che la soglia scende come 1/target mentre l'eccesso di solito "
+        "no: e' per questo che vale la pena guardare target ampi anche per uno scalper.</div>";
    h += "<div class='note'>Il null teorico assume percorso senza deriva e orizzonte illimitato. Quello "
         "empirico esatto lo produce <b>SIG_RANDOM</b> con gli stessi costi, target e orizzonte: lancialo "
         "e confronta riga per riga. Se il segnale non batte il random, non e' un segnale.</div>";
    h += "<table><tr><th>Target</th><th>x ATR</th><th>decisi %</th><th>fav oss %</th><th>fav null %</th>"
-        "<th>eccesso pp</th><th>EV eccesso pt</th><th>edge grezzo pp</th><th>z grezzo</th>"
-        "<th>costo pt</th><th>EV totale pt</th></tr>";
+        "<th>eccesso pp</th><th>soglia pp</th><th>margine pp</th><th>EV eccesso pt</th>"
+        "<th>edge grezzo pp</th><th>costo pt</th><th>EV totale pt</th></tr>";
    for(int k = 0; k < g_nSL; k++)
      {
       int lev = g_sl[k];
@@ -1194,18 +1215,26 @@ void WriteReport()
       double evExc = decPct/100.0 * lev * 2.0 * (excess/100.0);
       double evTot = decPct/100.0 * lev * (2.0*obsFav/100.0 - 1.0);
 
+      //--- soglia di redditivita': l'informazione del segnale deve valere piu' del costo,
+      //    cioe' |eccesso| in punti percentuali deve superare 100*c/(2T)
+      double thr    = (lev > 0) ? 100.0*avgCost/(2.0*lev) : 0;
+      double margin = MathAbs(excess) - thr;
+
       h += StringFormat("<tr><td>%d</td><td>%.1f</td><td>%.1f</td><td>%.2f</td><td>%.2f</td>"
-                        "<td style='color:%s'><b>%+.2f</b>%s</td><td style='color:%s'><b>%+.0f</b></td>"
-                        "<td>%+.2f</td><td>%+.1f</td><td>%.0f</td><td style='color:%s'>%+.0f</td></tr>",
+                        "<td style='color:%s'><b>%+.2f</b>%s</td><td>%.2f</td>"
+                        "<td style='color:%s'><b>%+.2f</b></td><td>%+.0f</td>"
+                        "<td>%+.2f</td><td>%.0f</td><td style='color:%s'>%+.0f</td></tr>",
                         lev, g_atrMed > 0 ? lev/g_atrMed : 0, decPct, obsFav, nullFav,
                         excess > 0 ? "#a3be8c" : "#bf616a", excess,
                         MathAbs(zExc) > 2.0 ? " *" : "",
-                        evExc > 0 ? "#a3be8c" : "#bf616a", evExc,
-                        edge, z2, avgCost,
+                        thr,
+                        margin > 0 ? "#a3be8c" : "#bf616a", margin, evExc,
+                        edge, avgCost,
                         evTot > 0 ? "#a3be8c" : "#bf616a", evTot);
-      tpDig += StringFormat("TPS|%d|dec|%.1f|favobs|%.2f|favnull|%.2f|exc|%.2f|zexc|%.2f|evexc|%.0f|"
-                            "edge|%.2f|z|%.2f|cost|%.0f|evtot|%.0f\n",
-                            lev, decPct, obsFav, nullFav, excess, zExc, evExc, edge, z2, avgCost, evTot);
+      tpDig += StringFormat("TPS|%d|dec|%.1f|favobs|%.2f|favnull|%.2f|exc|%.2f|zexc|%.2f|thr|%.2f|"
+                            "margin|%.2f|evexc|%.0f|edge|%.2f|cost|%.0f|evtot|%.0f\n",
+                            lev, decPct, obsFav, nullFav, excess, zExc, thr, margin, evExc,
+                            edge, avgCost, evTot);
      }
    h += "</table>";
 
