@@ -81,6 +81,18 @@ sessStr  = input.session("0700-2000", "Sessione attiva", group = grpF)
 skipRoll = input.bool(true, "Escludi rollover broker", group = grpF)
 rollStr  = input.session("2255-0105", "Finestra rollover da escludere", group = grpF)
 
+grpQ = "5b - Qualita' (filtri ORTOGONALI al flusso)"
+useGate  = input.bool(true, "Applica il gate di qualita'", group = grpQ, tooltip = "Spegnilo e riaccendilo guardando la tabella EDGE: se il gate non alza 'vs base', sta solo riducendo N senza migliorare nulla. Un filtro che non alza l'expectancy va tolto.")
+useCusum = input.bool(true,  "1. Campionamento CUSUM", group = grpQ, tooltip = "Invece di 'z sopra soglia su UNA barra', accumula la deviazione di flusso e genera un evento solo quando la somma cumulata supera h, poi azzera. Cattura il flusso PERSISTENTE (qualcuno che lavora un ordine) invece del singolo spike. E' il campionamento a eventi di Lopez de Prado.")
+cusumH   = input.float(4.0, "   soglia h", minval = 0.5, step = 0.5, group = grpQ)
+cusumWin = input.int(5,     "   validita' evento (barre)", minval = 1, group = grpQ)
+useConf  = input.bool(true,  "2. Barra di conferma", group = grpQ, tooltip = "Il segnale non vale alla sua chiusura: vale solo se la barra SUCCESSIVA estende nella direzione del trade. Elimina i segnali che falliscono immediatamente, che sono la maggioranza dei falsi positivi. Costo: 1 barra di ritardo.")
+useLoc   = input.bool(true,  "3. Contesto di prezzo (VWAP)", group = grpQ, tooltip = "Le inversioni si prendono solo LONTANO dal valore e verso il valore. Le continuazioni solo dal lato giusto del VWAP di sessione. Asse completamente indipendente dal flusso.")
+locMin   = input.float(1.2, "   distanza minima dal VWAP (sigma)", minval = 0.0, step = 0.1, group = grpQ)
+useMtf   = input.bool(true,  "4. Accordo multi-timeframe", group = grpQ, tooltip = "Il trade deve concordare con il trend del timeframe superiore. Per le inversioni significa: contro-tendenza sul TF operativo, MA a favore sul TF superiore. E' il pullback classico.")
+mtfRes   = input.timeframe("5", "   timeframe superiore", group = grpQ)
+mtfLen   = input.int(20, "   EMA sul TF superiore", minval = 3, group = grpQ)
+
 grpV = "6 - Validazione (edge measurement)"
 showStats = input.bool(true, "Mostra tabella statistiche", group = grpV)
 fwdBars   = input.int(20, "Orizzonte forward (barre)", minval = 1, maxval = 200, group = grpV)
@@ -207,6 +219,64 @@ inSess  = not useSess  or not na(time(timeframe.period, sessStr))
 notRoll = not skipRoll or     na(time(timeframe.period, rollStr))
 ok      = inSess and notRoll and bar_index > statLen + extLen
 
+
+// ============================================================================
+//  4-bis) ASSI DI QUALITA'  ·  tutti ORTOGONALI al flusso
+// ============================================================================
+//  Stringere vzMin o imbMin NON migliora la qualita': ti muovi lungo la stessa
+//  distribuzione, prendi la coda dello stesso segnale, perdi N e perdi la
+//  capacita' di misurare. La qualita' si guadagna condizionando su assi
+//  INDIPENDENTI. Questi quattro non guardano il delta.
+// ============================================================================
+
+// -- 1) CUSUM : campionamento a eventi ---------------------------------------
+//    Flusso efficace = sbilanciamento pesato per partecipazione. La somma
+//    cumulata scatta solo quando il flusso e' PERSISTENTE, non quando una
+//    singola barra fa uno spike. Reset dopo ogni evento.
+xFlow = imb * math.min(math.max(vz, 0.0), 4.0)
+var float sPos = 0.0
+var float sNeg = 0.0
+sPos := math.max(0.0, nz(sPos[1]) + xFlow)
+sNeg := math.min(0.0, nz(sNeg[1]) + xFlow)
+cusumEvt = sPos > cusumH or sNeg < -cusumH
+if cusumEvt
+    sPos := 0.0
+    sNeg := 0.0
+sinceCusum = ta.barssince(cusumEvt)
+
+// -- 2) VWAP di sessione con bande a sigma (contesto di prezzo) --------------
+var float pvSum  = 0.0
+var float vSum   = 0.0
+var float pv2Sum = 0.0
+if newDay
+    pvSum  := 0.0
+    vSum   := 0.0
+    pv2Sum := 0.0
+tp3 = hlc3
+pvSum  += tp3 * volume
+vSum   += volume
+pv2Sum += tp3 * tp3 * volume
+vwap = vSum > 0 ? pvSum / vSum : close
+vwSd = vSum > 0 ? math.sqrt(math.max(pv2Sum / vSum - vwap * vwap, 0.0)) : 0.0
+vwZ  = vwSd > 0 ? (close - vwap) / vwSd : 0.0
+
+// -- 3) Timeframe superiore (expr[1] = valore chiuso, nessun repaint) --------
+htfEma = request.security(syminfo.tickerid, mtfRes, ta.ema(close, mtfLen)[1], barmerge.gaps_off, barmerge.lookahead_off)
+htfUp  = close > htfEma
+
+// -- 4) Gate composito --------------------------------------------------------
+//    isFade = true  -> segnale di inversione (Absorption, Exhaustion, Divergence)
+//    isFade = false -> segnale di continuazione (Initiative)
+f_qual(bool raw, int dir, bool isFade) =>
+    // conferma: la barra SUCCESSIVA deve estendere nella direzione del trade
+    r = useConf ? (raw[1] and (dir > 0 ? high > high[1] : low < low[1])) : raw
+    cOk = not useCusum or nz(sinceCusum, 99999) <= cusumWin
+    // inversione: solo lontano dal valore E verso il valore
+    // continuazione: solo dal lato giusto del valore
+    lOk = not useLoc or (isFade ? (math.abs(vwZ) >= locMin and dir * vwZ < 0) : dir * vwZ > 0)
+    mOk = not useMtf or (dir > 0 ? htfUp : not htfUp)
+    not useGate ? r : (r and cOk and lOk and mOk)
+
 // ============================================================================
 //  5) EVENTI  (quattro famiglie realmente distinte)
 // ============================================================================
@@ -289,14 +359,14 @@ f_gate(bool raw) =>
         last := bar_index
     fire
 
-buyAbs  = f_gate(rawBuyAbs)
-sellAbs = f_gate(rawSellAbs)
-bullExh = f_gate(rawBullExh)
-bearExh = f_gate(rawBearExh)
-bullIni = f_gate(rawBullIni)
-bearIni = f_gate(rawBearIni)
-bullDiv = f_gate(rawBullDiv)
-bearDiv = f_gate(rawBearDiv)
+buyAbs  = f_gate(f_qual(rawBuyAbs,   1, true))
+sellAbs = f_gate(f_qual(rawSellAbs, -1, true))
+bullExh = f_gate(f_qual(rawBullExh, -1, true))   // trade SHORT
+bearExh = f_gate(f_qual(rawBearExh,  1, true))   // trade LONG
+bullIni = f_gate(f_qual(rawBullIni,  1, false))
+bearIni = f_gate(f_qual(rawBearIni, -1, false))
+bullDiv = f_gate(f_qual(rawBullDiv,  1, true))
+bearDiv = f_gate(f_qual(rawBearDiv, -1, true))
 
 // ============================================================================
 //  6) SCORE COMPOSITO CONTINUO  [-1, 1]
@@ -559,7 +629,7 @@ if barstate.islast and showDash
 
     table.cell(tDash, 0, 6, "Score", text_color = color.silver, text_size = size.tiny)
     table.cell(tDash, 1, 6, f_n2(score), text_color = score > 0 ? color.lime : color.red, text_size = size.tiny)
-    table.cell(tDash, 2, 6, math.abs(score) > 0.5 ? "forte" : "debole", text_color = color.gray, text_size = size.tiny)
+    table.cell(tDash, 2, 6, "VWAP z " + f_n2(vwZ), text_color = math.abs(vwZ) >= locMin ? color.fuchsia : color.gray, text_size = size.tiny)
 
     ev  = buyAbs ? "BUY ABS" : sellAbs ? "SELL ABS" : bullExh ? "BULL EXH" : bearExh ? "BEAR EXH" : bullIni ? "BULL INI" : bearIni ? "BEAR INI" : bullDiv ? "BULL DIV" : bearDiv ? "BEAR DIV" : "-"
     evc = buyAbs ? cAbsB : sellAbs ? cAbsS : bullExh ? cExhB : bearExh ? cExhR : bullIni ? cIniB : bearIni ? cIniS : bullDiv ? cDivB : bearDiv ? cDivS : color.gray
@@ -569,7 +639,7 @@ if barstate.islast and showDash
 
 if barstate.islast and showStats
     hdr2 = color.new(color.gray, 55)
-    table.cell(tEdge, 0, 0, "EDGE " + str.tostring(bar_index) + "b", bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
+    table.cell(tEdge, 0, 0, "EDGE " + str.tostring(dayN) + "gg", bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
     table.cell(tEdge, 1, 0, "N",     bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
     table.cell(tEdge, 2, 0, "Hit%",  bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
     table.cell(tEdge, 3, 0, "muR",   bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
