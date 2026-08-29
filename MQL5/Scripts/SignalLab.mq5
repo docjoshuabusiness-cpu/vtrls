@@ -712,7 +712,9 @@ int BestSL()
 //+------------------------------------------------------------------+
 string BuildDigest()
   {
-   string d = "### SIGNALLAB DIGEST v1\n";
+   string d = "### SIGNALLAB DIGEST v2\n";
+   d += "# fo=solo favorevole, ao=solo avverso (mutuamente esclusivi, test pulito del segno)\n";
+   d += "# edge in punti percentuali, exp/cost/MAE/MFE in punti, z e t in deviazioni standard\n";
    d += StringFormat("SIG|%s|invert|%d|tp|%d|maxbars|%d|delay|%d|cooldown|%d|hours|%d-%d\n",
                      SignalName(), InpInvert ? 1 : 0, InpTPpoints, InpMaxBars,
                      InpEntryDelay, InpCooldownBars, InpHourFrom, InpHourTo);
@@ -726,6 +728,13 @@ string BuildDigest()
                      InpSwLookback, InpSwMinPenATR, InpSwMinRejFrac,
                      InpVwSessStartH, InpVwSessStartM, InpVwMinDevATR,
                      InpExpMinRangeATR, InpExpMinVolMult, InpExpMinBodyFrac);
+   d += StringFormat("PARFAS|len|%d|up|%.2f|dn|%.2f\n", InpFasLen, InpFasUpper, InpFasLower);
+   d += StringFormat("PARCOND|atrlen|%d|vollb|%d|volema|%d|entwin|%d|on|%d\n",
+                     InpVolAtrLen, InpVolLookback, InpVolEmaSmooth, InpEntropyWin,
+                     InpUseConditioners ? 1 : 0);
+   d += StringFormat("PARRUN|costfix|%.0f|costextra|%.0f|split|%d|slgrid|%d-%d-%d|tzoff|%d\n",
+                     InpCostPoints, InpExtraCostPts, InpSplitPct,
+                     InpSLfrom, InpSLto, InpSLstep, InpTimeOffsetH);
 
    int nDays = 0; long prev = -1; double totCost = 0; int hits = 0;
    for(int s = 0; s < g_n; s++)
@@ -749,6 +758,46 @@ string BuildDigest()
    d += StringFormat("SYMM|fo|%d|ao|%d|both|%d|neither|%d|edge_pp|%.2f|z|%.2f\n",
                      fo, ao, both, neither, 100.0*(fo-ao)/g_n,
                      (fo+ao > 0) ? (fo-ao)/MathSqrt((double)(fo+ao)) : 0);
+
+//--- curva tempo->target: dove si appiattisce, li' sta l'orizzonte utile
+   d += "TTT";
+     {
+      int hz[9] = {1,3,5,10,15,30,60,120,240};
+      for(int k = 0; k < 9; k++)
+        {
+         if(hz[k] > InpMaxBars) break;
+         int c = 0;
+         for(int s = 0; s < g_n; s++) if(s_tTP[s] != BIG && s_tTP[s] < hz[k]) c++;
+         d += StringFormat("|%d|%.1f", hz[k], 100.0*c/g_n);
+        }
+     }
+   d += "\n";
+
+//--- MAE sofferta prima di toccare il target: da qui si sceglie lo stop
+     {
+      double mw[]; int nw = 0; ArrayResize(mw, g_n);
+      for(int s = 0; s < g_n; s++) if(s_tTP[s] != BIG) mw[nw++] = s_maeAtTP[s];
+      if(nw > 0)
+        {
+         ArrayResize(mw, nw); ArraySort(mw);
+         double q[6] = {0.25, 0.50, 0.75, 0.90, 0.95, 0.99};
+         d += StringFormat("MAEWIN|n|%d", nw);
+         for(int k = 0; k < 6; k++) d += StringFormat("|p%d|%.0f", (int)(q[k]*100), mw[(int)(q[k]*(nw-1))]);
+         d += StringFormat("|max|%.0f\n", mw[nw-1]);
+        }
+     }
+
+//--- MFE: quanto lontano arriva davvero il prezzo, in multipli di ATR
+     {
+      double mf[]; ArrayResize(mf, g_n);
+      for(int s = 0; s < g_n; s++) mf[s] = s_mfe[s];
+      ArraySort(mf);
+      double q[5] = {0.25, 0.50, 0.75, 0.90, 0.95};
+      d += "MFE";
+      for(int k = 0; k < 5; k++)
+         d += StringFormat("|p%d|%.0f", (int)(q[k]*100), mf[(int)(q[k]*(g_n-1))]);
+      d += StringFormat("|atr|%.0f\n", g_atrMed);
+     }
 
    int refK = BestSL();
    d += StringFormat("REFSL|%d\n", g_sl[refK]);
@@ -810,6 +859,46 @@ string BuildDigest()
                         (sd > 0) ? m/(sd/MathSqrt((double)n)) : 0, cst/n);
      }
 
+//--- direzione: un lato sistematicamente peggiore e' un segnale forte
+   for(int k = 0; k < 2; k++)
+     {
+      int want = (k == 0) ? 1 : -1;
+      int n = 0, f4 = 0, a4 = 0; double sum = 0, cst = 0;
+      for(int s = 0; s < g_n; s++)
+        {
+         if(s_dir[s] != want) continue;
+         n++; cst += s_cost[s];
+         bool f = (s_tTP[s] != BIG), a = (s_maeFull[s] >= (double)InpTPpoints);
+         if(f && !a) f4++;
+         if(a && !f) a4++;
+         sum += Outcome(s, refK);
+        }
+      if(n == 0) continue;
+      d += StringFormat("DIR|%d|n|%d|fo|%.1f|ao|%.1f|edge|%.2f|z|%.2f|exp|%.1f|cost|%.0f\n",
+                        want, n, 100.0*f4/n, 100.0*a4/n, 100.0*(f4-a4)/n,
+                        (f4+a4 > 0) ? (f4-a4)/MathSqrt((double)(f4+a4)) : 0, sum/n, cst/n);
+     }
+
+//--- giorno della settimana
+   for(int dd = 0; dd < 7; dd++)
+     {
+      int n = 0, f4 = 0, a4 = 0; double sum = 0;
+      for(int s = 0; s < g_n; s++)
+        {
+         MqlDateTime dt; TimeToStruct(s_time[s], dt);
+         if(dt.day_of_week != dd) continue;
+         n++;
+         bool f = (s_tTP[s] != BIG), a = (s_maeFull[s] >= (double)InpTPpoints);
+         if(f && !a) f4++;
+         if(a && !f) a4++;
+         sum += Outcome(s, refK);
+        }
+      if(n == 0) continue;
+      d += StringFormat("DOW|%d|n|%d|fo|%.1f|ao|%.1f|edge|%.2f|z|%.2f|exp|%.1f\n",
+                        dd, n, 100.0*f4/n, 100.0*a4/n, 100.0*(f4-a4)/n,
+                        (f4+a4 > 0) ? (f4-a4)/MathSqrt((double)(f4+a4)) : 0, sum/n);
+     }
+
 //--- decili di forza del segnale
      {
       double srt[]; ArrayResize(srt, g_n);
@@ -837,8 +926,7 @@ string BuildDigest()
         }
      }
 
-   d += "### END\n";
-   return d;
+   return d;   // il marcatore di fine viene aggiunto dopo i condizionatori
   }
 
 //+------------------------------------------------------------------+
@@ -1059,7 +1147,7 @@ void WriteReport()
      }
 
 //--- digest
-   string dg = BuildDigest() + condDig + "### END COND\n";
+   string dg = BuildDigest() + condDig + "### END\n";
    h += "<h2>Digest da copiare</h2>";
    h += "<div class='note'>Seleziona e incolla in chat. Stesso testo in <b>MQL5/Files/SignalLab_digest.txt</b>.</div>";
    string esc = dg;
