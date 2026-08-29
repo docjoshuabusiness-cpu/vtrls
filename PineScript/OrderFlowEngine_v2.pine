@@ -81,7 +81,7 @@ rollStr  = input.session("2255-0105", "Finestra rollover da escludere", group = 
 grpV = "6 - Validazione (edge measurement)"
 showStats = input.bool(true, "Mostra tabella statistiche", group = grpV)
 fwdBars   = input.int(20, "Orizzonte forward (barre)", minval = 1, maxval = 200, group = grpV)
-costPts   = input.float(7.0, "Costo round-trip (in mintick)", minval = 0.0, step = 0.5, group = grpV, tooltip = "FP Markets Raw EURUSD: ~0.1 pip spread + 3.5 USD/lot/side = circa 0.7 pip = 7 punti su 5 decimali. Impostalo sullo strumento reale, altrimenti le statistiche mentono.")
+costPts   = input.float(2.0, "Costo round-trip (in mintick)", minval = 0.0, step = 0.5, group = grpV, tooltip = "IN TICK, NON IN PIP. Preset:\n  NQ / ES futures : 2   (1 tick spread + commissioni)\n  EURUSD Raw 5dec : 7\n  XAUUSD          : 25\n  US30 CFD        : 15\nErrore tipico: lasciare 7 su NQ significa 1.75 punti invece di 0.5, cioe' circa 0.5R di costo fittizio su OGNI segnale.")
 
 grpU = "7 - Display"
 showPane  = input.bool(true, "Pannello motore", group = grpU)
@@ -276,34 +276,70 @@ score = (wImb * imb + wDz * f_sq(dz / 2.0) + wRes * f_sq(res)) / wSum
 // ============================================================================
 //  7) VALIDAZIONE  ·  forward return NETTO COSTI in unita' ATR
 // ============================================================================
-lowFwd  = ta.lowest(low,   fwdBars)
-highFwd = ta.highest(high, fwdBars)
+// La versione precedente misurava il rendimento a fwdBars barre normalizzato
+// per l'ATR di UNA barra. Due difetti: (a) ignorava lo stop, quindi contava
+// come vincenti trade che nella realta' erano gia' stati chiusi in perdita
+// (gli MAE osservati erano -2.3 / -3.4 ATR contro uno SL di 1.5 ATR: OGNI
+// trade era stato stoppato), (b) l'unita' "R" non era il rischio assunto.
+// Ora: triple barrier (SL / TP / uscita a tempo), R = rischio reale.
 
-f_edge(bool evt, int dir) =>
-    var int   n    = 0
-    var float sumR = 0.0
-    var int   wins = 0
-    var float sumM = 0.0
-    if evt[fwdBars]
-        a0   = math.max(atrS[fwdBars], tick)
-        c0   = close[fwdBars]
-        cost = costPts * tick / a0
-        r    = dir * (close - c0) / a0 - cost
-        m    = dir > 0 ? (lowFwd - c0) / a0 : (c0 - highFwd) / a0
-        n    += 1
-        sumR += r
-        wins += r > 0 ? 1 : 0
-        sumM += m
-    [n, n > 0 ? sumR / n : float(na), n > 0 ? 100.0 * wins / n : float(na), n > 0 ? sumM / n : float(na)]
+f_barrier(bool evt, int dir) =>
+    var int   n       = 0
+    var int   wins    = 0
+    var float sumR    = 0.0
+    var float sumWin  = 0.0
+    var float sumLoss = 0.0
+    var bool  inTrade = false
+    var float ent     = 0.0
+    var float slp     = 0.0
+    var float tpp     = 0.0
+    var float rsk     = 0.0
+    var int   held    = 0
+    if inTrade
+        held += 1
+        hitSL = dir > 0 ? low  <= slp : high >= slp
+        hitTP = dir > 0 ? high >= tpp : low  <= tpp
+        float r = na
+        // pessimistico: se nella stessa barra toccano entrambi, vince lo stop
+        if hitSL
+            r := -1.0
+        else if hitTP
+            r := tpATR / slATR
+        else if held >= fwdBars
+            r := dir * (close - ent) / rsk
+        if not na(r)
+            r -= costPts * tick / rsk
+            n       += 1
+            sumR    += r
+            wins    += r > 0 ? 1 : 0
+            sumWin  += r > 0 ? r : 0.0
+            sumLoss += r < 0 ? -r : 0.0
+            inTrade := false
+    if evt and not inTrade
+        ent     := close
+        rsk     := math.max(slATR * atrS, tick)
+        slp     := dir > 0 ? ent - rsk : ent + rsk
+        tpp     := dir > 0 ? ent + tpATR * atrS : ent - tpATR * atrS
+        held    := 0
+        inTrade := true
+    [n, n > 0 ? sumR / n : float(na), n > 0 ? 100.0 * wins / n : float(na), sumLoss > 0 ? sumWin / sumLoss : float(na)]
 
-[nBA, rBA, hBA, mBA] = f_edge(buyAbs,   1)
-[nSA, rSA, hSA, mSA] = f_edge(sellAbs, -1)
-[nBE, rBE, hBE, mBE] = f_edge(bullExh, -1)   // bull exhaustion -> setup SHORT
-[nRE, rRE, hRE, mRE] = f_edge(bearExh,  1)   // bear exhaustion -> setup LONG
-[nBI, rBI, hBI, mBI] = f_edge(bullIni,  1)
-[nSI, rSI, hSI, mSI] = f_edge(bearIni, -1)
-[nBD, rBD, hBD, mBD] = f_edge(bullDiv,  1)
-[nSD, rSD, hSD, mSD] = f_edge(bearDiv, -1)
+// -- BASELINE: ingresso su OGNI barra, stessa gestione. Serve a separare
+//    l'edge del segnale dalla DERIVA del campione. Se in un campione il
+//    prezzo scende, TUTTI i segnali short sembrano buoni: la baseline lo
+//    smaschera. Il numero che conta e' la colonna "vs base".
+warm = bar_index > statLen + extLen
+[nBL, rBL, hBL, pBL] = f_barrier(warm,  1)
+[nBS, rBS, hBS, pBS] = f_barrier(warm, -1)
+
+[nBA, rBA, hBA, pBA] = f_barrier(buyAbs,   1)
+[nSA, rSA, hSA, pSA] = f_barrier(sellAbs, -1)
+[nBE, rBE, hBE, pBE] = f_barrier(bullExh, -1)   // bull exhaustion -> setup SHORT
+[nRE, rRE, hRE, pRE] = f_barrier(bearExh,  1)   // bear exhaustion -> setup LONG
+[nBI, rBI, hBI, pBI] = f_barrier(bullIni,  1)
+[nSI, rSI, hSI, pSI] = f_barrier(bearIni, -1)
+[nBD, rBD, hBD, pBD] = f_barrier(bullDiv,  1)
+[nSD, rSD, hSD, pSD] = f_barrier(bearDiv, -1)
 
 
 // ============================================================================
@@ -388,14 +424,14 @@ g1BearFlw = f_gate1(v1BearFlow)
 g1BullBub = f_gate1(v1BullBub)
 g1BearBub = f_gate1(v1BearBub)
 
-[n1a, r1a, h1a, m1a] = f_edge(g1BuyAbs,   1)
-[n1b, r1b, h1b, m1b] = f_edge(g1SellAbs, -1)
-[n1c, r1c, h1c, m1c] = f_edge(g1BullExh, -1)   // v1: "potential reversal SHORT"
-[n1d, r1d, h1d, m1d] = f_edge(g1BearExh,  1)   // v1: "potential reversal LONG"
-[n1e, r1e, h1e, m1e] = f_edge(g1BullFlw,  1)
-[n1f, r1f, h1f, m1f] = f_edge(g1BearFlw, -1)
-[n1g, r1g, h1g, m1g] = f_edge(g1BullBub,  1)
-[n1h, r1h, h1h, m1h] = f_edge(g1BearBub, -1)
+[n1a, r1a, h1a, p1a] = f_barrier(g1BuyAbs,   1)
+[n1b, r1b, h1b, p1b] = f_barrier(g1SellAbs, -1)
+[n1c, r1c, h1c, p1c] = f_barrier(g1BullExh, -1)   // v1: "potential reversal SHORT"
+[n1d, r1d, h1d, p1d] = f_barrier(g1BearExh,  1)   // v1: "potential reversal LONG"
+[n1e, r1e, h1e, p1e] = f_barrier(g1BullFlw,  1)
+[n1f, r1f, h1f, p1f] = f_barrier(g1BearFlw, -1)
+[n1g, r1g, h1g, p1g] = f_barrier(g1BullBub,  1)
+[n1h, r1h, h1h, p1h] = f_barrier(g1BearBub, -1)
 
 // ============================================================================
 //  8) COLORI
@@ -451,16 +487,18 @@ plotshape(showV1Mk and g1BearBub, "v1 Bear Bub", shape.circle, location.abovebar
 // 11) DASHBOARD + TABELLA EDGE   (tabelle e funzioni a scope globale)
 // ============================================================================
 var table tDash = table.new(position.top_right, 3, 8, border_width = 1, bgcolor = color.new(#0B0E11, 12), frame_color = color.new(color.gray, 40), frame_width = 1)
-var table tEdge = table.new(position.bottom_right, 5, 18, border_width = 1, bgcolor = color.new(#0B0E11, 12), frame_color = color.new(color.gray, 40), frame_width = 1)
+var table tEdge = table.new(position.bottom_right, 5, 20, border_width = 1, bgcolor = color.new(#0B0E11, 12), frame_color = color.new(color.gray, 40), frame_width = 1)
 
-f_edgeRow(table tb, int row, string name, int n, float r, float h, float m, color c) =>
-    rc = na(r) ? color.gray : r > 0 ? color.lime : color.red
-    nc = n < 30 ? color.orange : color.silver          // campione insufficiente
+f_edgeRow(table tb, int row, string name, int n, float r, float h, float base, color c) =>
+    exc = r - base                                     // edge al netto della deriva
+    rc  = na(r)   ? color.gray : r   > 0 ? color.lime : color.red
+    ec  = na(exc) ? color.gray : exc > 0 ? color.lime : color.red
+    nc  = n < 30 ? color.orange : n < 100 ? color.yellow : color.silver
     table.cell(tb, 0, row, name,            text_color = c,            text_size = size.tiny)
     table.cell(tb, 1, row, str.tostring(n), text_color = nc,           text_size = size.tiny)
     table.cell(tb, 2, row, f_n0(h),         text_color = color.silver, text_size = size.tiny)
     table.cell(tb, 3, row, f_rr(r),         text_color = rc,           text_size = size.tiny)
-    table.cell(tb, 4, row, f_n2(m),         text_color = color.silver, text_size = size.tiny)
+    table.cell(tb, 4, row, f_rr(exc),       text_color = ec,           text_size = size.tiny)
 
 if barstate.islast and showDash
     hdr = color.new(color.gray, 55)
@@ -500,33 +538,35 @@ if barstate.islast and showDash
 
 if barstate.islast and showStats
     hdr2 = color.new(color.gray, 55)
-    table.cell(tEdge, 0, 0, "EDGE @" + str.tostring(fwdBars) + "b", bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
+    table.cell(tEdge, 0, 0, "EDGE " + str.tostring(bar_index) + "b", bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
     table.cell(tEdge, 1, 0, "N",     bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
     table.cell(tEdge, 2, 0, "Hit%",  bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
-    table.cell(tEdge, 3, 0, "mu net",bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
-    table.cell(tEdge, 4, 0, "MAE",   bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
-    f_edgeRow(tEdge, 1, "Buy Abs",  nBA, rBA, hBA, mBA, cAbsB)
-    f_edgeRow(tEdge, 2, "Sell Abs", nSA, rSA, hSA, mSA, cAbsS)
-    f_edgeRow(tEdge, 3, "Bull Exh", nBE, rBE, hBE, mBE, cExhB)
-    f_edgeRow(tEdge, 4, "Bear Exh", nRE, rRE, hRE, mRE, cExhR)
-    f_edgeRow(tEdge, 5, "Bull Ini", nBI, rBI, hBI, mBI, cIniB)
-    f_edgeRow(tEdge, 6, "Bear Ini", nSI, rSI, hSI, mSI, cIniS)
-    f_edgeRow(tEdge, 7, "Bull Div", nBD, rBD, hBD, mBD, cDivB)
-    f_edgeRow(tEdge, 8, "Bear Div", nSD, rSD, hSD, mSD, cDivS)
+    table.cell(tEdge, 3, 0, "muR",   bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
+    table.cell(tEdge, 4, 0, "vs base", bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
+    f_edgeRow(tEdge, 1, "Buy Abs",  nBA, rBA, hBA, rBL, cAbsB)
+    f_edgeRow(tEdge, 2, "Sell Abs", nSA, rSA, hSA, rBS, cAbsS)
+    f_edgeRow(tEdge, 3, "Bull Exh", nBE, rBE, hBE, rBS, cExhB)
+    f_edgeRow(tEdge, 4, "Bear Exh", nRE, rRE, hRE, rBL, cExhR)
+    f_edgeRow(tEdge, 5, "Bull Ini", nBI, rBI, hBI, rBL, cIniB)
+    f_edgeRow(tEdge, 6, "Bear Ini", nSI, rSI, hSI, rBS, cIniS)
+    f_edgeRow(tEdge, 7, "Bull Div", nBD, rBD, hBD, rBL, cDivB)
+    f_edgeRow(tEdge, 8, "Bear Div", nSD, rSD, hSD, rBS, cDivS)
+    f_edgeRow(tEdge, 9,  "BASE long",  nBL, rBL, hBL, rBL, color.gray)
+    f_edgeRow(tEdge, 10, "BASE short", nBS, rBS, hBS, rBS, color.gray)
     if showV1
-        table.cell(tEdge, 0, 9, "-- v1 --", text_color = color.gray, text_size = size.tiny)
-        table.cell(tEdge, 1, 9, "", text_size = size.tiny)
-        table.cell(tEdge, 2, 9, "", text_size = size.tiny)
-        table.cell(tEdge, 3, 9, "", text_size = size.tiny)
-        table.cell(tEdge, 4, 9, "", text_size = size.tiny)
-        f_edgeRow(tEdge, 10, "v1 BuyAbs",  n1a, r1a, h1a, m1a, color.silver)
-        f_edgeRow(tEdge, 11, "v1 SellAbs", n1b, r1b, h1b, m1b, color.silver)
-        f_edgeRow(tEdge, 12, "v1 BullExh", n1c, r1c, h1c, m1c, color.silver)
-        f_edgeRow(tEdge, 13, "v1 BearExh", n1d, r1d, h1d, m1d, color.silver)
-        f_edgeRow(tEdge, 14, "v1 BullFlw", n1e, r1e, h1e, m1e, color.silver)
-        f_edgeRow(tEdge, 15, "v1 BearFlw", n1f, r1f, h1f, m1f, color.silver)
-        f_edgeRow(tEdge, 16, "v1 BullBub", n1g, r1g, h1g, m1g, color.silver)
-        f_edgeRow(tEdge, 17, "v1 BearBub", n1h, r1h, h1h, m1h, color.silver)
+        table.cell(tEdge, 0, 11, "-- v1 --", text_color = color.gray, text_size = size.tiny)
+        table.cell(tEdge, 1, 11, "", text_size = size.tiny)
+        table.cell(tEdge, 2, 11, "", text_size = size.tiny)
+        table.cell(tEdge, 3, 11, "", text_size = size.tiny)
+        table.cell(tEdge, 4, 11, "", text_size = size.tiny)
+        f_edgeRow(tEdge, 12, "v1 BuyAbs", n1a, r1a, h1a, rBL, color.silver)
+        f_edgeRow(tEdge, 13, "v1 SellAbs", n1b, r1b, h1b, rBS, color.silver)
+        f_edgeRow(tEdge, 14, "v1 BullExh", n1c, r1c, h1c, rBS, color.silver)
+        f_edgeRow(tEdge, 15, "v1 BearExh", n1d, r1d, h1d, rBL, color.silver)
+        f_edgeRow(tEdge, 16, "v1 BullFlw", n1e, r1e, h1e, rBL, color.silver)
+        f_edgeRow(tEdge, 17, "v1 BearFlw", n1f, r1f, h1f, rBS, color.silver)
+        f_edgeRow(tEdge, 18, "v1 BullBub", n1g, r1g, h1g, rBL, color.silver)
+        f_edgeRow(tEdge, 19, "v1 BearBub", n1h, r1h, h1h, rBS, color.silver)
 
 // ============================================================================
 // 12) ALERT  ·  payload JSON per bridge MT5 / FP Markets
