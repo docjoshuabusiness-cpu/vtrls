@@ -56,15 +56,16 @@ extLen  = input.int(50, "Lookback estensione / estremi", minval = 10, group = gr
 
 grpT = "3 - Soglie eventi"
 vzMin    = input.float(1.5,  "Partecipazione minima (z volume)",     minval = 0.0, step = 0.1,  group = grpT)
-vzClimax = input.float(2.5,  "Partecipazione climax (z volume)",     minval = 0.0, step = 0.1,  group = grpT)
+vzClimax = input.float(2.0,  "Partecipazione climax (z volume)",     minval = 0.0, step = 0.1,  group = grpT)
 orthoMin = input.float(0.25, "Sbilanciamento ortogonale minimo",     minval = 0.0, maxval = 1.0, step = 0.05, group = grpT)
 imbMin   = input.float(0.35, "Sbilanciamento direzionale minimo",    minval = 0.0, maxval = 1.0, step = 0.05, group = grpT)
 resMin   = input.float(0.35, "Risultato minimo (|close-open| / ATR)", minval = 0.0, step = 0.05, group = grpT)
-erRange  = input.float(0.30, "ER sotto cui il mercato e' RANGE",     minval = 0.0, maxval = 1.0, step = 0.05, group = grpT)
-erTrend  = input.float(0.50, "ER sopra cui il mercato e' TREND",     minval = 0.0, maxval = 1.0, step = 0.05, group = grpT)
-extHi    = input.float(85.0, "Percentile estensione alta", minval = 50.0, maxval = 100.0, group = grpT)
-extLo    = input.float(15.0, "Percentile estensione bassa", minval = 0.0, maxval = 50.0,  group = grpT)
+erRange  = input.float(0.28, "ER sotto cui il mercato e' RANGE",     minval = 0.0, maxval = 1.0, step = 0.02, group = grpT, tooltip = "Random walk su 20 barre: E[|dnet|]=sigma*sqrt(20)=4.47sigma, E[sum|d|]=20*sigma*sqrt(2/pi)=15.96sigma -> ER mediana del rumore puro = 0.28. Sopra questo valore c'e' direzionalita' reale.")
+erTrend  = input.float(0.42, "ER sopra cui il mercato e' TREND",     minval = 0.0, maxval = 1.0, step = 0.02, group = grpT, tooltip = "0.50 teneva solo il decile superiore e rendeva Exhaustion praticamente inosservabile.")
+extHi    = input.float(80.0, "Percentile estensione alta", minval = 50.0, maxval = 100.0, group = grpT)
+extLo    = input.float(20.0, "Percentile estensione bassa", minval = 0.0, maxval = 50.0,  group = grpT)
 coolDown = input.int(3, "Barre minime tra segnali omologhi", minval = 1, group = grpT)
+clvRej   = input.float(0.45, "Soglia chiusura respinta (climax)", minval = 0.1, maxval = 0.5, step = 0.05, group = grpT)
 
 grpD = "4 - Divergenze CVD"
 useDiv = input.bool(true, "Attiva divergenze", group = grpD)
@@ -155,8 +156,17 @@ f_ltfImb() =>
 ltfOk = useLTF and ltfN > 2
 
 // -- 1c) sbilanciamento unificato --------------------------------------------
-imb      = ltfOk ? imbLtf : imbGeo    // [-1, 1]  chi sta vincendo
-imbOrtho = imb - bodyR                // parte NON meccanicamente legata al corpo
+imb = ltfOk ? imbLtf : imbGeo         // [-1, 1]  chi sta vincendo
+
+// Componente NON deducibile dalla direzione della barra.
+//  · modalita' LTF : imb viene dal volume intrabar reale, e' gia' informazione
+//                    indipendente -> nessuna ortogonalizzazione.
+//  · modalita' GEO : vale CLV = bodyR + wickImb, quindi l'unica informazione
+//                    non gia' contenuta nel corpo e' lo sbilanciamento ombre.
+// Sottrarre bodyR anche in LTF era un errore dimensionale: imb e' una frazione
+// di volume, bodyR un rapporto geometrico. Su barra ribassista bodyR ~ -0.6,
+// quindi imb - bodyR superava la soglia su quasi ogni barra ribassista.
+imbOrtho = ltfOk ? imb : wickW * wickImb
 delta    = imb * volume               // unita' = volume puro (non prezzo x volume)
 
 // -- 1d) CVD ancorato alla sessione ------------------------------------------
@@ -205,8 +215,8 @@ rawSellAbs = ok and isRange and vz > vzMin and imbOrtho < -orthoMin and res >  r
 // ---- EXHAUSTION : climax PRO-trend in estensione, chiusura respinta ---------
 //      nuovo estremo + volume climatico + chiusura rifiutata + flusso nascosto
 //      contrario. Concettualmente l'upthrust di Wyckoff.
-rawBullExh = ok and isTrend and vz > vzClimax and newHi and ext > extHi and clvPos < 0.40 and imbOrtho < -orthoMin
-rawBearExh = ok and isTrend and vz > vzClimax and newLo and ext < extLo and clvPos > 0.60 and imbOrtho >  orthoMin
+rawBullExh = ok and isTrend and vz > vzClimax and newHi and ext > extHi and clvPos < clvRej and imbOrtho < -orthoMin
+rawBearExh = ok and isTrend and vz > vzClimax and newLo and ext < extLo and clvPos > 1.0 - clvRej and imbOrtho >  orthoMin
 
 // ---- INITIATIVE : flusso e prezzo allineati in TREND, chiusura forte --------
 rawBullIni = ok and isTrend and vz > vzMin and imb >  imbMin and res >  resMin and clvPos > 0.70
@@ -295,6 +305,98 @@ f_edge(bool evt, int dir) =>
 [nBD, rBD, hBD, mBD] = f_edge(bullDiv,  1)
 [nSD, rSD, hSD, mSD] = f_edge(bearDiv, -1)
 
+
+// ============================================================================
+//  7-bis) BENCHMARK v1  ·  reimplementazione FEDELE del DVB-EX originale
+// ============================================================================
+//  Serve a rispondere con i numeri, non a occhio, alla domanda "quale genera
+//  segnali migliori". Stessa metodologia forward-return, stessi costi, stesso
+//  storico. Nessun filtro di sessione: la v1 non ne aveva, resta com'era.
+// ============================================================================
+grpB     = "9 - Benchmark v1 (originale)"
+showV1   = input.bool(true, "Misura anche i segnali v1", group = grpB)
+v1Len    = input.int(20,    "v1 Delta MA Length", minval = 5, group = grpB)
+v1SensB  = input.float(2.0, "v1 Bubble Sensitivity",     step = 0.1, group = grpB)
+v1SensA  = input.float(1.5, "v1 Absorption Sensitivity", step = 0.1, group = grpB)
+v1SensE  = input.float(1.2, "v1 Exhaustion Sensitivity", step = 0.1, group = grpB)
+v1UseVol = input.bool(true, "v1 Volume Spike Filter", group = grpB)
+v1VolTh  = input.float(1.3, "v1 Volume Threshold", step = 0.1, group = grpB)
+v1Align  = input.int(3,     "v1 Flow Confirmation Bars", minval = 1, group = grpB)
+v1Cool   = input.int(2,     "v1 Min Bars Between", minval = 1, group = grpB)
+showV1Mk = input.bool(false, "Disegna anche i marker v1 (confronto visivo)", group = grpB, tooltip = "Attivalo per verificare che la reimplementazione v1 coincida con il tuo indicatore originale, e per confrontare a occhio la densita' dei segnali.")
+
+v1BodyRange = high - low
+v1UpperWick = high - math.max(close, open)
+v1LowerWick = math.min(close, open) - low
+v1BuyP  = close > open ? (close - open) + (v1LowerWick * 0.5) : (v1LowerWick * 0.7)
+v1SellP = close < open ? (open - close) + (v1UpperWick * 0.5) : (v1UpperWick * 0.7)
+v1Raw   = (v1BuyP - v1SellP) * volume
+v1Vel   = (close - open) / math.max(v1BodyRange, 0.0001)
+v1Delta = v1Raw * (1 + math.abs(v1Vel))
+
+v1MA    = ta.sma(v1Delta, v1Len)
+v1SD    = ta.stdev(v1Delta, v1Len)
+v1ND    = v1SD > 0 ? (v1Delta - v1MA) / v1SD : 0.0     // z contaminato dalla barra corrente
+v1VolMA = ta.sma(volume, v1Len)
+v1Spike = not v1UseVol or volume > v1VolMA * v1VolTh
+v1ATR   = ta.atr(14)
+v1Sig   = math.abs(close - close[1]) > v1ATR * 0.3
+v1Up    = close > close[1]
+v1Dn    = close < close[1]
+v1DPos  = v1Delta > v1MA                                // NB: confronto con la MA, non con zero
+v1DNeg  = v1Delta < v1MA
+v1Strong = math.abs(v1ND) > v1SensA
+v1Mod    = math.abs(v1ND) > v1SensE
+
+v1BuyAbs  = v1Dn and v1DPos and v1Strong and v1Spike and v1Sig
+v1SellAbs = v1Up and v1DNeg and v1Strong and v1Spike and v1Sig
+v1BullExh = v1Up and v1DNeg and v1Mod and v1Spike and v1Sig and not v1SellAbs
+v1BearExh = v1Dn and v1DPos and v1Mod and v1Spike and v1Sig and not v1BuyAbs
+
+v1BullFlowC = v1Up and v1DPos and v1ND >  0.5
+v1BearFlowC = v1Dn and v1DNeg and v1ND < -0.5
+var int v1BullCnt = 0
+var int v1BearCnt = 0
+if v1BullFlowC
+    v1BullCnt += 1
+    v1BearCnt := 0
+else if v1BearFlowC
+    v1BearCnt += 1
+    v1BullCnt := 0
+else
+    v1BullCnt := 0
+    v1BearCnt := 0
+v1BullFlow = v1BullCnt == v1Align
+v1BearFlow = v1BearCnt == v1Align
+
+v1BullBub = v1ND >  v1SensB and v1Spike and v1Delta > 0 and not v1BuyAbs  and not v1BearExh
+v1BearBub = v1ND < -v1SensB and v1Spike and v1Delta < 0 and not v1SellAbs and not v1BullExh
+
+f_gate1(bool raw) =>
+    var int last = -1000000
+    fire = raw and (bar_index - last >= v1Cool)
+    if fire
+        last := bar_index
+    fire
+
+g1BuyAbs  = f_gate1(v1BuyAbs)
+g1SellAbs = f_gate1(v1SellAbs)
+g1BullExh = f_gate1(v1BullExh)
+g1BearExh = f_gate1(v1BearExh)
+g1BullFlw = f_gate1(v1BullFlow)
+g1BearFlw = f_gate1(v1BearFlow)
+g1BullBub = f_gate1(v1BullBub)
+g1BearBub = f_gate1(v1BearBub)
+
+[n1a, r1a, h1a, m1a] = f_edge(g1BuyAbs,   1)
+[n1b, r1b, h1b, m1b] = f_edge(g1SellAbs, -1)
+[n1c, r1c, h1c, m1c] = f_edge(g1BullExh, -1)   // v1: "potential reversal SHORT"
+[n1d, r1d, h1d, m1d] = f_edge(g1BearExh,  1)   // v1: "potential reversal LONG"
+[n1e, r1e, h1e, m1e] = f_edge(g1BullFlw,  1)
+[n1f, r1f, h1f, m1f] = f_edge(g1BearFlw, -1)
+[n1g, r1g, h1g, m1g] = f_edge(g1BullBub,  1)
+[n1h, r1h, h1h, m1h] = f_edge(g1BearBub, -1)
+
 // ============================================================================
 //  8) COLORI
 // ============================================================================
@@ -333,11 +435,23 @@ plotshape(showMarks and bearIni, "Bear Initiative", shape.triangledown, location
 plotshape(showMarks and bullDiv, "Bull Divergence", shape.circle,       location.belowbar, cDivB, size = size.tiny,   force_overlay = true)
 plotshape(showMarks and bearDiv, "Bear Divergence", shape.circle,       location.abovebar, cDivS, size = size.tiny,   force_overlay = true)
 
+// -- marker v1 (grigi, per confronto visivo diretto) --------------------------
+cV1L = color.new(#B0BEC5, 20)
+cV1S = color.new(#78909C, 20)
+plotshape(showV1Mk and g1BuyAbs,  "v1 Buy Abs",  shape.xcross, location.belowbar, cV1L, size = size.tiny, force_overlay = true)
+plotshape(showV1Mk and g1SellAbs, "v1 Sell Abs", shape.xcross, location.abovebar, cV1S, size = size.tiny, force_overlay = true)
+plotshape(showV1Mk and g1BearExh, "v1 Bear Exh", shape.cross,  location.belowbar, cV1L, size = size.tiny, force_overlay = true)
+plotshape(showV1Mk and g1BullExh, "v1 Bull Exh", shape.cross,  location.abovebar, cV1S, size = size.tiny, force_overlay = true)
+plotshape(showV1Mk and g1BullFlw, "v1 Bull Flow", shape.square, location.belowbar, cV1L, size = size.tiny, force_overlay = true)
+plotshape(showV1Mk and g1BearFlw, "v1 Bear Flow", shape.square, location.abovebar, cV1S, size = size.tiny, force_overlay = true)
+plotshape(showV1Mk and g1BullBub, "v1 Bull Bub", shape.circle, location.belowbar, cV1L, size = size.tiny, force_overlay = true)
+plotshape(showV1Mk and g1BearBub, "v1 Bear Bub", shape.circle, location.abovebar, cV1S, size = size.tiny, force_overlay = true)
+
 // ============================================================================
 // 11) DASHBOARD + TABELLA EDGE   (tabelle e funzioni a scope globale)
 // ============================================================================
 var table tDash = table.new(position.top_right, 3, 8, border_width = 1, bgcolor = color.new(#0B0E11, 12), frame_color = color.new(color.gray, 40), frame_width = 1)
-var table tEdge = table.new(position.bottom_right, 5, 9, border_width = 1, bgcolor = color.new(#0B0E11, 12), frame_color = color.new(color.gray, 40), frame_width = 1)
+var table tEdge = table.new(position.bottom_right, 5, 18, border_width = 1, bgcolor = color.new(#0B0E11, 12), frame_color = color.new(color.gray, 40), frame_width = 1)
 
 f_edgeRow(table tb, int row, string name, int n, float r, float h, float m, color c) =>
     rc = na(r) ? color.gray : r > 0 ? color.lime : color.red
@@ -399,6 +513,20 @@ if barstate.islast and showStats
     f_edgeRow(tEdge, 6, "Bear Ini", nSI, rSI, hSI, mSI, cIniS)
     f_edgeRow(tEdge, 7, "Bull Div", nBD, rBD, hBD, mBD, cDivB)
     f_edgeRow(tEdge, 8, "Bear Div", nSD, rSD, hSD, mSD, cDivS)
+    if showV1
+        table.cell(tEdge, 0, 9, "-- v1 --", text_color = color.gray, text_size = size.tiny)
+        table.cell(tEdge, 1, 9, "", text_size = size.tiny)
+        table.cell(tEdge, 2, 9, "", text_size = size.tiny)
+        table.cell(tEdge, 3, 9, "", text_size = size.tiny)
+        table.cell(tEdge, 4, 9, "", text_size = size.tiny)
+        f_edgeRow(tEdge, 10, "v1 BuyAbs",  n1a, r1a, h1a, m1a, color.silver)
+        f_edgeRow(tEdge, 11, "v1 SellAbs", n1b, r1b, h1b, m1b, color.silver)
+        f_edgeRow(tEdge, 12, "v1 BullExh", n1c, r1c, h1c, m1c, color.silver)
+        f_edgeRow(tEdge, 13, "v1 BearExh", n1d, r1d, h1d, m1d, color.silver)
+        f_edgeRow(tEdge, 14, "v1 BullFlw", n1e, r1e, h1e, m1e, color.silver)
+        f_edgeRow(tEdge, 15, "v1 BearFlw", n1f, r1f, h1f, m1f, color.silver)
+        f_edgeRow(tEdge, 16, "v1 BullBub", n1g, r1g, h1g, m1g, color.silver)
+        f_edgeRow(tEdge, 17, "v1 BearBub", n1h, r1h, h1h, m1h, color.silver)
 
 // ============================================================================
 // 12) ALERT  ·  payload JSON per bridge MT5 / FP Markets
