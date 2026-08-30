@@ -117,7 +117,8 @@ fvGateMin   = input.int(25, "   percentile minimo di volatilita'", minval = 0, m
 fvTint      = input.bool(false, "Tinta di sfondo per regime EXTREME", group = grpVo)
 
 grpV = "6 - Validazione (edge measurement)"
-showStats = input.bool(true, "Mostra tabella statistiche", group = grpV)
+statsMode = input.string("Compatta", "Tabella edge", options = ["Off", "Compatta", "Completa"], group = grpV, tooltip = "Off: nessuna tabella, solo grafico.\nCompatta: 5 colonne, e SOLO le famiglie che hanno prodotto trade. E' cio' che serve per decidere.\nCompleta: 8 colonne con MFE, MAE e muR pesato, piu' baseline e benchmark v1. E' il pannello di ricerca, non quello operativo.")
+statsPos  = input.string("Basso sinistra", "Posizione tabella edge", options = ["Basso sinistra", "Basso destra", "Alto sinistra"], group = grpV)
 fwdBars   = input.int(20, "Orizzonte forward (barre)", minval = 1, maxval = 200, group = grpV)
 costPts   = input.float(2.0, "Costo round-trip (in mintick)", minval = 0.0, step = 0.5, group = grpV, tooltip = "IN TICK, NON IN PIP. Preset:\n  NQ / ES futures : 2\n  EURUSD Raw 5dec : 7\n  XAUUSD          : 25\n  US30 CFD        : 15\nErrore tipico: lasciare 7 su NQ significa 1.75 punti invece di 0.5, cioe' circa 0.5R di costo fittizio su OGNI segnale.")
 
@@ -130,10 +131,14 @@ stopBuf = input.float(0.15, "   Buffer oltre l'estremo (x ATR)", minval = 0.0, m
 rrTP    = input.float(1.50, "   TP (x rischio)", minval = 0.2, step = 0.1, group = grpM, tooltip = "In MULTIPLI DI RISCHIO. Confrontalo con la colonna MFE: se il MFE mediano e' sotto questo valore, il target non viene mai raggiunto.")
 
 grpU = "7 - Display"
-showRegimeBg = input.bool(false, "Sfondo colorato per il regime (ER)", group = grpU)
-showDash  = input.bool(true, "Dashboard", group = grpU)
 showMarks = input.bool(true, "Marker eventi OFE", group = grpU)
 showAsmMk = input.bool(true, "Marker segnali ASM", group = grpU)
+mkOff  = input.float(0.45, "Distanza del primo marker dal prezzo (x ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = grpU, tooltip = "Tutti i marker sono posizionati in ASSOLUTO (location.absolute) e non con belowbar/abovebar. Con belowbar due segnali sulla stessa candela finiscono nello stesso pixel e ne vedi UNO SOLO: il piu' importante puo' essere quello nascosto.")
+mkStep = input.float(0.40, "Passo tra segnali impilati (x ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = grpU, tooltip = "Distanza verticale tra due segnali che scattano sulla stessa barra. I LONG si impilano verso il BASSO, gli SHORT verso l'ALTO, in ordine di priorita' (Absorption piu' vicino al prezzo, contesto piu' lontano).\n\nMettilo a 0 per tornare al comportamento sovrapposto.")
+showRegimeBg = input.bool(false, "Sfondo colorato per il regime (ER)", group = grpU)
+showDash  = input.bool(true, "Dashboard compatta", group = grpU)
+dashPos   = input.string("Alto destra", "Posizione dashboard", options = ["Alto destra", "Alto sinistra", "Basso destra", "Basso sinistra", "Centro destra"], group = grpU)
+dashTxt   = input.string("Piccolo", "Dimensione testo dashboard", options = ["Minimo", "Piccolo", "Normale"], group = grpU)
 wImb = input.float(0.45, "Peso sbilanciamento", minval = 0.0, maxval = 1.0, step = 0.05, group = grpU)
 wDz  = input.float(0.35, "Peso delta z",        minval = 0.0, maxval = 1.0, step = 0.05, group = grpU)
 wRes = input.float(0.20, "Peso risultato",      minval = 0.0, maxval = 1.0, step = 0.05, group = grpU)
@@ -686,30 +691,97 @@ bgVol = fvTint and fvPct >= fvExtTh ? color.new(color.red, 90) : na
 bgcolor(na(bgVol) ? bgER : bgVol, title = "Regime")
 
 // ============================================================================
-// 10) MARKER SUL GRAFICO PREZZO
+// 10) MARKER SUL GRAFICO PREZZO  ·  IMPILAMENTO ANTI-SOVRAPPOSIZIONE
 // ============================================================================
-// -- OFE ---------------------------------------------------------------------
-plotshape(showMarks and buyAbs,  "Buy Absorption",  shape.arrowup,      location.belowbar, cAbsB, size = size.normal)
-plotshape(showMarks and sellAbs, "Sell Absorption", shape.arrowdown,    location.abovebar, cAbsS, size = size.normal)
-plotshape(showMarks and bullExh, "Bull Exhaustion", shape.diamond,      location.abovebar, cExhB, size = size.small)
-plotshape(showMarks and bearExh, "Bear Exhaustion", shape.diamond,      location.belowbar, cExhR, size = size.small)
-plotshape(showMarks and bullIni, "Bull Initiative", shape.triangleup,   location.belowbar, cIniB, size = size.tiny)
-plotshape(showMarks and bearIni, "Bear Initiative", shape.triangledown, location.abovebar, cIniS, size = size.tiny)
-plotshape(showMarks and bullDiv, "Bull Divergence", shape.circle,       location.belowbar, cDivB, size = size.tiny)
-plotshape(showMarks and bearDiv, "Bear Divergence", shape.circle,       location.abovebar, cDivS, size = size.tiny)
+//  Con location.belowbar / abovebar due segnali che scattano sulla STESSA
+//  candela occupano lo stesso pixel: ne vedi uno solo, e non sai quale sia
+//  quello nascosto. Su questo indicatore e' un problema reale, non teorico -
+//  Absorption e Divergenza condividono per costruzione lo stesso contesto, e
+//  ASM in range spara spesso sulla stessa barra di un evento OFE.
+//
+//  Soluzione: posizione ASSOLUTA con slot verticale. Su ogni barra si conta
+//  quanti segnali della stessa direzione sono attivi e si assegna a ciascuno
+//  la propria altezza, in ordine di priorita' decrescente:
+//    · i LONG  si impilano verso il BASSO, sotto il minimo
+//    · gli SHORT si impilano verso l'ALTO, sopra il massimo
+//    · il marker di volatilita' (giallo) e' sempre il piu' esterno: e'
+//      contesto, non un trade, e non deve mai coprire un segnale
+//  Il passo e' in unita' di ATR, quindi resta leggibile su ogni scala e
+//  timeframe. mkStep = 0 ripristina la sovrapposizione.
+// ============================================================================
 
-// -- ASM ---------------------------------------------------------------------
-plotshape(showAsmMk and asmLongRg,  "ASM Long (Range)",   shape.triangleup,   location.belowbar, cAsmL, size = size.small)
-plotshape(showAsmMk and asmShortRg, "ASM Short (Range)",  shape.triangledown, location.abovebar, cAsmS, size = size.small)
-plotshape(showAsmMk and asmLongTr,  "ASM Long (Trend)",   shape.circle,       location.belowbar, cAsmT, size = size.tiny)
-plotshape(showAsmMk and asmShortTr, "ASM Short (Trend)",  shape.circle,       location.abovebar, cAsmU, size = size.tiny)
+// -- condizioni, in ordine di priorita' (indice 1 = piu' vicino al prezzo) ---
+bL1 = showMarks and buyAbs        // Buy Absorption
+bL2 = showMarks and bearExh       // Bear Exhaustion  -> LONG
+bL3 = showAsmMk and asmLongRg     // ASM Long (range)
+bL4 = showMarks and bullIni       // Bull Initiative
+bL5 = showMarks and bullDiv       // Bull Divergence
+bL6 = showAsmMk and asmLongTr     // ASM Long (trend)
+bL7 = fvShowCmp and fvCmp         // candela compressa (contesto)
 
-// -- FERRO: espansione / compressione di candela -----------------------------
-plotshape(fvShowExp and fvExp and fvExpShape == "Cerchio", "Candela in Espansione (cerchio)", shape.circle,     location.abovebar, cVolE, size = size.tiny)
-plotshape(fvShowExp and fvExp and fvExpShape == "Freccia", "Candela in Espansione (freccia)", shape.arrowup,    location.abovebar, cVolE, size = size.tiny)
-plotshape(fvShowCmp and fvCmp, "Candela Compressa", shape.xcross, location.belowbar, cVolC, size = size.tiny)
+bU1 = showMarks and sellAbs       // Sell Absorption
+bU2 = showMarks and bullExh       // Bull Exhaustion  -> SHORT
+bU3 = showAsmMk and asmShortRg    // ASM Short (range)
+bU4 = showMarks and bearIni       // Bear Initiative
+bU5 = showMarks and bearDiv       // Bear Divergence
+bU6 = showAsmMk and asmShortTr    // ASM Short (trend)
+bU7 = fvShowExp and fvExp         // candela in espansione (contesto)
 
-// -- marker v1 (grigi, confronto visivo) -------------------------------------
+// -- slot = quanti segnali con priorita' superiore sono attivi su questa barra
+kL1 = 0
+kL2 = kL1 + (bL1 ? 1 : 0)
+kL3 = kL2 + (bL2 ? 1 : 0)
+kL4 = kL3 + (bL3 ? 1 : 0)
+kL5 = kL4 + (bL4 ? 1 : 0)
+kL6 = kL5 + (bL5 ? 1 : 0)
+kL7 = kL6 + (bL6 ? 1 : 0)
+
+kU1 = 0
+kU2 = kU1 + (bU1 ? 1 : 0)
+kU3 = kU2 + (bU2 ? 1 : 0)
+kU4 = kU3 + (bU3 ? 1 : 0)
+kU5 = kU4 + (bU4 ? 1 : 0)
+kU6 = kU5 + (bU5 ? 1 : 0)
+kU7 = kU6 + (bU6 ? 1 : 0)
+
+f_yDn(bool c, int slot) => c ? low  - (mkOff + slot * mkStep) * atrS : na
+f_yUp(bool c, int slot) => c ? high + (mkOff + slot * mkStep) * atrS : na
+
+yL1 = f_yDn(bL1, kL1)
+yL2 = f_yDn(bL2, kL2)
+yL3 = f_yDn(bL3, kL3)
+yL4 = f_yDn(bL4, kL4)
+yL5 = f_yDn(bL5, kL5)
+yL6 = f_yDn(bL6, kL6)
+yL7 = f_yDn(bL7, kL7)
+
+yU1 = f_yUp(bU1, kU1)
+yU2 = f_yUp(bU2, kU2)
+yU3 = f_yUp(bU3, kU3)
+yU4 = f_yUp(bU4, kU4)
+yU5 = f_yUp(bU5, kU5)
+yU6 = f_yUp(bU6, kU6)
+yU7 = f_yUp(bU7, kU7)
+
+// -- LONG (verdi), impilati verso il basso -----------------------------------
+plotshape(yL1, "Buy Absorption",      shape.arrowup,    location.absolute, cAbsB, size = size.normal)
+plotshape(yL2, "Bear Exhaustion",     shape.diamond,    location.absolute, cExhR, size = size.small)
+plotshape(yL3, "ASM Long (Range)",    shape.triangleup, location.absolute, cAsmL, size = size.small)
+plotshape(yL4, "Bull Initiative",     shape.triangleup, location.absolute, cIniB, size = size.tiny)
+plotshape(yL5, "Bull Divergence",     shape.circle,     location.absolute, cDivB, size = size.tiny)
+plotshape(yL6, "ASM Long (Trend)",    shape.circle,     location.absolute, cAsmT, size = size.tiny)
+plotshape(yL7, "Candela Compressa",   shape.xcross,     location.absolute, cVolC, size = size.tiny)
+
+// -- SHORT (rossi), impilati verso l'alto ------------------------------------
+plotshape(yU1, "Sell Absorption",     shape.arrowdown,    location.absolute, cAbsS, size = size.normal)
+plotshape(yU2, "Bull Exhaustion",     shape.diamond,      location.absolute, cExhB, size = size.small)
+plotshape(yU3, "ASM Short (Range)",   shape.triangledown, location.absolute, cAsmS, size = size.small)
+plotshape(yU4, "Bear Initiative",     shape.triangledown, location.absolute, cIniS, size = size.tiny)
+plotshape(yU5, "Bear Divergence",     shape.circle,       location.absolute, cDivS, size = size.tiny)
+plotshape(yU6, "ASM Short (Trend)",   shape.circle,       location.absolute, cAsmU, size = size.tiny)
+plotshape(yU7 , "Candela in Espansione", fvExpShape == "Freccia" ? shape.arrowup : shape.circle, location.absolute, cVolE, size = size.tiny)
+
+// -- marker v1 (grigi, benchmark visivo) - restano attaccati alla barra ------
 cV1L = color.new(#B0BEC5, 20)
 cV1S = color.new(#78909C, 20)
 plotshape(showV1Mk and g1BuyAbs,  "v1 Buy Abs",   shape.xcross, location.belowbar, cV1L, size = size.tiny)
@@ -722,124 +794,118 @@ plotshape(showV1Mk and g1BullBub, "v1 Bull Bub",  shape.circle, location.belowba
 plotshape(showV1Mk and g1BearBub, "v1 Bear Bub",  shape.circle, location.abovebar, cV1S, size = size.tiny)
 
 // ============================================================================
-// 11) DASHBOARD + TABELLA EDGE
+// 11) DASHBOARD COMPATTA + TABELLA EDGE A RIGHE VARIABILI
 // ============================================================================
-var table tDash = table.new(position.top_right, 3, 11, border_width = 1, bgcolor = color.new(#0B0E11, 12), frame_color = color.new(color.gray, 40), frame_width = 1)
-var table tEdge = table.new(position.bottom_right, 8, 27, border_width = 1, bgcolor = color.new(#0B0E11, 12), frame_color = color.new(color.gray, 40), frame_width = 1)
+//  La dashboard e' 2 colonne x 6 righe: e' un pannello di STATO, deve dire in
+//  un colpo d'occhio dov'e' il flusso, che regime c'e', com'e' la volatilita'
+//  e cosa e' appena scattato. Tutto il resto era decorazione che rubava
+//  grafico.
+//  La tabella edge nasce in modalita' COMPATTA: 5 colonne e solo le famiglie
+//  che hanno effettivamente prodotto trade. Le righe vuote non informano.
+// ============================================================================
+posDash = dashPos == "Alto destra"    ? position.top_right    : dashPos == "Alto sinistra"  ? position.top_left :
+          dashPos == "Basso destra"   ? position.bottom_right : dashPos == "Basso sinistra" ? position.bottom_left : position.middle_right
+posStat = statsPos == "Basso sinistra" ? position.bottom_left : statsPos == "Basso destra" ? position.bottom_right : position.top_left
+szDash  = dashTxt == "Minimo" ? size.tiny : dashTxt == "Piccolo" ? size.small : size.normal
 
-f_edgeRow(table tb, int row, string name, int n, int nsig, float r, float h, float fe, float ae, float rw, float base, color c) =>
-    exc = r - base                                     // edge al netto della deriva
-    rc  = na(r)   ? color.gray : r   > 0 ? color.lime : color.red
-    ec  = na(exc) ? color.gray : exc > 0 ? color.lime : color.red
-    nc  = n < 30 ? color.orange : n < 100 ? color.yellow : color.silver
-    ns  = nsig > n ? str.tostring(n) + "/" + str.tostring(nsig) : str.tostring(n)
-    fc  = na(fe) ? color.gray : fe < rrTP ? color.orange : color.silver
-    wc  = na(rw) or na(r) ? color.gray : rw > r ? color.lime : color.red
-    table.cell(tb, 0, row, name,      text_color = c,             text_size = size.tiny)
-    table.cell(tb, 1, row, ns,        text_color = nc,            text_size = size.tiny)
-    table.cell(tb, 2, row, f_n0(h),   text_color = color.silver,  text_size = size.tiny)
-    table.cell(tb, 3, row, f_rr(r),   text_color = rc,            text_size = size.tiny)
-    table.cell(tb, 4, row, f_rr(exc), text_color = ec,            text_size = size.tiny)
-    table.cell(tb, 5, row, f_n2(fe),  text_color = fc,            text_size = size.tiny)
-    table.cell(tb, 6, row, f_n2(ae),  text_color = color.silver,  text_size = size.tiny)
-    table.cell(tb, 7, row, f_rr(rw),  text_color = wc,            text_size = size.tiny)
+var table tDash = table.new(posDash, 2, 6,  border_width = 1, bgcolor = color.new(#0B0E11, 8), frame_color = color.new(color.gray, 45), frame_width = 1)
+var table tEdge = table.new(posStat, 8, 27, border_width = 1, bgcolor = color.new(#0B0E11, 12), frame_color = color.new(color.gray, 40), frame_width = 1)
+
+// ritorna 1 se la riga e' stata disegnata, 0 altrimenti -> permette righe variabili
+f_edgeRow(table tb, int row, string name, int n, int nsig, float r, float h, float fe, float ae, float rw, float base, color c, bool full) =>
+    int drawn = 0
+    if n > 0 or full
+        exc = r - base                                 // edge al netto della deriva del campione
+        rc  = na(r)   ? color.gray : r   > 0 ? color.lime : color.red
+        ec  = na(exc) ? color.gray : exc > 0 ? color.lime : color.red
+        nc  = n < 30 ? color.orange : n < 100 ? color.yellow : color.silver
+        ns  = nsig > n ? str.tostring(n) + "/" + str.tostring(nsig) : str.tostring(n)
+        table.cell(tb, 0, row, name,      text_color = c,            text_size = size.tiny)
+        table.cell(tb, 1, row, ns,        text_color = nc,           text_size = size.tiny)
+        table.cell(tb, 2, row, f_n0(h),   text_color = color.silver, text_size = size.tiny)
+        table.cell(tb, 3, row, f_rr(r),   text_color = rc,           text_size = size.tiny)
+        table.cell(tb, 4, row, f_rr(exc), text_color = ec,           text_size = size.tiny)
+        if full
+            fc = na(fe) ? color.gray : fe < rrTP ? color.orange : color.silver
+            wc = na(rw) or na(r) ? color.gray : rw > r ? color.lime : color.red
+            table.cell(tb, 5, row, f_n2(fe), text_color = fc,           text_size = size.tiny)
+            table.cell(tb, 6, row, f_n2(ae), text_color = color.silver, text_size = size.tiny)
+            table.cell(tb, 7, row, f_rr(rw), text_color = wc,           text_size = size.tiny)
+        drawn := 1
+    drawn
 
 f_sep(table tb, int row, string txt) =>
     table.cell(tb, 0, row, txt, text_color = color.gray, text_size = size.tiny)
-    table.cell(tb, 1, row, "", text_size = size.tiny)
-    table.cell(tb, 2, row, "", text_size = size.tiny)
-    table.cell(tb, 3, row, "", text_size = size.tiny)
-    table.cell(tb, 4, row, "", text_size = size.tiny)
-    table.cell(tb, 5, row, "", text_size = size.tiny)
-    table.cell(tb, 6, row, "", text_size = size.tiny)
-    table.cell(tb, 7, row, "", text_size = size.tiny)
+    1
 
+// ---------------------------------------------------------------------------
 if barstate.islast and showDash
     hdr = color.new(color.gray, 55)
-    table.cell(tDash, 0, 0, "UFE1", bgcolor = hdr, text_color = color.white, text_size = size.small)
-    table.cell(tDash, 1, 0, ltfOk ? "LTF " + ltfRes : "GEO", bgcolor = hdr, text_color = ltfOk ? color.lime : color.orange, text_size = size.small)
-    table.cell(tDash, 2, 0, ok ? "ON" : "OFF", bgcolor = hdr, text_color = ok ? color.lime : color.red, text_size = size.small)
+    evTx  = buyAbs ? "BUY ABS" : sellAbs ? "SELL ABS" : bearExh ? "BEAR EXH >L" : bullExh ? "BULL EXH >S" : bullIni ? "BULL INI" : bearIni ? "BEAR INI" : bullDiv ? "BULL DIV" : bearDiv ? "BEAR DIV" : asmLongRg ? "ASM LONG rg" : asmShortRg ? "ASM SHORT rg" : asmLongTr ? "ASM LONG tr" : asmShortTr ? "ASM SHORT tr" : "-"
+    evCol = buyAbs ? cAbsB : sellAbs ? cAbsS : bearExh ? cExhR : bullExh ? cExhB : bullIni ? cIniB : bearIni ? cIniS : bullDiv ? cDivB : bearDiv ? cDivS : asmLongRg ? cAsmL : asmShortRg ? cAsmS : asmLongTr ? cAsmT : asmShortTr ? cAsmU : color.gray
 
-    table.cell(tDash, 0, 1, "Partecipazione z", text_color = color.silver, text_size = size.tiny)
-    table.cell(tDash, 1, 1, f_n2(vz), text_color = vz > vzClimax ? color.fuchsia : vz > vzMin ? color.yellow : color.gray, text_size = size.tiny)
-    table.cell(tDash, 2, 1, vz > vzClimax ? "CLIMAX" : vz > vzMin ? "alta" : "normale", text_color = color.gray, text_size = size.tiny)
+    table.cell(tDash, 0, 0, "UFE1", bgcolor = hdr, text_color = color.white, text_size = szDash)
+    table.cell(tDash, 1, 0, (ltfOk ? "LTF " + ltfRes : "GEO") + (ok ? "" : "  OFF"), bgcolor = hdr, text_color = ok ? (ltfOk ? color.lime : color.orange) : color.red, text_size = szDash)
 
-    table.cell(tDash, 0, 2, "Sbilanciamento", text_color = color.silver, text_size = size.tiny)
-    table.cell(tDash, 1, 2, f_n2(imb), text_color = imb > 0 ? color.lime : color.red, text_size = size.tiny)
-    table.cell(tDash, 2, 2, "ortho " + f_n2(imbOrtho), text_color = color.gray, text_size = size.tiny)
+    table.cell(tDash, 0, 1, "Flusso", text_color = color.silver, text_size = szDash)
+    table.cell(tDash, 1, 1, "z " + f_n2(vz) + "   imb " + f_n2(imb), text_color = imb > 0 ? color.lime : color.red, text_size = szDash)
 
-    table.cell(tDash, 0, 3, "Risultato (ATR)", text_color = color.silver, text_size = size.tiny)
-    table.cell(tDash, 1, 3, f_n2(res), text_color = res > 0 ? color.lime : color.red, text_size = size.tiny)
-    table.cell(tDash, 2, 3, "clv " + f_n2(clvPos), text_color = color.gray, text_size = size.tiny)
+    table.cell(tDash, 0, 2, "Regime", text_color = color.silver, text_size = szDash)
+    table.cell(tDash, 1, 2, (isTrend ? "TREND" : isRange ? "RANGE" : "misto") + " " + f_n2(er) + "   ext " + f_n0(ext) + "%", text_color = isTrend ? color.aqua : color.orange, text_size = szDash)
 
-    table.cell(tDash, 0, 4, "Regime (ER)", text_color = color.silver, text_size = size.tiny)
-    table.cell(tDash, 1, 4, f_n2(er), text_color = isTrend ? color.aqua : isRange ? color.orange : color.gray, text_size = size.tiny)
-    table.cell(tDash, 2, 4, isTrend ? "TREND" : isRange ? "RANGE" : "misto", text_color = isTrend ? color.aqua : color.orange, text_size = size.tiny)
+    table.cell(tDash, 0, 3, "Volatilita'", text_color = color.silver, text_size = szDash)
+    table.cell(tDash, 1, 3, fvRegime + " " + f_n0(fvPct) + "%" + (fvExp ? "   EXP" : "") + (fvGate and not fvOk ? "   BLOCK" : ""), text_color = fvExp ? cVolE : fvRegCol, text_size = szDash)
 
-    table.cell(tDash, 0, 5, "Estensione", text_color = color.silver, text_size = size.tiny)
-    table.cell(tDash, 1, 5, f_n0(ext) + "%", text_color = ext > extHi or ext < extLo ? color.fuchsia : color.gray, text_size = size.tiny)
-    table.cell(tDash, 2, 5, "CVD z " + f_n2(cvdN), text_color = color.aqua, text_size = size.tiny)
+    table.cell(tDash, 0, 4, "ASM", text_color = color.silver, text_size = szDash)
+    table.cell(tDash, 1, 4, (asmTrend ? (asmSlope > 0 ? "TREND up" : "TREND dn") : "RANGE") + "   z " + f_n2(asmZ), text_color = asmTrend ? (asmSlope > 0 ? cAsmT : cAsmU) : color.orange, text_size = szDash)
 
-    table.cell(tDash, 0, 6, "Score", text_color = color.silver, text_size = size.tiny)
-    table.cell(tDash, 1, 6, f_n2(score), text_color = score > 0 ? color.lime : color.red, text_size = size.tiny)
-    table.cell(tDash, 2, 6, "VWAP z " + f_n2(vwZ), text_color = math.abs(vwZ) >= locMin ? color.fuchsia : color.gray, text_size = size.tiny)
+    table.cell(tDash, 0, 5, "Evento", text_color = color.white, text_size = szDash)
+    table.cell(tDash, 1, 5, evTx, text_color = evCol, text_size = szDash)
 
-    // -- riga volatilita' (cio' che resta di Ferro, in forma decisionale) -----
-    table.cell(tDash, 0, 7, "Volatilita'", text_color = color.silver, text_size = size.tiny)
-    table.cell(tDash, 1, 7, f_n0(fvPct) + "%", text_color = fvRegCol, text_size = size.tiny)
-    table.cell(tDash, 2, 7, fvRegime + "  TR/ATR " + f_n2(fvTrAtr), text_color = fvExp ? cVolE : color.gray, text_size = size.tiny)
-
-    // -- riga ASM ------------------------------------------------------------
-    table.cell(tDash, 0, 8, "ASM z (len " + str.tostring(asmLen) + ")", text_color = color.silver, text_size = size.tiny)
-    table.cell(tDash, 1, 8, f_n2(asmZ), text_color = math.abs(asmZ) > asmZTh * 1.5 ? color.fuchsia : color.gray, text_size = size.tiny)
-    table.cell(tDash, 2, 8, asmTrend ? (asmSlope > 0 ? "TREND up" : "TREND dn") : "RANGE", text_color = asmTrend ? (asmSlope > 0 ? cAsmT : cAsmU) : color.orange, text_size = size.tiny)
-
-    table.cell(tDash, 0, 9, "Vol gate", text_color = color.silver, text_size = size.tiny)
-    table.cell(tDash, 1, 9, fvGate ? (fvOk ? "PASS" : "BLOCK") : "off", text_color = fvGate ? (fvOk ? color.lime : color.red) : color.gray, text_size = size.tiny)
-    table.cell(tDash, 2, 9, "z vol " + f_n2(fvZ), text_color = color.gray, text_size = size.tiny)
-
-    ev  = buyAbs ? "BUY ABS" : sellAbs ? "SELL ABS" : bullExh ? "BULL EXH" : bearExh ? "BEAR EXH" : bullIni ? "BULL INI" : bearIni ? "BEAR INI" : bullDiv ? "BULL DIV" : bearDiv ? "BEAR DIV" : asmLongRg ? "ASM L-RG" : asmShortRg ? "ASM S-RG" : asmLongTr ? "ASM L-TR" : asmShortTr ? "ASM S-TR" : "-"
-    evc = buyAbs ? cAbsB : sellAbs ? cAbsS : bullExh ? cExhB : bearExh ? cExhR : bullIni ? cIniB : bearIni ? cIniS : bullDiv ? cDivB : bearDiv ? cDivS : asmLongRg ? cAsmL : asmShortRg ? cAsmS : asmLongTr ? cAsmT : asmShortTr ? cAsmU : color.gray
-    table.cell(tDash, 0, 10, "EVENTO", text_color = color.white, text_size = size.tiny)
-    table.cell(tDash, 1, 10, ev, text_color = evc, text_size = size.tiny)
-    table.cell(tDash, 2, 10, fvExp ? "EXPANSION" : "", text_color = cVolE, text_size = size.tiny)
-
-if barstate.islast and showStats
+// ---------------------------------------------------------------------------
+if barstate.islast and statsMode != "Off"
+    full = statsMode == "Completa"
+    table.clear(tEdge, 0, 0, 7, 26)
     hdr2 = color.new(color.gray, 55)
     table.cell(tEdge, 0, 0, entryMode + " " + str.tostring(dayN) + "gg", bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
     table.cell(tEdge, 1, 0, "N",       bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
     table.cell(tEdge, 2, 0, "Hit%",    bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
     table.cell(tEdge, 3, 0, "muR",     bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
     table.cell(tEdge, 4, 0, "vs base", bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
-    table.cell(tEdge, 5, 0, "MFE",     bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
-    table.cell(tEdge, 6, 0, "MAE",     bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
-    table.cell(tEdge, 7, 0, "muR-w",   bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
-    f_edgeRow(tEdge, 1, "Buy Abs",  nBA, gBA, rBA, hBA, fBA, aBA, wBA, rBL, cAbsB)
-    f_edgeRow(tEdge, 2, "Sell Abs", nSA, gSA, rSA, hSA, fSA, aSA, wSA, rBS, cAbsS)
-    f_edgeRow(tEdge, 3, "Bull Exh", nBE, gBE, rBE, hBE, fBE, aBE, wBE, rBS, cExhB)
-    f_edgeRow(tEdge, 4, "Bear Exh", nRE, gRE, rRE, hRE, fRE, aRE, wRE, rBL, cExhR)
-    f_edgeRow(tEdge, 5, "Bull Ini", nBI, gBI, rBI, hBI, fBI, aBI, wBI, rBL, cIniB)
-    f_edgeRow(tEdge, 6, "Bear Ini", nSI, gSI, rSI, hSI, fSI, aSI, wSI, rBS, cIniS)
-    f_edgeRow(tEdge, 7, "Bull Div", nBD, gBD, rBD, hBD, fBD, aBD, wBD, rBL, cDivB)
-    f_edgeRow(tEdge, 8, "Bear Div", nSD, gSD, rSD, hSD, fSD, aSD, wSD, rBS, cDivS)
-    f_sep(tEdge, 9, "-- ASM --")
-    f_edgeRow(tEdge, 10, "ASM L rg", nAL, gAL, rAL, hAL, fAL, aAL, wAL, rBL, cAsmL)
-    f_edgeRow(tEdge, 11, "ASM S rg", nAS, gAS, rAS, hAS, fAS, aAS, wAS, rBS, cAsmS)
-    f_edgeRow(tEdge, 12, "ASM L tr", nAT, gAT, rAT, hAT, fAT, aAT, wAT, rBL, cAsmT)
-    f_edgeRow(tEdge, 13, "ASM S tr", nAU, gAU, rAU, hAU, fAU, aAU, wAU, rBS, cAsmU)
-    f_sep(tEdge, 14, "-- base --")
-    f_edgeRow(tEdge, 15, "BASE long",  nBL, gBL, rBL, hBL, fBL, aBL, wBL, rBL, color.gray)
-    f_edgeRow(tEdge, 16, "BASE short", nBS, gBS, rBS, hBS, fBS, aBS, wBS, rBS, color.gray)
-    if showV1
-        f_sep(tEdge, 17, "-- v1 --")
-        f_edgeRow(tEdge, 18, "v1 BuyAbs",  n1a, g1a, r1a, h1a, f1a, a1a, w1a, rBL, color.silver)
-        f_edgeRow(tEdge, 19, "v1 SellAbs", n1b, g1b, r1b, h1b, f1b, a1b, w1b, rBS, color.silver)
-        f_edgeRow(tEdge, 20, "v1 BullExh", n1c, g1c, r1c, h1c, f1c, a1c, w1c, rBS, color.silver)
-        f_edgeRow(tEdge, 21, "v1 BearExh", n1d, g1d, r1d, h1d, f1d, a1d, w1d, rBL, color.silver)
-        f_edgeRow(tEdge, 22, "v1 BullFlw", n1e, g1e, r1e, h1e, f1e, a1e, w1e, rBL, color.silver)
-        f_edgeRow(tEdge, 23, "v1 BearFlw", n1f, g1f, r1f, h1f, f1f, a1f, w1f, rBS, color.silver)
-        f_edgeRow(tEdge, 24, "v1 BullBub", n1g, g1g, r1g, h1g, f1g, a1g, w1g, rBL, color.silver)
-        f_edgeRow(tEdge, 25, "v1 BearBub", n1h, g1h, r1h, h1h, f1h, a1h, w1h, rBS, color.silver)
+    if full
+        table.cell(tEdge, 5, 0, "MFE",   bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
+        table.cell(tEdge, 6, 0, "MAE",   bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
+        table.cell(tEdge, 7, 0, "muR-w", bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
+
+    int rw = 1
+    rw += f_edgeRow(tEdge, rw, "Buy Abs",  nBA, gBA, rBA, hBA, fBA, aBA, wBA, rBL, cAbsB, full)
+    rw += f_edgeRow(tEdge, rw, "Sell Abs", nSA, gSA, rSA, hSA, fSA, aSA, wSA, rBS, cAbsS, full)
+    rw += f_edgeRow(tEdge, rw, "Bear Exh", nRE, gRE, rRE, hRE, fRE, aRE, wRE, rBL, cExhR, full)
+    rw += f_edgeRow(tEdge, rw, "Bull Exh", nBE, gBE, rBE, hBE, fBE, aBE, wBE, rBS, cExhB, full)
+    rw += f_edgeRow(tEdge, rw, "Bull Ini", nBI, gBI, rBI, hBI, fBI, aBI, wBI, rBL, cIniB, full)
+    rw += f_edgeRow(tEdge, rw, "Bear Ini", nSI, gSI, rSI, hSI, fSI, aSI, wSI, rBS, cIniS, full)
+    rw += f_edgeRow(tEdge, rw, "Bull Div", nBD, gBD, rBD, hBD, fBD, aBD, wBD, rBL, cDivB, full)
+    rw += f_edgeRow(tEdge, rw, "Bear Div", nSD, gSD, rSD, hSD, fSD, aSD, wSD, rBS, cDivS, full)
+    if full
+        rw += f_sep(tEdge, rw, "-- ASM --")
+    rw += f_edgeRow(tEdge, rw, "ASM L rg", nAL, gAL, rAL, hAL, fAL, aAL, wAL, rBL, cAsmL, full)
+    rw += f_edgeRow(tEdge, rw, "ASM S rg", nAS, gAS, rAS, hAS, fAS, aAS, wAS, rBS, cAsmS, full)
+    rw += f_edgeRow(tEdge, rw, "ASM L tr", nAT, gAT, rAT, hAT, fAT, aAT, wAT, rBL, cAsmT, full)
+    rw += f_edgeRow(tEdge, rw, "ASM S tr", nAU, gAU, rAU, hAU, fAU, aAU, wAU, rBS, cAsmU, full)
+    if full
+        rw += f_sep(tEdge, rw, "-- base --")
+    rw += f_edgeRow(tEdge, rw, "BASE long",  nBL, gBL, rBL, hBL, fBL, aBL, wBL, rBL, color.gray, full)
+    rw += f_edgeRow(tEdge, rw, "BASE short", nBS, gBS, rBS, hBS, fBS, aBS, wBS, rBS, color.gray, full)
+    if showV1 and full
+        rw += f_sep(tEdge, rw, "-- v1 --")
+        rw += f_edgeRow(tEdge, rw, "v1 BuyAbs",  n1a, g1a, r1a, h1a, f1a, a1a, w1a, rBL, color.silver, full)
+        rw += f_edgeRow(tEdge, rw, "v1 SellAbs", n1b, g1b, r1b, h1b, f1b, a1b, w1b, rBS, color.silver, full)
+        rw += f_edgeRow(tEdge, rw, "v1 BullExh", n1c, g1c, r1c, h1c, f1c, a1c, w1c, rBS, color.silver, full)
+        rw += f_edgeRow(tEdge, rw, "v1 BearExh", n1d, g1d, r1d, h1d, f1d, a1d, w1d, rBL, color.silver, full)
+        rw += f_edgeRow(tEdge, rw, "v1 BullFlw", n1e, g1e, r1e, h1e, f1e, a1e, w1e, rBL, color.silver, full)
+        rw += f_edgeRow(tEdge, rw, "v1 BearFlw", n1f, g1f, r1f, h1f, f1f, a1f, w1f, rBS, color.silver, full)
+        rw += f_edgeRow(tEdge, rw, "v1 BullBub", n1g, g1g, r1g, h1g, f1g, a1g, w1g, rBL, color.silver, full)
+        rw += f_edgeRow(tEdge, rw, "v1 BearBub", n1h, g1h, r1h, h1h, f1h, a1h, w1h, rBS, color.silver, full)
 
 // ============================================================================
 // 12) ALERT  ·  payload JSON per bridge MT5 / FP Markets
