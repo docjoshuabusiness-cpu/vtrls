@@ -37,7 +37,7 @@
 //  e' intrinsecamente poco osservabile: usare la modalita' LTF quando possibile.
 // ============================================================================
 
-indicator("Order Flow Engine v2", "OFE2", overlay = false, max_labels_count = 500)
+indicator("Order Flow Engine v2", "OFE2", overlay = true, max_labels_count = 500)
 
 // ============================================================================
 //  INPUT
@@ -103,7 +103,7 @@ fwdBars   = input.int(20, "Orizzonte forward (barre)", minval = 1, maxval = 200,
 costPts   = input.float(2.0, "Costo round-trip (in mintick)", minval = 0.0, step = 0.5, group = grpV, tooltip = "IN TICK, NON IN PIP. Preset:\n  NQ / ES futures : 2   (1 tick spread + commissioni)\n  EURUSD Raw 5dec : 7\n  XAUUSD          : 25\n  US30 CFD        : 15\nErrore tipico: lasciare 7 su NQ significa 1.75 punti invece di 0.5, cioe' circa 0.5R di costo fittizio su OGNI segnale.")
 
 grpU = "7 - Display"
-showPane  = input.bool(true, "Pannello motore", group = grpU)
+showRegimeBg = input.bool(false, "Sfondo colorato per il regime", group = grpU, tooltip = "Tinge lo sfondo: blu = trend, arancione = range. Il valore numerico dell'Efficiency Ratio resta comunque in dashboard.")
 showDash  = input.bool(true, "Dashboard", group = grpU)
 showMarks = input.bool(true, "Marker sul grafico prezzo", group = grpU)
 wImb = input.float(0.45, "Peso sbilanciamento", minval = 0.0, maxval = 1.0, step = 0.05, group = grpU)
@@ -648,40 +648,38 @@ cDivB = color.new(#7CB342, 0)
 cDivS = color.new(#D81B60, 0)
 
 // ============================================================================
-//  9) PANNELLO MOTORE (scale omogenee: tutto normalizzato)
+//  9) SFONDO DI REGIME
 // ============================================================================
-plot(showPane ? dz : na, "Delta z", style = plot.style_columns, color = delta > 0 ? color.new(cUp, 55) : color.new(cDn, 55))
-plot(showPane ? cvdN : na,        "CVD z",    color = color.new(#2962FF, 0), linewidth = 2)
-plot(showPane ? score * 4.0 : na, "Score x4", color = color.new(#FFFFFF, 35), linewidth = 1)
-plot(showPane ?  vzMin : na, "Soglia +", color = color.new(color.gray, 70))
-plot(showPane ? -vzMin : na, "Soglia -", color = color.new(color.gray, 70))
-hline(0, "zero", color = color.new(color.gray, 50))
-
-bgcolor(isTrend ? color.new(color.blue, 93) : isRange ? color.new(color.orange, 93) : na, title = "Regime")
+//  Il pannello inferiore e' stato rimosso: delta z, CVD z, score e regime
+//  erano gia' in dashboard in forma numerica. Un istogramma in piu' non
+//  aggiungeva informazione, occupava spazio, e obbligava a tenere lo script
+//  fuori dal grafico prezzo solo per ospitarlo. Ora i marker vanno sul
+//  prezzo direttamente e le colonne di export restano nel Data Window.
+bgcolor(showRegimeBg ? (isTrend ? color.new(color.blue, 92) : isRange ? color.new(color.orange, 92) : na) : na, title = "Regime")
 
 // ============================================================================
 // 10) MARKER SUL GRAFICO PREZZO
 // ============================================================================
-plotshape(showMarks and buyAbs,  "Buy Absorption",  shape.arrowup,      location.belowbar, cAbsB, size = size.normal, force_overlay = true)
-plotshape(showMarks and sellAbs, "Sell Absorption", shape.arrowdown,    location.abovebar, cAbsS, size = size.normal, force_overlay = true)
-plotshape(showMarks and bullExh, "Bull Exhaustion", shape.diamond,      location.abovebar, cExhB, size = size.small,  force_overlay = true)
-plotshape(showMarks and bearExh, "Bear Exhaustion", shape.diamond,      location.belowbar, cExhR, size = size.small,  force_overlay = true)
-plotshape(showMarks and bullIni, "Bull Initiative", shape.triangleup,   location.belowbar, cIniB, size = size.tiny,   force_overlay = true)
-plotshape(showMarks and bearIni, "Bear Initiative", shape.triangledown, location.abovebar, cIniS, size = size.tiny,   force_overlay = true)
-plotshape(showMarks and bullDiv, "Bull Divergence", shape.circle,       location.belowbar, cDivB, size = size.tiny,   force_overlay = true)
-plotshape(showMarks and bearDiv, "Bear Divergence", shape.circle,       location.abovebar, cDivS, size = size.tiny,   force_overlay = true)
+plotshape(showMarks and buyAbs,  "Buy Absorption",  shape.arrowup,      location.belowbar, cAbsB, size = size.normal)
+plotshape(showMarks and sellAbs, "Sell Absorption", shape.arrowdown,    location.abovebar, cAbsS, size = size.normal)
+plotshape(showMarks and bullExh, "Bull Exhaustion", shape.diamond,      location.abovebar, cExhB, size = size.small)
+plotshape(showMarks and bearExh, "Bear Exhaustion", shape.diamond,      location.belowbar, cExhR, size = size.small)
+plotshape(showMarks and bullIni, "Bull Initiative", shape.triangleup,   location.belowbar, cIniB, size = size.tiny)
+plotshape(showMarks and bearIni, "Bear Initiative", shape.triangledown, location.abovebar, cIniS, size = size.tiny)
+plotshape(showMarks and bullDiv, "Bull Divergence", shape.circle,       location.belowbar, cDivB, size = size.tiny)
+plotshape(showMarks and bearDiv, "Bear Divergence", shape.circle,       location.abovebar, cDivS, size = size.tiny)
 
 // -- marker v1 (grigi, per confronto visivo diretto) --------------------------
 cV1L = color.new(#B0BEC5, 20)
 cV1S = color.new(#78909C, 20)
-plotshape(showV1Mk and g1BuyAbs,  "v1 Buy Abs",  shape.xcross, location.belowbar, cV1L, size = size.tiny, force_overlay = true)
-plotshape(showV1Mk and g1SellAbs, "v1 Sell Abs", shape.xcross, location.abovebar, cV1S, size = size.tiny, force_overlay = true)
-plotshape(showV1Mk and g1BearExh, "v1 Bear Exh", shape.cross,  location.belowbar, cV1L, size = size.tiny, force_overlay = true)
-plotshape(showV1Mk and g1BullExh, "v1 Bull Exh", shape.cross,  location.abovebar, cV1S, size = size.tiny, force_overlay = true)
-plotshape(showV1Mk and g1BullFlw, "v1 Bull Flow", shape.square, location.belowbar, cV1L, size = size.tiny, force_overlay = true)
-plotshape(showV1Mk and g1BearFlw, "v1 Bear Flow", shape.square, location.abovebar, cV1S, size = size.tiny, force_overlay = true)
-plotshape(showV1Mk and g1BullBub, "v1 Bull Bub", shape.circle, location.belowbar, cV1L, size = size.tiny, force_overlay = true)
-plotshape(showV1Mk and g1BearBub, "v1 Bear Bub", shape.circle, location.abovebar, cV1S, size = size.tiny, force_overlay = true)
+plotshape(showV1Mk and g1BuyAbs,  "v1 Buy Abs",  shape.xcross, location.belowbar, cV1L, size = size.tiny)
+plotshape(showV1Mk and g1SellAbs, "v1 Sell Abs", shape.xcross, location.abovebar, cV1S, size = size.tiny)
+plotshape(showV1Mk and g1BearExh, "v1 Bear Exh", shape.cross,  location.belowbar, cV1L, size = size.tiny)
+plotshape(showV1Mk and g1BullExh, "v1 Bull Exh", shape.cross,  location.abovebar, cV1S, size = size.tiny)
+plotshape(showV1Mk and g1BullFlw, "v1 Bull Flow", shape.square, location.belowbar, cV1L, size = size.tiny)
+plotshape(showV1Mk and g1BearFlw, "v1 Bear Flow", shape.square, location.abovebar, cV1S, size = size.tiny)
+plotshape(showV1Mk and g1BullBub, "v1 Bull Bub", shape.circle, location.belowbar, cV1L, size = size.tiny)
+plotshape(showV1Mk and g1BearBub, "v1 Bear Bub", shape.circle, location.abovebar, cV1S, size = size.tiny)
 
 // ============================================================================
 // 11) DASHBOARD + TABELLA EDGE   (tabelle e funzioni a scope globale)
