@@ -11,7 +11,7 @@
 //  - Time stop: derivato dalla half-life AR(1) del segnale, non arbitrario
 //  - Stop loss / take profit in multipli di ATR misurati all'ingresso
 // =============================================================================
-strategy("ASM v2 - Strategy", overlay = true,
+strategy("ASM v2.1 - Strategy", overlay = true,
      default_qty_type      = strategy.percent_of_equity,
      default_qty_value     = 100,
      initial_capital       = 10000,
@@ -32,20 +32,22 @@ lenMax      = input.int (40,   "Orizzonte massimo",                  minval = 3,
 atrLen      = input.int (14,   "ATR length",                         minval = 2,  group = gM)
 volLen      = input.int (250,  "Finestra stima volatilita'",         minval = 50, group = gM)
 robustVol   = input.bool(true, "Scala robusta (MAD)",                             group = gM)
+sigFloorK   = input.float(0.5, "Floor sigma (x tick/prezzo)", minval = 0, step = 0.1, group = gM)
 smoothLen   = input.int (3,    "Smoothing z (EMA, 1 = off)",         minval = 1,  group = gM)
 reStd       = input.bool(true, "Ri-standardizza dopo smoothing",                  group = gM)
 
 gT = "2 - Soglie"
 thrMode  = input.string("Percentile adattivo", "Modalita' soglia", options = ["Sigma fisso", "Percentile adattivo"], group = gT)
 thrFixed = input.float (2.0, "Soglia in sigma",             minval = 0.5, step = 0.1, group = gT)
-thrPct   = input.float (92,  "Percentile |z| (%)",          minval = 50, maxval = 99.5, step = 0.5, group = gT)
-pctLen   = input.int   (500, "Finestra percentile",         minval = 100, group = gT)
+thrPct   = input.float (85,  "Percentile |z| (%)",          minval = 50, maxval = 99.5, step = 0.5, group = gT)
+pctLen   = input.int   (300, "Finestra percentile",         minval = 100, group = gT)
 trendZ   = input.float (1.0, "Soglia z ingresso trend",     step = 0.1, group = gT)
 
 gR = "3 - Regime (Variance Ratio)"
+vrBase = input.int (1,    "Intervallo base b (barre)", minval = 1, group = gR, tooltip = "Su TF molto bassi alzalo (es. 6 su 5s = 30s) per togliere il bid-ask bounce")
 vrQ   = input.int  (5,    "Orizzonte q del VR",  minval = 2,  group = gR)
 vrLen = input.int  (120,  "Finestra N del VR",   minval = 30, group = gR)
-vrThr = input.float(1.65, "Soglia |z| del VR",   step = 0.05, group = gR)
+vrThr = input.float(1.00, "Soglia |z| del VR",   step = 0.05, group = gR)
 
 gF = "4 - Filtri (ablation)"
 useAccel    = input.bool(false, "Usa filtro accelerazione",       group = gF)
@@ -63,7 +65,8 @@ slATR     = input.float(2.0,  "Stop loss (x ATR)",       minval = 0.2, step = 0.
 tpATR     = input.float(3.0,  "Take profit (x ATR, 0 = off)", minval = 0, step = 0.1, group = gX)
 
 gE = "6 - Esecuzione"
-minGap   = input.int(20, "Barre minime tra segnali", minval = 0, group = gE)
+entryMode = input.string("Anticipato", "Modalita' ingresso MR", options = ["Anticipato", "Confermato"], group = gE)
+minGap   = input.int(10, "Barre minime tra segnali", minval = 0, group = gE)
 fromYear = input.int(2015, "Anno inizio test", group = gE)
 
 // ============================ CORE (identico all'indicatore) ==================
@@ -72,8 +75,9 @@ muR     = ta.sma(r, volLen)
 sdStd   = ta.stdev(r, volLen)
 medR    = ta.median(r, volLen)
 sdMad   = 1.4826 * ta.median(math.abs(r - medR), volLen)
-sigma1  = robustVol ? sdMad : sdStd
-centerR = robustVol ? medR  : muR
+sigFloor = sigFloorK * syminfo.mintick / close
+sigma1   = math.max(robustVol ? sdMad : sdStd, sigFloor)
+centerR  = robustVol ? medR : muR
 
 atr    = ta.atr(atrLen)
 atrAvg = ta.sma(atr, volLen)
@@ -91,14 +95,15 @@ z     = reStd and sdZ > 0 ? zSm / sdZ : zSm
 thrAdaptive = ta.percentile_linear_interpolation(math.abs(z), pctLen, thrPct)
 thr         = thrMode == "Sigma fisso" ? thrFixed : nz(thrAdaptive, thrFixed)
 
-rq   = math.log(close / nz(close[vrQ], close))
-v1   = ta.variance(r,  vrLen)
-vq   = ta.variance(rq, vrLen)
-vr   = v1 > 0 ? vq / (vrQ * v1) : 1.0
+rb   = math.log(close / nz(close[vrBase],       close))
+rqb  = math.log(close / nz(close[vrQ * vrBase], close))
+vb   = ta.variance(rb,  vrLen)
+vqb  = ta.variance(rqb, vrLen)
+vr   = vb > 0 ? vqb / (vrQ * vb) : 1.0
 seVR = math.sqrt(2.0 * (2.0 * vrQ - 1.0) * (vrQ - 1.0) / (3.0 * vrQ * vrLen))
 zVR  = seVR > 0 ? (vr - 1.0) / seVR : 0.0
 
-warmup    = bar_index > math.max(volLen, vrLen) + 10
+warmup    = bar_index > math.max(math.max(volLen, vrLen), vrQ * vrBase) + 10
 isTrend   = warmup and zVR >  vrThr
 isMeanRev = warmup and zVR < -vrThr
 
@@ -107,8 +112,10 @@ acc    = accSmooth > 1 ? ta.ema(accRaw, accSmooth) : accRaw
 accLongOK  = not useAccel or acc > 0
 accShortOK = not useAccel or acc < 0
 
-mrLongRaw  = useMrSig and isMeanRev and z < -thr and z > z[1] and accLongOK
-mrShortRaw = useMrSig and isMeanRev and z >  thr and z < z[1] and accShortOK
+mrLongCore  = entryMode == "Confermato" ? ta.crossover (z, -thr) : (z < -thr and z > z[1])
+mrShortCore = entryMode == "Confermato" ? ta.crossunder(z,  thr) : (z >  thr and z < z[1])
+mrLongRaw  = useMrSig and isMeanRev and mrLongCore  and accLongOK
+mrShortRaw = useMrSig and isMeanRev and mrShortCore and accShortOK
 trUpState  = isTrend and z >  trendZ
 trDnState  = isTrend and z < -trendZ
 trLongRaw  = useTrendSig and trUpState and not trUpState[1]
