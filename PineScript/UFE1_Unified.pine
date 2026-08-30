@@ -109,8 +109,9 @@ fvExpTh     = input.float(1.8, "Soglia Espansione Candela (TR/ATR)", minval = 1.
 fvLowTh     = input.int(30, "Soglia LOW percentile", group = grpVo)
 fvHighTh    = input.int(70, "Soglia HIGH percentile", group = grpVo)
 fvExtTh     = input.int(90, "Soglia EXTREME percentile", group = grpVo)
-fvShowExp   = input.bool(true,  "Marker candela in ESPANSIONE", group = grpVo)
-fvExpShape  = input.string("Cerchio", "Forma marker espansione", options = ["Cerchio", "Freccia"], group = grpVo)
+fvShowExp   = input.bool(true,  "Evidenzia candela in ESPANSIONE", group = grpVo)
+fvExpStyle  = input.string("Sfondo", "   come", options = ["Sfondo", "Marker", "Sfondo + Marker"], group = grpVo, tooltip = "Sfondo: colonna gialla sulla sola candela in espansione. E' la lettura piu' immediata perche' la barra si distingue senza aggiungere un oggetto sopra il prezzo.\nMarker: cerchio giallo impilato sopra la barra.\nSe il grafico ti risulta a strisce, non abbassare la trasparenza: alza la soglia TR/ATR. Con 1.8 l'espansione tocca circa il 5-8% delle barre, con 2.2 scende sotto il 3%.")
+fvBgTr      = input.int(80, "   trasparenza sfondo espansione", minval = 0, maxval = 95, group = grpVo)
 fvShowCmp   = input.bool(false, "Marker candela COMPRESSA", group = grpVo, tooltip = "TR/ATR < 0.5 accade su circa un quarto delle barre: acceso, sporca il grafico. Default off.")
 fvGate      = input.bool(false, "GATE: blocca i segnali sotto un percentile di volatilita'", group = grpVo, tooltip = "Filtro di contesto ortogonale al flusso: in mercato morto lo spread pesa quanto il movimento atteso e ogni edge viene mangiato dai costi. Attivandolo cambia anche la baseline, quindi il confronto resta onesto.")
 fvGateMin   = input.int(25, "   percentile minimo di volatilita'", minval = 0, maxval = 100, group = grpVo)
@@ -686,9 +687,13 @@ cVolC = color.new(#40C4FF, 0)     // candela compressa       azzurro
 // ============================================================================
 //  9) SFONDO
 // ============================================================================
+//  Priorita': espansione di candela > volatilita' estrema > regime ER.
+//  L'espansione e' un evento della SINGOLA barra, gli altri due sono stati
+//  persistenti: se si sovrapponessero, lo stato coprirebbe l'evento.
 bgER  = showRegimeBg ? (isTrend ? color.new(color.blue, 92) : isRange ? color.new(color.orange, 92) : na) : na
 bgVol = fvTint and fvPct >= fvExtTh ? color.new(color.red, 90) : na
-bgcolor(na(bgVol) ? bgER : bgVol, title = "Regime")
+bgExp = fvShowExp and fvExp and fvExpStyle != "Marker" ? color.new(cVolE, fvBgTr) : na
+bgcolor(not na(bgExp) ? bgExp : not na(bgVol) ? bgVol : bgER, title = "Contesto")
 
 // ============================================================================
 // 10) MARKER SUL GRAFICO PREZZO  ·  IMPILAMENTO ANTI-SOVRAPPOSIZIONE
@@ -704,8 +709,9 @@ bgcolor(na(bgVol) ? bgER : bgVol, title = "Regime")
 //  la propria altezza, in ordine di priorita' decrescente:
 //    · i LONG  si impilano verso il BASSO, sotto il minimo
 //    · gli SHORT si impilano verso l'ALTO, sopra il massimo
-//    · il marker di volatilita' (giallo) e' sempre il piu' esterno: e'
-//      contesto, non un trade, e non deve mai coprire un segnale
+//    · l'espansione di volatilita' e' resa di default come SFONDO giallo
+//      della sola candela: e' contesto, non un trade, e cosi' non occupa
+//      uno slot ne' copre un segnale. Come marker resta il piu' esterno.
 //  Il passo e' in unita' di ATR, quindi resta leggibile su ogni scala e
 //  timeframe. mkStep = 0 ripristina la sovrapposizione.
 // ============================================================================
@@ -725,7 +731,7 @@ bU3 = showAsmMk and asmShortRg    // ASM Short (range)
 bU4 = showMarks and bearIni       // Bear Initiative
 bU5 = showMarks and bearDiv       // Bear Divergence
 bU6 = showAsmMk and asmShortTr    // ASM Short (trend)
-bU7 = fvShowExp and fvExp         // candela in espansione (contesto)
+bU7 = fvShowExp and fvExp and fvExpStyle != "Sfondo"   // espansione come marker
 
 // -- slot = quanti segnali con priorita' superiore sono attivi su questa barra
 kL1 = 0
@@ -779,7 +785,7 @@ plotshape(yU3, "ASM Short (Range)",   shape.triangledown, location.absolute, cAs
 plotshape(yU4, "Bear Initiative",     shape.triangledown, location.absolute, cIniS, size = size.tiny)
 plotshape(yU5, "Bear Divergence",     shape.circle,       location.absolute, cDivS, size = size.tiny)
 plotshape(yU6, "ASM Short (Trend)",   shape.circle,       location.absolute, cAsmU, size = size.tiny)
-plotshape(yU7 , "Candela in Espansione", fvExpShape == "Freccia" ? shape.arrowup : shape.circle, location.absolute, cVolE, size = size.tiny)
+plotshape(yU7, "Candela in Espansione", shape.circle, location.absolute, cVolE, size = size.tiny)
 
 // -- marker v1 (grigi, benchmark visivo) - restano attaccati alla barra ------
 cV1L = color.new(#B0BEC5, 20)
