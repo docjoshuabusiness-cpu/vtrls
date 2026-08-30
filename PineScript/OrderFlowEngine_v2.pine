@@ -85,7 +85,8 @@ grpX = "11 - Export per meta-labeling"
 useExport = input.bool(false, "Modalita' export (feature vector)", group = grpX, tooltip = "Aggiunge le colonne del feature vector al Data Window. Poi: click destro sul grafico > Esporta dati del grafico > CSV. Le colonne finiscono nel file e vengono lette dallo script Python di training. Le etichette NON si esportano: le calcola Python dalle OHLC, cosi' la definizione delle barriere resta in un posto solo.")
 
 grpQ = "5b - Qualita' (filtri ORTOGONALI al flusso)"
-useGate  = input.bool(true, "Applica il gate di qualita'", group = grpQ, tooltip = "Spegnilo e riaccendilo guardando la tabella EDGE: se il gate non alza 'vs base', sta solo riducendo N senza migliorare nulla. Un filtro che non alza l'expectancy va tolto.")
+qualMode = input.string("Peso continuo", "Uso degli assi di qualita'", options = ["Off", "Gate binario", "Peso continuo"], group = grpQ, tooltip = "Gate binario: scarta i segnali che non passano. Riduce la frequenza.\nPeso continuo: NON scarta NULLA. Ogni segnale riceve un peso in [0,1] e viene dimensionato in proporzione. Stessa frequenza, rischio concentrato dove il segnale e' forte.\n\nUn filtro binario puo' solo buttare via informazione. Se gli assi contengono segnale, il peso continuo lo estrae SENZA perdere campione - e la colonna muR-w te lo dimostra: se muR-w > muR, gli assi valgono.")
+mtfPen   = input.float(0.40, "   penalita' disaccordo MTF", minval = 0.0, maxval = 1.0, step = 0.05, group = grpQ, tooltip = "Peso assegnato quando il TF superiore NON concorda. 0 = equivale a scartare, 1 = MTF ignorato.")
 useCusum = input.bool(true,  "1. Campionamento CUSUM", group = grpQ, tooltip = "Invece di 'z sopra soglia su UNA barra', accumula la deviazione di flusso e genera un evento solo quando la somma cumulata supera h, poi azzera. Cattura il flusso PERSISTENTE (qualcuno che lavora un ordine) invece del singolo spike. E' il campionamento a eventi di Lopez de Prado.")
 cusumH   = input.float(4.0, "   soglia h", minval = 0.5, step = 0.5, group = grpQ)
 cusumWin = input.int(5,     "   validita' evento (barre)", minval = 1, group = grpQ)
@@ -274,7 +275,22 @@ vwZ  = vwSd > 0 ? (close - vwap) / vwSd : 0.0
 htfEma = request.security(syminfo.tickerid, mtfRes, ta.ema(close, mtfLen)[1], barmerge.gaps_off, barmerge.lookahead_off)
 htfUp  = close > htfEma
 
-// -- 4) Gate composito --------------------------------------------------------
+// -- 4a) PESO CONTINUO  ·  qualita' in [0,1], nessun segnale scartato ---------
+//    Un filtro binario puo' solo buttare via informazione. Se questi assi
+//    contengono segnale, pesare lo estrae senza perdere campione: il trade
+//    debole non si elimina, si prende con meno rischio.
+//    Media geometrica: basta un asse a zero per azzerare il peso, mentre la
+//    media aritmetica lascerebbe che due assi buoni coprano un veto.
+f_qw(int dir, bool isFade) =>
+    // quanto e' "fresco" l'evento CUSUM: 1 appena scattato, ->0 allontanandosi
+    qc = useCusum ? math.exp(-nz(sinceCusum, 99999) / math.max(cusumWin, 1)) : 1.0
+    // posizione rispetto al valore: >0 = lato favorevole al trade
+    pos = isFade ? -dir * vwZ : dir * vwZ
+    ql  = useLoc ? 1.0 / (1.0 + math.exp(-2.0 * (pos - (isFade ? locMin : 0.0)))) : 1.0
+    qm  = useMtf ? ((dir > 0 ? htfUp : not htfUp) ? 1.0 : mtfPen) : 1.0
+    math.pow(math.max(qc * ql * qm, 0.0), 1.0 / 3.0)
+
+// -- 4b) Gate binario (solo se qualMode = "Gate binario") --------------------------------------------------------
 //    isFade = true  -> segnale di inversione (Absorption, Exhaustion, Divergence)
 //    isFade = false -> segnale di continuazione (Initiative)
 f_qual(bool raw, int dir, bool isFade) =>
@@ -285,7 +301,7 @@ f_qual(bool raw, int dir, bool isFade) =>
     // continuazione: solo dal lato giusto del valore
     lOk = not useLoc or (isFade ? (math.abs(vwZ) >= locMin and dir * vwZ < 0) : dir * vwZ > 0)
     mOk = not useMtf or (dir > 0 ? htfUp : not htfUp)
-    not useGate ? r : (r and cOk and lOk and mOk)
+    qualMode == "Gate binario" ? (r and cOk and lOk and mOk) : r
 
 // ============================================================================
 //  5) EVENTI  (quattro famiglie realmente distinte)
@@ -419,13 +435,16 @@ score = (wImb * imb + wDz * f_sq(dz / 2.0) + wRes * f_sq(res)) / wSum
 //  TP espresso in MULTIPLI DI RISCHIO, non in ATR: cosi' il rapporto R:R resta
 //  costante qualunque sia la distanza dello stop.
 // ---------------------------------------------------------------------------
-f_trade(bool evt, int dir) =>
+f_trade(bool evt, int dir, float qwIn) =>
     var int   n     = 0
     var int   nSig  = 0
     var int   wins  = 0
     var float sumR  = 0.0
     var float sumFe = 0.0
     var float sumAe = 0.0
+    var float sumWR = 0.0        // rendimento pesato per la qualita'
+    var float sumW  = 0.0
+    var float qw    = 1.0
     var int   st    = 0            // 0 idle · 1 pending · 2 open
     var float px    = 0.0          // prezzo di entrata desiderato
     var float sHi   = 0.0          // estremi della barra di segnale
@@ -479,11 +498,14 @@ f_trade(bool evt, int dir) =>
             wins  += r > 0 ? 1 : 0
             sumFe += mfe
             sumAe += mae
+            sumWR += qw * r
+            sumW  += qw
             st    := 0
 
     // ---- nuovo segnale -----------------------------------------------------
     if evt and st == 0
         nSig += 1
+        qw   := qualMode == "Peso continuo" ? math.max(qwIn, 0.01) : 1.0
         sHi  := high
         sLo  := low
         sAtr := atrS
@@ -501,23 +523,23 @@ f_trade(bool evt, int dir) =>
             px := entryMode == "Pullback" ? close - dir * pbATR * sAtr : (dir > 0 ? sHi + stopBuf * sAtr : sLo - stopBuf * sAtr)
             st := 1
 
-    [n, nSig, n > 0 ? sumR / n : float(na), n > 0 ? 100.0 * wins / n : float(na), n > 0 ? sumFe / n : float(na), n > 0 ? sumAe / n : float(na)]
+    [n, nSig, n > 0 ? sumR / n : float(na), n > 0 ? 100.0 * wins / n : float(na), n > 0 ? sumFe / n : float(na), n > 0 ? sumAe / n : float(na), sumW > 0 ? sumWR / sumW : float(na)]
 
 // -- BASELINE: ingresso su OGNI barra, stesso modello di entrata. Separa
 //    l'edge del segnale dalla DERIVA del campione. Su un campione che scende
 //    TUTTI i segnali short sembrano buoni: la baseline lo smaschera.
 warm = bar_index > statLen + extLen
-[nBL, gBL, rBL, hBL, fBL, aBL] = f_trade(warm,  1)
-[nBS, gBS, rBS, hBS, fBS, aBS] = f_trade(warm, -1)
+[nBL, gBL, rBL, hBL, fBL, aBL, wBL] = f_trade(warm, 1, f_qw(1, true))
+[nBS, gBS, rBS, hBS, fBS, aBS, wBS] = f_trade(warm, -1, f_qw(-1, true))
 
-[nBA, gBA, rBA, hBA, fBA, aBA] = f_trade(buyAbs,   1)
-[nSA, gSA, rSA, hSA, fSA, aSA] = f_trade(sellAbs, -1)
-[nBE, gBE, rBE, hBE, fBE, aBE] = f_trade(bullExh, -1)   // bull exhaustion -> SHORT
-[nRE, gRE, rRE, hRE, fRE, aRE] = f_trade(bearExh,  1)   // bear exhaustion -> LONG
-[nBI, gBI, rBI, hBI, fBI, aBI] = f_trade(bullIni,  1)
-[nSI, gSI, rSI, hSI, fSI, aSI] = f_trade(bearIni, -1)
-[nBD, gBD, rBD, hBD, fBD, aBD] = f_trade(bullDiv,  1)
-[nSD, gSD, rSD, hSD, fSD, aSD] = f_trade(bearDiv, -1)
+[nBA, gBA, rBA, hBA, fBA, aBA, wBA] = f_trade(buyAbs, 1, f_qw(1, true))
+[nSA, gSA, rSA, hSA, fSA, aSA, wSA] = f_trade(sellAbs, -1, f_qw(-1, true))
+[nBE, gBE, rBE, hBE, fBE, aBE, wBE] = f_trade(bullExh, -1, f_qw(-1, true))   // bull exhaustion -> SHORT
+[nRE, gRE, rRE, hRE, fRE, aRE, wRE] = f_trade(bearExh, 1, f_qw(1, true))   // bear exhaustion -> LONG
+[nBI, gBI, rBI, hBI, fBI, aBI, wBI] = f_trade(bullIni, 1, f_qw(1, false))
+[nSI, gSI, rSI, hSI, fSI, aSI, wSI] = f_trade(bearIni, -1, f_qw(-1, false))
+[nBD, gBD, rBD, hBD, fBD, aBD, wBD] = f_trade(bullDiv, 1, f_qw(1, true))
+[nSD, gSD, rSD, hSD, fSD, aSD, wSD] = f_trade(bearDiv, -1, f_qw(-1, true))
 
 
 // ============================================================================
@@ -602,14 +624,14 @@ g1BearFlw = f_gate1(v1BearFlow)
 g1BullBub = f_gate1(v1BullBub)
 g1BearBub = f_gate1(v1BearBub)
 
-[n1a, g1a, r1a, h1a, f1a, a1a] = f_trade(g1BuyAbs, 1)
-[n1b, g1b, r1b, h1b, f1b, a1b] = f_trade(g1SellAbs, -1)
-[n1c, g1c, r1c, h1c, f1c, a1c] = f_trade(g1BullExh, -1)   // v1: "potential reversal SHORT"
-[n1d, g1d, r1d, h1d, f1d, a1d] = f_trade(g1BearExh, 1)   // v1: "potential reversal LONG"
-[n1e, g1e, r1e, h1e, f1e, a1e] = f_trade(g1BullFlw, 1)
-[n1f, g1f, r1f, h1f, f1f, a1f] = f_trade(g1BearFlw, -1)
-[n1g, g1g, r1g, h1g, f1g, a1g] = f_trade(g1BullBub, 1)
-[n1h, g1h, r1h, h1h, f1h, a1h] = f_trade(g1BearBub, -1)
+[n1a, g1a, r1a, h1a, f1a, a1a, w1a] = f_trade(g1BuyAbs, 1, f_qw(1, true))
+[n1b, g1b, r1b, h1b, f1b, a1b, w1b] = f_trade(g1SellAbs, -1, f_qw(-1, true))
+[n1c, g1c, r1c, h1c, f1c, a1c, w1c] = f_trade(g1BullExh, -1, f_qw(-1, true))   // v1: "potential reversal SHORT"
+[n1d, g1d, r1d, h1d, f1d, a1d, w1d] = f_trade(g1BearExh, 1, f_qw(1, true))   // v1: "potential reversal LONG"
+[n1e, g1e, r1e, h1e, f1e, a1e, w1e] = f_trade(g1BullFlw, 1, f_qw(1, true))
+[n1f, g1f, r1f, h1f, f1f, a1f, w1f] = f_trade(g1BearFlw, -1, f_qw(-1, true))
+[n1g, g1g, r1g, h1g, f1g, a1g, w1g] = f_trade(g1BullBub, 1, f_qw(1, true))
+[n1h, g1h, r1h, h1h, f1h, a1h, w1h] = f_trade(g1BearBub, -1, f_qw(-1, true))
 
 // ============================================================================
 //  8) COLORI
@@ -665,9 +687,9 @@ plotshape(showV1Mk and g1BearBub, "v1 Bear Bub", shape.circle, location.abovebar
 // 11) DASHBOARD + TABELLA EDGE   (tabelle e funzioni a scope globale)
 // ============================================================================
 var table tDash = table.new(position.top_right, 3, 8, border_width = 1, bgcolor = color.new(#0B0E11, 12), frame_color = color.new(color.gray, 40), frame_width = 1)
-var table tEdge = table.new(position.bottom_right, 7, 20, border_width = 1, bgcolor = color.new(#0B0E11, 12), frame_color = color.new(color.gray, 40), frame_width = 1)
+var table tEdge = table.new(position.bottom_right, 8, 20, border_width = 1, bgcolor = color.new(#0B0E11, 12), frame_color = color.new(color.gray, 40), frame_width = 1)
 
-f_edgeRow(table tb, int row, string name, int n, int nsig, float r, float h, float fe, float ae, float base, color c) =>
+f_edgeRow(table tb, int row, string name, int n, int nsig, float r, float h, float fe, float ae, float rw, float base, color c) =>
     exc = r - base                                     // edge al netto della deriva
     rc  = na(r)   ? color.gray : r   > 0 ? color.lime : color.red
     ec  = na(exc) ? color.gray : exc > 0 ? color.lime : color.red
@@ -683,6 +705,10 @@ f_edgeRow(table tb, int row, string name, int n, int nsig, float r, float h, flo
     table.cell(tb, 4, row, f_rr(exc), text_color = ec,         text_size = size.tiny)
     table.cell(tb, 5, row, f_n2(fe), text_color = fc,          text_size = size.tiny)
     table.cell(tb, 6, row, f_n2(ae), text_color = color.silver, text_size = size.tiny)
+    // muR-w > muR  =>  gli assi di qualita' contengono segnale, e lo estraggono
+    // SENZA scartare un solo trade. Se non lo alzano, non valgono.
+    wc = na(rw) or na(r) ? color.gray : rw > r ? color.lime : color.red
+    table.cell(tb, 7, row, f_rr(rw), text_color = wc, text_size = size.tiny)
 
 if barstate.islast and showDash
     hdr = color.new(color.gray, 55)
@@ -729,16 +755,17 @@ if barstate.islast and showStats
     table.cell(tEdge, 4, 0, "vs base", bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
     table.cell(tEdge, 5, 0, "MFE",     bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
     table.cell(tEdge, 6, 0, "MAE",     bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
-    f_edgeRow(tEdge, 1, "Buy Abs", nBA, gBA, rBA, hBA, fBA, aBA, rBL, cAbsB)
-    f_edgeRow(tEdge, 2, "Sell Abs", nSA, gSA, rSA, hSA, fSA, aSA, rBS, cAbsS)
-    f_edgeRow(tEdge, 3, "Bull Exh", nBE, gBE, rBE, hBE, fBE, aBE, rBS, cExhB)
-    f_edgeRow(tEdge, 4, "Bear Exh", nRE, gRE, rRE, hRE, fRE, aRE, rBL, cExhR)
-    f_edgeRow(tEdge, 5, "Bull Ini", nBI, gBI, rBI, hBI, fBI, aBI, rBL, cIniB)
-    f_edgeRow(tEdge, 6, "Bear Ini", nSI, gSI, rSI, hSI, fSI, aSI, rBS, cIniS)
-    f_edgeRow(tEdge, 7, "Bull Div", nBD, gBD, rBD, hBD, fBD, aBD, rBL, cDivB)
-    f_edgeRow(tEdge, 8, "Bear Div", nSD, gSD, rSD, hSD, fSD, aSD, rBS, cDivS)
+    table.cell(tEdge, 7, 0, "muR-w",   bgcolor = hdr2, text_color = color.white, text_size = size.tiny)
+    f_edgeRow(tEdge, 1, "Buy Abs", nBA, gBA, rBA, hBA, fBA, aBA, wBA, rBL, cAbsB)
+    f_edgeRow(tEdge, 2, "Sell Abs", nSA, gSA, rSA, hSA, fSA, aSA, wSA, rBS, cAbsS)
+    f_edgeRow(tEdge, 3, "Bull Exh", nBE, gBE, rBE, hBE, fBE, aBE, wBE, rBS, cExhB)
+    f_edgeRow(tEdge, 4, "Bear Exh", nRE, gRE, rRE, hRE, fRE, aRE, wRE, rBL, cExhR)
+    f_edgeRow(tEdge, 5, "Bull Ini", nBI, gBI, rBI, hBI, fBI, aBI, wBI, rBL, cIniB)
+    f_edgeRow(tEdge, 6, "Bear Ini", nSI, gSI, rSI, hSI, fSI, aSI, wSI, rBS, cIniS)
+    f_edgeRow(tEdge, 7, "Bull Div", nBD, gBD, rBD, hBD, fBD, aBD, wBD, rBL, cDivB)
+    f_edgeRow(tEdge, 8, "Bear Div", nSD, gSD, rSD, hSD, fSD, aSD, wSD, rBS, cDivS)
     f_edgeRow(tEdge, 9,  "BASE long",  nBL, gBL, rBL, hBL, fBL, aBL, rBL, color.gray)
-    f_edgeRow(tEdge, 10, "BASE short", nBS, gBS, rBS, hBS, fBS, aBS, rBS, color.gray)
+    f_edgeRow(tEdge, 10, "BASE short", nBS, gBS, rBS, hBS, fBS, aBS, wBS, rBS, color.gray)
     if showV1
         table.cell(tEdge, 0, 11, "-- v1 --", text_color = color.gray, text_size = size.tiny)
         table.cell(tEdge, 1, 11, "", text_size = size.tiny)
@@ -747,14 +774,15 @@ if barstate.islast and showStats
         table.cell(tEdge, 4, 11, "", text_size = size.tiny)
         table.cell(tEdge, 5, 11, "", text_size = size.tiny)
         table.cell(tEdge, 6, 11, "", text_size = size.tiny)
-        f_edgeRow(tEdge, 12, "v1 BuyAbs", n1a, g1a, r1a, h1a, f1a, a1a, rBL, color.silver)
-        f_edgeRow(tEdge, 13, "v1 SellAbs", n1b, g1b, r1b, h1b, f1b, a1b, rBS, color.silver)
-        f_edgeRow(tEdge, 14, "v1 BullExh", n1c, g1c, r1c, h1c, f1c, a1c, rBS, color.silver)
-        f_edgeRow(tEdge, 15, "v1 BearExh", n1d, g1d, r1d, h1d, f1d, a1d, rBL, color.silver)
-        f_edgeRow(tEdge, 16, "v1 BullFlw", n1e, g1e, r1e, h1e, f1e, a1e, rBL, color.silver)
-        f_edgeRow(tEdge, 17, "v1 BearFlw", n1f, g1f, r1f, h1f, f1f, a1f, rBS, color.silver)
-        f_edgeRow(tEdge, 18, "v1 BullBub", n1g, g1g, r1g, h1g, f1g, a1g, rBL, color.silver)
-        f_edgeRow(tEdge, 19, "v1 BearBub", n1h, g1h, r1h, h1h, f1h, a1h, rBS, color.silver)
+        table.cell(tEdge, 7, 11, "", text_size = size.tiny)
+        f_edgeRow(tEdge, 12, "v1 BuyAbs", n1a, g1a, r1a, h1a, f1a, a1a, w1a, rBL, color.silver)
+        f_edgeRow(tEdge, 13, "v1 SellAbs", n1b, g1b, r1b, h1b, f1b, a1b, w1b, rBS, color.silver)
+        f_edgeRow(tEdge, 14, "v1 BullExh", n1c, g1c, r1c, h1c, f1c, a1c, w1c, rBS, color.silver)
+        f_edgeRow(tEdge, 15, "v1 BearExh", n1d, g1d, r1d, h1d, f1d, a1d, w1d, rBL, color.silver)
+        f_edgeRow(tEdge, 16, "v1 BullFlw", n1e, g1e, r1e, h1e, f1e, a1e, w1e, rBL, color.silver)
+        f_edgeRow(tEdge, 17, "v1 BearFlw", n1f, g1f, r1f, h1f, f1f, a1f, w1f, rBS, color.silver)
+        f_edgeRow(tEdge, 18, "v1 BullBub", n1g, g1g, r1g, h1g, f1g, a1g, w1g, rBL, color.silver)
+        f_edgeRow(tEdge, 19, "v1 BearBub", n1h, g1h, r1h, h1h, f1h, a1h, w1h, rBS, color.silver)
 
 // ============================================================================
 // 12) ALERT  ·  payload JSON per bridge MT5 / FP Markets
@@ -768,7 +796,7 @@ f_json(string kind, int dir) =>
     rk  = math.max(math.abs(px - sl), tick)
     tp  = px + dir * rrTP * rk
     ord = entryMode == "Market" ? "market" : entryMode == "Pullback" ? "limit" : "stop"
-    '{"sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","evt":"' + kind + '","dir":' + str.tostring(dir) + ',"ord":"' + ord + '","px":' + str.tostring(px, format.mintick) + ',"sl":' + str.tostring(sl, format.mintick) + ',"tp":' + str.tostring(tp, format.mintick) + ',"riskpts":' + str.tostring(rk, format.mintick) + ',"validbars":' + str.tostring(fillWin) + ',"atr":' + str.tostring(atrS, format.mintick) + ',"vz":' + str.tostring(vz, "#.##") + ',"imb":' + str.tostring(imb, "#.##") + ',"er":' + str.tostring(er, "#.##") + ',"score":' + str.tostring(score, "#.##") + ',"t":' + str.tostring(time_close, "#") + '}'
+    '{"sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","evt":"' + kind + '","dir":' + str.tostring(dir) + ',"ord":"' + ord + '","px":' + str.tostring(px, format.mintick) + ',"sl":' + str.tostring(sl, format.mintick) + ',"tp":' + str.tostring(tp, format.mintick) + ',"riskpts":' + str.tostring(rk, format.mintick) + ',"validbars":' + str.tostring(fillWin) + ',"atr":' + str.tostring(atrS, format.mintick) + ',"vz":' + str.tostring(vz, "#.##") + ',"imb":' + str.tostring(imb, "#.##") + ',"er":' + str.tostring(er, "#.##") + ',"score":' + str.tostring(score, "#.##") + ',"qw":' + str.tostring(f_qw(dir, kind != "BULL_INITIATIVE" and kind != "BEAR_INITIATIVE"), "#.##") + ',"t":' + str.tostring(time_close, "#") + '}'
 
 if buyAbs
     alert(f_json("BUY_ABSORPTION", 1), alert.freq_once_per_bar_close)
@@ -826,4 +854,6 @@ plot(useExport ? nz(sinceCusum, 9999) : na, "x_cusumage", display = dd)
 plot(useExport ? (hour + minute / 60.0) : na, "x_hour", display = dd)
 plot(useExport ? dayofweek     : na, "x_dow",     display = dd)
 plot(useExport ? score         : na, "x_score",   display = dd)
+plot(useExport ? f_qw(1, true) : na, "x_qwl", display = dd)
+plot(useExport ? f_qw(-1, true) : na, "x_qws", display = dd)
 plot(useExport ? (ltfOk ? 1 : 0) : na, "x_ltf",   display = dd)
