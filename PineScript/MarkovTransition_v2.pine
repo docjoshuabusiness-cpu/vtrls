@@ -1,0 +1,241 @@
+//@version=5
+// ============================================================================
+//  MARKOV TRANSITION PROBABILITY  ·  v2
+//  Correzione di "Markov Probability + Signals + K".
+//
+//  BUG CORRETTI (in ordine di gravita')
+//  ------------------------------------
+//  1) INDICI ASSOLUTI USATI COME OFFSET STORICI.
+//        for i = bar_index - window_size + 1 to bar_index
+//            s1 = get_state(close[i - 1], close[i])
+//     In Pine close[i] e' "i barre FA", non "la barra numero i". Alla barra
+//     10000 con finestra 50 il loop leggeva gli offset 9951..10000, cioe' dati
+//     di 10000 barre prima - e oltre max_bars_back tornava na. Le probabilita'
+//     non avevano alcuna relazione con la finestra recente.
+//
+//  2) FILTRO VOLATILITA' MAI SODDISFATTO -> NESSUN SEGNALE, MAI.
+//        vol = ta.stdev(close, window_size)     // deviazione del PREZZO
+//        allow_signal = ... and vol < volatility_max   // 0.01
+//     Su NQ a 20000 la stdev su 50 barre vale decine di punti, contro una
+//     soglia di 0.01. La condizione e' sempre falsa, quindi allow_signal e'
+//     sempre falso e l'indicatore non emette un solo segnale. Ora la
+//     volatilita' e' RELATIVA (stdev dei rendimenti / prezzo), cosi' 0.01
+//     significa davvero "1%".
+//
+//  3) CRASH OLTRE LE 5000 BARRE.
+//        array.get(p_ud_arr, bar_index)   // array di dimensione 5000
+//     Non protetto: su qualunque grafico con piu' di 5000 barre va in
+//     "Array index out of bounds". Gli array erano comunque inutili: le serie
+//     Pine hanno gia' uno storico. Rimossi.
+//
+//  4) DIVISIONE INTERA NELL'ENTROPIA.
+//        up = 0 ... pu = up / len          // int / int
+//     Con entrambi gli operandi interi il risultato e' intero: pu, pd, pf
+//     valevano 0, l'entropia usciva ~0 e il filtro non filtrava nulla.
+//     Inoltre si contavano len-1 transizioni dividendo per len.
+//
+//  5) IL RILEVATORE "K" SCATTAVA QUASI SEMPRE.
+//     La finestra scorre di UNA barra, quindi la probabilita' cambia di
+//     ordine 1/n per costruzione: con n = 50 la variazione tipica e' 0.02-0.04,
+//     sotto la soglia const_k_diff = 0.05. "Stabile" era quasi sempre vero.
+//
+//  MIGLIORAMENTO SOSTANZIALE: SOGLIA -> TEST BINOMIALE
+//  ---------------------------------------------------
+//  Con finestra 50 si osservano circa 25 stati "up", quindi p(up->down) e'
+//  stimata su ~25 campioni:
+//        SE = sqrt(0.25 / 25) = 0.10
+//  Una soglia a 0.55 sta a MEZZO errore standard da 0.5: e' dentro il rumore.
+//  Per una deviazione significativa al 95% servirebbe p > 0.70.
+//  Qui la soglia e' sostituita dal punteggio z binomiale
+//        z = (p - 0.5) / sqrt(0.25 / n) = 2 * (p - 0.5) * sqrt(n)
+//  che si riscala da solo con la dimensione del campione. La banda di
+//  confidenza e' disegnata sul grafico: si vede a occhio quanto e' larga.
+//
+//  AVVERTENZA CHE CONTA PIU' DEL CODICE
+//  ------------------------------------
+//  Su timeframe bassi il rimbalzo bid-ask genera autocorrelazione NEGATIVA
+//  spuria del segno: p(up->down) risulta stabilmente sopra 0.5 anche su un
+//  mercato perfettamente efficiente. Sembra un edge enorme ed e' esattamente
+//  lo spread che pagheresti - non e' sfruttabile, e' l'artefatto microstrut-
+//  turale piu' classico che esista. Per questo esiste "Movimento minimo":
+//  sotto quella soglia in tick la barra e' classificata FLAT e non genera
+//  transizione. Alzalo finche' i segnali smettono di essere quasi tutti SELL.
+// ============================================================================
+
+indicator("Markov Transition v2", "MARKOV2", overlay = false, max_labels_count = 500, max_bars_back = 1000)
+
+// ============================================================================
+//  INPUT
+// ============================================================================
+grpM = "Stima"
+window   = input.int(200, "Finestra (barre)", minval = 30, maxval = 500, group = grpM, tooltip = "Serve campione. Con 50 barre si ottengono ~25 stati per direzione e un errore standard di 0.10 sulla probabilita': troppo per distinguere 0.55 da 0.50.")
+moveTk   = input.float(1.0, "Movimento minimo (tick)", minval = 0.0, step = 0.5, group = grpM, tooltip = "Sotto questa ampiezza la barra e' FLAT e non genera transizione. E' la difesa contro il rimbalzo bid-ask, che su TF bassi produce autocorrelazione negativa spuria e falsi SELL a raffica.")
+minN     = input.int(30, "Campione minimo per direzione", minval = 10, group = grpM, tooltip = "Sotto questo numero di transizioni la stima non viene nemmeno mostrata.")
+
+grpS = "Segnali"
+zMin     = input.float(2.0, "z binomiale minimo", minval = 0.5, step = 0.1, group = grpS, tooltip = "z = 2*(p-0.5)*sqrt(n). Con 2.0 chiedi significativita' al 95%. Sostituisce la soglia fissa sulla probabilita', che non teneva conto della dimensione del campione.")
+zStable  = input.float(0.5, "z sotto cui la catena e' senza memoria (K)", minval = 0.0, step = 0.1, group = grpS)
+useFilt  = input.bool(true, "Applica filtri z / volatilita' / entropia", group = grpS)
+zThresh  = input.float(1.0, "   |z| del rendimento corrente", step = 0.1, group = grpS)
+volMax   = input.float(0.010, "   volatilita' relativa massima", step = 0.001, group = grpS, tooltip = "stdev dei rendimenti diviso il prezzo. 0.010 = 1%. Nella v1 era la stdev del PREZZO confrontata con 0.01: condizione mai vera, nessun segnale mai.")
+entMax   = input.float(0.95, "   entropia normalizzata massima", minval = 0.0, maxval = 1.0, step = 0.01, group = grpS, tooltip = "Normalizzata su log(3), quindi 1.0 = massimo disordine possibile a tre stati.")
+
+grpV = "Grafico"
+showBand = input.bool(true, "Banda di confidenza attorno a 0.5", group = grpV)
+cUp      = input.color(color.new(#EF5350, 0), "P(up -> down)", group = grpV)
+cDn      = input.color(color.new(#26A69A, 0), "P(down -> up)", group = grpV)
+
+// ============================================================================
+//  STATO DELLA BARRA
+// ============================================================================
+//  Stato all'offset k = direzione del movimento che TERMINA su quella barra.
+//  Il flat non e' un dettaglio: senza soglia, su TF bassi quasi ogni tick
+//  minimo conta come direzione e il rumore microstrutturale domina la stima.
+eps = moveTk * syminfo.mintick
+
+f_state(int off) =>
+    d = close[off] - close[off + 1]
+    d > eps ? 1 : d < -eps ? -1 : 0
+
+// ============================================================================
+//  MATRICE DI TRANSIZIONE SULLA FINESTRA
+// ============================================================================
+//  Offset RELATIVI: 0 = barra corrente. Era questo il bug centrale della v1.
+int upN  = 0
+int upDn = 0
+int dnN  = 0
+int dnUp = 0
+
+if bar_index > window + 2
+    for k = 0 to window - 1
+        s2 = f_state(k)          // stato successivo
+        s1 = f_state(k + 1)      // stato precedente
+        if s1 == 1
+            upN += 1
+            if s2 == -1
+                upDn += 1
+        else if s1 == -1
+            dnN += 1
+            if s2 == 1
+                dnUp += 1
+
+// float esplicito: in Pine int / int e' divisione INTERA
+float p_ud = upN >= minN ? upDn / float(upN) : na
+float p_du = dnN >= minN ? dnUp / float(dnN) : na
+
+// ============================================================================
+//  TEST BINOMIALE  ·  z = (p - 0.5) / sqrt(0.25/n) = 2*(p - 0.5)*sqrt(n)
+// ============================================================================
+//  Sotto ipotesi nulla (catena senza memoria) p = 0.5. Il punteggio z si
+//  riscala da solo con il campione: con n piccolo servono deviazioni grandi,
+//  con n grande ne bastano di piccole. E' quello che una soglia fissa a 0.55
+//  non poteva fare.
+z_ud = na(p_ud) ? na : 2.0 * (p_ud - 0.5) * math.sqrt(upN)
+z_du = na(p_du) ? na : 2.0 * (p_du - 0.5) * math.sqrt(dnN)
+
+// semi-ampiezza della banda di confidenza, per direzione
+half_ud = upN >= minN ? zMin * math.sqrt(0.25 / upN) : na
+half_du = dnN >= minN ? zMin * math.sqrt(0.25 / dnN) : na
+halfMax = na(half_ud) and na(half_du) ? na : math.max(nz(half_ud), nz(half_du))
+
+// ============================================================================
+//  FILTRI
+// ============================================================================
+ret   = close - close[1]
+mret  = ta.sma(ret, window)
+sret  = ta.stdev(ret, window)
+zRet  = sret > 0 ? (ret - mret) / sret : 0.0
+
+// RELATIVA, non assoluta: e' il fix del bug che azzerava ogni segnale
+volRel = close != 0 ? sret / close : 0.0
+
+// entropia normalizzata su log(3): 0 = deterministico, 1 = massimo disordine
+f_entropy(int len) =>
+    int u = 0
+    int d = 0
+    int f = 0
+    for k = 0 to len - 1
+        st = f_state(k)
+        u += st ==  1 ? 1 : 0
+        d += st == -1 ? 1 : 0
+        f += st ==  0 ? 1 : 0
+    float tot = math.max(u + d + f, 1)
+    pu = u / tot
+    pd = d / tot
+    pf = f / tot
+    h = -(pu * math.log(pu + 1e-12) + pd * math.log(pd + 1e-12) + pf * math.log(pf + 1e-12))
+    h / math.log(3.0)
+
+ent = bar_index > window + 2 ? f_entropy(window) : na
+
+filtOk = not useFilt or (math.abs(zRet) > zThresh and volRel < volMax and nz(ent, 1.0) < entMax)
+
+// ============================================================================
+//  SEGNALI
+// ============================================================================
+buyRaw  = filtOk and not na(z_du) and z_du > zMin
+sellRaw = filtOk and not na(z_ud) and z_ud > zMin
+
+// solo sul FRONTE: la v1 creava un'etichetta a ogni barra in cui la
+// condizione restava vera, saturando il limite di label
+buySig  = buyRaw  and not buyRaw[1]
+sellSig = sellRaw and not sellRaw[1]
+
+// K = la catena e' indistinguibile da una senza memoria in ENTRAMBE le
+// direzioni. La v1 confrontava la variazione barra su barra, che e' O(1/n)
+// per costruzione e quindi quasi sempre sotto soglia.
+memoryless = not na(z_ud) and not na(z_du) and math.abs(z_ud) < zStable and math.abs(z_du) < zStable
+kSig = memoryless and not memoryless[1]
+
+// ============================================================================
+//  PLOT
+// ============================================================================
+plot(p_ud, "P(up -> down)", color = cUp, linewidth = 2)
+plot(p_du, "P(down -> up)", color = cDn, linewidth = 2)
+hline(0.5, "Nessuna memoria", color = color.new(color.gray, 30), linestyle = hline.style_dashed)
+
+// La banda mostra quanto e' larga l'incertezza: tutto cio' che ci sta dentro
+// e' indistinguibile da 0.5. Con finestra 50 sfiora +/-0.10.
+bu = plot(showBand and not na(halfMax) ? 0.5 + halfMax : na, "Banda +", color = color.new(color.gray, 75))
+bl = plot(showBand and not na(halfMax) ? 0.5 - halfMax : na, "Banda -", color = color.new(color.gray, 75))
+fill(bu, bl, color = color.new(color.gray, 92), title = "Zona non significativa")
+
+plotshape(buySig,  "BUY",  shape.labelup,   location.bottom, color.new(color.lime, 0), text = "BUY",  textcolor = color.black, size = size.tiny)
+plotshape(sellSig, "SELL", shape.labeldown, location.top,    color.new(color.red, 0),  text = "SELL", textcolor = color.white, size = size.tiny)
+plotshape(kSig ? 0.5 : na, "K", shape.circle, location.absolute, color.new(color.yellow, 0), size = size.tiny)
+
+// ============================================================================
+//  TABELLA
+// ============================================================================
+var table t = table.new(position.top_right, 2, 7, border_width = 1, bgcolor = color.new(#0B0E11, 15), frame_color = color.new(color.gray, 40), frame_width = 1)
+f_n(float v, int d) => na(v) ? "n/a" : str.tostring(math.round(v, d))
+
+if barstate.islast
+    hdr = color.new(color.gray, 55)
+    table.cell(t, 0, 0, "MARKOV2", bgcolor = hdr, text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 0, str.tostring(window) + "b", bgcolor = hdr, text_color = color.white, text_size = size.small)
+
+    table.cell(t, 0, 1, "n  up / down", text_color = color.silver, text_size = size.tiny)
+    table.cell(t, 1, 1, str.tostring(upN) + " / " + str.tostring(dnN), text_color = upN >= minN and dnN >= minN ? color.silver : color.orange, text_size = size.tiny)
+
+    table.cell(t, 0, 2, "P(up -> down)", text_color = color.silver, text_size = size.tiny)
+    table.cell(t, 1, 2, f_n(p_ud, 3), text_color = cUp, text_size = size.tiny)
+
+    table.cell(t, 0, 3, "P(down -> up)", text_color = color.silver, text_size = size.tiny)
+    table.cell(t, 1, 3, f_n(p_du, 3), text_color = cDn, text_size = size.tiny)
+
+    table.cell(t, 0, 4, "z  ud / du", text_color = color.silver, text_size = size.tiny)
+    zc = math.max(nz(math.abs(z_ud)), nz(math.abs(z_du))) > zMin ? color.yellow : color.gray
+    table.cell(t, 1, 4, f_n(z_ud, 2) + " / " + f_n(z_du, 2), text_color = zc, text_size = size.tiny)
+
+    table.cell(t, 0, 5, "Entropia", text_color = color.silver, text_size = size.tiny)
+    table.cell(t, 1, 5, f_n(ent, 3), text_color = color.silver, text_size = size.tiny)
+
+    table.cell(t, 0, 6, "Vol relativa", text_color = color.silver, text_size = size.tiny)
+    table.cell(t, 1, 6, f_n(volRel * 100, 3) + "%", text_color = volRel < volMax ? color.lime : color.orange, text_size = size.tiny)
+
+// ============================================================================
+//  ALERT
+// ============================================================================
+alertcondition(buySig,  "Markov BUY",  "P(down->up) significativamente sopra 0.5")
+alertcondition(sellSig, "Markov SELL", "P(up->down) significativamente sopra 0.5")
