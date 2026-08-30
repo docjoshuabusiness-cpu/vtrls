@@ -1,0 +1,175 @@
+//@version=5
+// =============================================================================
+// ASM v2 - STRATEGY (versione misurabile dell'indicatore ASM v2)
+// Stessa logica di segnale, piu' uscite derivate dal modello e costi reali.
+// Serve a produrre numeri: senza uscite, stop e commissioni un segnale non e'
+// valutabile. Usa il tab "Properties" per commissioni/slippage del tuo conto.
+//
+// USCITE:
+//  - MR : chiusura al rientro di z sotto |zExit| (ritorno alla media compiuto)
+//  - TR : chiusura all'uscita dal regime trend o all'inversione di segno di z
+//  - Time stop: derivato dalla half-life AR(1) del segnale, non arbitrario
+//  - Stop loss / take profit in multipli di ATR misurati all'ingresso
+// =============================================================================
+strategy("ASM v2 - Strategy", overlay = true,
+     default_qty_type      = strategy.percent_of_equity,
+     default_qty_value     = 100,
+     initial_capital       = 10000,
+     currency              = currency.USD,
+     commission_type       = strategy.commission.percent,
+     commission_value      = 0.002,     // ~0.2 bps/lato: FP Markets Raw ~7 USD/lot RT
+     slippage              = 1,         // in tick: alza su strumenti larghi
+     process_orders_on_close = true,
+     calc_on_every_tick    = false,
+     max_labels_count      = 500)
+
+// ============================ INPUT ==========================================
+gM = "1 - Momentum / Z-Score"
+baseLen     = input.int (14,   "Orizzonte base (barre)",             minval = 2,  group = gM)
+useVolClock = input.bool(true, "Orizzonte adattivo (vol clock)",                  group = gM)
+lenMin      = input.int (5,    "Orizzonte minimo",                   minval = 2,  group = gM)
+lenMax      = input.int (40,   "Orizzonte massimo",                  minval = 3,  group = gM)
+atrLen      = input.int (14,   "ATR length",                         minval = 2,  group = gM)
+volLen      = input.int (250,  "Finestra stima volatilita'",         minval = 50, group = gM)
+robustVol   = input.bool(true, "Scala robusta (MAD)",                             group = gM)
+smoothLen   = input.int (3,    "Smoothing z (EMA, 1 = off)",         minval = 1,  group = gM)
+reStd       = input.bool(true, "Ri-standardizza dopo smoothing",                  group = gM)
+
+gT = "2 - Soglie"
+thrMode  = input.string("Percentile adattivo", "Modalita' soglia", options = ["Sigma fisso", "Percentile adattivo"], group = gT)
+thrFixed = input.float (2.0, "Soglia in sigma",             minval = 0.5, step = 0.1, group = gT)
+thrPct   = input.float (92,  "Percentile |z| (%)",          minval = 50, maxval = 99.5, step = 0.5, group = gT)
+pctLen   = input.int   (500, "Finestra percentile",         minval = 100, group = gT)
+trendZ   = input.float (1.0, "Soglia z ingresso trend",     step = 0.1, group = gT)
+
+gR = "3 - Regime (Variance Ratio)"
+vrQ   = input.int  (5,    "Orizzonte q del VR",  minval = 2,  group = gR)
+vrLen = input.int  (120,  "Finestra N del VR",   minval = 30, group = gR)
+vrThr = input.float(1.65, "Soglia |z| del VR",   step = 0.05, group = gR)
+
+gF = "4 - Filtri (ablation)"
+useAccel    = input.bool(false, "Usa filtro accelerazione",       group = gF)
+accSmooth   = input.int (3,     "Smoothing accelerazione", minval = 1, group = gF)
+useMrSig    = input.bool(true,  "Abilita blocco mean-reversion",  group = gF)
+useTrendSig = input.bool(true,  "Abilita blocco trend",           group = gF)
+allowLong   = input.bool(true,  "Consenti long",                  group = gF)
+allowShort  = input.bool(true,  "Consenti short",                 group = gF)
+
+gX = "5 - Uscite / Rischio"
+zExit     = input.float(0.25, "z di uscita MR",                    step = 0.05, group = gX)
+hlMult    = input.float(2.0,  "Time stop = half-life x",           step = 0.25, group = gX)
+maxHold   = input.int  (80,   "Holding massimo (barre)", minval = 3, group = gX)
+slATR     = input.float(2.0,  "Stop loss (x ATR)",       minval = 0.2, step = 0.1, group = gX)
+tpATR     = input.float(3.0,  "Take profit (x ATR, 0 = off)", minval = 0, step = 0.1, group = gX)
+
+gE = "6 - Esecuzione"
+minGap   = input.int(20, "Barre minime tra segnali", minval = 0, group = gE)
+fromYear = input.int(2015, "Anno inizio test", group = gE)
+
+// ============================ CORE (identico all'indicatore) ==================
+r       = math.log(close / nz(close[1], close))
+muR     = ta.sma(r, volLen)
+sdStd   = ta.stdev(r, volLen)
+medR    = ta.median(r, volLen)
+sdMad   = 1.4826 * ta.median(math.abs(r - medR), volLen)
+sigma1  = robustVol ? sdMad : sdStd
+centerR = robustVol ? medR  : muR
+
+atr    = ta.atr(atrLen)
+atrAvg = ta.sma(atr, volLen)
+ratio  = atr > 0 ? atrAvg / atr : 1.0
+nRaw   = useVolClock ? baseLen * ratio : baseLen
+n      = bar_index < volLen ? baseLen : int(math.round(math.max(lenMin, math.min(lenMax, nRaw))))
+
+mom   = math.log(close / nz(close[n], close))
+denom = sigma1 * math.sqrt(n)
+zRaw  = denom > 0 ? (mom - centerR * n) / denom : 0.0
+zSm   = smoothLen > 1 ? ta.ema(zRaw, smoothLen) : zRaw
+sdZ   = ta.stdev(zSm, volLen)
+z     = reStd and sdZ > 0 ? zSm / sdZ : zSm
+
+thrAdaptive = ta.percentile_linear_interpolation(math.abs(z), pctLen, thrPct)
+thr         = thrMode == "Sigma fisso" ? thrFixed : nz(thrAdaptive, thrFixed)
+
+rq   = math.log(close / nz(close[vrQ], close))
+v1   = ta.variance(r,  vrLen)
+vq   = ta.variance(rq, vrLen)
+vr   = v1 > 0 ? vq / (vrQ * v1) : 1.0
+seVR = math.sqrt(2.0 * (2.0 * vrQ - 1.0) * (vrQ - 1.0) / (3.0 * vrQ * vrLen))
+zVR  = seVR > 0 ? (vr - 1.0) / seVR : 0.0
+
+warmup    = bar_index > math.max(volLen, vrLen) + 10
+isTrend   = warmup and zVR >  vrThr
+isMeanRev = warmup and zVR < -vrThr
+
+accRaw = atr > 0 ? (close - 2 * nz(close[1], close) + nz(close[2], close)) / atr : 0.0
+acc    = accSmooth > 1 ? ta.ema(accRaw, accSmooth) : accRaw
+accLongOK  = not useAccel or acc > 0
+accShortOK = not useAccel or acc < 0
+
+mrLongRaw  = useMrSig and isMeanRev and z < -thr and z > z[1] and accLongOK
+mrShortRaw = useMrSig and isMeanRev and z >  thr and z < z[1] and accShortOK
+trUpState  = isTrend and z >  trendZ
+trDnState  = isTrend and z < -trendZ
+trLongRaw  = useTrendSig and trUpState and not trUpState[1]
+trShortRaw = useTrendSig and trDnState and not trDnState[1]
+
+longRaw  = (mrLongRaw  or trLongRaw)  and allowLong
+shortRaw = (mrShortRaw or trShortRaw) and allowShort
+
+var int lastSigBar = na
+gapOK = na(lastSigBar) or (bar_index - lastSigBar >= minGap)
+inWin = year >= fromYear
+
+longSig  = longRaw  and gapOK and inWin and barstate.isconfirmed
+shortSig = shortRaw and gapOK and inWin and barstate.isconfirmed and not longSig
+if longSig or shortSig
+    lastSigBar := bar_index
+
+// Half-life AR(1) del segnale -> time stop
+phi      = ta.correlation(z, z[1], volLen)
+halfLife = phi > 0 and phi < 1 ? math.log(0.5) / math.log(phi) : na
+timeStop = int(math.max(3, math.min(maxHold, nz(halfLife, baseLen) * hlMult)))
+
+// ============================ ESECUZIONE =====================================
+var string tType   = na      // "MR" o "TR"
+var int    entryBar = na
+var float  atrEntry = na
+
+if longSig and strategy.position_size <= 0
+    strategy.entry("L", strategy.long)
+    tType    := mrLongRaw ? "MR" : "TR"
+    entryBar := bar_index
+    atrEntry := atr
+
+if shortSig and strategy.position_size >= 0
+    strategy.entry("S", strategy.short)
+    tType    := mrShortRaw ? "MR" : "TR"
+    entryBar := bar_index
+    atrEntry := atr
+
+barsIn = na(entryBar) ? 0 : bar_index - entryBar
+
+// Stop/target protettivi in multipli di ATR misurati all'ingresso
+if strategy.position_size > 0
+    stopL = strategy.position_avg_price - slATR * nz(atrEntry, atr)
+    tpL   = tpATR > 0 ? strategy.position_avg_price + tpATR * nz(atrEntry, atr) : na
+    strategy.exit("L-x", from_entry = "L", stop = stopL, limit = tpL)
+if strategy.position_size < 0
+    stopS = strategy.position_avg_price + slATR * nz(atrEntry, atr)
+    tpS   = tpATR > 0 ? strategy.position_avg_price - tpATR * nz(atrEntry, atr) : na
+    strategy.exit("S-x", from_entry = "S", stop = stopS, limit = tpS)
+
+// Uscite logiche
+if strategy.position_size > 0
+    exitMR = tType == "MR" and z >= -zExit
+    exitTR = tType == "TR" and (not isTrend or z < 0)
+    if exitMR or exitTR or barsIn >= timeStop
+        strategy.close("L", comment = exitMR or exitTR ? "signal" : "time")
+if strategy.position_size < 0
+    exitMR = tType == "MR" and z <= zExit
+    exitTR = tType == "TR" and (not isTrend or z > 0)
+    if exitMR or exitTR or barsIn >= timeStop
+        strategy.close("S", comment = exitMR or exitTR ? "signal" : "time")
+
+bgcolor(isTrend ? color.new(color.blue, 93) : isMeanRev ? color.new(color.orange, 93) : na, title = "Regime")

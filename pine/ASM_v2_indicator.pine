@@ -1,0 +1,187 @@
+//@version=5
+// =============================================================================
+// ASM v2 - Adaptive Statistical Momentum
+// Riscrittura di "ASM - Signals + Trend (Clean)".
+// Correzioni principali rispetto alla v1:
+//   1. Z-score calcolato con varianza stimata su finestra lunga e scalata con
+//      sqrt(n) -> niente piu' stima di sigma su finestre sovrapposte.
+//   2. Regime trend/range via Variance Ratio (Lo-MacKinlay) con z-stat, al posto
+//      di slope-vs-stdev-dei-prezzi (che si auto-sopprimeva in trend).
+//   3. Normalizzazione singola (log-return / sigma), scala robusta opzionale MAD.
+//   4. Nessun repaint: emissione solo su barra confermata.
+//   5. Accelerazione normalizzata per ATR e DISATTIVABILE (switch di ablation).
+//   6. Ri-standardizzazione dopo lo smoothing -> la soglia resta in sigma reali.
+//   7. Segnali di trend edge-triggered (evento, non stato).
+//   8. Debounce unico e simmetrico su long/short.
+// =============================================================================
+indicator("ASM v2 - Adaptive Statistical Momentum", overlay = true, max_labels_count = 500)
+
+// ============================ INPUT: MOMENTUM ================================
+gM = "1 - Momentum / Z-Score"
+baseLen     = input.int (14,   "Orizzonte base (barre)",              minval = 2,  group = gM)
+useVolClock = input.bool(true, "Orizzonte adattivo (vol clock)",                   group = gM)
+lenMin      = input.int (5,    "Orizzonte minimo",                    minval = 2,  group = gM)
+lenMax      = input.int (40,   "Orizzonte massimo",                   minval = 3,  group = gM)
+atrLen      = input.int (14,   "ATR length",                          minval = 2,  group = gM)
+volLen      = input.int (250,  "Finestra stima volatilita' (barre)",  minval = 50, group = gM)
+robustVol   = input.bool(true, "Scala robusta (MAD) invece di stdev",              group = gM)
+smoothLen   = input.int (3,    "Smoothing z (EMA, 1 = off)",          minval = 1,  group = gM)
+reStd       = input.bool(true, "Ri-standardizza dopo smoothing",                   group = gM)
+
+// ============================ INPUT: SOGLIE ==================================
+gT = "2 - Soglie"
+thrMode  = input.string("Percentile adattivo", "Modalita' soglia", options = ["Sigma fisso", "Percentile adattivo"], group = gT)
+thrFixed = input.float (2.0, "Soglia in sigma",           minval = 0.5, step = 0.1, group = gT)
+thrPct   = input.float (92,  "Percentile |z| (%)",        minval = 50, maxval = 99.5, step = 0.5, group = gT)
+pctLen   = input.int   (500, "Finestra percentile",       minval = 100, group = gT)
+trendZ   = input.float (1.0, "Soglia z per ingresso trend", step = 0.1, group = gT)
+
+// ============================ INPUT: REGIME ==================================
+gR = "3 - Regime (Variance Ratio)"
+vrQ    = input.int  (5,   "Orizzonte q del VR",         minval = 2,  group = gR)
+vrLen  = input.int  (120, "Finestra N del VR",          minval = 30, group = gR)
+vrThr  = input.float(1.65,"Soglia |z| del VR (1.65=90%, 1.96=95%)", step = 0.05, group = gR)
+
+// ============================ INPUT: FILTRI ==================================
+gF = "4 - Filtri (ablation)"
+useAccel   = input.bool(false, "Usa filtro accelerazione",           group = gF)
+accSmooth  = input.int (3,     "Smoothing accelerazione", minval = 1, group = gF)
+useTrendSig = input.bool(true, "Mostra segnali di trend",            group = gF)
+useMrSig    = input.bool(true, "Mostra segnali mean-reversion",      group = gF)
+
+// ============================ INPUT: ESECUZIONE ==============================
+gE = "5 - Esecuzione"
+confirmOnly = input.bool(true, "Solo barre confermate (no repaint)", group = gE)
+minGap      = input.int (20,   "Barre minime tra segnali", minval = 0, group = gE)
+showTable   = input.bool(true, "Mostra pannello diagnostico",        group = gE)
+tintRegime  = input.bool(true, "Colora sfondo per regime",           group = gE)
+
+// =============================================================================
+// 1. SCALA DELLA VOLATILITA' (stimata una sola volta, su finestra lunga)
+// =============================================================================
+r = math.log(close / nz(close[1], close))
+
+muR      = ta.sma(r, volLen)
+sdStd    = ta.stdev(r, volLen)
+medR     = ta.median(r, volLen)
+sdMad    = 1.4826 * ta.median(math.abs(r - medR), volLen)
+
+sigma1   = robustVol ? sdMad : sdStd            // scala di 1 barra
+centerR  = robustVol ? medR : muR               // drift per barra
+
+// =============================================================================
+// 2. ORIZZONTE ADATTIVO (vol clock: alta vol -> finestra corta)
+// =============================================================================
+atr    = ta.atr(atrLen)
+atrAvg = ta.sma(atr, volLen)
+ratio  = atr > 0 ? atrAvg / atr : 1.0
+nRaw   = useVolClock ? baseLen * ratio : baseLen
+nClamp = math.max(lenMin, math.min(lenMax, nRaw))
+n      = bar_index < volLen ? baseLen : int(math.round(nClamp))
+
+// =============================================================================
+// 3. Z-SCORE CORRETTO
+//    mom_n = log(P_t / P_{t-n});  sotto random walk: mom_n ~ N(n*mu, n*sigma^2)
+//    => z = (mom_n - n*mu) / (sigma * sqrt(n))    -> unita' di sigma vere
+// =============================================================================
+mom   = math.log(close / nz(close[n], close))
+denom = sigma1 * math.sqrt(n)
+zRaw  = denom > 0 ? (mom - centerR * n) / denom : 0.0
+
+zSm   = smoothLen > 1 ? ta.ema(zRaw, smoothLen) : zRaw
+sdZ   = ta.stdev(zSm, volLen)
+z     = reStd and sdZ > 0 ? zSm / sdZ : zSm     // lo smoothing comprime la varianza: la si riporta a 1
+
+// Soglia
+thrAdaptive = ta.percentile_linear_interpolation(math.abs(z), pctLen, thrPct)
+thr         = thrMode == "Sigma fisso" ? thrFixed : nz(thrAdaptive, thrFixed)
+
+// =============================================================================
+// 4. REGIME: VARIANCE RATIO
+//    VR(q) = Var(r_q) / (q * Var(r_1)).  VR>1 trend, VR<1 mean reversion.
+//    SE asintotico (RW omoschedastico, stimatore overlapping):
+//    Var[VR-1] = 2*(2q-1)*(q-1) / (3*q*N)
+// =============================================================================
+rq   = math.log(close / nz(close[vrQ], close))
+v1   = ta.variance(r,  vrLen)
+vq   = ta.variance(rq, vrLen)
+vr   = v1 > 0 ? vq / (vrQ * v1) : 1.0
+seVR = math.sqrt(2.0 * (2.0 * vrQ - 1.0) * (vrQ - 1.0) / (3.0 * vrQ * vrLen))
+zVR  = seVR > 0 ? (vr - 1.0) / seVR : 0.0
+
+warmup    = bar_index > math.max(volLen, vrLen) + 10
+isTrend   = warmup and zVR >  vrThr
+isMeanRev = warmup and zVR < -vrThr
+isNoise   = warmup and not isTrend and not isMeanRev
+
+// =============================================================================
+// 5. FILTRO ACCELERAZIONE (normalizzato, opzionale)
+// =============================================================================
+accRaw = atr > 0 ? (close - 2 * nz(close[1], close) + nz(close[2], close)) / atr : 0.0
+acc    = accSmooth > 1 ? ta.ema(accRaw, accSmooth) : accRaw
+accLongOK  = not useAccel or acc > 0
+accShortOK = not useAccel or acc < 0
+
+// =============================================================================
+// 6. SEGNALI
+// =============================================================================
+// -- Mean reversion: z estremo che comincia a rientrare, solo in regime MR
+mrLongRaw  = useMrSig and isMeanRev and z < -thr and z > z[1] and accLongOK
+mrShortRaw = useMrSig and isMeanRev and z >  thr and z < z[1] and accShortOK
+
+// -- Trend: EVENTO di ingresso in stato (edge-triggered), non lo stato stesso
+trUpState  = isTrend and z >  trendZ
+trDnState  = isTrend and z < -trendZ
+trLongRaw  = useTrendSig and trUpState and not trUpState[1]
+trShortRaw = useTrendSig and trDnState and not trDnState[1]
+
+longRaw  = mrLongRaw  or trLongRaw
+shortRaw = mrShortRaw or trShortRaw
+
+// -- Debounce unico e simmetrico (blocca anche il segnale opposto)
+var int lastSigBar = na
+gapOK   = na(lastSigBar) or (bar_index - lastSigBar >= minGap)
+barOK   = not confirmOnly or barstate.isconfirmed
+
+longSig  = longRaw  and gapOK and barOK
+shortSig = shortRaw and gapOK and barOK and not longSig
+
+if longSig or shortSig
+    lastSigBar := bar_index
+
+// =============================================================================
+// 7. HALF-LIFE (AR(1) su z) -> orizzonte di holding stimato, non inventato
+//    z_t = phi * z_{t-1}  =>  HL = ln(0.5) / ln(phi)
+// =============================================================================
+phi      = ta.correlation(z, z[1], volLen)
+halfLife = phi > 0 and phi < 1 ? math.log(0.5) / math.log(phi) : na
+
+// =============================================================================
+// 8. OUTPUT
+// =============================================================================
+plotshape(longSig  and mrLongRaw,  title = "Long MR",    location = location.belowbar, color = color.new(color.green, 0), style = shape.triangleup,   size = size.small)
+plotshape(shortSig and mrShortRaw, title = "Short MR",   location = location.abovebar, color = color.new(color.red, 0),   style = shape.triangledown, size = size.small)
+plotshape(longSig  and trLongRaw,  title = "Long Trend", location = location.belowbar, color = color.new(color.lime, 0),  style = shape.labelup,      size = size.tiny)
+plotshape(shortSig and trShortRaw, title = "Short Trend",location = location.abovebar, color = color.new(color.maroon,0), style = shape.labeldown,    size = size.tiny)
+
+bgcolor(tintRegime and isTrend   ? color.new(color.blue,   93) : tintRegime and isMeanRev ? color.new(color.orange, 93) : na, title = "Regime")
+
+// Pannello diagnostico
+var table tb = table.new(position.top_right, 2, 6, border_width = 1)
+if showTable and barstate.islast
+    regimeTxt = isTrend ? "TREND" : isMeanRev ? "MEAN REV" : "NEUTRO"
+    table.cell(tb, 0, 0, "Regime",     text_color = color.gray, text_size = size.small)
+    table.cell(tb, 1, 0, regimeTxt,    text_color = isTrend ? color.blue : isMeanRev ? color.orange : color.gray, text_size = size.small)
+    table.cell(tb, 0, 1, "z(VR)",      text_color = color.gray, text_size = size.small)
+    table.cell(tb, 1, 1, str.tostring(zVR, "#.00"), text_size = size.small)
+    table.cell(tb, 0, 2, "z",          text_color = color.gray, text_size = size.small)
+    table.cell(tb, 1, 2, str.tostring(z, "#.00"),   text_size = size.small)
+    table.cell(tb, 0, 3, "soglia",     text_color = color.gray, text_size = size.small)
+    table.cell(tb, 1, 3, str.tostring(thr, "#.00"), text_size = size.small)
+    table.cell(tb, 0, 4, "orizzonte n",text_color = color.gray, text_size = size.small)
+    table.cell(tb, 1, 4, str.tostring(n), text_size = size.small)
+    table.cell(tb, 0, 5, "half-life",  text_color = color.gray, text_size = size.small)
+    table.cell(tb, 1, 5, na(halfLife) ? "n/d" : str.tostring(halfLife, "#.0") + " bar", text_size = size.small)
+
+alertcondition(longSig,  title = "ASM Long",  message = "ASM v2 LONG {{ticker}} {{interval}}")
+alertcondition(shortSig, title = "ASM Short", message = "ASM v2 SHORT {{ticker}} {{interval}}")
