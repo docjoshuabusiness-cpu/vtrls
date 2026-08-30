@@ -764,7 +764,7 @@ if barstate.islast and showStats
     f_edgeRow(tEdge, 6, "Bear Ini", nSI, gSI, rSI, hSI, fSI, aSI, wSI, rBS, cIniS)
     f_edgeRow(tEdge, 7, "Bull Div", nBD, gBD, rBD, hBD, fBD, aBD, wBD, rBL, cDivB)
     f_edgeRow(tEdge, 8, "Bear Div", nSD, gSD, rSD, hSD, fSD, aSD, wSD, rBS, cDivS)
-    f_edgeRow(tEdge, 9,  "BASE long",  nBL, gBL, rBL, hBL, fBL, aBL, rBL, color.gray)
+    f_edgeRow(tEdge, 9,  "BASE long",  nBL, gBL, rBL, hBL, fBL, aBL, wBL, rBL, color.gray)
     f_edgeRow(tEdge, 10, "BASE short", nBS, gBS, rBS, hBS, fBS, aBS, wBS, rBS, color.gray)
     if showV1
         table.cell(tEdge, 0, 11, "-- v1 --", text_color = color.gray, text_size = size.tiny)
