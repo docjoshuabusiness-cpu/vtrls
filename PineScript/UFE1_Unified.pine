@@ -105,7 +105,9 @@ grpVo = "5d - Volatilita' (Ferro)"
 fvAtrLen    = input.int(14, "ATR Length", minval = 1, group = grpVo)
 fvLookback  = input.int(100, "Percentile Lookback (barre)", minval = 20, group = grpVo)
 fvSmooth    = input.int(3, "Smoothing EMA", minval = 1, group = grpVo)
-fvExpTh     = input.float(1.8, "Soglia Espansione Candela (TR/ATR)", minval = 1.0, step = 0.1, group = grpVo)
+fvExpMode   = input.string("Percentile", "Definizione di ESPANSIONE", options = ["Percentile", "Rapporto TR/ATR"], group = grpVo, tooltip = "Rapporto: TR/ATR sopra una soglia fissa. Problema: la distribuzione di TR/ATR cambia con il timeframe. Su barre a 15s la microstruttura la fa sforare di continuo e il grafico diventa a strisce.\nPercentile: espansione = la barra e' nel top X% della SUA storia recente. Auto-adattivo, e la frequenza dell'evento e' nota per costruzione (95 -> una barra su venti).")
+fvExpPct    = input.float(95.0, "   percentile (modalita' Percentile)", minval = 50.0, maxval = 99.9, step = 0.5, group = grpVo)
+fvExpTh     = input.float(1.8, "   soglia TR/ATR (modalita' Rapporto)", minval = 1.0, step = 0.1, group = grpVo)
 fvLowTh     = input.int(30, "Soglia LOW percentile", group = grpVo)
 fvHighTh    = input.int(70, "Soglia HIGH percentile", group = grpVo)
 fvExtTh     = input.int(90, "Soglia EXTREME percentile", group = grpVo)
@@ -136,6 +138,9 @@ showMarks = input.bool(true, "Marker eventi OFE", group = grpU)
 showAsmMk = input.bool(true, "Marker segnali ASM", group = grpU)
 mkOff  = input.float(0.45, "Distanza del primo marker dal prezzo (x ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = grpU, tooltip = "Tutti i marker sono posizionati in ASSOLUTO (location.absolute) e non con belowbar/abovebar. Con belowbar due segnali sulla stessa candela finiscono nello stesso pixel e ne vedi UNO SOLO: il piu' importante puo' essere quello nascosto.")
 mkStep = input.float(0.40, "Passo tra segnali impilati (x ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = grpU, tooltip = "Distanza verticale tra due segnali che scattano sulla stessa barra. I LONG si impilano verso il BASSO, gli SHORT verso l'ALTO, in ordine di priorita' (Absorption piu' vicino al prezzo, contesto piu' lontano).\n\nMettilo a 0 per tornare al comportamento sovrapposto.")
+mkFade = input.bool(true, "Opacita' del marker proporzionale al peso di qualita'", group = grpU, tooltip = "Il peso qw in [0,1] esiste gia' e dimensiona il rischio, ma sul grafico tutti i segnali sembravano uguali. Ora un segnale con qw alto e' pieno, uno debole e' sbiadito: la gerarchia si legge senza aprire tabelle.")
+mkQwMin = input.float(0.0, "Disegna solo i segnali con peso >=", minval = 0.0, maxval = 1.0, step = 0.05, group = grpU, tooltip = "Filtro di SOLO DISEGNO: non tocca eventi, alert, ne' la misura di edge nella tabella. Serve a decongestionare il grafico senza falsare le statistiche. 0.55-0.65 dimezza i marker.")
+showVwap = input.bool(true, "Mostra VWAP di sessione e bande a sigma", group = grpU, tooltip = "Il filtro di contesto usa la distanza dal VWAP in sigma (locMin), ma finora quella distanza non era visibile. Senza le bande non puoi capire perche' un segnale sia stato pesato poco.")
 showRegimeBg = input.bool(false, "Sfondo colorato per il regime (ER)", group = grpU)
 showDash  = input.bool(true, "Dashboard compatta", group = grpU)
 dashPos   = input.string("Alto destra", "Posizione dashboard", options = ["Alto destra", "Alto sinistra", "Basso destra", "Basso sinistra", "Centro destra"], group = grpU)
@@ -300,7 +305,8 @@ fvZ      = fvSd != 0 ? (fvSm - fvMean) / fvSd : 0.0
 
 fvTr     = ta.tr(true)
 fvTrAtr  = fvAtr != 0 ? fvTr / fvAtr : 0.0
-fvExp    = fvTrAtr > fvExpTh
+fvTrRank = ta.percentrank(fvTrAtr, fvLookback)
+fvExp    = fvExpMode == "Percentile" ? fvTrRank >= fvExpPct : fvTrAtr > fvExpTh
 fvCmp    = fvTrAtr < 0.5
 
 fvRegime = fvPct >= fvExtTh ? "EXTREME" : fvPct >= fvHighTh ? "HIGH" : fvPct >= fvLowTh ? "NORMAL" : "LOW"
@@ -670,7 +676,7 @@ cExhR = color.new(#1DE9B6, 0)     // Bear Exhaustion -> LONG rombo
 cIniB = color.new(#66BB6A, 0)     // Bull Initiative         triangolo su
 cDivB = color.new(#7CB342, 0)     // Bull Divergence         cerchio
 cAsmL = color.new(#00C853, 0)     // ASM Long  (range)       triangolo su
-cAsmT = color.new(#A5D6A7, 0)     // ASM Long  (trend)       cerchio
+cAsmT = color.new(#2E7D32, 0)     // ASM Long  (trend)       cerchio
 
 // -- famiglia SHORT (rossi) --------------------------------------------------
 cAbsS = color.new(#FF1744, 0)     // Sell Absorption         freccia giu
@@ -678,7 +684,7 @@ cExhB = color.new(#D50000, 0)     // Bull Exhaustion -> SHORT rombo
 cIniS = color.new(#EF5350, 0)     // Bear Initiative         triangolo giu
 cDivS = color.new(#B71C1C, 0)     // Bear Divergence         cerchio
 cAsmS = color.new(#C62828, 0)     // ASM Short (range)       triangolo giu
-cAsmU = color.new(#EF9A9A, 0)     // ASM Short (trend)       cerchio
+cAsmU = color.new(#E64A19, 0)     // ASM Short (trend)       cerchio
 
 // -- contesto (non direzionale) ----------------------------------------------
 cVolE = color.new(#FFD600, 0)     // candela in ESPANSIONE   giallo
@@ -716,21 +722,34 @@ bgcolor(not na(bgExp) ? bgExp : not na(bgVol) ? bgVol : bgER, title = "Contesto"
 //  timeframe. mkStep = 0 ripristina la sovrapposizione.
 // ============================================================================
 
-// -- condizioni, in ordine di priorita' (indice 1 = piu' vicino al prezzo) ---
-bL1 = showMarks and buyAbs        // Buy Absorption
-bL2 = showMarks and bearExh       // Bear Exhaustion  -> LONG
-bL3 = showAsmMk and asmLongRg     // ASM Long (range)
-bL4 = showMarks and bullIni       // Bull Initiative
-bL5 = showMarks and bullDiv       // Bull Divergence
-bL6 = showAsmMk and asmLongTr     // ASM Long (trend)
-bL7 = fvShowCmp and fvCmp         // candela compressa (contesto)
+// -- peso di qualita' per direzione e tipo di trade --------------------------
+//    Lo stesso qw che dimensiona il rischio ora governa OPACITA' e filtro di
+//    disegno: un segnale debole si vede sbiadito, sotto mkQwMin non si disegna
+//    affatto. Il filtro e' puramente grafico: eventi, alert e misura di edge
+//    restano invariati, altrimenti si falserebbero le statistiche.
+qwLf = f_qw( 1, true)      // long  contrarian (Absorption, Exhaustion, Div, ASM range)
+qwSf = f_qw(-1, true)      // short contrarian
+qwLc = f_qw( 1, false)     // long  continuazione (Initiative, ASM trend)
+qwSc = f_qw(-1, false)     // short continuazione
 
-bU1 = showMarks and sellAbs       // Sell Absorption
-bU2 = showMarks and bullExh       // Bull Exhaustion  -> SHORT
-bU3 = showAsmMk and asmShortRg    // ASM Short (range)
-bU4 = showMarks and bearIni       // Bear Initiative
-bU5 = showMarks and bearDiv       // Bear Divergence
-bU6 = showAsmMk and asmShortTr    // ASM Short (trend)
+f_mc(color c, float w) => mkFade ? color.new(c, math.round(math.min(80.0, math.max(0.0, 80.0 * (1.0 - w))))) : c
+f_dw(float w) => w >= mkQwMin
+
+// -- condizioni, in ordine di priorita' (indice 1 = piu' vicino al prezzo) ---
+bL1 = showMarks and buyAbs     and f_dw(qwLf)   // Buy Absorption
+bL2 = showMarks and bearExh    and f_dw(qwLf)   // Bear Exhaustion  -> LONG
+bL3 = showAsmMk and asmLongRg  and f_dw(qwLf)   // ASM Long (range)
+bL4 = showMarks and bullIni    and f_dw(qwLc)   // Bull Initiative
+bL5 = showMarks and bullDiv    and f_dw(qwLf)   // Bull Divergence
+bL6 = showAsmMk and asmLongTr  and f_dw(qwLc)   // ASM Long (trend)
+bL7 = fvShowCmp and fvCmp                       // candela compressa (contesto)
+
+bU1 = showMarks and sellAbs    and f_dw(qwSf)   // Sell Absorption
+bU2 = showMarks and bullExh    and f_dw(qwSf)   // Bull Exhaustion  -> SHORT
+bU3 = showAsmMk and asmShortRg and f_dw(qwSf)   // ASM Short (range)
+bU4 = showMarks and bearIni    and f_dw(qwSc)   // Bear Initiative
+bU5 = showMarks and bearDiv    and f_dw(qwSf)   // Bear Divergence
+bU6 = showAsmMk and asmShortTr and f_dw(qwSc)   // ASM Short (trend)
 bU7 = fvShowExp and fvExp and fvExpStyle != "Sfondo"   // espansione come marker
 
 // -- slot = quanti segnali con priorita' superiore sono attivi su questa barra
@@ -770,21 +789,21 @@ yU6 = f_yUp(bU6, kU6)
 yU7 = f_yUp(bU7, kU7)
 
 // -- LONG (verdi), impilati verso il basso -----------------------------------
-plotshape(yL1, "Buy Absorption",      shape.arrowup,    location.absolute, cAbsB, size = size.normal)
-plotshape(yL2, "Bear Exhaustion",     shape.diamond,    location.absolute, cExhR, size = size.small)
-plotshape(yL3, "ASM Long (Range)",    shape.triangleup, location.absolute, cAsmL, size = size.small)
-plotshape(yL4, "Bull Initiative",     shape.triangleup, location.absolute, cIniB, size = size.tiny)
-plotshape(yL5, "Bull Divergence",     shape.circle,     location.absolute, cDivB, size = size.tiny)
-plotshape(yL6, "ASM Long (Trend)",    shape.circle,     location.absolute, cAsmT, size = size.tiny)
+plotshape(yL1, "Buy Absorption",      shape.arrowup,    location.absolute, f_mc(cAbsB, qwLf), size = size.normal)
+plotshape(yL2, "Bear Exhaustion",     shape.diamond,    location.absolute, f_mc(cExhR, qwLf), size = size.small)
+plotshape(yL3, "ASM Long (Range)",    shape.triangleup, location.absolute, f_mc(cAsmL, qwLf), size = size.small)
+plotshape(yL4, "Bull Initiative",     shape.triangleup, location.absolute, f_mc(cIniB, qwLc), size = size.tiny)
+plotshape(yL5, "Bull Divergence",     shape.circle,     location.absolute, f_mc(cDivB, qwLf), size = size.tiny)
+plotshape(yL6, "ASM Long (Trend)",    shape.circle,     location.absolute, f_mc(cAsmT, qwLc), size = size.tiny)
 plotshape(yL7, "Candela Compressa",   shape.xcross,     location.absolute, cVolC, size = size.tiny)
 
 // -- SHORT (rossi), impilati verso l'alto ------------------------------------
-plotshape(yU1, "Sell Absorption",     shape.arrowdown,    location.absolute, cAbsS, size = size.normal)
-plotshape(yU2, "Bull Exhaustion",     shape.diamond,      location.absolute, cExhB, size = size.small)
-plotshape(yU3, "ASM Short (Range)",   shape.triangledown, location.absolute, cAsmS, size = size.small)
-plotshape(yU4, "Bear Initiative",     shape.triangledown, location.absolute, cIniS, size = size.tiny)
-plotshape(yU5, "Bear Divergence",     shape.circle,       location.absolute, cDivS, size = size.tiny)
-plotshape(yU6, "ASM Short (Trend)",   shape.circle,       location.absolute, cAsmU, size = size.tiny)
+plotshape(yU1, "Sell Absorption",     shape.arrowdown,    location.absolute, f_mc(cAbsS, qwSf), size = size.normal)
+plotshape(yU2, "Bull Exhaustion",     shape.diamond,      location.absolute, f_mc(cExhB, qwSf), size = size.small)
+plotshape(yU3, "ASM Short (Range)",   shape.triangledown, location.absolute, f_mc(cAsmS, qwSf), size = size.small)
+plotshape(yU4, "Bear Initiative",     shape.triangledown, location.absolute, f_mc(cIniS, qwSc), size = size.tiny)
+plotshape(yU5, "Bear Divergence",     shape.circle,       location.absolute, f_mc(cDivS, qwSf), size = size.tiny)
+plotshape(yU6, "ASM Short (Trend)",   shape.circle,       location.absolute, f_mc(cAsmU, qwSc), size = size.tiny)
 plotshape(yU7, "Candela in Espansione", shape.circle, location.absolute, cVolE, size = size.tiny)
 
 // -- marker v1 (grigi, benchmark visivo) - restano attaccati alla barra ------
@@ -798,6 +817,15 @@ plotshape(showV1Mk and g1BullFlw, "v1 Bull Flow", shape.square, location.belowba
 plotshape(showV1Mk and g1BearFlw, "v1 Bear Flow", shape.square, location.abovebar, cV1S, size = size.tiny)
 plotshape(showV1Mk and g1BullBub, "v1 Bull Bub",  shape.circle, location.belowbar, cV1L, size = size.tiny)
 plotshape(showV1Mk and g1BearBub, "v1 Bear Bub",  shape.circle, location.abovebar, cV1S, size = size.tiny)
+
+// -- VWAP di sessione e bande a locMin sigma ---------------------------------
+//  Sono le stesse grandezze che il filtro di contesto usa per pesare i
+//  segnali: la banda superiore/inferiore e' esattamente la soglia oltre la
+//  quale un segnale contrarian riceve peso pieno.
+pVw = plot(showVwap ? vwap : na, "VWAP sessione", color = color.new(#FFFFFF, 25), linewidth = 1)
+pVu = plot(showVwap and vwSd > 0 ? vwap + locMin * vwSd : na, "VWAP +sigma", color = color.new(#9E9E9E, 55), linewidth = 1)
+pVl = plot(showVwap and vwSd > 0 ? vwap - locMin * vwSd : na, "VWAP -sigma", color = color.new(#9E9E9E, 55), linewidth = 1)
+fill(pVu, pVl, color = showVwap ? color.new(#607D8B, 94) : na, title = "Banda VWAP")
 
 // ============================================================================
 // 11) DASHBOARD COMPATTA + TABELLA EDGE A RIGHE VARIABILI
