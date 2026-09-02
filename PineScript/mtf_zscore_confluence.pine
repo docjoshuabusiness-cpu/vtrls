@@ -135,12 +135,17 @@ riskUnit = input.string("Punti", "   unita\'", options=["Punti","Tick","Entrambi
 var string gR2 = "5b · Filtro STOP STRETTO"
 useRisk  = input.bool(false, "Attiva", group=gR2,
      tooltip="Scarta i segnali in cui lo stop strutturale e' piu' lontano della soglia. E' il filtro che risponde direttamente a 'voglio entrare dove il rischio e' minimo': non rende il segnale migliore, seleziona i casi in cui la struttura offre un'invalidazione vicina.\n\nATTENZIONE: uno stop piu' stretto NON riduce la MAE, riduce la frazione di trade che le sopravvive. Confronta sempre la soglia con i percentili MAE in fondo alla dashboard.")
-maxStopA = input.float(1.0, "   stop massimo (x ATR)", minval=0.1, maxval=10.0, step=0.1, group=gR2)
+maxStopU = input.string("Punti", "   unita\' del limite", options=["Punti","x ATR"], group=gR2,
+     tooltip="x ATR: il limite si adatta alla volatilita\'. Attenzione, subito dopo uno spike l\'ATR e\' gia\' salito, quindi il limite si allarga proprio quando servirebbe stretto.\n\nPUNTI: limite assoluto, immune a quella contaminazione. Piu\' grezzo ma piu\' affidabile nei minuti successivi a un movimento violento.")
+maxStopA = input.float(2.0, "   limite (x ATR)", minval=0.1, maxval=10.0, step=0.1, group=gR2)
+maxStopP = input.float(8.0, "   limite (punti)", minval=0.25, step=0.25, group=gR2)
 
 var string gR3 = "5c · Filtro COMPRESSIONE"
 useComp  = input.bool(false, "Attiva", group=gR3,
      tooltip="Richiede che la barra del segnale abbia TR/ATR sotto la soglia. Entrare su una barra di espansione significa comprare il massimo del rumore locale: lo stop strutturale e' largo proprio perche' la barra e' larga.")
 maxTrAtr = input.float(1.2, "   TR/ATR massimo", minval=0.2, maxval=5.0, step=0.1, group=gR3)
+expLook  = input.int(1, "   barre esaminate", minval=1, maxval=100, group=gR3,
+     tooltip="Con 1 viene controllata solo la barra del segnale: subito dopo uno spike quella barra e\' gia\' normale e il filtro non blocca nulla, mentre lo stop strutturale resta enorme perche\' guarda ancora il massimo dello spike.\n\nPortalo al valore di \'Barre per lo stop strutturale\' (default 10): cosi\' il filtro copre la stessa finestra che determina lo stop, e i segnali nei minuti successivi a un movimento violento vengono scartati.")
 
 var string gR4 = "5d · Filtro ENTROPIA"
 useEnt   = input.bool(false, "Attiva", group=gR4,
@@ -389,6 +394,9 @@ rskSell = stopPol == "Strutturale" or na(maeStop) ? rskSellS : stopPol == "MAE p
 rskBuy  = stopPol == "Strutturale" or na(maeStop) ? rskBuyS  : stopPol == "MAE p80" ? maeStop : math.max(rskBuyS,  maeStop)
 
 trAtr  = ta.tr(true) / atrR
+// massima espansione nella finestra: e' questa a spiegare uno stop largo, non
+// la barra corrente, che due barre dopo uno spike e' gia' tornata normale
+trAtrMax = ta.highest(trAtr, expLook)
 
 // Entropia binaria della direzione: 0 = tutte le barre nello stesso verso,
 // 1 = meta' su meta' giu'. Misura quanto e' ordinato il movimento recente.
@@ -398,8 +406,9 @@ entH   = pUp <= 0.0 or pUp >= 1.0 ? 0.0 : -(pUp * math.log(pUp) + (1 - pUp) * ma
 
 f_riskOk(bool isSell) =>
     r      = isSell ? rskSell : rskBuy
-    okStop = not useRisk or (r > 0 and r <= maxStopA * atrR)
-    okComp = not useComp or trAtr <= maxTrAtr
+    cap    = maxStopU == "Punti" ? maxStopP : maxStopA * atrR
+    okStop = not useRisk or (r > 0 and r <= cap)
+    okComp = not useComp or trAtrMax <= maxTrAtr
     okEnt  = not useEnt or (entH >= entMin and entH <= entMax)
     okStop and okComp and okEnt
 
@@ -743,7 +752,7 @@ if showTab and barstate.islast
     table.cell(dash, 0, 10, "rischio", text_size=szDash, text_color=color.silver, bgcolor=rbg)
     table.cell(dash, 1, 10, riskUnit == "Tick" ? str.tostring(math.round(rskSell / syminfo.mintick)) + "t" : str.tostring(rskSell, format.mintick) + "pt", text_size=szDash, text_color=cUp, bgcolor=rbg)
     table.cell(dash, 2, 10, riskUnit == "Tick" ? str.tostring(math.round(rskBuy / syminfo.mintick)) + "t" : str.tostring(rskBuy, format.mintick) + "pt", text_size=szDash, text_color=cDn, bgcolor=rbg)
-    table.cell(dash, 3, 10, "TR/ATR " + str.tostring(trAtr, "#.0"), text_size=szDash, text_color=not useComp ? color.gray : trAtr > maxTrAtr ? color.red : color.lime, bgcolor=rbg)
+    table.cell(dash, 3, 10, "TR/ATR " + str.tostring(trAtrMax, "#.0"), text_size=szDash, text_color=not useComp ? color.gray : trAtrMax > maxTrAtr ? color.red : color.lime, bgcolor=rbg)
     table.cell(dash, 4, 10, "H " + str.tostring(entH, "#.00"), text_size=szDash, text_color=not useEnt ? color.gray : (entH < entMin or entH > entMax) ? color.red : color.lime, bgcolor=rbg)
     table.cell(dash, 5, 10, "", bgcolor=rbg)
 
