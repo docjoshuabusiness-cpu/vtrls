@@ -134,6 +134,8 @@ cLvl0    = input.color(color.new(#000000, 55), "zero",                 inline="l
 markWhere= input.string("Pannello", "Posizione marker", options=["Pannello","Grafico prezzi","Entrambi"], group=gV,
      tooltip="Pannello: i marker stanno nel pannello dello z-score, come negli indicatori di riferimento. Restano comunque ancorati alla barra del grafico in cui il TF piu\' veloce ha attraversato il livello di trigger.")
 markLvl  = input.float(2.8, "   livello marker nel pannello (z)", step=0.1, minval=0.5, group=gV)
+showMiss = input.bool(false, "Marker dei SETUP MANCATI", group=gV,
+     tooltip="Disegna una × grigia dove il trigger e\' scattato ma l\'armamento NON era valido, elencando le sezioni che non erano in soglia.\n\nRisponde alla domanda 'perche\' qui non e\' uscito il segnale' senza doverla dedurre: se leggi ×A S4 S5, sono le sezioni 2m e 5m ad aver bloccato la confluenza.\n\nSpento di default perche\' i setup mancati sono molti piu\' dei segnali e consumano il budget delle label.")
 showTags = input.bool(true, "Etichette del periodo a destra delle curve", group=gV,
      tooltip="Scrive il timeframe di ogni sezione in fondo alla sua curva, nel pannello. Serve a non dover ricordare a memoria quale colore corrisponde a quale periodo.")
 tagOff   = input.int(4, "   distanza (barre)", minval=1, maxval=50, group=gV)
@@ -359,12 +361,12 @@ f_stream(bool en, float thr, float trg, bool isUp) =>
         fired   := true
         lastSig := bar_index
         seq     += 1
-    [fire, armed, seq]
+    [fire, armed, seq, trig]
 
-[sigA, armA, seqA] = f_stream(enP2, thrP2, trgP2, true)
-[sigB, armB, seqB] = f_stream(enP1, thrP1, trgP1, true)
-[sigC, armC, seqC] = f_stream(enM1, thrM1, trgM1, false)
-[sigD, armD, seqD] = f_stream(enM2, thrM2, trgM2, false)
+[sigA, armA, seqA, trgARaw] = f_stream(enP2, thrP2, trgP2, true)
+[sigB, armB, seqB, trgBRaw] = f_stream(enP1, thrP1, trgP1, true)
+[sigC, armC, seqC, trgCRaw] = f_stream(enM1, thrM1, trgM1, false)
+[sigD, armD, seqD, trgDRaw] = f_stream(enM2, thrM2, trgM2, false)
 
 // ============================================================ DIAGNOSTICA =====
 //  Quando non compaiono segnali serve sapere DOVE si rompe la catena, non
@@ -474,6 +476,26 @@ txBuy  = isArrow ? "▲" : "●"
 
 // gli stream della stessa direzione sono sfalsati di 0.35 z per non finire sullo
 // stesso pixel quando scattano sulla medesima barra
+// Sezioni che NON erano in soglia al momento del trigger: e' la spiegazione del
+// segnale mancato, e va letta sulla barra in cui e' successo, non a posteriori.
+f_missTxt(float thr, bool isUp) =>
+    t = ""
+    if use1 and not (isUp ? hi1 >= thr : lo1 <= thr)
+        t := t + " S1"
+    if use2 and not (isUp ? hi2 >= thr : lo2 <= thr)
+        t := t + " S2"
+    if use3 and not (isUp ? hi3 >= thr : lo3 <= thr)
+        t := t + " S3"
+    if use4 and not (isUp ? hi4 >= thr : lo4 <= thr)
+        t := t + " S4"
+    if use5 and not (isUp ? hi5 >= thr : lo5 <= thr)
+        t := t + " S5"
+    t
+
+f_miss(bool en, bool trig, bool armed, float y, string tag, float thr, bool isUp) =>
+    if showMiss and en and trig and not armed
+        label.new(bar_index, y, "×" + tag + f_missTxt(thr, isUp), style = label.style_none, textcolor = color.new(color.gray, 25), size = szMark, textalign = text.align_center)
+
 f_seqTxt(int n) => showSeq and n > 1 ? str.tostring(n) : ""
 
 f_markPane(sigA,  markLvl,        txSell + "A" + f_seqTxt(seqA), cUp)
@@ -485,6 +507,11 @@ f_markChart(sigA, true,  txSell + "A" + f_seqTxt(seqA), cUp)
 f_markChart(sigB, true,  txSell + "B" + f_seqTxt(seqB), color.new(cUp, 35))
 f_markChart(sigC, false, txBuy  + "C" + f_seqTxt(seqC), color.new(cDn, 35))
 f_markChart(sigD, false, txBuy  + "D" + f_seqTxt(seqD), cDn)
+
+f_miss(enP2, trgARaw, armA,  markLvl,        "A", thrP2, true)
+f_miss(enP1, trgBRaw, armB,  markLvl - 0.35, "B", thrP1, true)
+f_miss(enM1, trgCRaw, armC, -markLvl + 0.35, "C", thrM1, false)
+f_miss(enM2, trgDRaw, armD, -markLvl,        "D", thrM2, false)
 
 // Sfondo di armamento: resta NEL PANNELLO, cosi' non sporca le candele.
 bgcolor(not showArmBg ? na : (armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title="Sfondo armamento")
