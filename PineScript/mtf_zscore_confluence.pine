@@ -11,6 +11,16 @@
 //  proprio valore e proprio livello di trigger -> 4 stream di segnali distinti,
 //  confrontabili a video per capire quale ha edge.
 //
+//  TRE BASI DI CALCOLO DELLO Z-SCORE (input zBasis):
+//    A - TF nativo ............ ogni sezione usa le candele del proprio TF.
+//                               Periodo di storia diverso per ogni sezione.
+//    B - Barre grafico (HTF) .. tutte le sezioni usano lo stesso numero di
+//                               barre del grafico. I TF alti hanno pochi dati
+//                               reali e non raggiungono z-score alti.
+//    C - Orizzonte equivalente  stesso periodo di storia del modo A, ma
+//                               calcolato sulle candele del grafico. Piu' dati,
+//                               nessun ritardo, nessun repaint. Consigliato.
+//
 //  NOTE OPERATIVE (leggere):
 //  - Mettere il grafico sul TF PIU' PICCOLO che si vuole osservare. Tutti i TF
 //    delle sezioni devono essere >= al TF del grafico, altrimenti request.security
@@ -35,7 +45,7 @@ confirmed = input.bool(true, "Solo barre HTF chiuse (no repaint)", group=gZ,
      tooltip="Applica shift di 1 barra SOLO ai TF superiori a quello del grafico. Il TF del grafico non viene ritardato.")
 zBasis    = input.string("A · TF nativo", "Base di calcolo dello z-score",
      options=["A · TF nativo","B · Barre grafico (serie HTF)","C · Barre grafico (orizzonte equivalente)"], group=gZ,
-     tooltip="A · TF NATIVO: z calcolato DENTRO il TF di riferimento su 'len' barre DI QUEL TF. Ogni sezione ha un orizzonte temporale diverso (len x tf). E' la vera analisi multi-orizzonte. n_eff = len.\n\nB · BARRE GRAFICO (serie HTF): si prende la serie del TF superiore mappata sulle barre del grafico e si calcola media/stdev su 'len' BARRE DEL GRAFICO. Tutte le sezioni condividono la stessa finestra in tempo reale.\nATTENZIONE: la serie HTF e' a gradini, quindi il campione effettivo e' n_eff = len/k con k = tf/grafico. Con stdev di popolazione max|z| = sqrt(n_eff-1): con len=100 su grafico 15S, la sezione 5m ha n_eff=5 e NON PUO' superare z=2.0. Controlla la colonna n della dashboard.\n\nC · BARRE GRAFICO (orizzonte equivalente): z calcolato sul prezzo DEL GRAFICO con finestra len*k barre. Stesso orizzonte temporale del TF nativo ma a piena risoluzione: nessun gradino, nessun repaint, nessuna barra di conferma da perdere. Il TF della sezione diventa un puro moltiplicatore di orizzonte. n_eff = len*k.")
+     tooltip="Come viene calcolato lo z-score di ogni sezione.\n\nA · TF NATIVO\nOgni sezione usa le candele del PROPRIO timeframe. Con len=100: la sezione 15S guarda 25 minuti di storia, la sezione 5m ne guarda 500. Ogni sezione osserva un periodo diverso.\n\nB · BARRE GRAFICO (serie HTF)\nTutte le sezioni usano lo stesso numero di barre DEL GRAFICO, quindi lo stesso periodo di storia. Ma i timeframe alti ripetono lo stesso valore per k barre: hanno pochi dati reali e non riescono a raggiungere z-score alti. Verifica sempre la colonna n·cap della tabella.\n\nC · BARRE GRAFICO (orizzonte equivalente)\nStesso periodo di storia del modo A, ma calcolato sulle candele del grafico. Molti più dati, nessun ritardo, nessun repaint. E' la scelta consigliata.\n\nk = timeframe della sezione / timeframe del grafico.")
 
 // ---------------------------------------------------------- SEZIONI / TF -----
 var string gT = "2 · Sezioni (timeframe)"
