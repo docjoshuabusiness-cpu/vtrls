@@ -1,0 +1,268 @@
+//@version=6
+// =============================================================================
+//  MTF Z-Score Confluence  v1.0
+//  ---------------------------------------------------------------------------
+//  5 sezioni (timeframe) attivabili singolarmente. Ognuna calcola uno z-score
+//  nel proprio TF. Il segnale nasce quando TUTTI i TF attivi hanno superato una
+//  soglia (armamento) entro una finestra di N barre del grafico, e il TF PIU'
+//  VELOCE attivo rientra attraverso il livello di trigger.
+//
+//  4 soglie indipendenti (+2 / +1 / -1 / -2), ciascuna con proprio ON/OFF,
+//  proprio valore e proprio livello di trigger -> 4 stream di segnali distinti,
+//  confrontabili a video per capire quale ha edge.
+//
+//  NOTE OPERATIVE (leggere):
+//  - Mettere il grafico sul TF PIU' PICCOLO che si vuole osservare. Tutti i TF
+//    delle sezioni devono essere >= al TF del grafico, altrimenti request.security
+//    restituisce l'ultimo valore intrabar => REPAINT. Il pannello avvisa.
+//  - I TF a secondi (15S/30S) richiedono un piano TradingView con dati a secondi
+//    e hanno storico molto limitato: il backtest visivo sara' corto.
+//  - Gli z-score multi-TF sullo stesso prezzo sono FORTEMENTE collineari: la
+//    "conferma di 5 TF" contiene molta meno informazione indipendente di quanto
+//    sembri. Usare "Log Return" come sorgente riduce (non elimina) il problema.
+// =============================================================================
+
+indicator("MTF Z-Score Confluence", shorttitle="MTF-Z", overlay=false, max_bars_back=500)
+
+// ----------------------------------------------------------------- MOTORE Z --
+var string gZ = "1 · Motore Z-Score"
+srcMode   = input.string("Close", "Sorgente", options=["Close","HLC3","Log Return"], group=gZ,
+     tooltip="Log Return = z-score sui rendimenti: serie stazionaria, meno collineare tra TF. Close = z-score classico prezzo vs media.")
+maMode    = input.string("SMA", "Base (media)", options=["SMA","EMA"], group=gZ)
+robust    = input.bool(false, "Stimatore robusto (mediana / MAD)", group=gZ,
+     tooltip="z = 0.6745*(x-mediana)/MAD. Immune agli outlier che gonfiano la stdev e sopprimono lo z proprio quando serve.")
+confirmed = input.bool(true, "Solo barre HTF chiuse (no repaint)", group=gZ,
+     tooltip="Applica shift di 1 barra SOLO ai TF superiori a quello del grafico. Il TF del grafico non viene ritardato.")
+
+// ---------------------------------------------------------- SEZIONI / TF -----
+var string gT = "2 · Sezioni (timeframe)"
+use1 = input.bool(true,  "S1", inline="s1", group=gT)
+tf1  = input.timeframe("15S", "", inline="s1", group=gT)
+len1 = input.int(100, "len", minval=5, maxval=5000, inline="s1", group=gT)
+
+use2 = input.bool(true,  "S2", inline="s2", group=gT)
+tf2  = input.timeframe("30S", "", inline="s2", group=gT)
+len2 = input.int(100, "len", minval=5, maxval=5000, inline="s2", group=gT)
+
+use3 = input.bool(true,  "S3", inline="s3", group=gT)
+tf3  = input.timeframe("1", "", inline="s3", group=gT)
+len3 = input.int(100, "len", minval=5, maxval=5000, inline="s3", group=gT)
+
+use4 = input.bool(true,  "S4", inline="s4", group=gT)
+tf4  = input.timeframe("2", "", inline="s4", group=gT)
+len4 = input.int(100, "len", minval=5, maxval=5000, inline="s4", group=gT)
+
+use5 = input.bool(true,  "S5", inline="s5", group=gT)
+tf5  = input.timeframe("5", "", inline="s5", group=gT)
+len5 = input.int(100, "len", minval=5, maxval=5000, inline="s5", group=gT)
+
+// ------------------------------------------------------------- LOGICA SEGNALE
+var string gS = "3 · Logica segnale"
+lookback = input.int(10, "Finestra di confluenza (barre del grafico)", minval=1, maxval=500, group=gS,
+     tooltip="Tutti i TF attivi devono aver superato la soglia almeno una volta entro queste N barre del grafico.")
+trigMode = input.string("Rientro (reversione)", "Modalita' trigger",
+     options=["Rientro (reversione)","Primo tocco della soglia"], group=gS,
+     tooltip="Rientro: il TF piu' veloce riattraversa il livello di trigger tornando verso lo zero (setup di esaurimento). Primo tocco: il TF piu' veloce buca la soglia (setup di continuazione/momentum).")
+cooldown = input.int(5, "Cooldown fra segnali (barre)", minval=0, maxval=500, group=gS)
+
+var string gL = "4 · Soglie (stream indipendenti)"
+enP2  = input.bool(true,  "Soglia A", inline="a", group=gL)
+thrP2 = input.float(2.0,  "liv", step=0.1, inline="a", group=gL)
+trgP2 = input.float(1.0,  "trigger", step=0.1, inline="a", group=gL)
+
+enP1  = input.bool(false, "Soglia B", inline="b", group=gL)
+thrP1 = input.float(1.0,  "liv", step=0.1, inline="b", group=gL)
+trgP1 = input.float(0.0,  "trigger", step=0.1, inline="b", group=gL)
+
+enM1  = input.bool(false, "Soglia C", inline="c", group=gL)
+thrM1 = input.float(-1.0, "liv", step=0.1, inline="c", group=gL)
+trgM1 = input.float(0.0,  "trigger", step=0.1, inline="c", group=gL)
+
+enM2  = input.bool(true,  "Soglia D", inline="d", group=gL)
+thrM2 = input.float(-2.0, "liv", step=0.1, inline="d", group=gL)
+trgM2 = input.float(-1.0, "trigger", step=0.1, inline="d", group=gL)
+
+// ------------------------------------------------------------------- GRAFICA -
+var string gV = "5 · Grafica"
+marker   = input.string("Freccia", "Marker segnale", options=["Freccia","Pallino"], group=gV)
+showZ    = input.bool(true,  "Mostra linee z-score nel pannello", group=gV)
+showTab  = input.bool(true,  "Mostra cruscotto", group=gV)
+cUp      = input.color(color.new(#ef5350, 0), "Colore SELL", inline="col", group=gV)
+cDn      = input.color(color.new(#26a69a, 0), "Colore BUY",  inline="col", group=gV)
+
+// =============================================================== CALCOLO Z ====
+// Calcolata DENTRO il contesto del TF richiesto da request.security().
+f_z(simple int len, simple bool shift) =>
+    s      = srcMode == "Close" ? close : srcMode == "HLC3" ? hlc3 : math.log(close / nz(close[1], close))
+    bSma   = ta.sma(s, len)
+    bEma   = ta.ema(s, len)
+    b      = maMode == "EMA" ? bEma : bSma
+    d      = ta.stdev(s, len)
+    zClas  = d > 0 ? (s - b) / d : 0.0
+    med    = ta.median(s, len)
+    mad    = ta.median(math.abs(s - med), len)
+    zRob   = mad > 0 ? 0.6745 * (s - med) / mad : 0.0
+    z      = robust ? zRob : zClas
+    shift ? z[1] : z
+
+chartSec = timeframe.in_seconds()
+sec1 = timeframe.in_seconds(tf1)
+sec2 = timeframe.in_seconds(tf2)
+sec3 = timeframe.in_seconds(tf3)
+sec4 = timeframe.in_seconds(tf4)
+sec5 = timeframe.in_seconds(tf5)
+
+// Lo shift anti-repaint si applica solo ai TF STRETTAMENTE superiori al grafico.
+z1 = request.security(syminfo.tickerid, tf1, f_z(len1, confirmed and sec1 > chartSec), lookahead=barmerge.lookahead_off)
+z2 = request.security(syminfo.tickerid, tf2, f_z(len2, confirmed and sec2 > chartSec), lookahead=barmerge.lookahead_off)
+z3 = request.security(syminfo.tickerid, tf3, f_z(len3, confirmed and sec3 > chartSec), lookahead=barmerge.lookahead_off)
+z4 = request.security(syminfo.tickerid, tf4, f_z(len4, confirmed and sec4 > chartSec), lookahead=barmerge.lookahead_off)
+z5 = request.security(syminfo.tickerid, tf5, f_z(len5, confirmed and sec5 > chartSec), lookahead=barmerge.lookahead_off)
+
+// Estremi raggiunti nella finestra di confluenza (barre del grafico = unita' di tempo uniforme).
+hi1 = ta.highest(z1, lookback)
+lo1 = ta.lowest(z1, lookback)
+hi2 = ta.highest(z2, lookback)
+lo2 = ta.lowest(z2, lookback)
+hi3 = ta.highest(z3, lookback)
+lo3 = ta.lowest(z3, lookback)
+hi4 = ta.highest(z4, lookback)
+lo4 = ta.lowest(z4, lookback)
+hi5 = ta.highest(z5, lookback)
+lo5 = ta.lowest(z5, lookback)
+
+// ------------------------------------------------ TF piu' veloce fra gli attivi
+BIG = 1e12
+m1 = use1 ? sec1 : BIG
+m2 = use2 ? sec2 : BIG
+m3 = use3 ? sec3 : BIG
+m4 = use4 ? sec4 : BIG
+m5 = use5 ? sec5 : BIG
+minSec    = math.min(math.min(math.min(math.min(m1, m2), m3), m4), m5)
+anyActive = use1 or use2 or use3 or use4 or use5
+zFast     = m1 == minSec ? z1 : m2 == minSec ? z2 : m3 == minSec ? z3 : m4 == minSec ? z4 : m5 == minSec ? z5 : na
+zPrev     = nz(zFast[1], zFast)
+tfFast    = m1 == minSec ? tf1 : m2 == minSec ? tf2 : m3 == minSec ? tf3 : m4 == minSec ? tf4 : m5 == minSec ? tf5 : "-"
+
+// Cross puri (nessuno stato interno => sicuri dentro rami condizionali).
+f_cu(float now, float prev, float lvl) => now < lvl and prev >= lvl
+f_co(float now, float prev, float lvl) => now > lvl and prev <= lvl
+
+// Armamento: TUTTI i TF attivi hanno superato la soglia entro la finestra.
+f_arm(float thr, bool isUp) =>
+    a = anyActive
+    if use1
+        a := a and (isUp ? hi1 >= thr : lo1 <= thr)
+    if use2
+        a := a and (isUp ? hi2 >= thr : lo2 <= thr)
+    if use3
+        a := a and (isUp ? hi3 >= thr : lo3 <= thr)
+    if use4
+        a := a and (isUp ? hi4 >= thr : lo4 <= thr)
+    if use5
+        a := a and (isUp ? hi5 >= thr : lo5 <= thr)
+    a
+
+// Uno stream = una soglia. Latch: un solo segnale per episodio di armamento.
+f_stream(bool en, float thr, float trg, bool isUp) =>
+    var bool fired   = false
+    var int  lastSig = -100000
+    armed = en and f_arm(thr, isUp)
+    if not armed
+        fired := false
+    trig = false
+    if trigMode == "Primo tocco della soglia"
+        trig := isUp ? f_co(zFast, zPrev, thr) : f_cu(zFast, zPrev, thr)
+    else
+        trig := isUp ? f_cu(zFast, zPrev, trg) : f_co(zFast, zPrev, trg)
+    fire = armed and not fired and trig and not na(zFast) and (bar_index - lastSig >= cooldown)
+    if fire
+        fired   := true
+        lastSig := bar_index
+    [fire, armed]
+
+[sigA, armA] = f_stream(enP2, thrP2, trgP2, true)
+[sigB, armB] = f_stream(enP1, thrP1, trgP1, true)
+[sigC, armC] = f_stream(enM1, thrM1, trgM1, false)
+[sigD, armD] = f_stream(enM2, thrM2, trgM2, false)
+
+// ================================================================== PLOT ======
+plot(showZ and use1 ? z1 : na, "z S1", color=color.new(#42a5f5, 0), linewidth=1)
+plot(showZ and use2 ? z2 : na, "z S2", color=color.new(#7e57c2, 0), linewidth=1)
+plot(showZ and use3 ? z3 : na, "z S3", color=color.new(#ffa726, 0), linewidth=1)
+plot(showZ and use4 ? z4 : na, "z S4", color=color.new(#ec407a, 0), linewidth=1)
+plot(showZ and use5 ? z5 : na, "z S5", color=color.new(#bdbdbd, 0), linewidth=2)
+
+hline(0, "0", color=color.new(color.gray, 50), linestyle=hline.style_dotted)
+hline(2, "+2", color=color.new(color.red, 60), linestyle=hline.style_dashed)
+hline(1, "+1", color=color.new(color.red, 80), linestyle=hline.style_dotted)
+hline(-1, "-1", color=color.new(color.teal, 80), linestyle=hline.style_dotted)
+hline(-2, "-2", color=color.new(color.teal, 60), linestyle=hline.style_dashed)
+
+// plotshape richiede uno stile costante: due chiamate per stream, una per forma.
+isArrow = marker == "Freccia"
+
+plotshape(isArrow and sigA, "SELL A (freccia)", shape.arrowdown, location.abovebar, cUp, size=size.small, force_overlay=true, text="A")
+plotshape(not isArrow and sigA, "SELL A (pallino)", shape.circle, location.abovebar, cUp, size=size.tiny, force_overlay=true)
+plotshape(isArrow and sigB, "SELL B (freccia)", shape.arrowdown, location.abovebar, color.new(cUp, 45), size=size.small, force_overlay=true, text="B")
+plotshape(not isArrow and sigB, "SELL B (pallino)", shape.circle, location.abovebar, color.new(cUp, 45), size=size.tiny, force_overlay=true)
+plotshape(isArrow and sigC, "BUY C (freccia)", shape.arrowup, location.belowbar, color.new(cDn, 45), size=size.small, force_overlay=true, text="C")
+plotshape(not isArrow and sigC, "BUY C (pallino)", shape.circle, location.belowbar, color.new(cDn, 45), size=size.tiny, force_overlay=true)
+plotshape(isArrow and sigD, "BUY D (freccia)", shape.arrowup, location.belowbar, cDn, size=size.small, force_overlay=true, text="D")
+plotshape(not isArrow and sigD, "BUY D (pallino)", shape.circle, location.belowbar, cDn, size=size.tiny, force_overlay=true)
+
+// Sfondo pannello quando un setup e' armato (nessun trigger ancora).
+bgcolor((armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title="Sfondo armamento")
+
+// ============================================================== CRUSCOTTO =====
+f_stat(bool use, string tf, int sec, float z, float h, float l) =>
+    bad = use and sec < chartSec
+    [use ? (bad ? "⚠ < grafico" : tf) : "off", use ? str.tostring(z, "#.00") : "–", use ? str.tostring(l, "#.0") + " / " + str.tostring(h, "#.0") : "–", bad]
+
+var table dash = table.new(position.top_right, 4, 8, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+if showTab and barstate.islast
+    table.cell(dash, 0, 0, "TF", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 0, "z", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 0, "min/max " + str.tostring(lookback), bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 0, "stato", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+
+    [t1, v1, r1, b1] = f_stat(use1, tf1, sec1, z1, hi1, lo1)
+    [t2, v2, r2, b2] = f_stat(use2, tf2, sec2, z2, hi2, lo2)
+    [t3, v3, r3, b3] = f_stat(use3, tf3, sec3, z3, hi3, lo3)
+    [t4, v4, r4, b4] = f_stat(use4, tf4, sec4, z4, hi4, lo4)
+    [t5, v5, r5, b5] = f_stat(use5, tf5, sec5, z5, hi5, lo5)
+
+    ts = array.from(t1, t2, t3, t4, t5)
+    vs = array.from(v1, v2, v3, v4, v5)
+    rs = array.from(r1, r2, r3, r4, r5)
+    bs = array.from(b1, b2, b3, b4, b5)
+    zs = array.from(z1, z2, z3, z4, z5)
+    us = array.from(use1, use2, use3, use4, use5)
+
+    for i = 0 to 4
+        zv  = array.get(zs, i)
+        act = array.get(us, i)
+        col = not act ? color.new(color.gray, 60) : array.get(bs, i) ? color.new(color.orange, 30) : zv >= 2 ? color.new(cUp, 40) : zv <= -2 ? color.new(cDn, 40) : color.new(color.gray, 80)
+        table.cell(dash, 0, i + 1, "S" + str.tostring(i + 1) + " " + array.get(ts, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
+        table.cell(dash, 1, i + 1, array.get(vs, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
+        table.cell(dash, 2, i + 1, array.get(rs, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
+        table.cell(dash, 3, i + 1, act ? (zv >= 2 or zv <= -2 ? "estremo" : "–") : "off", text_size=size.tiny, text_color=color.white, bgcolor=col)
+
+    armTxt = (armA ? "A " : "") + (armB ? "B " : "") + (armC ? "C " : "") + (armD ? "D " : "")
+    table.cell(dash, 0, 6, "fast", text_size=size.tiny, text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 6, tfFast, text_size=size.tiny, text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 2, 6, "armati", text_size=size.tiny, text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 3, 6, armTxt == "" ? "–" : armTxt, text_size=size.tiny, text_color=color.white, bgcolor=armTxt == "" ? color.new(color.gray, 70) : color.new(color.orange, 40))
+
+// ================================================================= ALERT ======
+alertcondition(sigA, "MTF-Z · SELL soglia A", "MTF-Z SELL A · confluenza su tutti i TF attivi")
+alertcondition(sigB, "MTF-Z · SELL soglia B", "MTF-Z SELL B · confluenza su tutti i TF attivi")
+alertcondition(sigC, "MTF-Z · BUY soglia C",  "MTF-Z BUY C · confluenza su tutti i TF attivi")
+alertcondition(sigD, "MTF-Z · BUY soglia D",  "MTF-Z BUY D · confluenza su tutti i TF attivi")
+alertcondition(sigA or sigB, "MTF-Z · SELL (qualsiasi)", "MTF-Z SELL · confluenza")
+alertcondition(sigC or sigD, "MTF-Z · BUY (qualsiasi)",  "MTF-Z BUY · confluenza")
+
+if sigA or sigB or sigC or sigD
+    dir = (sigA or sigB) ? "SELL" : "BUY"
+    tag = sigA ? "A" : sigB ? "B" : sigC ? "C" : "D"
+    alert("MTF-Z " + dir + " [" + tag + "] " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | zFast=" + str.tostring(zFast, "#.00"), alert.freq_once_per_bar_close)
