@@ -35,7 +35,7 @@
 //    sembri. Usare "Log Return" come sorgente riduce (non elimina) il problema.
 // =============================================================================
 
-indicator("MTF Z-Score Confluence", shorttitle="MTF-Z", overlay=false, max_bars_back=500)
+indicator("MTF Z-Score Confluence", shorttitle="MTF-Z", overlay=false, max_bars_back=500, max_labels_count=500)
 
 // ----------------------------------------------------------------- MOTORE Z --
 var string gZ = "1 · Motore Z-Score"
@@ -111,6 +111,7 @@ showArmBg= input.bool(true,  "Sfondo colorato quando un setup e' armato", group=
 showTab  = input.bool(true,  "Mostra cruscotto", group=gV)
 dashSz   = input.string("Piccolo", "Dimensione testo cruscotto", options=["Minimo","Piccolo","Normale","Grande"], group=gV)
 tagSz    = input.string("Piccolo", "Dimensione etichette periodo", options=["Minimo","Piccolo","Normale","Grande"], group=gV)
+markSz   = input.string("Normale", "Dimensione marker", options=["Minimo","Piccolo","Normale","Grande"], group=gV)
 cz1      = input.color(color.new(#42a5f5, 0), "S1", inline="zc1", group=gV)
 cz2      = input.color(color.new(#7e57c2, 0), "S2", inline="zc1", group=gV)
 cz3      = input.color(color.new(#ffa726, 0), "S3", inline="zc1", group=gV)
@@ -351,6 +352,7 @@ f_size(string opt) =>
     opt == "Minimo" ? size.tiny : opt == "Piccolo" ? size.small : opt == "Normale" ? size.normal : size.large
 szDash = f_size(dashSz)
 szTag  = f_size(tagSz)
+szMark = f_size(markSz)
 
 // Etichetta con il periodo, scritta in fondo alla curva della sezione. Cosi' la
 // corrispondenza colore -> timeframe si legge dal pannello e non va ricordata.
@@ -381,41 +383,40 @@ plot(showLv and enP1 ? trgP1 : na, "trigger B", color = cLvlT, style = plot.styl
 plot(showLv and enM1 ? trgM1 : na, "trigger C", color = cLvlT, style = plot.style_cross, linewidth = 1)
 plot(showLv and enM2 ? trgM2 : na, "trigger D", color = cLvlT, style = plot.style_cross, linewidth = 1)
 
-// I marker: force_overlay e' un parametro COSTANTE, non puo' essere commutato da
-// un input. Quindi esistono due serie di plotshape, una nel pannello e una sul
-// grafico prezzi, e l'input sceglie quale riceve il segnale. In entrambi i casi
-// il marker resta ancorato alla barra del grafico in cui il TF piu' veloce ha
-// attraversato il livello di trigger: cambia solo dove viene disegnato.
+// I marker sono LABEL, non plotshape. Motivo tecnico: TradingView conta due plot
+// per ogni plot/plotshape con colore non costante, e sedici plotshape colorati
+// da soli superavano il limite di 64 dello script. Le label non consumano quel
+// budget, hanno un tetto proprio (max_labels_count) e in piu' permettono di
+// scegliere forma e posizione a runtime, cosa che force_overlay - parametro
+// costante - non consentiva.
+// In entrambe le destinazioni il marker resta ancorato alla barra del grafico in
+// cui il TF piu' veloce ha attraversato il livello di trigger.
 isArrow = marker == "Freccia"
 inPane  = markWhere != "Grafico prezzi"
 onChart = markWhere != "Pannello"
 
-// y assoluto nel pannello; gli stream della stessa direzione sono sfalsati di
-// 0.35 z per non finire sullo stesso pixel quando scattano insieme.
-yA = inPane and sigA ?  markLvl        : na
-yB = inPane and sigB ?  markLvl - 0.35 : na
-yC = inPane and sigC ? -markLvl + 0.35 : na
-yD = inPane and sigD ? -markLvl        : na
+f_markPane(bool fire, float y, string txt, color c) =>
+    if fire and inPane
+        label.new(bar_index, y, txt, style = label.style_none, textcolor = c, size = szMark, textalign = text.align_center)
 
-// -- pannello ----------------------------------------------------------------
-plotshape(isArrow ? yA : na,     "SELL A", shape.arrowdown, location.absolute, cUp, size = size.small, text = "A")
-plotshape(not isArrow ? yA : na, "SELL A ·", shape.circle,  location.absolute, cUp, size = size.tiny)
-plotshape(isArrow ? yB : na,     "SELL B", shape.arrowdown, location.absolute, color.new(cUp, 45), size = size.small, text = "B")
-plotshape(not isArrow ? yB : na, "SELL B ·", shape.circle,  location.absolute, color.new(cUp, 45), size = size.tiny)
-plotshape(isArrow ? yC : na,     "BUY C",  shape.arrowup,   location.absolute, color.new(cDn, 45), size = size.small, text = "C")
-plotshape(not isArrow ? yC : na, "BUY C ·", shape.circle,   location.absolute, color.new(cDn, 45), size = size.tiny)
-plotshape(isArrow ? yD : na,     "BUY D",  shape.arrowup,   location.absolute, cDn, size = size.small, text = "D")
-plotshape(not isArrow ? yD : na, "BUY D ·", shape.circle,   location.absolute, cDn, size = size.tiny)
+f_markChart(bool fire, bool isSell, string txt, color c) =>
+    if fire and onChart
+        label.new(bar_index, na, txt, yloc = isSell ? yloc.abovebar : yloc.belowbar, style = label.style_none, textcolor = c, size = szMark, textalign = text.align_center, force_overlay = true)
 
-// -- grafico prezzi ----------------------------------------------------------
-plotshape(onChart and isArrow and sigA,     "SELL A (prezzo)", shape.arrowdown, location.abovebar, cUp, size = size.small, force_overlay = true, text = "A")
-plotshape(onChart and not isArrow and sigA, "SELL A (prezzo) ·", shape.circle,  location.abovebar, cUp, size = size.tiny, force_overlay = true)
-plotshape(onChart and isArrow and sigB,     "SELL B (prezzo)", shape.arrowdown, location.abovebar, color.new(cUp, 45), size = size.small, force_overlay = true, text = "B")
-plotshape(onChart and not isArrow and sigB, "SELL B (prezzo) ·", shape.circle,  location.abovebar, color.new(cUp, 45), size = size.tiny, force_overlay = true)
-plotshape(onChart and isArrow and sigC,     "BUY C (prezzo)",  shape.arrowup,   location.belowbar, color.new(cDn, 45), size = size.small, force_overlay = true, text = "C")
-plotshape(onChart and not isArrow and sigC, "BUY C (prezzo) ·", shape.circle,   location.belowbar, color.new(cDn, 45), size = size.tiny, force_overlay = true)
-plotshape(onChart and isArrow and sigD,     "BUY D (prezzo)",  shape.arrowup,   location.belowbar, cDn, size = size.small, force_overlay = true, text = "D")
-plotshape(onChart and not isArrow and sigD, "BUY D (prezzo) ·", shape.circle,   location.belowbar, cDn, size = size.tiny, force_overlay = true)
+txSell = isArrow ? "▼" : "●"
+txBuy  = isArrow ? "▲" : "●"
+
+// gli stream della stessa direzione sono sfalsati di 0.35 z per non finire sullo
+// stesso pixel quando scattano sulla medesima barra
+f_markPane(sigA,  markLvl,        txSell + "A", cUp)
+f_markPane(sigB,  markLvl - 0.35, txSell + "B", color.new(cUp, 35))
+f_markPane(sigC, -markLvl + 0.35, txBuy  + "C", color.new(cDn, 35))
+f_markPane(sigD, -markLvl,        txBuy  + "D", cDn)
+
+f_markChart(sigA, true,  txSell + "A", cUp)
+f_markChart(sigB, true,  txSell + "B", color.new(cUp, 35))
+f_markChart(sigC, false, txBuy  + "C", color.new(cDn, 35))
+f_markChart(sigD, false, txBuy  + "D", cDn)
 
 // Sfondo di armamento: resta NEL PANNELLO, cosi' non sporca le candele.
 bgcolor(not showArmBg ? na : (armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title="Sfondo armamento")
