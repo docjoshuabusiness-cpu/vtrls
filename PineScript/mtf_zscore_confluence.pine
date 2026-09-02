@@ -103,7 +103,7 @@ var string gV = "5 · Grafica"
 marker   = input.string("Freccia", "Marker segnale", options=["Freccia","Pallino"], group=gV)
 showZ    = input.bool(true,  "Curve z-score nel pannello", group=gV)
 showLv   = input.bool(true,  "Linee di soglia e di trigger nel pannello", group=gV)
-showArmBg= input.bool(false, "Sfondo colorato quando un setup e' armato", group=gV)
+showArmBg= input.bool(true,  "Sfondo colorato quando un setup e' armato", group=gV)
 showTab  = input.bool(true,  "Mostra cruscotto", group=gV)
 cUp      = input.color(color.new(#ef5350, 0), "Colore SELL", inline="col", group=gV)
 cDn      = input.color(color.new(#26a69a, 0), "Colore BUY",  inline="col", group=gV)
@@ -266,6 +266,41 @@ f_stream(bool en, float thr, float trg, bool isUp) =>
 [sigC, armC] = f_stream(enM1, thrM1, trgM1, false)
 [sigD, armD] = f_stream(enM2, thrM2, trgM2, false)
 
+// ============================================================ DIAGNOSTICA =====
+//  Quando non compaiono segnali serve sapere DOVE si rompe la catena, non
+//  tirare a indovinare sui parametri. Tre livelli di conteggio:
+//    hit     = quante volte la singola sezione ha TOCCATO la soglia piu' alta
+//              attiva. Se una sezione mostra 0, e' lei a bloccare tutto.
+//    armate  = su quante barre lo stream ha avuto TUTTE le sezioni in soglia.
+//              0 con hit alti = le sezioni non sono mai estreme INSIEME:
+//              allarga la finestra di confluenza.
+//    segnali = quante volte e' poi scattato il trigger. Armate alte e segnali 0
+//              = il livello di trigger e' irraggiungibile, non le soglie.
+f_cnt(bool c) =>
+    var int n = 0
+    if c
+        n += 1
+    n
+
+// tocco = attraversamento della soglia, non permanenza sopra di essa
+f_hit(bool use, float z) =>
+    f_cnt(use and thrMaxAct > 0 and math.abs(z) >= thrMaxAct and math.abs(nz(z[1], z)) < thrMaxAct)
+
+cHit1 = f_hit(use1, z1)
+cHit2 = f_hit(use2, z2)
+cHit3 = f_hit(use3, z3)
+cHit4 = f_hit(use4, z4)
+cHit5 = f_hit(use5, z5)
+
+cArmA = f_cnt(armA)
+cArmB = f_cnt(armB)
+cArmC = f_cnt(armC)
+cArmD = f_cnt(armD)
+cSigA = f_cnt(sigA)
+cSigB = f_cnt(sigB)
+cSigC = f_cnt(sigC)
+cSigD = f_cnt(sigD)
+
 // ================================================================== PLOT ======
 // Il pannello mostra le curve z e i livelli. I MARKER invece vengono spinti sul
 // grafico dei prezzi con force_overlay: cosi' si ha il quadro statistico sotto e
@@ -319,7 +354,7 @@ f_stat(bool use, string tf, int sec, float z, float h, float l, float ne) =>
      use ? str.tostring(int(math.round(ne))) + " · " + str.tostring(cap, "#.0") : "–",
      bad, dead]
 
-var table dash = table.new(position.top_right, 5, 9, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+var table dash = table.new(position.top_right, 6, 10, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
 if showTab and barstate.islast
     hdrBg = color.new(color.gray, 70)
     modeTag = modeA ? "A nativo" : modeB ? "B grafico/HTF" : "C orizz.equiv."
@@ -327,7 +362,8 @@ if showTab and barstate.islast
     table.cell(dash, 1, 0, "z", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
     table.cell(dash, 2, 0, "min/max " + str.tostring(lookback), bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
     table.cell(dash, 3, 0, "n · cap", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
-    table.cell(dash, 4, 0, "stato", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 4, 0, "hit", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 5, 0, "stato", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
 
     [t1, v1, r1, q1, b1, d1] = f_stat(use1, tf1, sec1, z1, hi1, lo1, ne1)
     [t2, v2, r2, q2, b2, d2] = f_stat(use2, tf2, sec2, z2, hi2, lo2, ne2)
@@ -343,6 +379,7 @@ if showTab and barstate.islast
     ds = array.from(d1, d2, d3, d4, d5)
     zs = array.from(z1, z2, z3, z4, z5)
     us = array.from(use1, use2, use3, use4, use5)
+    hs = array.from(cHit1, cHit2, cHit3, cHit4, cHit5)
 
     for i = 0 to 4
         zv   = array.get(zs, i)
@@ -354,14 +391,43 @@ if showTab and barstate.islast
         table.cell(dash, 1, i + 1, array.get(vs, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
         table.cell(dash, 2, i + 1, array.get(rs, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
         table.cell(dash, 3, i + 1, array.get(qs, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
-        table.cell(dash, 4, i + 1, st, text_size=size.tiny, text_color=color.white, bgcolor=col)
+        hitN = array.get(hs, i)
+        table.cell(dash, 4, i + 1, act ? str.tostring(hitN) : "–", text_size=size.tiny, text_color=act and hitN == 0 ? color.red : color.white, bgcolor=col)
+        table.cell(dash, 5, i + 1, st, text_size=size.tiny, text_color=color.white, bgcolor=col)
 
     armTxt = (armA ? "A " : "") + (armB ? "B " : "") + (armC ? "C " : "") + (armD ? "D " : "")
     table.cell(dash, 0, 6, "modo", text_size=size.tiny, text_color=color.white, bgcolor=hdrBg)
     table.cell(dash, 1, 6, modeTag, text_size=size.tiny, text_color=color.white, bgcolor=hdrBg)
     table.cell(dash, 2, 6, "fast", text_size=size.tiny, text_color=color.white, bgcolor=hdrBg)
     table.cell(dash, 3, 6, tfFast, text_size=size.tiny, text_color=color.white, bgcolor=hdrBg)
-    table.cell(dash, 4, 6, "armati " + (armTxt == "" ? "–" : armTxt), text_size=size.tiny, text_color=color.white, bgcolor=armTxt == "" ? hdrBg : color.new(color.orange, 40))
+    table.cell(dash, 4, 6, "ora", text_size=size.tiny, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 5, 6, armTxt == "" ? "–" : armTxt, text_size=size.tiny, text_color=color.white, bgcolor=armTxt == "" ? hdrBg : color.new(color.orange, 40))
+
+    // -- diagnostica: dove si rompe la catena --------------------------------
+    table.cell(dash, 0, 7, "stream",  text_size=size.tiny, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 1, 7, "A " + str.tostring(thrP2, "#.#"), text_size=size.tiny, text_color=enP2 ? cUp : color.gray, bgcolor=hdrBg)
+    table.cell(dash, 2, 7, "B " + str.tostring(thrP1, "#.#"), text_size=size.tiny, text_color=enP1 ? cUp : color.gray, bgcolor=hdrBg)
+    table.cell(dash, 3, 7, "C " + str.tostring(thrM1, "#.#"), text_size=size.tiny, text_color=enM1 ? cDn : color.gray, bgcolor=hdrBg)
+    table.cell(dash, 4, 7, "D " + str.tostring(thrM2, "#.#"), text_size=size.tiny, text_color=enM2 ? cDn : color.gray, bgcolor=hdrBg)
+    table.cell(dash, 5, 7, "", bgcolor=hdrBg)
+
+    ac = array.from(cArmA, cArmB, cArmC, cArmD)
+    sc = array.from(cSigA, cSigB, cSigC, cSigD)
+    ae = array.from(enP2, enP1, enM1, enM2)
+    table.cell(dash, 0, 8, "armate",  text_size=size.tiny, text_color=color.silver, bgcolor=color.new(color.gray, 85))
+    table.cell(dash, 0, 9, "segnali", text_size=size.tiny, text_color=color.silver, bgcolor=color.new(color.gray, 85))
+    for j = 0 to 3
+        av = array.get(ac, j)
+        sv = array.get(sc, j)
+        on = array.get(ae, j)
+        // rosso = mai armato (soglie o finestra troppo strette)
+        // arancio = armato ma mai scattato (livello di trigger irraggiungibile)
+        acol = not on ? color.gray : av == 0 ? color.red : color.silver
+        scol = not on ? color.gray : sv == 0 and av > 0 ? color.orange : sv == 0 ? color.red : color.lime
+        table.cell(dash, j + 1, 8, on ? str.tostring(av) : "–", text_size=size.tiny, text_color=acol, bgcolor=color.new(color.gray, 85))
+        table.cell(dash, j + 1, 9, on ? str.tostring(sv) : "–", text_size=size.tiny, text_color=scol, bgcolor=color.new(color.gray, 85))
+    table.cell(dash, 5, 8, "barre", text_size=size.tiny, text_color=color.gray, bgcolor=color.new(color.gray, 85))
+    table.cell(dash, 5, 9, "tot",   text_size=size.tiny, text_color=color.gray, bgcolor=color.new(color.gray, 85))
 
 // ================================================================= ALERT ======
 alertcondition(sigA, "MTF-Z · SELL soglia A", "MTF-Z SELL A · confluenza su tutti i TF attivi")

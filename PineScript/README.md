@@ -68,6 +68,31 @@ sezione smette di essere una richiesta di dati e diventa un puro **moltiplicator
 orizzonte**: due sezioni con lo stesso `k` producono z identici, quindi vanno
 differenziate via `len`.
 
+### Diagnostica: perché non compaiono segnali
+
+Le ultime tre righe della dashboard dicono dove si rompe la catena, senza dover
+tirare a indovinare sui parametri:
+
+- colonna **`hit`** (per sezione) — quante volte quella sezione ha *attraversato* la
+  soglia attiva più alta. Una sezione a **0** (in rosso) è quella che blocca tutto:
+  o la sua soglia è irraggiungibile (vedi `n · cap`), o quel timeframe non arriva
+  mai a quell'estensione.
+- riga **`armate`** (per stream) — su quante barre *tutte* le sezioni attive erano
+  contemporaneamente in soglia. **0 in rosso con `hit` alti** significa che le
+  sezioni sono estreme ma **non insieme**: la finestra di confluenza è troppo stretta.
+- riga **`segnali`** (per stream) — quante volte è poi scattato il trigger. **0 in
+  arancio con `armate` > 0** significa che il problema non sono le soglie ma il
+  livello di trigger, che il timeframe veloce non riattraversa mai.
+
+**Taratura della finestra di confluenza.** Deve contenere almeno 2 barre della
+sezione più lenta, altrimenti quella sezione è di fatto immobile e dovrebbe trovarsi
+già in soglia nell'istante esatto in cui ci arriva la più veloce:
+
+    lookback minimo ≈ 2 × (TF più lento / TF del grafico)
+
+Su grafico 5s con sezione più lenta a 5m: `2 × (300/5) = 120` barre. Con il default
+di 10 barre la confluenza non si arma praticamente mai.
+
 ### Vincoli operativi
 
 - Modo **C**: nessun vincolo di repaint, ma servono `len × k` barre di storico
