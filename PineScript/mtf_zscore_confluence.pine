@@ -126,6 +126,8 @@ atrLenR  = input.int(14, "ATR di riferimento", minval=2, group=gR1)
 swingLen = input.int(10, "Barre per lo stop strutturale", minval=2, maxval=200, group=gR1,
      tooltip="Lo stop viene messo oltre l'estremo delle ultime N barre piu' un buffer. La sua DISTANZA e' il rischio del trade: e' questa la quantita' da minimizzare, non il drawdown, che non dipende da te.")
 stopBuf  = input.float(0.15, "   buffer oltre l'estremo (x ATR)", minval=0.0, maxval=2.0, step=0.05, group=gR1)
+stopPol  = input.string("Il maggiore dei due", "Stop da usare", options=["Strutturale","MAE p80","Il maggiore dei due"], group=gR1,
+     tooltip="STRUTTURALE: oltre l'estremo delle ultime N barre. E' l'invalidazione logica del setup, ma puo' cadere dentro la banda di rumore e venire colpito senza che il setup sia sbagliato.\n\nMAE p80: la distanza che l'80% dei segnali passati NON ha superato. E' la banda di rumore misurata, non stimata. Disponibile solo con almeno 5 osservazioni.\n\nIL MAGGIORE DEI DUE (default): rispetta sia la struttura sia il rumore misurato. E' la scelta difendibile: uno stop piu' stretto del rumore viene colpito a prescindere da dove lo metti.")
 showRisk = input.bool(true, "Scrivi il rischio in tick accanto al marker", group=gR1)
 
 var string gR2 = "5b · Filtro STOP STRETTO"
@@ -356,6 +358,15 @@ winFast   = trigOwn ? float(trigLen) * secT : (modeA ? float(len1) * minSec : fl
 f_cu(float now, float prev, float lvl) => now < lvl and prev >= lvl
 f_co(float now, float prev, float lvl) => now > lvl and prev <= lvl
 
+// Distribuzione della MAE accumulata FINORA. L'array viene riempito piu' sotto,
+// quando ogni segnale completa il suo orizzonte di misura: qui si leggono solo
+// osservazioni gia' chiuse, quindi lo stop consigliato non usa dati futuri.
+var array<float> maeArr = array.new_float()
+maeN   = array.size(maeArr)
+maeMed = maeN >= 5 ? array.percentile_nearest_rank(maeArr, 50) : na
+maeP80 = maeN >= 5 ? array.percentile_nearest_rank(maeArr, 80) : na
+maeP95 = maeN >= 5 ? array.percentile_nearest_rank(maeArr, 95) : na
+
 // ======================================================= ENTRATA E RISCHIO ===
 //  Lo stop NON riduce l'escursione contraria: decide solo quando smetti di
 //  guardarla. Quello che si puo' scegliere e' il PUNTO in cui la struttura
@@ -365,8 +376,15 @@ swHi   = ta.highest(high, swingLen)
 swLo   = ta.lowest(low,  swingLen)
 stpSell = swHi + stopBuf * atrR          // stop di uno SHORT: oltre il massimo
 stpBuy  = swLo - stopBuf * atrR          // stop di un LONG:   oltre il minimo
-rskSell = stpSell - close
-rskBuy  = close - stpBuy
+rskSellS = stpSell - close               // strutturale: oltre il massimo
+rskBuyS  = close - stpBuy                // strutturale: oltre il minimo
+maeStop  = na(maeP80) ? na : maeP80 * atrR   // banda di rumore misurata
+
+// Uno stop piu' stretto della banda di rumore viene colpito a prescindere da
+// dove lo metti: la struttura dice DOVE il setup e' invalidato, la MAE dice
+// quanto rumore devi sopportare per arrivarci.
+rskSell = stopPol == "Strutturale" or na(maeStop) ? rskSellS : stopPol == "MAE p80" ? maeStop : math.max(rskSellS, maeStop)
+rskBuy  = stopPol == "Strutturale" or na(maeStop) ? rskBuyS  : stopPol == "MAE p80" ? maeStop : math.max(rskBuyS,  maeStop)
 
 trAtr  = ta.tr(true) / atrR
 
@@ -444,7 +462,6 @@ f_stream(bool en, float thr, float trg, bool isUp) =>
 //  quando il segnale aveva ragione sulla direzione.
 //  Si traccia un segnale alla volta: le sovrapposizioni non sono campionate,
 //  quindi il numero e' una sottostima del totale, non una distorsione.
-var array<float> maeArr = array.new_float()
 var bool  trk   = false
 var float trkPx = 0.0
 var int   trkDir= 0
@@ -471,11 +488,6 @@ if useMae and anySig and not trk
     trkDir := sigBuy ? 1 : -1
     trkMae := 0.0
     trkBar := 0
-
-maeN   = array.size(maeArr)
-maeMed = maeN >= 5 ? array.percentile_nearest_rank(maeArr, 50) : na
-maeP80 = maeN >= 5 ? array.percentile_nearest_rank(maeArr, 80) : na
-maeP95 = maeN >= 5 ? array.percentile_nearest_rank(maeArr, 95) : na
 
 // ============================================================ DIAGNOSTICA =====
 //  Quando non compaiono segnali serve sapere DOVE si rompe la catena, non
@@ -645,7 +657,7 @@ f_stat(bool use, string tf, int sec, float z, float h, float l, float ne, float 
      use ? str.tostring(int(math.round(ne))) + " · " + str.tostring(cap, "#.0") : "–",
      bad, dead]
 
-var table dash = table.new(position.top_right, 6, 12, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+var table dash = table.new(position.top_right, 6, 13, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
 if showTab and barstate.islast
     hdrBg = color.new(color.gray, 70)
     modeTag = modeA ? "A nativo" : modeB ? "B grafico/HTF" : "C orizz.equiv."
@@ -739,6 +751,20 @@ if showTab and barstate.islast
     table.cell(dash, 3, 11, "p95 " + f_n2(maeP95), text_size=szDash, text_color=color.silver, bgcolor=mbg)
     table.cell(dash, 4, 11, "n " + str.tostring(maeN), text_size=szDash, text_color=maeN < 30 ? color.orange : color.silver, bgcolor=mbg)
     table.cell(dash, 5, 11, useRisk ? "cap " + str.tostring(maxStopA, "#.0") : "", text_size=szDash, text_color=not na(maeP80) and useRisk and maxStopA < maeP80 ? color.red : color.gray, bgcolor=mbg)
+
+    // -- lo stop consigliato in unita' operative: punti, tick, valuta --------
+    //    e' p80 x ATR, cioe' la banda di rumore misurata tradotta in prezzo
+    sbg  = color.new(color.gray, 88)
+    sSug = na(maeP80) ? na : maeP80 * atrR
+    tickV = syminfo.mintick
+    table.cell(dash, 0, 12, "stop cons.", text_size=szDash, text_color=color.white, bgcolor=sbg)
+    table.cell(dash, 1, 12, na(sSug) ? "n/a" : str.tostring(sSug, format.mintick) + " pt", text_size=szDash, text_color=color.white, bgcolor=sbg)
+    table.cell(dash, 2, 12, na(sSug) ? "n/a" : str.tostring(math.round(sSug / tickV)) + " t", text_size=szDash, text_color=color.white, bgcolor=sbg)
+    table.cell(dash, 3, 12, na(sSug) ? "n/a" : "$" + str.tostring(math.round(sSug * syminfo.pointvalue, 2)), text_size=szDash, text_color=color.white, bgcolor=sbg)
+    // rosso = lo stop strutturale cade DENTRO la banda di rumore: verrebbe
+    // colpito anche quando il setup e' corretto
+    table.cell(dash, 4, 12, na(sSug) ? "–" : "S " + (rskSellS < sSug ? "stretto" : "ok"), text_size=szDash, text_color=na(sSug) ? color.gray : rskSellS < sSug ? color.red : color.lime, bgcolor=sbg)
+    table.cell(dash, 5, 12, na(sSug) ? "–" : "B " + (rskBuyS < sSug ? "stretto" : "ok"), text_size=szDash, text_color=na(sSug) ? color.gray : rskBuyS < sSug ? color.red : color.lime, bgcolor=sbg)
 
 // ================================================================= ALERT ======
 alertcondition(sigA, "MTF-Z · SELL soglia A", "MTF-Z SELL A · confluenza su tutti i TF attivi")
