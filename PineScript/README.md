@@ -25,9 +25,42 @@ in barre configurabile.
 proprio livello di trigger. Attivandone più di una si ottengono serie di segnali
 distinte e confrontabili sullo stesso grafico (marker etichettati A/B/C/D).
 
+### Base di calcolo dello z-score (`zBasis`) — la scelta che conta
+
+| Modo | Cosa calcola | Finestra | n effettivo |
+|---|---|---|---|
+| **A · TF nativo** (default) | z dentro il TF di riferimento, su `len` barre **di quel TF** | `len × tf` — diversa per ogni sezione | `len` |
+| **B · Barre grafico (serie HTF)** | serie del TF mappata sul grafico, media/stdev su `len` **barre del grafico** | uguale per tutte le sezioni | `len / k` ⚠ |
+| **C · Barre grafico (orizzonte equivalente)** | z sul prezzo **del grafico**, finestra `len × k` barre | stessa di A, a piena risoluzione | `len × k` |
+
+con `k = tf_sezione / tf_grafico`.
+
+**Il tetto algebrico dello z-score.** Con deviazione standard di popolazione (quella
+usata da `ta.stdev` per default) il massimo |z| ottenibile da `n` osservazioni è
+
+    max|z| = sqrt(n - 1)
+
+Nel **modo B** la serie HTF mappata sul grafico è a gradini: il close a 5m resta
+costante per `k` barre, quindi il campione effettivo è `len/k`, non `len`. Con
+grafico 15S, sezione 5m e `len = 100` si ottiene `n_eff = 5` e quindi `max|z| = 2.00`:
+quella sezione **non può superare la soglia +2** e la confluenza non si arma mai.
+Non è un bug ed è impossibile aggirarlo con la taratura. La colonna `n · cap` della
+dashboard mostra campione e tetto per ogni sezione, e colora la riga di **rosso**
+quando il tetto è sotto la soglia attiva più ambiziosa.
+
+Il **modo C** è la versione corretta di "z-score dei TF superiori calcolato con le
+candele del timeframe corrente": stesso orizzonte temporale del modo A, ma calcolato
+sul prezzo del grafico a piena risoluzione — nessun gradino, nessun repaint, nessuna
+barra di conferma da perdere, campione effettivo `len × k`. In questo modo il TF della
+sezione smette di essere una richiesta di dati e diventa un puro **moltiplicatore di
+orizzonte**: due sezioni con lo stesso `k` producono z identici, quindi vanno
+differenziate via `len`.
+
 ### Vincoli operativi
 
-- **Mettere il grafico sul TF più piccolo che si vuole osservare.** Tutti i TF delle
+- Modo **C**: nessun vincolo di repaint, ma servono `len × k` barre di storico
+  disponibili; la finestra è capata a 4000 barre.
+- Modi **A** e **B**: **mettere il grafico sul TF più piccolo che si vuole osservare.** Tutti i TF delle
   sezioni devono essere `>=` al TF del grafico. Un TF inferiore fa restituire a
   `request.security()` l'ultimo valore intrabar → **repaint**. Il cruscotto segnala
   la sezione incriminata con `⚠ < grafico`.

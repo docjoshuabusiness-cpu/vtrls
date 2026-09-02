@@ -33,6 +33,9 @@ robust    = input.bool(false, "Stimatore robusto (mediana / MAD)", group=gZ,
      tooltip="z = 0.6745*(x-mediana)/MAD. Immune agli outlier che gonfiano la stdev e sopprimono lo z proprio quando serve.")
 confirmed = input.bool(true, "Solo barre HTF chiuse (no repaint)", group=gZ,
      tooltip="Applica shift di 1 barra SOLO ai TF superiori a quello del grafico. Il TF del grafico non viene ritardato.")
+zBasis    = input.string("A · TF nativo", "Base di calcolo dello z-score",
+     options=["A · TF nativo","B · Barre grafico (serie HTF)","C · Barre grafico (orizzonte equivalente)"], group=gZ,
+     tooltip="A · TF NATIVO: z calcolato DENTRO il TF di riferimento su 'len' barre DI QUEL TF. Ogni sezione ha un orizzonte temporale diverso (len x tf). E' la vera analisi multi-orizzonte. n_eff = len.\n\nB · BARRE GRAFICO (serie HTF): si prende la serie del TF superiore mappata sulle barre del grafico e si calcola media/stdev su 'len' BARRE DEL GRAFICO. Tutte le sezioni condividono la stessa finestra in tempo reale.\nATTENZIONE: la serie HTF e' a gradini, quindi il campione effettivo e' n_eff = len/k con k = tf/grafico. Con stdev di popolazione max|z| = sqrt(n_eff-1): con len=100 su grafico 15S, la sezione 5m ha n_eff=5 e NON PUO' superare z=2.0. Controlla la colonna n della dashboard.\n\nC · BARRE GRAFICO (orizzonte equivalente): z calcolato sul prezzo DEL GRAFICO con finestra len*k barre. Stesso orizzonte temporale del TF nativo ma a piena risoluzione: nessun gradino, nessun repaint, nessuna barra di conferma da perdere. Il TF della sezione diventa un puro moltiplicatore di orizzonte. n_eff = len*k.")
 
 // ---------------------------------------------------------- SEZIONI / TF -----
 var string gT = "2 · Sezioni (timeframe)"
@@ -91,19 +94,36 @@ cUp      = input.color(color.new(#ef5350, 0), "Colore SELL", inline="col", group
 cDn      = input.color(color.new(#26a69a, 0), "Colore BUY",  inline="col", group=gV)
 
 // =============================================================== CALCOLO Z ====
-// Calcolata DENTRO il contesto del TF richiesto da request.security().
-f_z(simple int len, simple bool shift) =>
-    s      = srcMode == "Close" ? close : srcMode == "HLC3" ? hlc3 : math.log(close / nz(close[1], close))
-    bSma   = ta.sma(s, len)
-    bEma   = ta.ema(s, len)
-    b      = maMode == "EMA" ? bEma : bSma
-    d      = ta.stdev(s, len)
-    zClas  = d > 0 ? (s - b) / d : 0.0
-    med    = ta.median(s, len)
-    mad    = ta.median(math.abs(s - med), len)
-    zRob   = mad > 0 ? 0.6745 * (s - med) / mad : 0.0
-    z      = robust ? zRob : zClas
-    shift ? z[1] : z
+// Tre basi di calcolo, selezionabili con zBasis. Cambiano la STATISTICA, non
+// solo l'implementazione: leggere il tooltip di zBasis prima di scegliere.
+// -----------------------------------------------------------------------------
+
+// Sorgente nel contesto corrente (grafico oppure HTF dentro request.security).
+f_src() =>
+    srcMode == "Close" ? close : srcMode == "HLC3" ? hlc3 : math.log(close / nz(close[1], close))
+
+// Z-score di una serie qualsiasi nel contesto corrente.
+// La branch robusta e' condizionata a 'robust', che e' costante per tutto il
+// grafico: l'esecuzione resta deterministica e si evita di pagare due ta.median
+// per sezione quando lo stimatore robusto e' spento.
+f_zser(float s, simple int len) =>
+    bSma = ta.sma(s, len)
+    bEma = ta.ema(s, len)
+    b    = maMode == "EMA" ? bEma : bSma
+    d    = ta.stdev(s, len)
+    float z = d > 0 ? (s - b) / d : 0.0
+    if robust
+        med = ta.median(s, len)
+        mad = ta.median(math.abs(s - med), len)
+        z := mad > 0 ? 0.6745 * (s - med) / mad : 0.0
+    z
+
+// Eseguita DENTRO il contesto del TF richiesto: restituisce lo z nativo (modo A)
+// e la sorgente HTF grezza, che serve al modo B una volta mappata sul grafico.
+f_htf(simple int len, simple bool shift) =>
+    s = f_src()
+    z = f_zser(s, len)
+    [shift ? z[1] : z, shift ? s[1] : s]
 
 chartSec = timeframe.in_seconds()
 sec1 = timeframe.in_seconds(tf1)
@@ -112,12 +132,57 @@ sec3 = timeframe.in_seconds(tf3)
 sec4 = timeframe.in_seconds(tf4)
 sec5 = timeframe.in_seconds(tf5)
 
+// k = quante barre del grafico entrano in una barra della sezione.
+k1 = int(math.max(1, math.round(sec1 / float(chartSec))))
+k2 = int(math.max(1, math.round(sec2 / float(chartSec))))
+k3 = int(math.max(1, math.round(sec3 / float(chartSec))))
+k4 = int(math.max(1, math.round(sec4 / float(chartSec))))
+k5 = int(math.max(1, math.round(sec5 / float(chartSec))))
+
 // Lo shift anti-repaint si applica solo ai TF STRETTAMENTE superiori al grafico.
-z1 = request.security(syminfo.tickerid, tf1, f_z(len1, confirmed and sec1 > chartSec), lookahead=barmerge.lookahead_off)
-z2 = request.security(syminfo.tickerid, tf2, f_z(len2, confirmed and sec2 > chartSec), lookahead=barmerge.lookahead_off)
-z3 = request.security(syminfo.tickerid, tf3, f_z(len3, confirmed and sec3 > chartSec), lookahead=barmerge.lookahead_off)
-z4 = request.security(syminfo.tickerid, tf4, f_z(len4, confirmed and sec4 > chartSec), lookahead=barmerge.lookahead_off)
-z5 = request.security(syminfo.tickerid, tf5, f_z(len5, confirmed and sec5 > chartSec), lookahead=barmerge.lookahead_off)
+[zN1, sH1] = request.security(syminfo.tickerid, tf1, f_htf(len1, confirmed and sec1 > chartSec), lookahead = barmerge.lookahead_off)
+[zN2, sH2] = request.security(syminfo.tickerid, tf2, f_htf(len2, confirmed and sec2 > chartSec), lookahead = barmerge.lookahead_off)
+[zN3, sH3] = request.security(syminfo.tickerid, tf3, f_htf(len3, confirmed and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+[zN4, sH4] = request.security(syminfo.tickerid, tf4, f_htf(len4, confirmed and sec4 > chartSec), lookahead = barmerge.lookahead_off)
+[zN5, sH5] = request.security(syminfo.tickerid, tf5, f_htf(len5, confirmed and sec5 > chartSec), lookahead = barmerge.lookahead_off)
+
+modeA = zBasis == "A · TF nativo"
+modeB = zBasis == "B · Barre grafico (serie HTF)"
+
+// Modo C: finestra equivalente in barre del grafico. Cap a 4000 per non far
+// esplodere il tempo di calcolo (5 sezioni x ta.stdev su finestre enormi).
+lenC1 = int(math.min(4000, len1 * k1))
+lenC2 = int(math.min(4000, len2 * k2))
+lenC3 = int(math.min(4000, len3 * k3))
+lenC4 = int(math.min(4000, len4 * k4))
+lenC5 = int(math.min(4000, len5 * k5))
+
+srcC = f_src()   // sorgente nel contesto del grafico, a piena risoluzione
+
+z1 = modeA ? zN1 : modeB ? f_zser(sH1, len1) : f_zser(srcC, lenC1)
+z2 = modeA ? zN2 : modeB ? f_zser(sH2, len2) : f_zser(srcC, lenC2)
+z3 = modeA ? zN3 : modeB ? f_zser(sH3, len3) : f_zser(srcC, lenC3)
+z4 = modeA ? zN4 : modeB ? f_zser(sH4, len4) : f_zser(srcC, lenC4)
+z5 = modeA ? zN5 : modeB ? f_zser(sH5, len5) : f_zser(srcC, lenC5)
+
+// -- CAMPIONE EFFETTIVO e TETTO ALGEBRICO DELLO Z-SCORE ----------------------
+//  Con deviazione standard di popolazione (quella usata da ta.stdev di default)
+//  il massimo |z| ottenibile da n osservazioni e' sqrt(n-1). E' un vincolo
+//  algebrico, non statistico: nessuna configurazione lo aggira.
+//  Nel modo B la serie HTF e' a gradini, quindi n_eff = len/k e non len.
+//  Esempio: grafico 15S, sezione 5m, len 100 -> n_eff 5 -> max|z| = 2.00.
+//  Quella sezione non superera' MAI la soglia +2 e il segnale non scattera'
+//  mai. La dashboard colora di rosso la sezione in cui questo accade.
+ne1 = modeA ? float(len1) : modeB ? math.max(1.0, len1 / float(k1)) : float(lenC1)
+ne2 = modeA ? float(len2) : modeB ? math.max(1.0, len2 / float(k2)) : float(lenC2)
+ne3 = modeA ? float(len3) : modeB ? math.max(1.0, len3 / float(k3)) : float(lenC3)
+ne4 = modeA ? float(len4) : modeB ? math.max(1.0, len4 / float(k4)) : float(lenC4)
+ne5 = modeA ? float(len5) : modeB ? math.max(1.0, len5 / float(k5)) : float(lenC5)
+
+f_zcap(float ne) => math.sqrt(math.max(ne - 1.0, 0.0))
+
+// soglia attiva piu' ambiziosa: serve a capire se il tetto la rende irraggiungibile
+thrMaxAct = math.max(math.max(enP2 ? math.abs(thrP2) : 0.0, enP1 ? math.abs(thrP1) : 0.0), math.max(enM1 ? math.abs(thrM1) : 0.0, enM2 ? math.abs(thrM2) : 0.0))
 
 // Estremi raggiunti nella finestra di confluenza (barre del grafico = unita' di tempo uniforme).
 hi1 = ta.highest(z1, lookback)
@@ -215,44 +280,63 @@ plotshape(not isArrow and sigD, "BUY D (pallino)", shape.circle, location.belowb
 bgcolor((armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title="Sfondo armamento")
 
 // ============================================================== CRUSCOTTO =====
-f_stat(bool use, string tf, int sec, float z, float h, float l) =>
-    bad = use and sec < chartSec
-    [use ? (bad ? "⚠ < grafico" : tf) : "off", use ? str.tostring(z, "#.00") : "–", use ? str.tostring(l, "#.0") + " / " + str.tostring(h, "#.0") : "–", bad]
+//  La colonna "n · cap" e' la piu' importante quando si usa il modo B: mostra
+//  il campione effettivo della sezione e il massimo |z| algebricamente
+//  raggiungibile. Se il cap e' sotto la soglia attiva, la riga diventa ROSSA:
+//  quella sezione non potra' mai armare e la confluenza restera' bloccata.
+f_stat(bool use, string tf, int sec, float z, float h, float l, float ne) =>
+    bad  = use and sec < chartSec
+    cap  = f_zcap(ne)
+    dead = use and cap < thrMaxAct
+    [use ? (bad ? "⚠ < grafico" : tf) : "off",
+     use ? str.tostring(z, "#.00") : "–",
+     use ? str.tostring(l, "#.0") + " / " + str.tostring(h, "#.0") : "–",
+     use ? str.tostring(int(math.round(ne))) + " · " + str.tostring(cap, "#.0") : "–",
+     bad, dead]
 
-var table dash = table.new(position.top_right, 4, 8, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+var table dash = table.new(position.top_right, 5, 9, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
 if showTab and barstate.islast
-    table.cell(dash, 0, 0, "TF", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
-    table.cell(dash, 1, 0, "z", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
-    table.cell(dash, 2, 0, "min/max " + str.tostring(lookback), bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
-    table.cell(dash, 3, 0, "stato", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    hdrBg = color.new(color.gray, 70)
+    modeTag = modeA ? "A nativo" : modeB ? "B grafico/HTF" : "C orizz.equiv."
+    table.cell(dash, 0, 0, "TF", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 0, "z", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 0, "min/max " + str.tostring(lookback), bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 0, "n · cap", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 4, 0, "stato", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
 
-    [t1, v1, r1, b1] = f_stat(use1, tf1, sec1, z1, hi1, lo1)
-    [t2, v2, r2, b2] = f_stat(use2, tf2, sec2, z2, hi2, lo2)
-    [t3, v3, r3, b3] = f_stat(use3, tf3, sec3, z3, hi3, lo3)
-    [t4, v4, r4, b4] = f_stat(use4, tf4, sec4, z4, hi4, lo4)
-    [t5, v5, r5, b5] = f_stat(use5, tf5, sec5, z5, hi5, lo5)
+    [t1, v1, r1, q1, b1, d1] = f_stat(use1, tf1, sec1, z1, hi1, lo1, ne1)
+    [t2, v2, r2, q2, b2, d2] = f_stat(use2, tf2, sec2, z2, hi2, lo2, ne2)
+    [t3, v3, r3, q3, b3, d3] = f_stat(use3, tf3, sec3, z3, hi3, lo3, ne3)
+    [t4, v4, r4, q4, b4, d4] = f_stat(use4, tf4, sec4, z4, hi4, lo4, ne4)
+    [t5, v5, r5, q5, b5, d5] = f_stat(use5, tf5, sec5, z5, hi5, lo5, ne5)
 
     ts = array.from(t1, t2, t3, t4, t5)
     vs = array.from(v1, v2, v3, v4, v5)
     rs = array.from(r1, r2, r3, r4, r5)
+    qs = array.from(q1, q2, q3, q4, q5)
     bs = array.from(b1, b2, b3, b4, b5)
+    ds = array.from(d1, d2, d3, d4, d5)
     zs = array.from(z1, z2, z3, z4, z5)
     us = array.from(use1, use2, use3, use4, use5)
 
     for i = 0 to 4
-        zv  = array.get(zs, i)
-        act = array.get(us, i)
-        col = not act ? color.new(color.gray, 60) : array.get(bs, i) ? color.new(color.orange, 30) : zv >= 2 ? color.new(cUp, 40) : zv <= -2 ? color.new(cDn, 40) : color.new(color.gray, 80)
+        zv   = array.get(zs, i)
+        act  = array.get(us, i)
+        dead = array.get(ds, i)
+        col  = not act ? color.new(color.gray, 60) : dead ? color.new(color.red, 25) : array.get(bs, i) ? color.new(color.orange, 30) : zv >= 2 ? color.new(cUp, 40) : zv <= -2 ? color.new(cDn, 40) : color.new(color.gray, 80)
+        st   = not act ? "off" : dead ? "cap < soglia" : (zv >= 2 or zv <= -2 ? "estremo" : "–")
         table.cell(dash, 0, i + 1, "S" + str.tostring(i + 1) + " " + array.get(ts, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
         table.cell(dash, 1, i + 1, array.get(vs, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
         table.cell(dash, 2, i + 1, array.get(rs, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
-        table.cell(dash, 3, i + 1, act ? (zv >= 2 or zv <= -2 ? "estremo" : "–") : "off", text_size=size.tiny, text_color=color.white, bgcolor=col)
+        table.cell(dash, 3, i + 1, array.get(qs, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
+        table.cell(dash, 4, i + 1, st, text_size=size.tiny, text_color=color.white, bgcolor=col)
 
     armTxt = (armA ? "A " : "") + (armB ? "B " : "") + (armC ? "C " : "") + (armD ? "D " : "")
-    table.cell(dash, 0, 6, "fast", text_size=size.tiny, text_color=color.white, bgcolor=color.new(color.gray, 70))
-    table.cell(dash, 1, 6, tfFast, text_size=size.tiny, text_color=color.white, bgcolor=color.new(color.gray, 70))
-    table.cell(dash, 2, 6, "armati", text_size=size.tiny, text_color=color.white, bgcolor=color.new(color.gray, 70))
-    table.cell(dash, 3, 6, armTxt == "" ? "–" : armTxt, text_size=size.tiny, text_color=color.white, bgcolor=armTxt == "" ? color.new(color.gray, 70) : color.new(color.orange, 40))
+    table.cell(dash, 0, 6, "modo", text_size=size.tiny, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 1, 6, modeTag, text_size=size.tiny, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 2, 6, "fast", text_size=size.tiny, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 3, 6, tfFast, text_size=size.tiny, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 4, 6, "armati " + (armTxt == "" ? "–" : armTxt), text_size=size.tiny, text_color=color.white, bgcolor=armTxt == "" ? hdrBg : color.new(color.orange, 40))
 
 // ================================================================= ALERT ======
 alertcondition(sigA, "MTF-Z · SELL soglia A", "MTF-Z SELL A · confluenza su tutti i TF attivi")
