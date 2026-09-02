@@ -75,7 +75,7 @@ len5 = input.int(100, "len", minval=5, maxval=5000, inline="s5", group=gT)
 // ------------------------------------------------------------- LOGICA SEGNALE
 var string gS = "3 · Logica segnale"
 lookback = input.int(10, "Finestra di confluenza (barre del grafico)", minval=1, maxval=500, group=gS,
-     tooltip="Tutti i TF attivi devono aver superato la soglia almeno una volta entro queste N barre del grafico.")
+     tooltip="Tutti i TF attivi devono aver superato la soglia almeno una volta entro queste N barre del grafico.\n\nREGOLA DI TARATURA: la finestra deve contenere almeno 2 barre della sezione piu LENTA, altrimenti quella sezione e praticamente ferma e dovrebbe trovarsi gia in soglia nell istante esatto in cui ci arriva la piu veloce.\n  minimo consigliato = 2 * (TF piu lento / TF del grafico)\n  esempio: grafico 5s, sezione piu lenta 5m -> 2 * (300/5) = 120 barre.\nCon valori troppo bassi la confluenza non si arma MAI: controlla il contatore armate in fondo alla dashboard.")
 trigMode = input.string("Rientro (reversione)", "Modalita' trigger",
      options=["Rientro (reversione)","Primo tocco della soglia"], group=gS,
      tooltip="Rientro: il TF piu' veloce riattraversa il livello di trigger tornando verso lo zero (setup di esaurimento). Primo tocco: il TF piu' veloce buca la soglia (setup di continuazione/momentum).")
