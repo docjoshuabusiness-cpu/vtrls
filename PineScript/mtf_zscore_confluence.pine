@@ -21,6 +21,9 @@
 //                               calcolato sulle candele del grafico. Piu' dati,
 //                               nessun ritardo, nessun repaint. Consigliato.
 //
+//  Script OVERLAY: disegna SOLO i marker sul grafico prezzi. Nessun pannello.
+//  Gli z-score sono ispezionabili nel Data Window (Alt+D).
+//
 //  NOTE OPERATIVE (leggere):
 //  - Mettere il grafico sul TF PIU' PICCOLO che si vuole osservare. Tutti i TF
 //    delle sezioni devono essere >= al TF del grafico, altrimenti request.security
@@ -32,7 +35,7 @@
 //    sembri. Usare "Log Return" come sorgente riduce (non elimina) il problema.
 // =============================================================================
 
-indicator("MTF Z-Score Confluence", shorttitle="MTF-Z", overlay=false, max_bars_back=500)
+indicator("MTF Z-Score Confluence", shorttitle="MTF-Z", overlay=true, max_bars_back=500)
 
 // ----------------------------------------------------------------- MOTORE Z --
 var string gZ = "1 · Motore Z-Score"
@@ -98,7 +101,9 @@ trgM2 = input.float(-1.0, "trigger", step=0.1, inline="d", group=gL)
 // ------------------------------------------------------------------- GRAFICA -
 var string gV = "5 · Grafica"
 marker   = input.string("Freccia", "Marker segnale", options=["Freccia","Pallino"], group=gV)
-showZ    = input.bool(true,  "Mostra linee z-score nel pannello", group=gV)
+showZ    = input.bool(true,  "Esporta i valori z nel Data Window", group=gV,
+     tooltip="Non disegna nulla sul grafico. I cinque z-score diventano leggibili nel Data Window (Alt+D) passando il mouse su una barra.")
+showArmBg= input.bool(false, "Sfondo colorato quando un setup e' armato", group=gV)
 showTab  = input.bool(true,  "Mostra cruscotto", group=gV)
 cUp      = input.color(color.new(#ef5350, 0), "Colore SELL", inline="col", group=gV)
 cDn      = input.color(color.new(#26a69a, 0), "Colore BUY",  inline="col", group=gV)
@@ -262,32 +267,30 @@ f_stream(bool en, float thr, float trg, bool isUp) =>
 [sigD, armD] = f_stream(enM2, thrM2, trgM2, false)
 
 // ================================================================== PLOT ======
-plot(showZ and use1 ? z1 : na, "z S1", color=color.new(#42a5f5, 0), linewidth=1)
-plot(showZ and use2 ? z2 : na, "z S2", color=color.new(#7e57c2, 0), linewidth=1)
-plot(showZ and use3 ? z3 : na, "z S3", color=color.new(#ffa726, 0), linewidth=1)
-plot(showZ and use4 ? z4 : na, "z S4", color=color.new(#ec407a, 0), linewidth=1)
-plot(showZ and use5 ? z5 : na, "z S5", color=color.new(#bdbdbd, 0), linewidth=2)
-
-hline(0, "0", color=color.new(color.gray, 50), linestyle=hline.style_dotted)
-hline(2, "+2", color=color.new(color.red, 60), linestyle=hline.style_dashed)
-hline(1, "+1", color=color.new(color.red, 80), linestyle=hline.style_dotted)
-hline(-1, "-1", color=color.new(color.teal, 80), linestyle=hline.style_dotted)
-hline(-2, "-2", color=color.new(color.teal, 60), linestyle=hline.style_dashed)
+// Nessun pannello: lo script e' overlay puro. Gli z-score restano ispezionabili
+// nel Data Window (Alt+D), dove non rubano spazio al grafico.
+dw = display.data_window
+plot(showZ and use1 ? z1 : na, "z S1", display = dw)
+plot(showZ and use2 ? z2 : na, "z S2", display = dw)
+plot(showZ and use3 ? z3 : na, "z S3", display = dw)
+plot(showZ and use4 ? z4 : na, "z S4", display = dw)
+plot(showZ and use5 ? z5 : na, "z S5", display = dw)
+plot(showZ ? zFast : na,        "z fast", display = dw)
 
 // plotshape richiede uno stile costante: due chiamate per stream, una per forma.
 isArrow = marker == "Freccia"
 
-plotshape(isArrow and sigA, "SELL A (freccia)", shape.arrowdown, location.abovebar, cUp, size=size.small, force_overlay=true, text="A")
-plotshape(not isArrow and sigA, "SELL A (pallino)", shape.circle, location.abovebar, cUp, size=size.tiny, force_overlay=true)
-plotshape(isArrow and sigB, "SELL B (freccia)", shape.arrowdown, location.abovebar, color.new(cUp, 45), size=size.small, force_overlay=true, text="B")
-plotshape(not isArrow and sigB, "SELL B (pallino)", shape.circle, location.abovebar, color.new(cUp, 45), size=size.tiny, force_overlay=true)
-plotshape(isArrow and sigC, "BUY C (freccia)", shape.arrowup, location.belowbar, color.new(cDn, 45), size=size.small, force_overlay=true, text="C")
-plotshape(not isArrow and sigC, "BUY C (pallino)", shape.circle, location.belowbar, color.new(cDn, 45), size=size.tiny, force_overlay=true)
-plotshape(isArrow and sigD, "BUY D (freccia)", shape.arrowup, location.belowbar, cDn, size=size.small, force_overlay=true, text="D")
-plotshape(not isArrow and sigD, "BUY D (pallino)", shape.circle, location.belowbar, cDn, size=size.tiny, force_overlay=true)
+plotshape(isArrow and sigA, "SELL A (freccia)", shape.arrowdown, location.abovebar, cUp, size=size.small, text="A")
+plotshape(not isArrow and sigA, "SELL A (pallino)", shape.circle, location.abovebar, cUp, size=size.tiny)
+plotshape(isArrow and sigB, "SELL B (freccia)", shape.arrowdown, location.abovebar, color.new(cUp, 45), size=size.small, text="B")
+plotshape(not isArrow and sigB, "SELL B (pallino)", shape.circle, location.abovebar, color.new(cUp, 45), size=size.tiny)
+plotshape(isArrow and sigC, "BUY C (freccia)", shape.arrowup, location.belowbar, color.new(cDn, 45), size=size.small, text="C")
+plotshape(not isArrow and sigC, "BUY C (pallino)", shape.circle, location.belowbar, color.new(cDn, 45), size=size.tiny)
+plotshape(isArrow and sigD, "BUY D (freccia)", shape.arrowup, location.belowbar, cDn, size=size.small, text="D")
+plotshape(not isArrow and sigD, "BUY D (pallino)", shape.circle, location.belowbar, cDn, size=size.tiny)
 
 // Sfondo pannello quando un setup e' armato (nessun trigger ancora).
-bgcolor((armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title="Sfondo armamento")
+bgcolor(not showArmBg ? na : (armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title="Sfondo armamento")
 
 // ============================================================== CRUSCOTTO =====
 //  La colonna "n · cap" e' la piu' importante quando si usa il modo B: mostra

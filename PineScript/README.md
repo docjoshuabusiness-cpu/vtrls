@@ -5,6 +5,15 @@
 Indicatore di confluenza multi-timeframe su z-score, con 5 sezioni e 4 soglie tutte
 attivabili/disattivabili indipendentemente.
 
+**Overlay puro**: disegna solo i marker sul grafico prezzi, nessun pannello separato.
+I cinque z-score e quello del timeframe più veloce restano ispezionabili nel Data
+Window (`Alt+D`) passando il mouse su una barra.
+
+> **Installazione**: nel Pine Editor premi `Ctrl+A` per selezionare *tutto* il template
+> di default (`//@version=6`, `indicator("My script")`, `plot(close)`) e poi incolla.
+> Incollare in coda produce l'errore `CE10243`: un file Pine ammette una sola
+> dichiarazione `indicator()`.
+
 ### Logica in due stadi
 
 1. **ARMAMENTO** — per una data soglia `T`, *tutti* i timeframe attivi devono aver
