@@ -117,6 +117,12 @@ cz3      = input.color(color.new(#ffa726, 0), "S3", inline="zc1", group=gV)
 cz4      = input.color(color.new(#ec407a, 0), "S4", inline="zc2", group=gV)
 cz5      = input.color(color.new(#bdbdbd, 0), "S5", inline="zc2", group=gV)
 czF      = input.color(color.new(#ffffff, 25), "TF veloce", inline="zc2", group=gV)
+cLvlS    = input.color(color.new(#000000,  0), "Colore linee soglia",  inline="lv", group=gV)
+cLvlT    = input.color(color.new(#000000, 45), "trigger",              inline="lv", group=gV)
+cLvl0    = input.color(color.new(#000000, 55), "zero",                 inline="lv", group=gV)
+markWhere= input.string("Pannello", "Posizione marker", options=["Pannello","Grafico prezzi","Entrambi"], group=gV,
+     tooltip="Pannello: i marker stanno nel pannello dello z-score, come negli indicatori di riferimento. Restano comunque ancorati alla barra del grafico in cui il TF piu\' veloce ha attraversato il livello di trigger.")
+markLvl  = input.float(2.8, "   livello marker nel pannello (z)", step=0.1, minval=0.5, group=gV)
 showTags = input.bool(true, "Etichette del periodo a destra delle curve", group=gV,
      tooltip="Scrive il timeframe di ogni sezione in fondo alla sua curva, nel pannello. Serve a non dover ricordare a memoria quale colore corrisponde a quale periodo.")
 tagOff   = input.int(4, "   distanza (barre)", minval=1, maxval=50, group=gV)
@@ -365,27 +371,51 @@ f_tag(use5, tf5, z5, cz5)
 
 // Soglie e trigger: solo quelli degli stream ATTIVI, cosi' il pannello mostra
 // esattamente la configurazione in uso e non quattro righe decorative.
-hline(0, "zero", color = color.new(color.gray, 55), linestyle = hline.style_dotted)
-plot(showLv and enP2 ? thrP2 : na, "soglia A", color = color.new(cUp, 50), style = plot.style_linebr)
-plot(showLv and enP1 ? thrP1 : na, "soglia B", color = color.new(cUp, 70), style = plot.style_linebr)
-plot(showLv and enM1 ? thrM1 : na, "soglia C", color = color.new(cDn, 70), style = plot.style_linebr)
-plot(showLv and enM2 ? thrM2 : na, "soglia D", color = color.new(cDn, 50), style = plot.style_linebr)
-plot(showLv and enP2 ? trgP2 : na, "trigger A", color = color.new(cUp, 75), style = plot.style_cross, linewidth = 1)
-plot(showLv and enP1 ? trgP1 : na, "trigger B", color = color.new(cUp, 85), style = plot.style_cross, linewidth = 1)
-plot(showLv and enM1 ? trgM1 : na, "trigger C", color = color.new(cDn, 85), style = plot.style_cross, linewidth = 1)
-plot(showLv and enM2 ? trgM2 : na, "trigger D", color = color.new(cDn, 75), style = plot.style_cross, linewidth = 1)
+hline(0, "zero", color = cLvl0, linestyle = hline.style_dotted)
+plot(showLv and enP2 ? thrP2 : na, "soglia A", color = cLvlS, style = plot.style_linebr)
+plot(showLv and enP1 ? thrP1 : na, "soglia B", color = cLvlS, style = plot.style_linebr)
+plot(showLv and enM1 ? thrM1 : na, "soglia C", color = cLvlS, style = plot.style_linebr)
+plot(showLv and enM2 ? thrM2 : na, "soglia D", color = cLvlS, style = plot.style_linebr)
+plot(showLv and enP2 ? trgP2 : na, "trigger A", color = cLvlT, style = plot.style_cross, linewidth = 1)
+plot(showLv and enP1 ? trgP1 : na, "trigger B", color = cLvlT, style = plot.style_cross, linewidth = 1)
+plot(showLv and enM1 ? trgM1 : na, "trigger C", color = cLvlT, style = plot.style_cross, linewidth = 1)
+plot(showLv and enM2 ? trgM2 : na, "trigger D", color = cLvlT, style = plot.style_cross, linewidth = 1)
 
-// plotshape richiede uno stile costante: due chiamate per stream, una per forma.
+// I marker: force_overlay e' un parametro COSTANTE, non puo' essere commutato da
+// un input. Quindi esistono due serie di plotshape, una nel pannello e una sul
+// grafico prezzi, e l'input sceglie quale riceve il segnale. In entrambi i casi
+// il marker resta ancorato alla barra del grafico in cui il TF piu' veloce ha
+// attraversato il livello di trigger: cambia solo dove viene disegnato.
 isArrow = marker == "Freccia"
+inPane  = markWhere != "Grafico prezzi"
+onChart = markWhere != "Pannello"
 
-plotshape(isArrow and sigA, "SELL A (freccia)", shape.arrowdown, location.abovebar, cUp, size=size.small, force_overlay=true, text="A")
-plotshape(not isArrow and sigA, "SELL A (pallino)", shape.circle, location.abovebar, cUp, size=size.tiny, force_overlay=true)
-plotshape(isArrow and sigB, "SELL B (freccia)", shape.arrowdown, location.abovebar, color.new(cUp, 45), size=size.small, force_overlay=true, text="B")
-plotshape(not isArrow and sigB, "SELL B (pallino)", shape.circle, location.abovebar, color.new(cUp, 45), size=size.tiny, force_overlay=true)
-plotshape(isArrow and sigC, "BUY C (freccia)", shape.arrowup, location.belowbar, color.new(cDn, 45), size=size.small, force_overlay=true, text="C")
-plotshape(not isArrow and sigC, "BUY C (pallino)", shape.circle, location.belowbar, color.new(cDn, 45), size=size.tiny, force_overlay=true)
-plotshape(isArrow and sigD, "BUY D (freccia)", shape.arrowup, location.belowbar, cDn, size=size.small, force_overlay=true, text="D")
-plotshape(not isArrow and sigD, "BUY D (pallino)", shape.circle, location.belowbar, cDn, size=size.tiny, force_overlay=true)
+// y assoluto nel pannello; gli stream della stessa direzione sono sfalsati di
+// 0.35 z per non finire sullo stesso pixel quando scattano insieme.
+yA = inPane and sigA ?  markLvl        : na
+yB = inPane and sigB ?  markLvl - 0.35 : na
+yC = inPane and sigC ? -markLvl + 0.35 : na
+yD = inPane and sigD ? -markLvl        : na
+
+// -- pannello ----------------------------------------------------------------
+plotshape(isArrow ? yA : na,     "SELL A", shape.arrowdown, location.absolute, cUp, size = size.small, text = "A")
+plotshape(not isArrow ? yA : na, "SELL A ·", shape.circle,  location.absolute, cUp, size = size.tiny)
+plotshape(isArrow ? yB : na,     "SELL B", shape.arrowdown, location.absolute, color.new(cUp, 45), size = size.small, text = "B")
+plotshape(not isArrow ? yB : na, "SELL B ·", shape.circle,  location.absolute, color.new(cUp, 45), size = size.tiny)
+plotshape(isArrow ? yC : na,     "BUY C",  shape.arrowup,   location.absolute, color.new(cDn, 45), size = size.small, text = "C")
+plotshape(not isArrow ? yC : na, "BUY C ·", shape.circle,   location.absolute, color.new(cDn, 45), size = size.tiny)
+plotshape(isArrow ? yD : na,     "BUY D",  shape.arrowup,   location.absolute, cDn, size = size.small, text = "D")
+plotshape(not isArrow ? yD : na, "BUY D ·", shape.circle,   location.absolute, cDn, size = size.tiny)
+
+// -- grafico prezzi ----------------------------------------------------------
+plotshape(onChart and isArrow and sigA,     "SELL A (prezzo)", shape.arrowdown, location.abovebar, cUp, size = size.small, force_overlay = true, text = "A")
+plotshape(onChart and not isArrow and sigA, "SELL A (prezzo) ·", shape.circle,  location.abovebar, cUp, size = size.tiny, force_overlay = true)
+plotshape(onChart and isArrow and sigB,     "SELL B (prezzo)", shape.arrowdown, location.abovebar, color.new(cUp, 45), size = size.small, force_overlay = true, text = "B")
+plotshape(onChart and not isArrow and sigB, "SELL B (prezzo) ·", shape.circle,  location.abovebar, color.new(cUp, 45), size = size.tiny, force_overlay = true)
+plotshape(onChart and isArrow and sigC,     "BUY C (prezzo)",  shape.arrowup,   location.belowbar, color.new(cDn, 45), size = size.small, force_overlay = true, text = "C")
+plotshape(onChart and not isArrow and sigC, "BUY C (prezzo) ·", shape.circle,   location.belowbar, color.new(cDn, 45), size = size.tiny, force_overlay = true)
+plotshape(onChart and isArrow and sigD,     "BUY D (prezzo)",  shape.arrowup,   location.belowbar, cDn, size = size.small, force_overlay = true, text = "D")
+plotshape(onChart and not isArrow and sigD, "BUY D (prezzo) ·", shape.circle,   location.belowbar, cDn, size = size.tiny, force_overlay = true)
 
 // Sfondo di armamento: resta NEL PANNELLO, cosi' non sporca le candele.
 bgcolor(not showArmBg ? na : (armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title="Sfondo armamento")

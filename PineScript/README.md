@@ -68,6 +68,28 @@ sezione smette di essere una richiesta di dati e diventa un puro **moltiplicator
 orizzonte**: due sezioni con lo stesso `k` producono z identici, quindi vanno
 differenziate via `len`.
 
+### Riprodurre un indicatore z-score esistente
+
+Per confrontare una sezione con un altro indicatore z-score, i parametri devono
+coincidere tutti, non solo il timeframe. Dato un riferimento con `Length 17`,
+`Source Close`, `Timeframe 1 minute`:
+
+| Impostazione | Valore |
+|---|---|
+| Base di calcolo | `A · TF nativo` |
+| Sorgente | `Close` |
+| Base (media) | `SMA` |
+| Stimatore robusto | OFF |
+| Solo barre HTF chiuse | OFF (se il riferimento aggiorna sulla candela in formazione) |
+| `len` della sezione 1m | `17` |
+
+La formula diventa identica: `z = (close - sma(close,17)) / stdev(close,17)` calcolata
+sulle candele da 1 minuto. Con `len` diverso le due curve **non possono** coincidere:
+una finestra 6 volte più lunga produce una curva molto più liscia che non raggiunge
+gli stessi estremi. Se una sezione non scende sotto −2 quando il riferimento lo fa,
+il primo posto da guardare è la colonna `n · cap` della dashboard, che mostra la
+finestra realmente in uso.
+
 ### Diagnostica: perché non compaiono segnali
 
 Le ultime tre righe della dashboard dicono dove si rompe la catena, senza dover
