@@ -89,6 +89,10 @@ fastNow  = input.bool(true, "Trigger immediato sul TF veloce (niente attesa di c
 trigMode = input.string("Rientro (reversione)", "Modalita' trigger",
      options=["Rientro (reversione)","Primo tocco della soglia"], group=gS,
      tooltip="Rientro: il TF piu' veloce riattraversa il livello di trigger tornando verso lo zero (setup di esaurimento). Primo tocco: il TF piu' veloce buca la soglia (setup di continuazione/momentum).")
+repMode  = input.string("Uno per escursione", "Ripetizione dei segnali",
+     options=["Uno per escursione","Uno per armamento","Tutti"], group=gS,
+     tooltip="UNO PER ESCURSIONE (default): dopo un segnale il latch si riarma appena la serie di trigger RIENTRA oltre la soglia. Se lo z torna sopra +2 e poi riscende sotto +1, esce un secondo segnale. E\' il comportamento naturale: ogni escursione nell\'estremo e\' un setup a se\'.\n\nUNO PER ARMAMENTO: un solo segnale finche\' l\'armamento resta valido. Il piu\' conservativo, ma perde i setup successivi dentro la stessa finestra.\n\nTUTTI: ogni attraversamento del livello di trigger produce un segnale, limitato solo dal cooldown. Massimo campione, massimo rumore.\n\nIl numero accanto al marker e\' la posizione del segnale dentro l\'armamento corrente: serve a verificare se il primo vale davvero meno dei successivi.")
+showSeq  = input.bool(true, "   numera i segnali dentro l\'armamento", group=gS)
 cooldown = input.int(5, "Cooldown fra segnali (barre)", minval=0, maxval=500, group=gS)
 
 var string gL = "4 · Soglie (stream indipendenti)"
@@ -335,8 +339,15 @@ f_arm(float thr, bool isUp) =>
 f_stream(bool en, float thr, float trg, bool isUp) =>
     var bool fired   = false
     var int  lastSig = -100000
+    var int  seq     = 0
     armed = en and f_arm(thr, isUp)
+    // rientro nell'estremo: la serie di trigger torna oltre la soglia, quindi
+    // quella che segue e' una NUOVA escursione e merita un proprio segnale
+    reEnter = isUp ? zFast >= thr : zFast <= thr
     if not armed
+        fired := false
+        seq   := 0
+    else if repMode == "Tutti" or (repMode == "Uno per escursione" and reEnter)
         fired := false
     trig = false
     if trigMode == "Primo tocco della soglia"
@@ -347,12 +358,13 @@ f_stream(bool en, float thr, float trg, bool isUp) =>
     if fire
         fired   := true
         lastSig := bar_index
-    [fire, armed]
+        seq     += 1
+    [fire, armed, seq]
 
-[sigA, armA] = f_stream(enP2, thrP2, trgP2, true)
-[sigB, armB] = f_stream(enP1, thrP1, trgP1, true)
-[sigC, armC] = f_stream(enM1, thrM1, trgM1, false)
-[sigD, armD] = f_stream(enM2, thrM2, trgM2, false)
+[sigA, armA, seqA] = f_stream(enP2, thrP2, trgP2, true)
+[sigB, armB, seqB] = f_stream(enP1, thrP1, trgP1, true)
+[sigC, armC, seqC] = f_stream(enM1, thrM1, trgM1, false)
+[sigD, armD, seqD] = f_stream(enM2, thrM2, trgM2, false)
 
 // ============================================================ DIAGNOSTICA =====
 //  Quando non compaiono segnali serve sapere DOVE si rompe la catena, non
@@ -462,15 +474,17 @@ txBuy  = isArrow ? "▲" : "●"
 
 // gli stream della stessa direzione sono sfalsati di 0.35 z per non finire sullo
 // stesso pixel quando scattano sulla medesima barra
-f_markPane(sigA,  markLvl,        txSell + "A", cUp)
-f_markPane(sigB,  markLvl - 0.35, txSell + "B", color.new(cUp, 35))
-f_markPane(sigC, -markLvl + 0.35, txBuy  + "C", color.new(cDn, 35))
-f_markPane(sigD, -markLvl,        txBuy  + "D", cDn)
+f_seqTxt(int n) => showSeq and n > 1 ? str.tostring(n) : ""
 
-f_markChart(sigA, true,  txSell + "A", cUp)
-f_markChart(sigB, true,  txSell + "B", color.new(cUp, 35))
-f_markChart(sigC, false, txBuy  + "C", color.new(cDn, 35))
-f_markChart(sigD, false, txBuy  + "D", cDn)
+f_markPane(sigA,  markLvl,        txSell + "A" + f_seqTxt(seqA), cUp)
+f_markPane(sigB,  markLvl - 0.35, txSell + "B" + f_seqTxt(seqB), color.new(cUp, 35))
+f_markPane(sigC, -markLvl + 0.35, txBuy  + "C" + f_seqTxt(seqC), color.new(cDn, 35))
+f_markPane(sigD, -markLvl,        txBuy  + "D" + f_seqTxt(seqD), cDn)
+
+f_markChart(sigA, true,  txSell + "A" + f_seqTxt(seqA), cUp)
+f_markChart(sigB, true,  txSell + "B" + f_seqTxt(seqB), color.new(cUp, 35))
+f_markChart(sigC, false, txBuy  + "C" + f_seqTxt(seqC), color.new(cDn, 35))
+f_markChart(sigD, false, txBuy  + "D" + f_seqTxt(seqD), cDn)
 
 // Sfondo di armamento: resta NEL PANNELLO, cosi' non sporca le candele.
 bgcolor(not showArmBg ? na : (armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title="Sfondo armamento")
@@ -577,4 +591,5 @@ alertcondition(sigC or sigD, "MTF-Z · BUY (qualsiasi)",  "MTF-Z BUY · confluen
 if sigA or sigB or sigC or sigD
     dir = (sigA or sigB) ? "SELL" : "BUY"
     tag = sigA ? "A" : sigB ? "B" : sigC ? "C" : "D"
-    alert("MTF-Z " + dir + " [" + tag + "] " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | zFast=" + str.tostring(zFast, "#.00"), alert.freq_once_per_bar_close)
+    nth = sigA ? seqA : sigB ? seqB : sigC ? seqC : seqD
+    alert("MTF-Z " + dir + " [" + tag + "#" + str.tostring(nth) + "] " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | zFast=" + str.tostring(zFast, "#.00"), alert.freq_once_per_bar_close)
