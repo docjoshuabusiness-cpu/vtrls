@@ -88,6 +88,29 @@ due campi: con `15S` e `17` la curva di trigger è identica a un riferimento
 configurato `Length 17 · Close · Timeframe 15 seconds`. La riga `trigger` della
 dashboard mostra in azzurro il timeframe e la durata reale della finestra in uso.
 
+#### Il ritardo di gradino, e come si toglie
+
+`request.security` restituisce il valore dell'ultima candela HTF **chiusa**. Una
+candela 15S copre 3 barre di un grafico a 5s, quindi lo z-score arriva come una
+scala a gradini che cambia una volta ogni 3 barre: il rientro sotto il livello di
+trigger viene rilevato al gradino, non nell'istante in cui il prezzo lo produce.
+Ritardo medio `k-1` barre, con `k = TF trigger / TF grafico`.
+
+`trigger LIVE` (default ON) lo elimina senza introdurre look-ahead: centro e scala
+della distribuzione continuano a venire dalle candele HTF **chiuse**, mentre il
+numeratore usa il prezzo **corrente** della barra del grafico:
+
+    z_live = (prezzo corrente − media HTF chiusa) / dev.std HTF chiusa
+
+Lo z si aggiorna a ogni barra da 5s e il marker cade sulla barra in cui il rientro
+avviene davvero. Nessun dato futuro: è esattamente ciò che un operatore vede in
+tempo reale. Con stimatore robusto la scala usata è `MAD / 0.6745`, così la formula
+resta identica allo z robusto.
+
+Unico caso in cui va spento: sorgente `Log Return`, dove il rendimento della barra
+del grafico ha una scala diversa da quello della candela HTF e la ricostruzione non
+è coerente.
+
 ### Riprodurre un indicatore z-score esistente
 
 Per confrontare una sezione con un altro indicatore z-score, i parametri devono

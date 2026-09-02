@@ -79,6 +79,8 @@ lookback = input.int(10, "Finestra di confluenza (barre del grafico)", minval=1,
 trigOwn  = input.bool(true, "Serie dedicata per il trigger", group=gS,
      tooltip="Il trigger NON eredita piu\' il modo e la len della sezione piu\' veloce: usa una serie propria, definita qui sotto e calcolata SEMPRE in modo nativo (z sulle candele del suo timeframe).\n\nCosi\' l\'armamento puo\' usare il modo che preferisci sulle 5 sezioni, mentre il segnale cade esattamente sulla barra in cui la curva che stai guardando attraversa il livello di trigger.\n\nPer replicare un indicatore esterno: imposta qui il suo timeframe e la sua Length.\n\nSpento, il trigger torna a usare la sezione attiva piu\' veloce.")
 trigTf   = input.timeframe("15S", "   timeframe del trigger", group=gS)
+trigLive = input.bool(true, "   trigger LIVE (nessun ritardo di gradino)", group=gS,
+     tooltip="PROBLEMA: request.security restituisce il valore dell\'ultima candela HTF CHIUSA. Una candela 15S copre 3 barre di un grafico a 5s, quindi lo z-score e\' una scala a gradini e il rientro viene rilevato al gradino, con un ritardo medio di k-1 barre (k = TF trigger / TF grafico).\n\nSOLUZIONE: media e deviazione standard vengono prese dalle candele HTF chiuse, ma il numeratore usa il prezzo CORRENTE della barra del grafico. Lo z si aggiorna a ogni barra e il rientro cade sulla barra in cui avviene davvero.\n\nNessun dato futuro: e\' cio\' che un operatore vede in tempo reale, non un\'anticipazione.\n\nNOTA: con sorgente Log Return la ricostruzione non e\' coerente (il rendimento del grafico ha scala diversa da quello HTF); in quel caso lasciare spento.")
 trigLen  = input.int(17, "   len del trigger", minval=3, maxval=5000, group=gS)
 autoLb   = input.bool(true, "Finestra automatica (2 barre della sezione piu' lenta)", group=gS,
      tooltip="Calcola la finestra minima da solo: 2 * (TF piu' lento attivo / TF del grafico), e usa il valore maggiore fra questo e quello impostato sopra. Evita l'errore piu' comune, cioe' una finestra in cui le sezioni lente sono di fatto immobili e non possono mai allinearsi alle veloci.")
@@ -159,6 +161,27 @@ f_zser(float s, simple int len) =>
         z := mad > 0 ? 0.6745 * (s - med) / mad : 0.0
     z
 
+// Come f_htf, ma restituisce anche CENTRO e SCALA della distribuzione. Servono a
+// ricostruire lo z sul grafico senza aspettare la chiusura della candela HTF:
+// centro e scala vengono dalle candele HTF chiuse, il numeratore dal prezzo
+// corrente. Nessun dato futuro, aggiornamento a ogni barra.
+f_htfStat(simple int len, simple bool shift) =>
+    s   = f_src()
+    bSm = ta.sma(s, len)
+    bEm = ta.ema(s, len)
+    b   = maMode == "EMA" ? bEm : bSm
+    d   = ta.stdev(s, len)
+    float zz = d > 0 ? (s - b) / d : 0.0
+    float cc = b
+    float ss = d
+    if robust
+        med = ta.median(s, len)
+        mad = ta.median(math.abs(s - med), len)
+        zz := mad > 0 ? 0.6745 * (s - med) / mad : 0.0
+        cc := med
+        ss := mad / 0.6745          // scala equivalente, cosi' (x-cc)/ss == z robusto
+    [shift ? zz[1] : zz, shift ? cc[1] : cc, shift ? ss[1] : ss]
+
 // Eseguita DENTRO il contesto del TF richiesto: restituisce lo z nativo (modo A)
 // e la sorgente HTF grezza, che serve al modo B una volta mappata sul grafico.
 f_htf(simple int len, simple bool shift) =>
@@ -202,7 +225,10 @@ anyActive = use1 or use2 or use3 or use4 or use5
 // curva su cui si misura il rientro, e va poter essere quella che l'operatore
 // guarda davvero, non quella che capita di essere la sezione piu' veloce.
 secT  = timeframe.in_seconds(trigTf)
-[zT, sT] = request.security(syminfo.tickerid, trigTf, f_htf(trigLen, confirmed and secT > chartSec and not fastNow), lookahead = barmerge.lookahead_off)
+[zTclosed, cT, sclT] = request.security(syminfo.tickerid, trigTf, f_htfStat(trigLen, confirmed and secT > chartSec and not fastNow), lookahead = barmerge.lookahead_off)
+srcNow = f_src()                                    // prezzo corrente, sul grafico
+zTlive = sclT > 0 ? (srcNow - cT) / sclT : zTclosed
+zT     = trigLive ? zTlive : zTclosed
 
 modeA = zBasis == "A · TF nativo"
 modeB = zBasis == "B · Barre grafico (serie HTF)"
