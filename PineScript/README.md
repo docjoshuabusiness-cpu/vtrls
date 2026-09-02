@@ -5,9 +5,12 @@
 Indicatore di confluenza multi-timeframe su z-score, con 5 sezioni e 4 soglie tutte
 attivabili/disattivabili indipendentemente.
 
-**Overlay puro**: disegna solo i marker sul grafico prezzi, nessun pannello separato.
-I cinque z-score e quello del timeframe più veloce restano ispezionabili nel Data
-Window (`Alt+D`) passando il mouse su una barra.
+**Doppia vista da un solo script.** L'indicatore vive in un pannello separato, dove
+disegna le cinque curve z, la curva del timeframe più veloce e i livelli di soglia e
+di trigger degli stream attivi. I **marker dei segnali** vengono però spinti sul
+grafico dei prezzi tramite `force_overlay`, così le frecce/pallini stanno sulle
+candele e il quadro statistico resta leggibile sotto. Curve e livelli si spengono
+indipendentemente dal gruppo "Grafica".
 
 > **Installazione**: nel Pine Editor premi `Ctrl+A` per selezionare *tutto* il template
 > di default (`//@version=6`, `indicator("My script")`, `plot(close)`) e poi incolla.
