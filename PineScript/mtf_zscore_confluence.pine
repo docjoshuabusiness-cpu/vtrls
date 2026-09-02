@@ -76,6 +76,10 @@ len5 = input.int(100, "len", minval=5, maxval=5000, inline="s5", group=gT)
 var string gS = "3 · Logica segnale"
 lookback = input.int(10, "Finestra di confluenza (barre del grafico)", minval=1, maxval=500, group=gS,
      tooltip="Tutti i TF attivi devono aver superato la soglia almeno una volta entro queste N barre del grafico.\n\nREGOLA DI TARATURA: la finestra deve contenere almeno 2 barre della sezione piu LENTA, altrimenti quella sezione e praticamente ferma e dovrebbe trovarsi gia in soglia nell istante esatto in cui ci arriva la piu veloce.\n  minimo consigliato = 2 * (TF piu lento / TF del grafico)\n  esempio: grafico 5s, sezione piu lenta 5m -> 2 * (300/5) = 120 barre.\nCon valori troppo bassi la confluenza non si arma MAI: controlla il contatore armate in fondo alla dashboard.")
+trigOwn  = input.bool(true, "Serie dedicata per il trigger", group=gS,
+     tooltip="Il trigger NON eredita piu\' il modo e la len della sezione piu\' veloce: usa una serie propria, definita qui sotto e calcolata SEMPRE in modo nativo (z sulle candele del suo timeframe).\n\nCosi\' l\'armamento puo\' usare il modo che preferisci sulle 5 sezioni, mentre il segnale cade esattamente sulla barra in cui la curva che stai guardando attraversa il livello di trigger.\n\nPer replicare un indicatore esterno: imposta qui il suo timeframe e la sua Length.\n\nSpento, il trigger torna a usare la sezione attiva piu\' veloce.")
+trigTf   = input.timeframe("15S", "   timeframe del trigger", group=gS)
+trigLen  = input.int(17, "   len del trigger", minval=3, maxval=5000, group=gS)
 autoLb   = input.bool(true, "Finestra automatica (2 barre della sezione piu' lenta)", group=gS,
      tooltip="Calcola la finestra minima da solo: 2 * (TF piu' lento attivo / TF del grafico), e usa il valore maggiore fra questo e quello impostato sopra. Evita l'errore piu' comune, cioe' una finestra in cui le sezioni lente sono di fatto immobili e non possono mai allinearsi alle veloci.")
 fastNow  = input.bool(true, "Trigger immediato sul TF veloce (niente attesa di chiusura)", group=gS,
@@ -194,6 +198,12 @@ anyActive = use1 or use2 or use3 or use4 or use5
 [zN4, sH4] = request.security(syminfo.tickerid, tf4, f_htf(len4, confirmed and sec4 > chartSec and not (fastNow and m4 == minSec)), lookahead = barmerge.lookahead_off)
 [zN5, sH5] = request.security(syminfo.tickerid, tf5, f_htf(len5, confirmed and sec5 > chartSec and not (fastNow and m5 == minSec)), lookahead = barmerge.lookahead_off)
 
+// Serie dedicata al trigger: sempre modo nativo, indipendente da zBasis. E' la
+// curva su cui si misura il rientro, e va poter essere quella che l'operatore
+// guarda davvero, non quella che capita di essere la sezione piu' veloce.
+secT  = timeframe.in_seconds(trigTf)
+[zT, sT] = request.security(syminfo.tickerid, trigTf, f_htf(trigLen, confirmed and secT > chartSec and not fastNow), lookahead = barmerge.lookahead_off)
+
 modeA = zBasis == "A · TF nativo"
 modeB = zBasis == "B · Barre grafico (serie HTF)"
 
@@ -269,9 +279,12 @@ hi5 = ta.highest(z5, lbEff)
 lo5 = ta.lowest(z5, lbEff)
 
 // ------------------------------------------------ TF piu' veloce fra gli attivi
-zFast     = m1 == minSec ? z1 : m2 == minSec ? z2 : m3 == minSec ? z3 : m4 == minSec ? z4 : m5 == minSec ? z5 : na
+zSecFast  = m1 == minSec ? z1 : m2 == minSec ? z2 : m3 == minSec ? z3 : m4 == minSec ? z4 : m5 == minSec ? z5 : na
+zFast     = trigOwn ? zT : zSecFast
 zPrev     = nz(zFast[1], zFast)
-tfFast    = m1 == minSec ? tf1 : m2 == minSec ? tf2 : m3 == minSec ? tf3 : m4 == minSec ? tf4 : m5 == minSec ? tf5 : "-"
+tfSecFast = m1 == minSec ? tf1 : m2 == minSec ? tf2 : m3 == minSec ? tf3 : m4 == minSec ? tf4 : m5 == minSec ? tf5 : "-"
+tfFast    = trigOwn ? trigTf : tfSecFast
+winFast   = trigOwn ? float(trigLen) * secT : (modeA ? float(len1) * minSec : float(len1) * chartSec)
 
 // Cross puri (nessuno stato interno => sicuri dentro rami condizionali).
 f_cu(float now, float prev, float lvl) => now < lvl and prev >= lvl
@@ -496,8 +509,8 @@ if showTab and barstate.islast
     armTxt = (armA ? "A " : "") + (armB ? "B " : "") + (armC ? "C " : "") + (armD ? "D " : "")
     table.cell(dash, 0, 6, "modo", text_size=szDash, text_color=color.white, bgcolor=hdrBg)
     table.cell(dash, 1, 6, modeTag, text_size=szDash, text_color=color.white, bgcolor=hdrBg)
-    table.cell(dash, 2, 6, "fast", text_size=szDash, text_color=color.white, bgcolor=hdrBg)
-    table.cell(dash, 3, 6, tfFast, text_size=szDash, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 2, 6, "trigger", text_size=szDash, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 3, 6, tfFast + " " + f_wtxt(winFast), text_size=szDash, text_color=trigOwn ? color.aqua : color.white, bgcolor=hdrBg)
     table.cell(dash, 4, 6, "ora", text_size=szDash, text_color=color.white, bgcolor=hdrBg)
     table.cell(dash, 5, 6, armTxt == "" ? "–" : armTxt, text_size=szDash, text_color=color.white, bgcolor=armTxt == "" ? hdrBg : color.new(color.orange, 40))
 

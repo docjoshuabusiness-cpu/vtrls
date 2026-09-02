@@ -68,6 +68,26 @@ sezione smette di essere una richiesta di dati e diventa un puro **moltiplicator
 orizzonte**: due sezioni con lo stesso `k` producono z identici, quindi vanno
 differenziate via `len`.
 
+### Serie dedicata per il trigger
+
+Armamento e trigger sono due cose distinte e possono usare serie diverse.
+L'armamento chiede che *tutte* le sezioni attive siano state in soglia entro la
+finestra; il trigger è il momento in cui **una sola curva** riattraversa il
+livello. Legare quest'ultima alla sezione più veloce la costringeva a ereditarne
+il modo e la `len`, che è una dipendenza inutile: in modo C, per esempio, la
+sezione 15S non è affatto lo z-score a 15S, è lo z del prezzo del grafico su un
+orizzonte equivalente.
+
+Con `Serie dedicata per il trigger` (default ON) il trigger usa una serie propria,
+definita da `timeframe del trigger` e `len del trigger` e calcolata **sempre in modo
+nativo**. Le 5 sezioni restano libere di usare qualunque `zBasis`, e il marker cade
+sulla barra in cui la curva che stai davvero guardando attraversa il livello.
+
+Per replicare un indicatore esterno basta ricopiarne timeframe e Length in questi
+due campi: con `15S` e `17` la curva di trigger è identica a un riferimento
+configurato `Length 17 · Close · Timeframe 15 seconds`. La riga `trigger` della
+dashboard mostra in azzurro il timeframe e la durata reale della finestra in uso.
+
 ### Riprodurre un indicatore z-score esistente
 
 Per confrontare una sezione con un altro indicatore z-score, i parametri devono
