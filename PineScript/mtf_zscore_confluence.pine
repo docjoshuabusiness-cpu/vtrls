@@ -76,6 +76,10 @@ len5 = input.int(100, "len", minval=5, maxval=5000, inline="s5", group=gT)
 var string gS = "3 · Logica segnale"
 lookback = input.int(10, "Finestra di confluenza (barre del grafico)", minval=1, maxval=500, group=gS,
      tooltip="Tutti i TF attivi devono aver superato la soglia almeno una volta entro queste N barre del grafico.\n\nREGOLA DI TARATURA: la finestra deve contenere almeno 2 barre della sezione piu LENTA, altrimenti quella sezione e praticamente ferma e dovrebbe trovarsi gia in soglia nell istante esatto in cui ci arriva la piu veloce.\n  minimo consigliato = 2 * (TF piu lento / TF del grafico)\n  esempio: grafico 5s, sezione piu lenta 5m -> 2 * (300/5) = 120 barre.\nCon valori troppo bassi la confluenza non si arma MAI: controlla il contatore armate in fondo alla dashboard.")
+autoLb   = input.bool(true, "Finestra automatica (2 barre della sezione piu' lenta)", group=gS,
+     tooltip="Calcola la finestra minima da solo: 2 * (TF piu' lento attivo / TF del grafico), e usa il valore maggiore fra questo e quello impostato sopra. Evita l'errore piu' comune, cioe' una finestra in cui le sezioni lente sono di fatto immobili e non possono mai allinearsi alle veloci.")
+fastNow  = input.bool(true, "Trigger immediato sul TF veloce (niente attesa di chiusura)", group=gS,
+     tooltip="La sezione PIU' VELOCE non subisce lo shift anti-repaint, quindi il rientro sotto il livello di trigger viene rilevato sulla barra del grafico in cui avviene davvero, non alla chiusura della sua candela.\n\nCosto: sulla barra in corso il segnale puo' comparire e sparire finche' la barra del grafico non chiude. Le barre storiche non sono toccate.\n\nSpento, su grafico 5s con sezione veloce 15S, il segnale arriva fino a 3 barre in ritardo.")
 trigMode = input.string("Rientro (reversione)", "Modalita' trigger",
      options=["Rientro (reversione)","Primo tocco della soglia"], group=gS,
      tooltip="Rientro: il TF piu' veloce riattraversa il livello di trigger tornando verso lo zero (setup di esaurimento). Primo tocco: il TF piu' veloce buca la soglia (setup di continuazione/momentum).")
@@ -154,12 +158,23 @@ k3 = int(math.max(1, math.round(sec3 / float(chartSec))))
 k4 = int(math.max(1, math.round(sec4 / float(chartSec))))
 k5 = int(math.max(1, math.round(sec5 / float(chartSec))))
 
+// TF piu' veloce fra gli attivi: serve gia' qui, perche' decide quale sezione
+// viene esentata dallo shift anti-repaint quando fastNow e' attivo.
+BIG = 1e12
+m1 = use1 ? sec1 : BIG
+m2 = use2 ? sec2 : BIG
+m3 = use3 ? sec3 : BIG
+m4 = use4 ? sec4 : BIG
+m5 = use5 ? sec5 : BIG
+minSec    = math.min(math.min(math.min(math.min(m1, m2), m3), m4), m5)
+anyActive = use1 or use2 or use3 or use4 or use5
+
 // Lo shift anti-repaint si applica solo ai TF STRETTAMENTE superiori al grafico.
-[zN1, sH1] = request.security(syminfo.tickerid, tf1, f_htf(len1, confirmed and sec1 > chartSec), lookahead = barmerge.lookahead_off)
-[zN2, sH2] = request.security(syminfo.tickerid, tf2, f_htf(len2, confirmed and sec2 > chartSec), lookahead = barmerge.lookahead_off)
-[zN3, sH3] = request.security(syminfo.tickerid, tf3, f_htf(len3, confirmed and sec3 > chartSec), lookahead = barmerge.lookahead_off)
-[zN4, sH4] = request.security(syminfo.tickerid, tf4, f_htf(len4, confirmed and sec4 > chartSec), lookahead = barmerge.lookahead_off)
-[zN5, sH5] = request.security(syminfo.tickerid, tf5, f_htf(len5, confirmed and sec5 > chartSec), lookahead = barmerge.lookahead_off)
+[zN1, sH1] = request.security(syminfo.tickerid, tf1, f_htf(len1, confirmed and sec1 > chartSec and not (fastNow and m1 == minSec)), lookahead = barmerge.lookahead_off)
+[zN2, sH2] = request.security(syminfo.tickerid, tf2, f_htf(len2, confirmed and sec2 > chartSec and not (fastNow and m2 == minSec)), lookahead = barmerge.lookahead_off)
+[zN3, sH3] = request.security(syminfo.tickerid, tf3, f_htf(len3, confirmed and sec3 > chartSec and not (fastNow and m3 == minSec)), lookahead = barmerge.lookahead_off)
+[zN4, sH4] = request.security(syminfo.tickerid, tf4, f_htf(len4, confirmed and sec4 > chartSec and not (fastNow and m4 == minSec)), lookahead = barmerge.lookahead_off)
+[zN5, sH5] = request.security(syminfo.tickerid, tf5, f_htf(len5, confirmed and sec5 > chartSec and not (fastNow and m5 == minSec)), lookahead = barmerge.lookahead_off)
 
 modeA = zBasis == "A · TF nativo"
 modeB = zBasis == "B · Barre grafico (serie HTF)"
@@ -199,27 +214,28 @@ f_zcap(float ne) => math.sqrt(math.max(ne - 1.0, 0.0))
 // soglia attiva piu' ambiziosa: serve a capire se il tetto la rende irraggiungibile
 thrMaxAct = math.max(math.max(enP2 ? math.abs(thrP2) : 0.0, enP1 ? math.abs(thrP1) : 0.0), math.max(enM1 ? math.abs(thrM1) : 0.0, enM2 ? math.abs(thrM2) : 0.0))
 
+// Finestra effettiva: mai piu' stretta di 2 barre della sezione piu' lenta attiva.
+kAct1 = use1 ? k1 : 1
+kAct2 = use2 ? k2 : 1
+kAct3 = use3 ? k3 : 1
+kAct4 = use4 ? k4 : 1
+kAct5 = use5 ? k5 : 1
+kMax  = math.max(math.max(math.max(math.max(kAct1, kAct2), kAct3), kAct4), kAct5)
+lbEff = autoLb ? int(math.max(lookback, 2 * kMax)) : lookback
+
 // Estremi raggiunti nella finestra di confluenza (barre del grafico = unita' di tempo uniforme).
-hi1 = ta.highest(z1, lookback)
-lo1 = ta.lowest(z1, lookback)
-hi2 = ta.highest(z2, lookback)
-lo2 = ta.lowest(z2, lookback)
-hi3 = ta.highest(z3, lookback)
-lo3 = ta.lowest(z3, lookback)
-hi4 = ta.highest(z4, lookback)
-lo4 = ta.lowest(z4, lookback)
-hi5 = ta.highest(z5, lookback)
-lo5 = ta.lowest(z5, lookback)
+hi1 = ta.highest(z1, lbEff)
+lo1 = ta.lowest(z1, lbEff)
+hi2 = ta.highest(z2, lbEff)
+lo2 = ta.lowest(z2, lbEff)
+hi3 = ta.highest(z3, lbEff)
+lo3 = ta.lowest(z3, lbEff)
+hi4 = ta.highest(z4, lbEff)
+lo4 = ta.lowest(z4, lbEff)
+hi5 = ta.highest(z5, lbEff)
+lo5 = ta.lowest(z5, lbEff)
 
 // ------------------------------------------------ TF piu' veloce fra gli attivi
-BIG = 1e12
-m1 = use1 ? sec1 : BIG
-m2 = use2 ? sec2 : BIG
-m3 = use3 ? sec3 : BIG
-m4 = use4 ? sec4 : BIG
-m5 = use5 ? sec5 : BIG
-minSec    = math.min(math.min(math.min(math.min(m1, m2), m3), m4), m5)
-anyActive = use1 or use2 or use3 or use4 or use5
 zFast     = m1 == minSec ? z1 : m2 == minSec ? z2 : m3 == minSec ? z3 : m4 == minSec ? z4 : m5 == minSec ? z5 : na
 zPrev     = nz(zFast[1], zFast)
 tfFast    = m1 == minSec ? tf1 : m2 == minSec ? tf2 : m3 == minSec ? tf3 : m4 == minSec ? tf4 : m5 == minSec ? tf5 : "-"
@@ -360,7 +376,7 @@ if showTab and barstate.islast
     modeTag = modeA ? "A nativo" : modeB ? "B grafico/HTF" : "C orizz.equiv."
     table.cell(dash, 0, 0, "TF", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
     table.cell(dash, 1, 0, "z", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
-    table.cell(dash, 2, 0, "min/max " + str.tostring(lookback), bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 0, "min/max " + str.tostring(lbEff), bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
     table.cell(dash, 3, 0, "n · cap", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
     table.cell(dash, 4, 0, "hit", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
     table.cell(dash, 5, 0, "stato", bgcolor=hdrBg, text_color=color.white, text_size=size.tiny)
