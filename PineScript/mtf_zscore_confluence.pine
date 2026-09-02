@@ -95,6 +95,8 @@ fastNow  = input.bool(true, "Trigger immediato sul TF veloce (niente attesa di c
 trigMode = input.string("Rientro (reversione)", "Modalita' trigger",
      options=["Rientro (reversione)","Primo tocco della soglia"], group=gS,
      tooltip="Rientro: il TF piu' veloce riattraversa il livello di trigger tornando verso lo zero (setup di esaurimento). Primo tocco: il TF piu' veloce buca la soglia (setup di continuazione/momentum).")
+reqSec   = input.int(0, "Sezioni richieste in soglia (0 = tutte)", minval=0, maxval=5, group=gS,
+     tooltip="Quante sezioni ATTIVE devono essere in soglia perche\' il setup si armi.\n\n0 = tutte (congiunzione piena). E\' la richiesta piu\' severa ma anche la piu\' fragile: le sezioni lente hanno una frequenza naturale molto piu\' bassa delle veloci, quindi sono loro a dettare il ritmo e le veloci non aggiungono quasi nulla. Con una sezione a 5m su grafico 5s la finestra e\' di ore: perche\' tocchi -2 serve un movimento 10-15 volte piu\' grande di quello che porta la finestra da 4m a -2.\n\nK < numero di sezioni attive = confluenza PARZIALE: bastano K sezioni qualsiasi. Recuperi frequenza senza rinunciare all\'idea di conferma, e confrontando K=2, 3, 4 vedi quanto vale davvero ogni sezione in piu\'.\n\nSe K supera le sezioni attive viene ridotto automaticamente.")
 repMode  = input.string("Uno per escursione", "Ripetizione dei segnali",
      options=["Uno per escursione","Uno per armamento","Tutti"], group=gS,
      tooltip="UNO PER ESCURSIONE (default): dopo un segnale il latch si riarma appena la serie di trigger RIENTRA oltre la soglia. Se lo z torna sopra +2 e poi riscende sotto +1, esce un secondo segnale. E\' il comportamento naturale: ogni escursione nell\'estremo e\' un setup a se\'.\n\nUNO PER ARMAMENTO: un solo segnale finche\' l\'armamento resta valido. Il piu\' conservativo, ma perde i setup successivi dentro la stessa finestra.\n\nTUTTI: ogni attraversamento del livello di trigger produce un segnale, limitato solo dal cooldown. Massimo campione, massimo rumore.\n\nIl numero accanto al marker e\' la posizione del segnale dentro l\'armamento corrente: serve a verificare se il primo vale davvero meno dei successivi.")
@@ -219,6 +221,7 @@ m4 = use4 ? sec4 : BIG
 m5 = use5 ? sec5 : BIG
 minSec    = math.min(math.min(math.min(math.min(m1, m2), m3), m4), m5)
 anyActive = use1 or use2 or use3 or use4 or use5
+nActive   = (use1 ? 1 : 0) + (use2 ? 1 : 0) + (use3 ? 1 : 0) + (use4 ? 1 : 0) + (use5 ? 1 : 0)
 
 // Lo shift anti-repaint si applica solo ai TF STRETTAMENTE superiori al grafico.
 [zN1, sH1] = request.security(syminfo.tickerid, tf1, f_htf(len1, confirmed and sec1 > chartSec and not (fastNow and m1 == minSec)), lookahead = barmerge.lookahead_off)
@@ -322,19 +325,26 @@ winFast   = trigOwn ? float(trigLen) * secT : (modeA ? float(len1) * minSec : fl
 f_cu(float now, float prev, float lvl) => now < lvl and prev >= lvl
 f_co(float now, float prev, float lvl) => now > lvl and prev <= lvl
 
-// Armamento: TUTTI i TF attivi hanno superato la soglia entro la finestra.
+// Armamento: quante sezioni attive hanno superato la soglia entro la finestra.
+// Con reqSec = 0 servono tutte; con K < attive basta una confluenza parziale.
+// Restituisce anche il conteggio, che serve alla diagnostica dei setup mancati.
 f_arm(float thr, bool isUp) =>
-    a = anyActive
-    if use1
-        a := a and (isUp ? hi1 >= thr : lo1 <= thr)
-    if use2
-        a := a and (isUp ? hi2 >= thr : lo2 <= thr)
-    if use3
-        a := a and (isUp ? hi3 >= thr : lo3 <= thr)
-    if use4
-        a := a and (isUp ? hi4 >= thr : lo4 <= thr)
-    if use5
-        a := a and (isUp ? hi5 >= thr : lo5 <= thr)
+    int okN = 0
+    if use1 and (isUp ? hi1 >= thr : lo1 <= thr)
+        okN += 1
+    if use2 and (isUp ? hi2 >= thr : lo2 <= thr)
+        okN += 1
+    if use3 and (isUp ? hi3 >= thr : lo3 <= thr)
+        okN += 1
+    if use4 and (isUp ? hi4 >= thr : lo4 <= thr)
+        okN += 1
+    if use5 and (isUp ? hi5 >= thr : lo5 <= thr)
+        okN += 1
+    need = reqSec <= 0 ? nActive : math.min(reqSec, nActive)
+    [anyActive and okN >= need, okN, need]
+
+f_armOk(float thr, bool isUp) =>
+    [a, _o, _n] = f_arm(thr, isUp)
     a
 
 // Uno stream = una soglia. Latch: un solo segnale per episodio di armamento.
@@ -342,7 +352,7 @@ f_stream(bool en, float thr, float trg, bool isUp) =>
     var bool fired   = false
     var int  lastSig = -100000
     var int  seq     = 0
-    armed = en and f_arm(thr, isUp)
+    armed = en and f_armOk(thr, isUp)
     // rientro nell'estremo: la serie di trigger torna oltre la soglia, quindi
     // quella che segue e' una NUOVA escursione e merita un proprio segnale
     reEnter = isUp ? zFast >= thr : zFast <= thr
@@ -494,7 +504,8 @@ f_missTxt(float thr, bool isUp) =>
 
 f_miss(bool en, bool trig, bool armed, float y, string tag, float thr, bool isUp) =>
     if showMiss and en and trig and not armed
-        label.new(bar_index, y, "×" + tag + f_missTxt(thr, isUp), style = label.style_none, textcolor = color.new(color.gray, 25), size = szMark, textalign = text.align_center)
+        [_a, okN, need] = f_arm(thr, isUp)
+        label.new(bar_index, y, "×" + tag + " " + str.tostring(okN) + "/" + str.tostring(need) + f_missTxt(thr, isUp), style = label.style_none, textcolor = color.new(color.gray, 25), size = szMark, textalign = text.align_center)
 
 f_seqTxt(int n) => showSeq and n > 1 ? str.tostring(n) : ""
 
@@ -582,7 +593,7 @@ if showTab and barstate.islast
     table.cell(dash, 5, 6, armTxt == "" ? "–" : armTxt, text_size=szDash, text_color=color.white, bgcolor=armTxt == "" ? hdrBg : color.new(color.orange, 40))
 
     // -- diagnostica: dove si rompe la catena --------------------------------
-    table.cell(dash, 0, 7, "stream",  text_size=szDash, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 0, 7, "K " + str.tostring(reqSec <= 0 ? nActive : math.min(reqSec, nActive)) + "/" + str.tostring(nActive), text_size=szDash, text_color=reqSec > 0 and reqSec < nActive ? color.yellow : color.white, bgcolor=hdrBg)
     table.cell(dash, 1, 7, "A " + str.tostring(thrP2, "#.#"), text_size=szDash, text_color=enP2 ? cUp : color.gray, bgcolor=hdrBg)
     table.cell(dash, 2, 7, "B " + str.tostring(thrP1, "#.#"), text_size=szDash, text_color=enP1 ? cUp : color.gray, bgcolor=hdrBg)
     table.cell(dash, 3, 7, "C " + str.tostring(thrM1, "#.#"), text_size=szDash, text_color=enM1 ? cDn : color.gray, bgcolor=hdrBg)
