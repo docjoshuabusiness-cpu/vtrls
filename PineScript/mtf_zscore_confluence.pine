@@ -109,6 +109,15 @@ showZ    = input.bool(true,  "Curve z-score nel pannello", group=gV)
 showLv   = input.bool(true,  "Linee di soglia e di trigger nel pannello", group=gV)
 showArmBg= input.bool(true,  "Sfondo colorato quando un setup e' armato", group=gV)
 showTab  = input.bool(true,  "Mostra cruscotto", group=gV)
+cz1      = input.color(color.new(#42a5f5, 0), "S1", inline="zc1", group=gV)
+cz2      = input.color(color.new(#7e57c2, 0), "S2", inline="zc1", group=gV)
+cz3      = input.color(color.new(#ffa726, 0), "S3", inline="zc1", group=gV)
+cz4      = input.color(color.new(#ec407a, 0), "S4", inline="zc2", group=gV)
+cz5      = input.color(color.new(#bdbdbd, 0), "S5", inline="zc2", group=gV)
+czF      = input.color(color.new(#ffffff, 25), "TF veloce", inline="zc2", group=gV)
+showTags = input.bool(true, "Etichette del periodo a destra delle curve", group=gV,
+     tooltip="Scrive il timeframe di ogni sezione in fondo alla sua curva, nel pannello. Serve a non dover ricordare a memoria quale colore corrisponde a quale periodo.")
+tagOff   = input.int(4, "   distanza (barre)", minval=1, maxval=50, group=gV)
 cUp      = input.color(color.new(#ef5350, 0), "Colore SELL", inline="col", group=gV)
 cDn      = input.color(color.new(#26a69a, 0), "Colore BUY",  inline="col", group=gV)
 
@@ -321,12 +330,28 @@ cSigD = f_cnt(sigD)
 // Il pannello mostra le curve z e i livelli. I MARKER invece vengono spinti sul
 // grafico dei prezzi con force_overlay: cosi' si ha il quadro statistico sotto e
 // i segnali sulle candele, senza dover caricare due script.
-plot(showZ and use1 ? z1 : na, "z S1", color = color.new(#42a5f5, 0), linewidth = 1)
-plot(showZ and use2 ? z2 : na, "z S2", color = color.new(#7e57c2, 0), linewidth = 1)
-plot(showZ and use3 ? z3 : na, "z S3", color = color.new(#ffa726, 0), linewidth = 1)
-plot(showZ and use4 ? z4 : na, "z S4", color = color.new(#ec407a, 0), linewidth = 1)
-plot(showZ and use5 ? z5 : na, "z S5", color = color.new(#bdbdbd, 0), linewidth = 2)
-plot(showZ ? zFast : na,       "z TF veloce", color = color.new(color.white, 35), linewidth = 2)
+plot(showZ and use1 ? z1 : na, "z S1", color = cz1, linewidth = 1)
+plot(showZ and use2 ? z2 : na, "z S2", color = cz2, linewidth = 1)
+plot(showZ and use3 ? z3 : na, "z S3", color = cz3, linewidth = 1)
+plot(showZ and use4 ? z4 : na, "z S4", color = cz4, linewidth = 1)
+plot(showZ and use5 ? z5 : na, "z S5", color = cz5, linewidth = 2)
+plot(showZ ? zFast : na,       "z TF veloce", color = czF, linewidth = 2)
+
+// Etichetta con il periodo, scritta in fondo alla curva della sezione. Cosi' la
+// corrispondenza colore -> timeframe si legge dal pannello e non va ricordata.
+f_tag(bool use, string tf, float z, color c) =>
+    var label lb = label.new(bar_index, 0.0, "", style = label.style_none, size = size.tiny, textalign = text.align_left)
+    if barstate.islast
+        label.set_xy(lb, bar_index + tagOff, z)
+        label.set_text(lb, showZ and showTags and use ? tf : "")
+        label.set_textcolor(lb, c)
+    lb
+
+f_tag(use1, tf1, z1, cz1)
+f_tag(use2, tf2, z2, cz2)
+f_tag(use3, tf3, z3, cz3)
+f_tag(use4, tf4, z4, cz4)
+f_tag(use5, tf5, z5, cz5)
 
 // Soglie e trigger: solo quelli degli stream ATTIVI, cosi' il pannello mostra
 // esattamente la configurazione in uso e non quattro righe decorative.
@@ -396,6 +421,7 @@ if showTab and barstate.islast
     zs = array.from(z1, z2, z3, z4, z5)
     us = array.from(use1, use2, use3, use4, use5)
     hs = array.from(cHit1, cHit2, cHit3, cHit4, cHit5)
+    cs = array.from(cz1, cz2, cz3, cz4, cz5)
 
     for i = 0 to 4
         zv   = array.get(zs, i)
@@ -403,7 +429,7 @@ if showTab and barstate.islast
         dead = array.get(ds, i)
         col  = not act ? color.new(color.gray, 60) : dead ? color.new(color.red, 25) : array.get(bs, i) ? color.new(color.orange, 30) : zv >= 2 ? color.new(cUp, 40) : zv <= -2 ? color.new(cDn, 40) : color.new(color.gray, 80)
         st   = not act ? "off" : dead ? "cap < soglia" : (zv >= 2 or zv <= -2 ? "estremo" : "–")
-        table.cell(dash, 0, i + 1, "S" + str.tostring(i + 1) + " " + array.get(ts, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
+        table.cell(dash, 0, i + 1, "S" + str.tostring(i + 1) + " " + array.get(ts, i), text_size=size.tiny, text_color=act ? array.get(cs, i) : color.gray, bgcolor=col)
         table.cell(dash, 1, i + 1, array.get(vs, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
         table.cell(dash, 2, i + 1, array.get(rs, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
         table.cell(dash, 3, i + 1, array.get(qs, i), text_size=size.tiny, text_color=color.white, bgcolor=col)
