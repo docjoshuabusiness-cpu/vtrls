@@ -121,6 +121,25 @@ thrM2 = input.float(-2.0, "liv", step=0.1, inline="d", group=gL)
 trgM2 = input.float(-1.0, "trigger", step=0.1, inline="d", group=gL)
 
 // ------------------------------------------------------------------- GRAFICA -
+var string gR = "5 · Entrata e rischio"
+atrLenR  = input.int(14, "ATR di riferimento", minval=2, group=gR)
+swingLen = input.int(10, "Barre per lo stop strutturale", minval=2, maxval=200, group=gR,
+     tooltip="Lo stop viene messo oltre l\'estremo delle ultime N barre piu\' un buffer. La sua DISTANZA e\' il rischio del trade: e\' questa la quantita\' da minimizzare, non il drawdown, che non dipende da te.")
+stopBuf  = input.float(0.15, "   buffer oltre l\'estremo (x ATR)", minval=0.0, maxval=2.0, step=0.05, group=gR)
+useRisk  = input.bool(false, "Filtro: accetta solo stop stretti", group=gR,
+     tooltip="Scarta i segnali in cui lo stop strutturale e\' piu\' lontano della soglia. E\' il filtro che risponde direttamente a \'voglio entrare dove il rischio e\' minimo\': non rende il segnale migliore, seleziona i casi in cui la struttura offre un\'invalidazione vicina.\n\nATTENZIONE: uno stop piu\' stretto NON riduce la MAE, riduce la frazione di trade che le sopravvive. Confronta sempre la soglia scelta con i percentili MAE in fondo alla dashboard: uno stop sotto il p80 verra\' colpito in almeno un caso su cinque anche quando il segnale aveva ragione.")
+maxStopA = input.float(1.0, "   stop massimo (x ATR)", minval=0.1, maxval=10.0, step=0.1, group=gR)
+useComp  = input.bool(false, "Filtro: solo su barra compressa", group=gR,
+     tooltip="Richiede che la barra del segnale abbia TR/ATR sotto la soglia. Entrare su una barra di espansione significa comprare il massimo del rumore locale: lo stop strutturale e\' largo proprio perche\' la barra e\' larga.")
+maxTrAtr = input.float(1.2, "   TR/ATR massimo", minval=0.2, maxval=5.0, step=0.1, group=gR)
+entLen   = input.int(20, "Entropia: barre", minval=5, maxval=200, group=gR,
+     tooltip="Entropia binaria della direzione delle ultime N barre.\n  H = 0   -> tutte nella stessa direzione, movimento ordinato\n  H = 1   -> meta\' su meta\' giu\', rumore puro\nPer un ingresso in controtendenza dopo un estremo, H bassa significa che l\'impulso e\' ANCORA in corso: e\' il caso in cui il fade viene travolto. H alta significa che l\'impulso si e\' disordinato.\n\nE\' un\'IPOTESI da verificare, non una verita\': lascia il range 0-1 e guarda la colonna MAE per capire se filtrare aiuta davvero.")
+entMin   = input.float(0.0, "   H minima", minval=0.0, maxval=1.0, step=0.05, inline="ent", group=gR)
+entMax   = input.float(1.0, "   H massima", minval=0.0, maxval=1.0, step=0.05, inline="ent", group=gR)
+maeLen   = input.int(30, "Orizzonte di misura della MAE (barre)", minval=3, maxval=500, group=gR,
+     tooltip="Dopo ogni segnale viene misurata la massima escursione CONTRARIA nelle N barre successive, espressa in ATR. I percentili in fondo alla dashboard sono la risposta empirica a \'quanto stretto puo\' stare lo stop\': sotto il p80 vieni colpito in un caso su cinque, sotto la mediana in uno su due.")
+showRisk = input.bool(true, "Scrivi il rischio in tick accanto al marker", group=gR)
+
 var string gV = "5 · Grafica"
 marker   = input.string("Freccia", "Marker segnale", options=["Freccia","Pallino"], group=gV)
 showZ    = input.bool(true,  "Curve z-score nel pannello", group=gV)
@@ -286,6 +305,8 @@ winS3 = modeA ? float(len3) * sec3 : modeB ? float(len3) * chartSec : float(lenC
 winS4 = modeA ? float(len4) * sec4 : modeB ? float(len4) * chartSec : float(lenC4) * chartSec
 winS5 = modeA ? float(len5) * sec5 : modeB ? float(len5) * chartSec : float(lenC5) * chartSec
 
+f_n2(float v) => na(v) ? "n/a" : str.tostring(v, "#.00")
+
 f_wtxt(float sc) =>
     sc < 60 ? str.tostring(math.round(sc)) + "s" : sc < 3600 ? str.tostring(math.round(sc / 60)) + "m" : str.tostring(math.round(sc / 3600.0, 1)) + "h"
 
@@ -324,6 +345,33 @@ winFast   = trigOwn ? float(trigLen) * secT : (modeA ? float(len1) * minSec : fl
 // Cross puri (nessuno stato interno => sicuri dentro rami condizionali).
 f_cu(float now, float prev, float lvl) => now < lvl and prev >= lvl
 f_co(float now, float prev, float lvl) => now > lvl and prev <= lvl
+
+// ======================================================= ENTRATA E RISCHIO ===
+//  Lo stop NON riduce l'escursione contraria: decide solo quando smetti di
+//  guardarla. Quello che si puo' scegliere e' il PUNTO in cui la struttura
+//  offre un'invalidazione vicina, e la distanza di quello stop e' il rischio.
+atrR   = math.max(ta.atr(atrLenR), syminfo.mintick)
+swHi   = ta.highest(high, swingLen)
+swLo   = ta.lowest(low,  swingLen)
+stpSell = swHi + stopBuf * atrR          // stop di uno SHORT: oltre il massimo
+stpBuy  = swLo - stopBuf * atrR          // stop di un LONG:   oltre il minimo
+rskSell = stpSell - close
+rskBuy  = close - stpBuy
+
+trAtr  = ta.tr(true) / atrR
+
+// Entropia binaria della direzione: 0 = tutte le barre nello stesso verso,
+// 1 = meta' su meta' giu'. Misura quanto e' ordinato il movimento recente.
+upCnt  = math.sum(close > close[1] ? 1.0 : 0.0, entLen)
+pUp    = upCnt / entLen
+entH   = pUp <= 0.0 or pUp >= 1.0 ? 0.0 : -(pUp * math.log(pUp) + (1 - pUp) * math.log(1 - pUp)) / math.log(2)
+
+f_riskOk(bool isSell) =>
+    r      = isSell ? rskSell : rskBuy
+    okStop = not useRisk or (r > 0 and r <= maxStopA * atrR)
+    okComp = not useComp or trAtr <= maxTrAtr
+    okEnt  = entH >= entMin and entH <= entMax
+    okStop and okComp and okEnt
 
 // Armamento: quante sezioni attive hanno superato la soglia entro la finestra.
 // Con reqSec = 0 servono tutte; con K < attive basta una confluenza parziale.
@@ -366,7 +414,7 @@ f_stream(bool en, float thr, float trg, bool isUp) =>
         trig := isUp ? f_co(zFast, zPrev, thr) : f_cu(zFast, zPrev, thr)
     else
         trig := isUp ? f_cu(zFast, zPrev, trg) : f_co(zFast, zPrev, trg)
-    fire = armed and not fired and trig and not na(zFast) and (bar_index - lastSig >= cooldown)
+    fire = armed and not fired and trig and not na(zFast) and f_riskOk(isUp) and (bar_index - lastSig >= cooldown)
     if fire
         fired   := true
         lastSig := bar_index
@@ -377,6 +425,47 @@ f_stream(bool en, float thr, float trg, bool isUp) =>
 [sigB, armB, seqB, trgBRaw] = f_stream(enP1, thrP1, trgP1, true)
 [sigC, armC, seqC, trgCRaw] = f_stream(enM1, thrM1, trgM1, false)
 [sigD, armD, seqD, trgDRaw] = f_stream(enM2, thrM2, trgM2, false)
+
+// ============================================== MISURA DELLA MAE =============
+//  Dopo ogni segnale si misura la massima escursione CONTRARIA nelle maeLen
+//  barre successive, in unita' di ATR. I percentili di questa distribuzione
+//  sono la risposta empirica a "quanto stretto puo' stare lo stop":
+//  uno stop sotto il p80 viene colpito in almeno un caso su cinque ANCHE
+//  quando il segnale aveva ragione sulla direzione.
+//  Si traccia un segnale alla volta: le sovrapposizioni non sono campionate,
+//  quindi il numero e' una sottostima del totale, non una distorsione.
+var array<float> maeArr = array.new_float()
+var bool  trk   = false
+var float trkPx = 0.0
+var int   trkDir= 0
+var float trkMae= 0.0
+var int   trkBar= 0
+
+sigSell = sigA or sigB
+sigBuy  = sigC or sigD
+anySig  = sigSell or sigBuy
+
+if trk
+    trkBar += 1
+    adv = trkDir > 0 ? trkPx - low : high - trkPx      // escursione CONTRARIA
+    trkMae := math.max(trkMae, adv)
+    if trkBar >= maeLen
+        array.push(maeArr, trkMae / atrR)
+        if array.size(maeArr) > 500
+            array.shift(maeArr)
+        trk := false
+
+if anySig and not trk
+    trk    := true
+    trkPx  := close
+    trkDir := sigBuy ? 1 : -1
+    trkMae := 0.0
+    trkBar := 0
+
+maeN   = array.size(maeArr)
+maeMed = maeN >= 5 ? array.percentile_nearest_rank(maeArr, 50) : na
+maeP80 = maeN >= 5 ? array.percentile_nearest_rank(maeArr, 80) : na
+maeP95 = maeN >= 5 ? array.percentile_nearest_rank(maeArr, 95) : na
 
 // ============================================================ DIAGNOSTICA =====
 //  Quando non compaiono segnali serve sapere DOVE si rompe la catena, non
@@ -508,16 +597,20 @@ f_miss(bool en, bool trig, bool armed, float y, string tag, float thr, bool isUp
         label.new(bar_index, y, "×" + tag + " " + str.tostring(okN) + "/" + str.tostring(need) + f_missTxt(thr, isUp), style = label.style_none, textcolor = color.new(color.gray, 25), size = szMark, textalign = text.align_center)
 
 f_seqTxt(int n) => showSeq and n > 1 ? str.tostring(n) : ""
+// distanza dello stop strutturale, in tick: e' il rischio del trade
+f_rskTxt(bool isSell) =>
+    r = isSell ? rskSell : rskBuy
+    showRisk and r > 0 ? " " + str.tostring(math.round(r / syminfo.mintick)) + "t" : ""
 
-f_markPane(sigA,  markLvl,        txSell + "A" + f_seqTxt(seqA), cUp)
-f_markPane(sigB,  markLvl - 0.35, txSell + "B" + f_seqTxt(seqB), color.new(cUp, 35))
-f_markPane(sigC, -markLvl + 0.35, txBuy  + "C" + f_seqTxt(seqC), color.new(cDn, 35))
-f_markPane(sigD, -markLvl,        txBuy  + "D" + f_seqTxt(seqD), cDn)
+f_markPane(sigA,  markLvl,        txSell + "A" + f_seqTxt(seqA) + f_rskTxt(true), cUp)
+f_markPane(sigB,  markLvl - 0.35, txSell + "B" + f_seqTxt(seqB) + f_rskTxt(true), color.new(cUp, 35))
+f_markPane(sigC, -markLvl + 0.35, txBuy  + "C" + f_seqTxt(seqC) + f_rskTxt(false), color.new(cDn, 35))
+f_markPane(sigD, -markLvl,        txBuy  + "D" + f_seqTxt(seqD) + f_rskTxt(false), cDn)
 
-f_markChart(sigA, true,  txSell + "A" + f_seqTxt(seqA), cUp)
-f_markChart(sigB, true,  txSell + "B" + f_seqTxt(seqB), color.new(cUp, 35))
-f_markChart(sigC, false, txBuy  + "C" + f_seqTxt(seqC), color.new(cDn, 35))
-f_markChart(sigD, false, txBuy  + "D" + f_seqTxt(seqD), cDn)
+f_markChart(sigA, true,  txSell + "A" + f_seqTxt(seqA) + f_rskTxt(true), cUp)
+f_markChart(sigB, true,  txSell + "B" + f_seqTxt(seqB) + f_rskTxt(true), color.new(cUp, 35))
+f_markChart(sigC, false, txBuy  + "C" + f_seqTxt(seqC) + f_rskTxt(false), color.new(cDn, 35))
+f_markChart(sigD, false, txBuy  + "D" + f_seqTxt(seqD) + f_rskTxt(false), cDn)
 
 f_miss(enP2, trgARaw, armA,  markLvl,        "A", thrP2, true)
 f_miss(enP1, trgBRaw, armB,  markLvl - 0.35, "B", thrP1, true)
@@ -542,7 +635,7 @@ f_stat(bool use, string tf, int sec, float z, float h, float l, float ne, float 
      use ? str.tostring(int(math.round(ne))) + " · " + str.tostring(cap, "#.0") : "–",
      bad, dead]
 
-var table dash = table.new(position.top_right, 6, 10, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+var table dash = table.new(position.top_right, 6, 12, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
 if showTab and barstate.islast
     hdrBg = color.new(color.gray, 70)
     modeTag = modeA ? "A nativo" : modeB ? "B grafico/HTF" : "C orizz.equiv."
@@ -618,6 +711,25 @@ if showTab and barstate.islast
     table.cell(dash, 5, 8, "barre", text_size=szDash, text_color=color.gray, bgcolor=color.new(color.gray, 85))
     table.cell(dash, 5, 9, "tot",   text_size=szDash, text_color=color.gray, bgcolor=color.new(color.gray, 85))
 
+    // -- rischio prospettico sulla barra corrente e distribuzione della MAE --
+    rbg = color.new(color.gray, 88)
+    table.cell(dash, 0, 10, "rischio", text_size=szDash, text_color=color.silver, bgcolor=rbg)
+    table.cell(dash, 1, 10, str.tostring(math.round(rskSell / syminfo.mintick)) + "t", text_size=szDash, text_color=cUp, bgcolor=rbg)
+    table.cell(dash, 2, 10, str.tostring(math.round(rskBuy / syminfo.mintick)) + "t", text_size=szDash, text_color=cDn, bgcolor=rbg)
+    table.cell(dash, 3, 10, "TR/ATR " + str.tostring(trAtr, "#.0"), text_size=szDash, text_color=useComp and trAtr > maxTrAtr ? color.red : color.silver, bgcolor=rbg)
+    table.cell(dash, 4, 10, "H " + str.tostring(entH, "#.00"), text_size=szDash, text_color=entH < entMin or entH > entMax ? color.red : color.silver, bgcolor=rbg)
+    table.cell(dash, 5, 10, "", bgcolor=rbg)
+
+    // p80 e' la soglia operativa: sotto quel valore lo stop viene colpito in
+    // almeno un caso su cinque anche quando la direzione era giusta
+    mbg = color.new(color.gray, 88)
+    table.cell(dash, 0, 11, "MAE atr", text_size=szDash, text_color=color.silver, bgcolor=mbg)
+    table.cell(dash, 1, 11, "med " + f_n2(maeMed), text_size=szDash, text_color=color.silver, bgcolor=mbg)
+    table.cell(dash, 2, 11, "p80 " + f_n2(maeP80), text_size=szDash, text_color=color.yellow, bgcolor=mbg)
+    table.cell(dash, 3, 11, "p95 " + f_n2(maeP95), text_size=szDash, text_color=color.silver, bgcolor=mbg)
+    table.cell(dash, 4, 11, "n " + str.tostring(maeN), text_size=szDash, text_color=maeN < 30 ? color.orange : color.silver, bgcolor=mbg)
+    table.cell(dash, 5, 11, useRisk ? "cap " + str.tostring(maxStopA, "#.0") : "", text_size=szDash, text_color=not na(maeP80) and useRisk and maxStopA < maeP80 ? color.red : color.gray, bgcolor=mbg)
+
 // ================================================================= ALERT ======
 alertcondition(sigA, "MTF-Z · SELL soglia A", "MTF-Z SELL A · confluenza su tutti i TF attivi")
 alertcondition(sigB, "MTF-Z · SELL soglia B", "MTF-Z SELL B · confluenza su tutti i TF attivi")
@@ -630,4 +742,4 @@ if sigA or sigB or sigC or sigD
     dir = (sigA or sigB) ? "SELL" : "BUY"
     tag = sigA ? "A" : sigB ? "B" : sigC ? "C" : "D"
     nth = sigA ? seqA : sigB ? seqB : sigC ? seqC : seqD
-    alert("MTF-Z " + dir + " [" + tag + "#" + str.tostring(nth) + "] " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | zFast=" + str.tostring(zFast, "#.00"), alert.freq_once_per_bar_close)
+    alert("MTF-Z " + dir + " [" + tag + "#" + str.tostring(nth) + "] " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | zFast=" + str.tostring(zFast, "#.00") + " | risk=" + str.tostring(math.round((sigC or sigD ? rskBuy : rskSell) / syminfo.mintick)) + "t | trAtr=" + str.tostring(trAtr, "#.0") + " | H=" + str.tostring(entH, "#.00"), alert.freq_once_per_bar_close)
