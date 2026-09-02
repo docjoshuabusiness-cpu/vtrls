@@ -121,26 +121,36 @@ thrM2 = input.float(-2.0, "liv", step=0.1, inline="d", group=gL)
 trgM2 = input.float(-1.0, "trigger", step=0.1, inline="d", group=gL)
 
 // ------------------------------------------------------------------- GRAFICA -
-var string gR = "5 · Entrata e rischio"
-atrLenR  = input.int(14, "ATR di riferimento", minval=2, group=gR)
-swingLen = input.int(10, "Barre per lo stop strutturale", minval=2, maxval=200, group=gR,
-     tooltip="Lo stop viene messo oltre l\'estremo delle ultime N barre piu\' un buffer. La sua DISTANZA e\' il rischio del trade: e\' questa la quantita\' da minimizzare, non il drawdown, che non dipende da te.")
-stopBuf  = input.float(0.15, "   buffer oltre l\'estremo (x ATR)", minval=0.0, maxval=2.0, step=0.05, group=gR)
-useRisk  = input.bool(false, "Filtro: accetta solo stop stretti", group=gR,
-     tooltip="Scarta i segnali in cui lo stop strutturale e\' piu\' lontano della soglia. E\' il filtro che risponde direttamente a \'voglio entrare dove il rischio e\' minimo\': non rende il segnale migliore, seleziona i casi in cui la struttura offre un\'invalidazione vicina.\n\nATTENZIONE: uno stop piu\' stretto NON riduce la MAE, riduce la frazione di trade che le sopravvive. Confronta sempre la soglia scelta con i percentili MAE in fondo alla dashboard: uno stop sotto il p80 verra\' colpito in almeno un caso su cinque anche quando il segnale aveva ragione.")
-maxStopA = input.float(1.0, "   stop massimo (x ATR)", minval=0.1, maxval=10.0, step=0.1, group=gR)
-useComp  = input.bool(false, "Filtro: solo su barra compressa", group=gR,
-     tooltip="Richiede che la barra del segnale abbia TR/ATR sotto la soglia. Entrare su una barra di espansione significa comprare il massimo del rumore locale: lo stop strutturale e\' largo proprio perche\' la barra e\' larga.")
-maxTrAtr = input.float(1.2, "   TR/ATR massimo", minval=0.2, maxval=5.0, step=0.1, group=gR)
-entLen   = input.int(20, "Entropia: barre", minval=5, maxval=200, group=gR,
-     tooltip="Entropia binaria della direzione delle ultime N barre.\n  H = 0   -> tutte nella stessa direzione, movimento ordinato\n  H = 1   -> meta\' su meta\' giu\', rumore puro\nPer un ingresso in controtendenza dopo un estremo, H bassa significa che l\'impulso e\' ANCORA in corso: e\' il caso in cui il fade viene travolto. H alta significa che l\'impulso si e\' disordinato.\n\nE\' un\'IPOTESI da verificare, non una verita\': lascia il range 0-1 e guarda la colonna MAE per capire se filtrare aiuta davvero.")
-entMin   = input.float(0.0, "   H minima", minval=0.0, maxval=1.0, step=0.05, inline="ent", group=gR)
-entMax   = input.float(1.0, "   H massima", minval=0.0, maxval=1.0, step=0.05, inline="ent", group=gR)
-maeLen   = input.int(30, "Orizzonte di misura della MAE (barre)", minval=3, maxval=500, group=gR,
-     tooltip="Dopo ogni segnale viene misurata la massima escursione CONTRARIA nelle N barre successive, espressa in ATR. I percentili in fondo alla dashboard sono la risposta empirica a \'quanto stretto puo\' stare lo stop\': sotto il p80 vieni colpito in un caso su cinque, sotto la mediana in uno su due.")
-showRisk = input.bool(true, "Scrivi il rischio in tick accanto al marker", group=gR)
+var string gR1 = "5a · Stop strutturale (sempre attivo)"
+atrLenR  = input.int(14, "ATR di riferimento", minval=2, group=gR1)
+swingLen = input.int(10, "Barre per lo stop strutturale", minval=2, maxval=200, group=gR1,
+     tooltip="Lo stop viene messo oltre l'estremo delle ultime N barre piu' un buffer. La sua DISTANZA e' il rischio del trade: e' questa la quantita' da minimizzare, non il drawdown, che non dipende da te.")
+stopBuf  = input.float(0.15, "   buffer oltre l'estremo (x ATR)", minval=0.0, maxval=2.0, step=0.05, group=gR1)
+showRisk = input.bool(true, "Scrivi il rischio in tick accanto al marker", group=gR1)
 
-var string gV = "5 · Grafica"
+var string gR2 = "5b · Filtro STOP STRETTO"
+useRisk  = input.bool(false, "Attiva", group=gR2,
+     tooltip="Scarta i segnali in cui lo stop strutturale e' piu' lontano della soglia. E' il filtro che risponde direttamente a 'voglio entrare dove il rischio e' minimo': non rende il segnale migliore, seleziona i casi in cui la struttura offre un'invalidazione vicina.\n\nATTENZIONE: uno stop piu' stretto NON riduce la MAE, riduce la frazione di trade che le sopravvive. Confronta sempre la soglia con i percentili MAE in fondo alla dashboard.")
+maxStopA = input.float(1.0, "   stop massimo (x ATR)", minval=0.1, maxval=10.0, step=0.1, group=gR2)
+
+var string gR3 = "5c · Filtro COMPRESSIONE"
+useComp  = input.bool(false, "Attiva", group=gR3,
+     tooltip="Richiede che la barra del segnale abbia TR/ATR sotto la soglia. Entrare su una barra di espansione significa comprare il massimo del rumore locale: lo stop strutturale e' largo proprio perche' la barra e' larga.")
+maxTrAtr = input.float(1.2, "   TR/ATR massimo", minval=0.2, maxval=5.0, step=0.1, group=gR3)
+
+var string gR4 = "5d · Filtro ENTROPIA"
+useEnt   = input.bool(false, "Attiva", group=gR4,
+     tooltip="Entropia binaria della direzione delle ultime N barre.\n  H = 0  -> tutte nella stessa direzione, movimento ordinato\n  H = 1  -> meta' su meta' giu', rumore puro\n\nPer un ingresso in controtendenza dopo un estremo, H bassa significa che l'impulso e' ANCORA in corso: e' il caso in cui il fade viene travolto. H alta significa che l'impulso si e' disordinato.\n\nE' un'IPOTESI da verificare, non una verita': attivala e guarda se i percentili MAE scendono davvero.")
+entLen   = input.int(20, "   barre", minval=5, maxval=200, group=gR4)
+entMin   = input.float(0.0, "   H min", minval=0.0, maxval=1.0, step=0.05, inline="ent", group=gR4)
+entMax   = input.float(1.0, "   H max", minval=0.0, maxval=1.0, step=0.05, inline="ent", group=gR4)
+
+var string gR5 = "5e · Misura della MAE"
+useMae   = input.bool(true, "Attiva", group=gR5,
+     tooltip="Dopo ogni segnale misura la massima escursione CONTRARIA nelle N barre successive, in ATR. I percentili in fondo alla dashboard sono la risposta empirica a 'quanto stretto puo' stare lo stop': sotto il p80 vieni colpito in un caso su cinque, sotto la mediana in uno su due.\n\nNon filtra nulla, misura soltanto: tienila accesa mentre tari gli altri filtri, e' l'unico modo per sapere se stanno funzionando.")
+maeLen   = input.int(30, "   orizzonte (barre)", minval=3, maxval=500, group=gR5)
+
+var string gV = "6 · Grafica"
 marker   = input.string("Freccia", "Marker segnale", options=["Freccia","Pallino"], group=gV)
 showZ    = input.bool(true,  "Curve z-score nel pannello", group=gV)
 showLv   = input.bool(true,  "Linee di soglia e di trigger nel pannello", group=gV)
@@ -370,7 +380,7 @@ f_riskOk(bool isSell) =>
     r      = isSell ? rskSell : rskBuy
     okStop = not useRisk or (r > 0 and r <= maxStopA * atrR)
     okComp = not useComp or trAtr <= maxTrAtr
-    okEnt  = entH >= entMin and entH <= entMax
+    okEnt  = not useEnt or (entH >= entMin and entH <= entMax)
     okStop and okComp and okEnt
 
 // Armamento: quante sezioni attive hanno superato la soglia entro la finestra.
@@ -445,7 +455,7 @@ sigSell = sigA or sigB
 sigBuy  = sigC or sigD
 anySig  = sigSell or sigBuy
 
-if trk
+if useMae and trk
     trkBar += 1
     adv = trkDir > 0 ? trkPx - low : high - trkPx      // escursione CONTRARIA
     trkMae := math.max(trkMae, adv)
@@ -455,7 +465,7 @@ if trk
             array.shift(maeArr)
         trk := false
 
-if anySig and not trk
+if useMae and anySig and not trk
     trk    := true
     trkPx  := close
     trkDir := sigBuy ? 1 : -1
@@ -716,8 +726,8 @@ if showTab and barstate.islast
     table.cell(dash, 0, 10, "rischio", text_size=szDash, text_color=color.silver, bgcolor=rbg)
     table.cell(dash, 1, 10, str.tostring(math.round(rskSell / syminfo.mintick)) + "t", text_size=szDash, text_color=cUp, bgcolor=rbg)
     table.cell(dash, 2, 10, str.tostring(math.round(rskBuy / syminfo.mintick)) + "t", text_size=szDash, text_color=cDn, bgcolor=rbg)
-    table.cell(dash, 3, 10, "TR/ATR " + str.tostring(trAtr, "#.0"), text_size=szDash, text_color=useComp and trAtr > maxTrAtr ? color.red : color.silver, bgcolor=rbg)
-    table.cell(dash, 4, 10, "H " + str.tostring(entH, "#.00"), text_size=szDash, text_color=entH < entMin or entH > entMax ? color.red : color.silver, bgcolor=rbg)
+    table.cell(dash, 3, 10, "TR/ATR " + str.tostring(trAtr, "#.0"), text_size=szDash, text_color=not useComp ? color.gray : trAtr > maxTrAtr ? color.red : color.lime, bgcolor=rbg)
+    table.cell(dash, 4, 10, "H " + str.tostring(entH, "#.00"), text_size=szDash, text_color=not useEnt ? color.gray : (entH < entMin or entH > entMax) ? color.red : color.lime, bgcolor=rbg)
     table.cell(dash, 5, 10, "", bgcolor=rbg)
 
     // p80 e' la soglia operativa: sotto quel valore lo stop viene colpito in
