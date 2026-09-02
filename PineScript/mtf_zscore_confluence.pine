@@ -229,6 +229,21 @@ ne5 = modeA ? float(len5) : modeB ? math.max(1.0, len5 / float(k5)) : float(lenC
 
 f_zcap(float ne) => math.sqrt(math.max(ne - 1.0, 0.0))
 
+// Durata REALE della finestra statistica di ogni sezione, in tempo. E' il numero
+// che rende confrontabile una sezione con un indicatore esterno: "Length 17 su
+// 1 minuto" sono 17 minuti, e va confrontato con questo, non con 'len'.
+//   modo A -> len barre del TF della sezione
+//   modo B -> len barre del grafico
+//   modo C -> len*k barre del grafico
+winS1 = modeA ? float(len1) * sec1 : modeB ? float(len1) * chartSec : float(lenC1) * chartSec
+winS2 = modeA ? float(len2) * sec2 : modeB ? float(len2) * chartSec : float(lenC2) * chartSec
+winS3 = modeA ? float(len3) * sec3 : modeB ? float(len3) * chartSec : float(lenC3) * chartSec
+winS4 = modeA ? float(len4) * sec4 : modeB ? float(len4) * chartSec : float(lenC4) * chartSec
+winS5 = modeA ? float(len5) * sec5 : modeB ? float(len5) * chartSec : float(lenC5) * chartSec
+
+f_wtxt(float sc) =>
+    sc < 60 ? str.tostring(math.round(sc)) + "s" : sc < 3600 ? str.tostring(math.round(sc / 60)) + "m" : str.tostring(math.round(sc / 3600.0, 1)) + "h"
+
 // soglia attiva piu' ambiziosa: serve a capire se il tetto la rende irraggiungibile
 thrMaxAct = math.max(math.max(enP2 ? math.abs(thrP2) : 0.0, enP1 ? math.abs(thrP1) : 0.0), math.max(enM1 ? math.abs(thrM1) : 0.0, enM2 ? math.abs(thrM2) : 0.0))
 
@@ -426,11 +441,11 @@ bgcolor(not showArmBg ? na : (armA or armB) ? color.new(cUp, 92) : (armC or armD
 //  il campione effettivo della sezione e il massimo |z| algebricamente
 //  raggiungibile. Se il cap e' sotto la soglia attiva, la riga diventa ROSSA:
 //  quella sezione non potra' mai armare e la confluenza restera' bloccata.
-f_stat(bool use, string tf, int sec, float z, float h, float l, float ne) =>
+f_stat(bool use, string tf, int sec, float z, float h, float l, float ne, float win) =>
     bad  = use and sec < chartSec
     cap  = f_zcap(ne)
     dead = use and cap < thrMaxAct
-    [use ? (bad ? "⚠ < grafico" : tf) : "off",
+    [use ? (bad ? "⚠ < grafico" : tf + " " + f_wtxt(win)) : "off",
      use ? str.tostring(z, "#.00") : "–",
      use ? str.tostring(l, "#.0") + " / " + str.tostring(h, "#.0") : "–",
      use ? str.tostring(int(math.round(ne))) + " · " + str.tostring(cap, "#.0") : "–",
@@ -447,11 +462,11 @@ if showTab and barstate.islast
     table.cell(dash, 4, 0, "hit", bgcolor=hdrBg, text_color=color.white, text_size=szDash)
     table.cell(dash, 5, 0, "stato", bgcolor=hdrBg, text_color=color.white, text_size=szDash)
 
-    [t1, v1, r1, q1, b1, d1] = f_stat(use1, tf1, sec1, z1, hi1, lo1, ne1)
-    [t2, v2, r2, q2, b2, d2] = f_stat(use2, tf2, sec2, z2, hi2, lo2, ne2)
-    [t3, v3, r3, q3, b3, d3] = f_stat(use3, tf3, sec3, z3, hi3, lo3, ne3)
-    [t4, v4, r4, q4, b4, d4] = f_stat(use4, tf4, sec4, z4, hi4, lo4, ne4)
-    [t5, v5, r5, q5, b5, d5] = f_stat(use5, tf5, sec5, z5, hi5, lo5, ne5)
+    [t1, v1, r1, q1, b1, d1] = f_stat(use1, tf1, sec1, z1, hi1, lo1, ne1, winS1)
+    [t2, v2, r2, q2, b2, d2] = f_stat(use2, tf2, sec2, z2, hi2, lo2, ne2, winS2)
+    [t3, v3, r3, q3, b3, d3] = f_stat(use3, tf3, sec3, z3, hi3, lo3, ne3, winS3)
+    [t4, v4, r4, q4, b4, d4] = f_stat(use4, tf4, sec4, z4, hi4, lo4, ne4, winS4)
+    [t5, v5, r5, q5, b5, d5] = f_stat(use5, tf5, sec5, z5, hi5, lo5, ne5, winS5)
 
     ts = array.from(t1, t2, t3, t4, t5)
     vs = array.from(v1, v2, v3, v4, v5)
