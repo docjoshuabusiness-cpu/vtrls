@@ -54,23 +54,29 @@ zBasis    = input.string("A · TF nativo", "Base di calcolo dello z-score",
 var string gT = "2 · Sezioni (timeframe)"
 use1 = input.bool(true,  "S1", inline="s1", group=gT)
 tf1  = input.timeframe("15S", "", inline="s1", group=gT)
-len1 = input.int(100, "len", minval=5, maxval=5000, inline="s1", group=gT)
+len1 = input.int(17, "Len", minval=5, maxval=5000, inline="s1", group=gT)
+cz1  = input.color(color.new(#42a5f5, 0), "", inline="s1", group=gT)
 
 use2 = input.bool(true,  "S2", inline="s2", group=gT)
 tf2  = input.timeframe("30S", "", inline="s2", group=gT)
-len2 = input.int(100, "len", minval=5, maxval=5000, inline="s2", group=gT)
+len2 = input.int(17, "Len", minval=5, maxval=5000, inline="s2", group=gT)
+cz2  = input.color(color.new(#7e57c2, 0), "", inline="s2", group=gT)
 
 use3 = input.bool(true,  "S3", inline="s3", group=gT)
 tf3  = input.timeframe("1", "", inline="s3", group=gT)
-len3 = input.int(100, "len", minval=5, maxval=5000, inline="s3", group=gT)
+len3 = input.int(17, "Len", minval=5, maxval=5000, inline="s3", group=gT)
+cz3  = input.color(color.new(#ffa726, 0), "", inline="s3", group=gT)
 
 use4 = input.bool(true,  "S4", inline="s4", group=gT)
 tf4  = input.timeframe("2", "", inline="s4", group=gT)
-len4 = input.int(100, "len", minval=5, maxval=5000, inline="s4", group=gT)
+len4 = input.int(17, "Len", minval=5, maxval=5000, inline="s4", group=gT)
+cz4  = input.color(color.new(#ec407a, 0), "", inline="s4", group=gT)
 
 use5 = input.bool(true,  "S5", inline="s5", group=gT)
 tf5  = input.timeframe("5", "", inline="s5", group=gT)
-len5 = input.int(100, "len", minval=5, maxval=5000, inline="s5", group=gT)
+len5 = input.int(17, "Len", minval=5, maxval=5000, inline="s5", group=gT)
+cz5  = input.color(color.new(#bdbdbd, 0), "", inline="s5", group=gT)
+czF  = input.color(color.new(#ffffff, 25), "curva del trigger", inline="tfz", group=gT)
 
 // ------------------------------------------------------------- LOGICA SEGNALE
 var string gS = "3 · Logica segnale"
@@ -122,12 +128,6 @@ showTab  = input.bool(true,  "Mostra cruscotto", group=gV)
 dashSz   = input.string("Piccolo", "Dimensione testo cruscotto", options=["Minimo","Piccolo","Normale","Grande"], group=gV)
 tagSz    = input.string("Piccolo", "Dimensione etichette periodo", options=["Minimo","Piccolo","Normale","Grande"], group=gV)
 markSz   = input.string("Normale", "Dimensione marker", options=["Minimo","Piccolo","Normale","Grande"], group=gV)
-cz1      = input.color(color.new(#42a5f5, 0), "S1", inline="zc1", group=gV)
-cz2      = input.color(color.new(#7e57c2, 0), "S2", inline="zc1", group=gV)
-cz3      = input.color(color.new(#ffa726, 0), "S3", inline="zc1", group=gV)
-cz4      = input.color(color.new(#ec407a, 0), "S4", inline="zc2", group=gV)
-cz5      = input.color(color.new(#bdbdbd, 0), "S5", inline="zc2", group=gV)
-czF      = input.color(color.new(#ffffff, 25), "TF veloce", inline="zc2", group=gV)
 cLvlS    = input.color(color.new(#000000,  0), "Colore linee soglia",  inline="lv", group=gV)
 cLvlT    = input.color(color.new(#000000, 45), "trigger",              inline="lv", group=gV)
 cLvl0    = input.color(color.new(#000000, 55), "zero",                 inline="lv", group=gV)
@@ -140,7 +140,7 @@ showTags = input.bool(true, "Etichette del periodo a destra delle curve", group=
      tooltip="Scrive il timeframe di ogni sezione in fondo alla sua curva, nel pannello. Serve a non dover ricordare a memoria quale colore corrisponde a quale periodo.")
 tagOff   = input.int(4, "   distanza (barre)", minval=1, maxval=50, group=gV)
 cUp      = input.color(color.new(#ef5350, 0), "Colore SELL", inline="col", group=gV)
-cDn      = input.color(color.new(#26a69a, 0), "Colore BUY",  inline="col", group=gV)
+cDn      = input.color(color.new(#1B5E20, 0), "Colore BUY",  inline="col", group=gV)
 
 // =============================================================== CALCOLO Z ====
 // Tre basi di calcolo, selezionabili con zBasis. Cambiano la STATISTICA, non
