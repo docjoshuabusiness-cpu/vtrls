@@ -128,7 +128,9 @@ swingLen = input.int(10, "Barre per lo stop strutturale", minval=2, maxval=200, 
 stopBuf  = input.float(0.15, "   buffer oltre l'estremo (x ATR)", minval=0.0, maxval=2.0, step=0.05, group=gR1)
 stopPol  = input.string("Il maggiore dei due", "Stop da usare", options=["Strutturale","MAE p80","Il maggiore dei due"], group=gR1,
      tooltip="STRUTTURALE: oltre l'estremo delle ultime N barre. E' l'invalidazione logica del setup, ma puo' cadere dentro la banda di rumore e venire colpito senza che il setup sia sbagliato.\n\nMAE p80: la distanza che l'80% dei segnali passati NON ha superato. E' la banda di rumore misurata, non stimata. Disponibile solo con almeno 5 osservazioni.\n\nIL MAGGIORE DEI DUE (default): rispetta sia la struttura sia il rumore misurato. E' la scelta difendibile: uno stop piu' stretto del rumore viene colpito a prescindere da dove lo metti.")
-showRisk = input.bool(true, "Scrivi il rischio in tick accanto al marker", group=gR1)
+showRisk = input.bool(true, "Scrivi il rischio accanto al marker", group=gR1)
+riskUnit = input.string("Punti", "   unita\'", options=["Punti","Tick","Entrambi"], group=gR1,
+     tooltip="Punti = unita\' di prezzo dello strumento, le stesse del righello di TradingView. Tick = passo minimo di quotazione. Su NQ 1 tick = 0.25 punti, quindi 76 tick = 19.00 punti.")
 
 var string gR2 = "5b · Filtro STOP STRETTO"
 useRisk  = input.bool(false, "Attiva", group=gR2,
@@ -621,8 +623,11 @@ f_miss(bool en, bool trig, bool armed, float y, string tag, float thr, bool isUp
 f_seqTxt(int n) => showSeq and n > 1 ? str.tostring(n) : ""
 // distanza dello stop strutturale, in tick: e' il rischio del trade
 f_rskTxt(bool isSell) =>
-    r = isSell ? rskSell : rskBuy
-    showRisk and r > 0 ? " " + str.tostring(math.round(r / syminfo.mintick)) + "t" : ""
+    r  = isSell ? rskSell : rskBuy
+    pt = str.tostring(r, format.mintick) + "pt"
+    tk = str.tostring(math.round(r / syminfo.mintick)) + "t"
+    u  = riskUnit == "Tick" ? tk : riskUnit == "Punti" ? pt : pt + " / " + tk
+    showRisk and r > 0 ? " " + u : ""
 
 f_markPane(sigA,  markLvl,        txSell + "A" + f_seqTxt(seqA) + f_rskTxt(true), cUp)
 f_markPane(sigB,  markLvl - 0.35, txSell + "B" + f_seqTxt(seqB) + f_rskTxt(true), color.new(cUp, 35))
@@ -736,8 +741,8 @@ if showTab and barstate.islast
     // -- rischio prospettico sulla barra corrente e distribuzione della MAE --
     rbg = color.new(color.gray, 88)
     table.cell(dash, 0, 10, "rischio", text_size=szDash, text_color=color.silver, bgcolor=rbg)
-    table.cell(dash, 1, 10, str.tostring(math.round(rskSell / syminfo.mintick)) + "t", text_size=szDash, text_color=cUp, bgcolor=rbg)
-    table.cell(dash, 2, 10, str.tostring(math.round(rskBuy / syminfo.mintick)) + "t", text_size=szDash, text_color=cDn, bgcolor=rbg)
+    table.cell(dash, 1, 10, riskUnit == "Tick" ? str.tostring(math.round(rskSell / syminfo.mintick)) + "t" : str.tostring(rskSell, format.mintick) + "pt", text_size=szDash, text_color=cUp, bgcolor=rbg)
+    table.cell(dash, 2, 10, riskUnit == "Tick" ? str.tostring(math.round(rskBuy / syminfo.mintick)) + "t" : str.tostring(rskBuy, format.mintick) + "pt", text_size=szDash, text_color=cDn, bgcolor=rbg)
     table.cell(dash, 3, 10, "TR/ATR " + str.tostring(trAtr, "#.0"), text_size=szDash, text_color=not useComp ? color.gray : trAtr > maxTrAtr ? color.red : color.lime, bgcolor=rbg)
     table.cell(dash, 4, 10, "H " + str.tostring(entH, "#.00"), text_size=szDash, text_color=not useEnt ? color.gray : (entH < entMin or entH > entMax) ? color.red : color.lime, bgcolor=rbg)
     table.cell(dash, 5, 10, "", bgcolor=rbg)
@@ -778,4 +783,4 @@ if sigA or sigB or sigC or sigD
     dir = (sigA or sigB) ? "SELL" : "BUY"
     tag = sigA ? "A" : sigB ? "B" : sigC ? "C" : "D"
     nth = sigA ? seqA : sigB ? seqB : sigC ? seqC : seqD
-    alert("MTF-Z " + dir + " [" + tag + "#" + str.tostring(nth) + "] " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | zFast=" + str.tostring(zFast, "#.00") + " | risk=" + str.tostring(math.round((sigC or sigD ? rskBuy : rskSell) / syminfo.mintick)) + "t | trAtr=" + str.tostring(trAtr, "#.0") + " | H=" + str.tostring(entH, "#.00"), alert.freq_once_per_bar_close)
+    alert("MTF-Z " + dir + " [" + tag + "#" + str.tostring(nth) + "] " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | zFast=" + str.tostring(zFast, "#.00") + " | risk=" + str.tostring(sigC or sigD ? rskBuy : rskSell, format.mintick) + "pt/" + str.tostring(math.round((sigC or sigD ? rskBuy : rskSell) / syminfo.mintick)) + "t | trAtr=" + str.tostring(trAtr, "#.0") + " | H=" + str.tostring(entH, "#.00"), alert.freq_once_per_bar_close)
