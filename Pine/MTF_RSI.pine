@@ -1,0 +1,232 @@
+//@version=6
+// =============================================================================
+//  MTF RSI  v1.0
+//  ---------------------------------------------------------------------------
+//  RSI multi-timeframe. Nient'altro.
+//
+//  Cinque sezioni, ognuna calcola l'RSI sulle candele del PROPRIO timeframe
+//  (calcolo nativo, identico a quello che vedresti aprendo quel timeframe) e lo
+//  disegna sul grafico che stai guardando, aggiornato in tempo reale.
+//
+//  DUE COSE CHE LO RENDONO ONESTO:
+//
+//  1) NESSUN RITARDO DI GRADINO. request.security restituisce il valore
+//     dell'ultima candela HTF CHIUSA, quindi su un grafico piu' veloce la curva
+//     sarebbe una scala. Qui gain e loss medi vengono presi dall'ultima candela
+//     chiusa e avanzati di UN passo di Wilder con la variazione della candela in
+//     formazione:
+//        avgU_live = avgU + (max(P_ora - C_htf, 0) - avgU) / n
+//        avgD_live = avgD + (max(C_htf - P_ora, 0) - avgD) / n
+//     E' esattamente il valore che l'RSI avrebbe se quella candela chiudesse
+//     adesso. Nessun dato futuro, nessun repaint dello storico.
+//
+//  2) LE SOGLIE SONO MISURATE, NON ASSUNTE. 70 e 30 sono una convenzione, non
+//     una statistica: su timeframe diversi sono quantili diversi. La tabella
+//     riporta, per ogni sezione, mediana / p10 / p90 / minimo / massimo dell'RSI
+//     calcolati su N candele DEL SUO timeframe. Sono quelli i livelli che quella
+//     sezione raggiunge davvero.
+//     La colonna "n" dice quante candele sono realmente disponibili: se e'
+//     inferiore alla storia richiesta, la mediana e' stimata su meno dati di
+//     quelli che hai chiesto e il numero diventa arancione. Su grafici molto
+//     veloci lo storico dei timeframe alti e' corto: e' un limite dei dati, non
+//     dello script.
+//
+//  NOTA: i timeframe delle sezioni devono essere >= a quello del grafico. Uno
+//  piu' basso viene segnalato con ⚠ perche' request.security restituirebbe un
+//  valore intrabar, quindi soggetto a repaint.
+// =============================================================================
+
+indicator("MTF RSI", shorttitle="MTF-RSI", overlay=false, max_bars_back=5000)
+
+// ------------------------------------------------------------------- MOTORE --
+var string gA = "1 · RSI"
+srcMode = input.string("Close", "Sorgente", options=["Close","HLC3"], group=gA)
+statLen = input.int(500, "Storia per le soglie reali (candele della sezione)", minval=50, maxval=2000, group=gA,
+     tooltip="Quante candele DEL TIMEFRAME DELLA SEZIONE vengono usate per calcolare mediana, p10, p90, minimo e massimo dell'RSI.\n\nE' espressa nelle candele della sezione, non del grafico: con 500, la sezione a 5m guarda 500 candele da 5 minuti, cioe' circa 42 ore, mentre la sezione a 15 secondi ne guarda 500 da 15 secondi, cioe' circa 2 ore. Ogni sezione ha quindi il proprio orizzonte, coerente con la propria scala temporale. La tabella scrive quell'orizzonte in ore accanto al timeframe.\n\nAlzarla rende la mediana piu' stabile ma la lega a un mercato piu' vecchio. 500 e' un compromesso ragionevole; sotto 200 la stima e' rumorosa.")
+live    = input.bool(true, "Valore in tempo reale (niente ritardo di gradino)", group=gA,
+     tooltip="ACCESO: gain e loss medi vengono dall'ultima candela HTF chiusa, poi si applica un passo di Wilder con la variazione della candela in formazione. La curva si muove a ogni barra del grafico ed e' il valore che l'RSI avrebbe se la candela chiudesse ora. Nessun dato futuro.\n\nSPENTO: viene mostrato il valore dell'ultima candela HTF chiusa. La curva e' una scala e reagisce solo alla chiusura di quella candela.\n\nIrrilevante per una sezione che ha lo stesso timeframe del grafico: li' il calcolo e' gia' nativo ed esatto.")
+
+// ---------------------------------------------------------------- SEZIONI ----
+var string gB = "2 · Sezioni"
+use1 = input.bool(true, "S1", inline="s1", group=gB)
+tf1  = input.timeframe("15S", "", inline="s1", group=gB)
+len1 = input.int(14, "Len", minval=2, maxval=500, inline="s1", group=gB)
+c1   = input.color(color.new(#42a5f5, 0), "", inline="s1", group=gB)
+
+use2 = input.bool(true, "S2", inline="s2", group=gB)
+tf2  = input.timeframe("30S", "", inline="s2", group=gB)
+len2 = input.int(14, "Len", minval=2, maxval=500, inline="s2", group=gB)
+c2   = input.color(color.new(#7e57c2, 0), "", inline="s2", group=gB)
+
+use3 = input.bool(true, "S3", inline="s3", group=gB)
+tf3  = input.timeframe("1", "", inline="s3", group=gB)
+len3 = input.int(14, "Len", minval=2, maxval=500, inline="s3", group=gB)
+c3   = input.color(color.new(#ffa726, 0), "", inline="s3", group=gB)
+
+use4 = input.bool(true, "S4", inline="s4", group=gB)
+tf4  = input.timeframe("2", "", inline="s4", group=gB)
+len4 = input.int(14, "Len", minval=2, maxval=500, inline="s4", group=gB)
+c4   = input.color(color.new(#ec407a, 0), "", inline="s4", group=gB)
+
+use5 = input.bool(true, "S5", inline="s5", group=gB)
+tf5  = input.timeframe("5", "", inline="s5", group=gB)
+len5 = input.int(14, "Len", minval=2, maxval=500, inline="s5", group=gB)
+c5   = input.color(color.new(#bdbdbd, 0), "", inline="s5", group=gB)
+
+// ----------------------------------------------------------------- LIVELLI ---
+var string gC = "3 · Livelli"
+lvH   = input.float(70, "Ipercomprato", step=1, inline="lv", group=gC)
+lvL   = input.float(30, "Ipervenduto",  step=1, inline="lv", group=gC)
+shMid = input.bool(true, "Linea a 50", group=gC)
+cLv   = input.color(color.new(#000000, 20), "Colore livelli", inline="lc", group=gC)
+cMid  = input.color(color.new(#000000, 60), "50", inline="lc", group=gC)
+bandOf= input.int(0, "Bande reali della sezione (0 = nessuna)", minval=0, maxval=5, group=gC,
+     tooltip="Disegna p10 e p90 MISURATI della sezione scelta, al posto delle sole linee convenzionali. Serve a vedere quanto 70 e 30 siano lontani da cio' che quel timeframe raggiunge davvero. 0 le disattiva.")
+
+// ----------------------------------------------------------------- GRAFICA ---
+var string gD = "4 · Grafica"
+shTab  = input.bool(true, "Tabella", group=gD)
+shTags = input.bool(true, "Etichette del timeframe accanto alle curve", group=gD)
+tagOff = input.int(4, "   distanza (barre)", minval=1, maxval=50, group=gD)
+txtSz  = input.string("Piccolo", "Dimensione testo", options=["Minimo","Piccolo","Normale","Grande"], group=gD)
+
+// ================================================================== CALCOLO ===
+// Eseguita DENTRO il contesto del timeframe richiesto: l'RSI e' nativo, e le
+// statistiche sono calcolate sulle candele di quel timeframe, non del grafico.
+f_sec(simple int len, simple int sl, simple bool shift) =>
+    s  = srcMode == "Close" ? close : hlc3
+    p  = nz(s[1], s)
+    u  = math.max(s - p, 0.0)
+    d  = math.max(p - s, 0.0)
+    au = ta.rma(u, len)
+    ad = ta.rma(d, len)
+    r  = ad <= 0.0 ? (au <= 0.0 ? 50.0 : 100.0) : au <= 0.0 ? 0.0 : 100.0 - 100.0 / (1.0 + au / ad)
+    med = ta.percentile_nearest_rank(r, sl, 50)
+    q10 = ta.percentile_nearest_rank(r, sl, 10)
+    q90 = ta.percentile_nearest_rank(r, sl, 90)
+    lo  = ta.lowest(r, sl)
+    hi  = ta.highest(r, sl)
+    n   = math.min(sl, bar_index + 1)
+    [shift ? r[1]   : r,
+     shift ? au[1]  : au,
+     shift ? ad[1]  : ad,
+     shift ? s[1]   : s,
+     shift ? med[1] : med,
+     shift ? q10[1] : q10,
+     shift ? q90[1] : q90,
+     shift ? lo[1]  : lo,
+     shift ? hi[1]  : hi,
+     n]
+
+// Un passo di Wilder sulla candela HTF in formazione: porta il valore dall'ultima
+// chiusura HTF al prezzo corrente del grafico. Se la sezione ha il timeframe del
+// grafico non serve, perche' il calcolo e' gia' nativo ed esatto.
+f_live(float rC, float au, float ad, float sC, simple int len, bool canLive) =>
+    sNow = srcMode == "Close" ? close : hlc3
+    dl   = sNow - sC
+    auL  = au + (math.max(dl, 0.0)  - au) / len
+    adL  = ad + (math.max(-dl, 0.0) - ad) / len
+    rL   = adL <= 0.0 ? (auL <= 0.0 ? 50.0 : 100.0) : auL <= 0.0 ? 0.0 : 100.0 - 100.0 / (1.0 + auL / adL)
+    canLive ? rL : rC
+
+chartSec = timeframe.in_seconds()
+sc1 = timeframe.in_seconds(tf1)
+sc2 = timeframe.in_seconds(tf2)
+sc3 = timeframe.in_seconds(tf3)
+sc4 = timeframe.in_seconds(tf4)
+sc5 = timeframe.in_seconds(tf5)
+
+// Sopra il TF del grafico si prende sempre l'ultima candela CHIUSA: senza live
+// resta il valore a gradini, con live viene avanzato di un passo. In entrambi i
+// casi lo storico non ripinge.
+sh1 = sc1 > chartSec
+sh2 = sc2 > chartSec
+sh3 = sc3 > chartSec
+sh4 = sc4 > chartSec
+sh5 = sc5 > chartSec
+
+[rc1, au1, ad1, sC1, md1, p101, p901, lo1, hi1, n1] = request.security(syminfo.tickerid, tf1, f_sec(len1, statLen, sh1), lookahead = barmerge.lookahead_off)
+[rc2, au2, ad2, sC2, md2, p102, p902, lo2, hi2, n2] = request.security(syminfo.tickerid, tf2, f_sec(len2, statLen, sh2), lookahead = barmerge.lookahead_off)
+[rc3, au3, ad3, sC3, md3, p103, p903, lo3, hi3, n3] = request.security(syminfo.tickerid, tf3, f_sec(len3, statLen, sh3), lookahead = barmerge.lookahead_off)
+[rc4, au4, ad4, sC4, md4, p104, p904, lo4, hi4, n4] = request.security(syminfo.tickerid, tf4, f_sec(len4, statLen, sh4), lookahead = barmerge.lookahead_off)
+[rc5, au5, ad5, sC5, md5, p105, p905, lo5, hi5, n5] = request.security(syminfo.tickerid, tf5, f_sec(len5, statLen, sh5), lookahead = barmerge.lookahead_off)
+
+r1 = f_live(rc1, au1, ad1, sC1, len1, live and sh1)
+r2 = f_live(rc2, au2, ad2, sC2, len2, live and sh2)
+r3 = f_live(rc3, au3, ad3, sC3, len3, live and sh3)
+r4 = f_live(rc4, au4, ad4, sC4, len4, live and sh4)
+r5 = f_live(rc5, au5, ad5, sC5, len5, live and sh5)
+
+// ==================================================================== PLOT ====
+plot(use1 ? r1 : na, "S1", color = c1, linewidth = 1)
+plot(use2 ? r2 : na, "S2", color = c2, linewidth = 1)
+plot(use3 ? r3 : na, "S3", color = c3, linewidth = 1)
+plot(use4 ? r4 : na, "S4", color = c4, linewidth = 1)
+plot(use5 ? r5 : na, "S5", color = c5, linewidth = 2)
+
+hline(lvH, "ipercomprato", color = cLv, linestyle = hline.style_dashed)
+hline(lvL, "ipervenduto",  color = cLv, linestyle = hline.style_dashed)
+plot(shMid ? 50 : na, "50", color = cMid, style = plot.style_linebr)
+
+// Bande reali: p10 e p90 misurati della sezione scelta. Sono i livelli che quel
+// timeframe raggiunge davvero, da confrontare con i 70/30 convenzionali.
+bU = bandOf == 1 ? p901 : bandOf == 2 ? p902 : bandOf == 3 ? p903 : bandOf == 4 ? p904 : bandOf == 5 ? p905 : na
+bD = bandOf == 1 ? p101 : bandOf == 2 ? p102 : bandOf == 3 ? p103 : bandOf == 4 ? p104 : bandOf == 5 ? p105 : na
+bC = bandOf == 1 ? c1 : bandOf == 2 ? c2 : bandOf == 3 ? c3 : bandOf == 4 ? c4 : bandOf == 5 ? c5 : color.gray
+plot(bU, "p90 reale", color = color.new(bC, 45), style = plot.style_linebr)
+plot(bD, "p10 reale", color = color.new(bC, 45), style = plot.style_linebr)
+
+f_size(string o) => o == "Minimo" ? size.tiny : o == "Piccolo" ? size.small : o == "Normale" ? size.normal : size.large
+sz = f_size(txtSz)
+
+// Timeframe scritto in fondo alla curva: la corrispondenza colore-periodo si
+// legge, non si ricorda.
+f_tag(bool use, string tf, float r, color c) =>
+    var label lb = label.new(bar_index, 0.0, "", style = label.style_none, size = size.tiny, textalign = text.align_left)
+    if barstate.islast
+        label.set_xy(lb, bar_index + tagOff, r)
+        label.set_text(lb, shTags and use ? tf : "")
+        label.set_textcolor(lb, c)
+        label.set_size(lb, sz)
+    lb
+
+f_tag(use1, tf1, r1, c1)
+f_tag(use2, tf2, r2, c2)
+f_tag(use3, tf3, r3, c3)
+f_tag(use4, tf4, r4, c4)
+f_tag(use5, tf5, r5, c5)
+
+// =================================================================== TABELLA ==
+f_htxt(float sec) =>
+    h = sec * statLen
+    h < 3600 ? str.tostring(math.round(h / 60)) + "m" : h < 86400 ? str.tostring(math.round(h / 3600.0, 1)) + "h" : str.tostring(math.round(h / 86400.0, 1)) + "g"
+
+f_v(float v) => na(v) ? "–" : str.tostring(v, "#.0")
+
+var table t = table.new(position.top_right, 6, 6, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
+
+f_row(int i, bool use, string tf, float sec, float r, float md, float p10, float p90, float lo, float hi, float n, color c) =>
+    bad = use and sec < chartSec
+    // manca storia: la mediana e' stimata su meno candele di quelle richieste
+    thin = use and n < statLen
+    bg  = not use ? color.new(color.gray, 70) : bad ? color.new(color.orange, 40) : r >= lvH ? color.new(color.red, 55) : r <= lvL ? color.new(color.green, 55) : color.new(color.gray, 82)
+    table.cell(t, 0, i, "S" + str.tostring(i) + " " + (use ? (bad ? "⚠ " + tf : tf + " · " + f_htxt(sec)) : "off"), text_size = sz, text_color = use ? c : color.gray, bgcolor = bg)
+    table.cell(t, 1, i, use ? f_v(r) : "–", text_size = sz, text_color = color.white, bgcolor = bg)
+    table.cell(t, 2, i, use ? f_v(md) : "–", text_size = sz, text_color = color.silver, bgcolor = bg)
+    table.cell(t, 3, i, use ? f_v(p10) + " / " + f_v(p90) : "–", text_size = sz, text_color = color.white, bgcolor = bg)
+    table.cell(t, 4, i, use ? f_v(lo) + " / " + f_v(hi) : "–", text_size = sz, text_color = color.silver, bgcolor = bg)
+    table.cell(t, 5, i, use ? str.tostring(int(n)) : "–", text_size = sz, text_color = thin ? color.orange : color.silver, bgcolor = bg)
+
+if shTab and barstate.islast
+    hb = color.new(color.gray, 65)
+    table.cell(t, 0, 0, "TF · storia", text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 1, 0, "RSI",        text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 2, 0, "mediana",    text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 3, 0, "p10 / p90",  text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 4, 0, "min / max",  text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 5, 0, "n",          text_size = sz, text_color = color.white, bgcolor = hb)
+    f_row(1, use1, tf1, sc1, r1, md1, p101, p901, lo1, hi1, n1, c1)
+    f_row(2, use2, tf2, sc2, r2, md2, p102, p902, lo2, hi2, n2, c2)
+    f_row(3, use3, tf3, sc3, r3, md3, p103, p903, lo3, hi3, n3, c3)
+    f_row(4, use4, tf4, sc4, r4, md4, p104, p904, lo4, hi4, n4, c4)
+    f_row(5, use5, tf5, sc5, r5, md5, p105, p905, lo5, hi5, n5, c5)
