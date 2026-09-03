@@ -108,9 +108,13 @@
 //    singolo evento per centinaia di barre. Con Cutler il modo C e' esatto.
 //
 //  --- BASE DI CALCOLO --------------------------------------------------------
-//  C (orizzonte equivalente) - default consigliato.
-//    Obbligatorio su grafici sotto il minuto: nel modo A le sezioni lente hanno
-//    pochissime barre reali e la loro curva e' una scala grossolana.
+//  C (orizzonte equivalente) - default consigliato, MA SOLO con scala Sigma o
+//    Percentile. Obbligatorio su grafici sotto il minuto: nel modo A le sezioni
+//    lente hanno pochissime barre reali e la loro curva e' una scala grossolana.
+//    Con RSI GREZZO il modo C e' una trappola: comprime l'escursione di sqrt(k)
+//    e su grafici molto veloci le sezioni lente non raggiungono mai 70/30,
+//    quindi il contatore "armate" resta a zero per sempre. Se vuoi restare su
+//    RSI grezzo sotto il minuto, usa il modo A oppure la compensazione sqrt(k).
 //  A (TF nativo)
 //    Grafico >= 1m su indici e maggiori, quando vuoi che le sezioni coincidano
 //    con l'RSI che vedresti aprendo quei timeframe uno per uno.
@@ -162,11 +166,13 @@ rsiLenSm = input.int(0, "Smoothing dell'RSI (0 = off)", minval=0, maxval=50, gro
 rsiScale = input.string("RSI grezzo", "Scala del segnale", options=["RSI grezzo","Percentile","Sigma (50+10z)"], group=gZ,
      tooltip="RSI GREZZO: il valore nudo 0-100. Le soglie 70/30 sono convenzionali, non statistiche: sono quantili diversi su strumenti e timeframe diversi.\n\nPERCENTILE: rango empirico dell'RSI sulla propria storia recente. 90 significa 'piu' alto del 90% delle osservazioni di questa sezione'. Le soglie diventano confrontabili fra TF e fra strumenti. Con questa scala usare soglie 90/10, non 70/30.\n\nSIGMA: 50 + 10*z(RSI). 60 = +1 sigma, 70 = +2, 80 = +3. E' la scala che rende questo script direttamente sovrapponibile alla versione z-score.\n\nLa normalizzazione usa una finestra pari a 'Storia di normalizzazione' moltiplicata per il rapporto fra TF della sezione e TF del grafico, cosi' ogni sezione viene normalizzata sul proprio orizzonte temporale e non su un numero di barre.")
 normLen  = input.int(200, "   storia di normalizzazione (barre della sezione)", minval=20, maxval=2000, group=gZ)
+ampComp  = input.bool(false, "Compensazione d'ampiezza sqrt(k) (solo modo C)", group=gZ,
+     tooltip="IL PROBLEMA. Nel modo C la sezione ha la stessa costante di TEMPO del modo A, ma NON la stessa ampiezza. Scomponendo l'RSI:\n\n  RSI - 50 = 50 * (spostamento netto) / (lunghezza del percorso)\n\nLo spostamento netto sull'orizzonte non dipende da come campioni. La lunghezza del percorso si', e per un cammino quasi-martingala cresce come la radice del numero di campioni. Campionando k volte piu' fine, l'escursione dell'RSI dal 50 si comprime di sqrt(k).\n\nEsempio misurato su NQ: sezione 5m con len 14, passando da grafico 15s a grafico 5s (k da 20 a 60, quindi k relativo 3), l'escursione massima e' scesa da 10.3 a 5.6 punti. Rapporto 1.84 contro sqrt(3)=1.73.\n\nE' la ragione per cui su grafico 5s la curva del trigger a 15S, che e' nativa e non compressa, oscilla molto piu' delle curve delle sezioni anche quando puntano allo stesso timeframe.\n\nLO Z-SCORE NON HA QUESTO PROBLEMA: z e' invariante di scala per costruzione, numeratore e denominatore si riferiscono alla stessa distribuzione. Nell'RSI scalano in modo diverso.\n\nLA CORREZIONE. Riporta l'escursione alla scala nativa:\n  RSI_corr = 50 + (RSI - 50) * sqrt(k), troncato a [0,100]\n\nEsatta al primo ordine su prezzi quasi-martingala. In tendenza forte lo spostamento netto domina, la compressione e' minore di sqrt(k) e la correzione ECCEDE: il troncamento la contiene ma la curva satura. Per questo e' spenta di default.\n\nIRRILEVANTE con scala Percentile (invariante per trasformazioni monotone) e con Sigma (invariante per trasformazioni affini, salvo il troncamento). Serve solo con RSI grezzo. Se ti trovi ad attivarla, valuta se non sia piu' pulito passare a Sigma, che normalizza empiricamente senza assumere nulla sul processo.")
 confirmed = input.bool(true, "Solo barre HTF chiuse (no repaint)", group=gZ,
      tooltip="Applica shift di 1 barra SOLO ai TF superiori a quello del grafico. Il TF del grafico non viene ritardato.")
 zBasis   = input.string("A · TF nativo", "Base di calcolo dell'RSI",
      options=["A · TF nativo","B · Barre grafico (serie HTF)","C · Barre grafico (orizzonte equivalente)"], group=gZ,
-     tooltip="A · TF NATIVO\nOgni sezione calcola l'RSI sulle candele del PROPRIO timeframe. Con len=14: la sezione 15S guarda 3.5 minuti, la sezione 5m ne guarda 70. Orizzonti diversi per ogni sezione, come in qualsiasi setup multi-timeframe classico.\n\nB · BARRE GRAFICO (serie HTF)\nL'RSI viene calcolato sulla serie HTF mappata sulle barre del grafico. Quella serie e' una scala a gradini: k-1 barre su k hanno variazione nulla. Gain e loss medi vengono diluiti dagli zeri nella stessa proporzione, quindi il rapporto RS sopravvive ma l'RSI risulta fortemente rallentato: in pratica e' un RSI di periodo len*k con in piu' il ritardo del gradino. Utile solo per confronto, non consigliato.\n\nC · BARRE GRAFICO (orizzonte equivalente)\nRSI di periodo len*k sulle candele del grafico. Stessa costante di tempo del modo A, molti piu' dati, nessun gradino, nessun ritardo. Con Wilder l'equivalenza e' esatta sulla costante di tempo; con Cutler e' esatta sulla finestra. E' la scelta consigliata.\n\nk = timeframe della sezione / timeframe del grafico.")
+     tooltip="A · TF NATIVO\nOgni sezione calcola l'RSI sulle candele del PROPRIO timeframe. Con len=14: la sezione 15S guarda 3.5 minuti, la sezione 5m ne guarda 70. Orizzonti diversi per ogni sezione, come in qualsiasi setup multi-timeframe classico.\n\nB · BARRE GRAFICO (serie HTF)\nL'RSI viene calcolato sulla serie HTF mappata sulle barre del grafico. Quella serie e' una scala a gradini: k-1 barre su k hanno variazione nulla. Gain e loss medi vengono diluiti dagli zeri nella stessa proporzione, quindi il rapporto RS sopravvive ma l'RSI risulta fortemente rallentato: in pratica e' un RSI di periodo len*k con in piu' il ritardo del gradino. Utile solo per confronto, non consigliato.\n\nC · BARRE GRAFICO (orizzonte equivalente)\nRSI di periodo len*k sulle candele del grafico. Stessa costante di TEMPO del modo A, molti piu' dati, nessun gradino, nessun ritardo.\n\nATTENZIONE, NON CONSERVA L'AMPIEZZA: l'escursione dell'RSI dal 50 si comprime di sqrt(k) rispetto al modo A, perche' lo spostamento netto e' invariante al campionamento mentre la lunghezza del percorso cresce come la radice del numero di campioni. Su grafico 5s una sezione 5m puo' restare confinata fra 44 e 56 e non raggiungere MAI 70/30, e il contatore armate resta a zero per sempre. Rimedio: scala Sigma o Percentile, che normalizzano empiricamente, oppure la compensazione sqrt(k). Con lo z-score il problema non esiste perche' z e' invariante di scala per costruzione.\n\nk = timeframe della sezione / timeframe del grafico.")
 
 // ---------------------------------------------------------- SEZIONI / TF -----
 var string gT = "2 · Sezioni (timeframe)"
@@ -408,11 +414,20 @@ nw3 = int(math.min(2000, normLen * k3))
 nw4 = int(math.min(2000, normLen * k4))
 nw5 = int(math.min(2000, normLen * k5))
 
-r1 = f_norm(rRaw1, nw1)
-r2 = f_norm(rRaw2, nw2)
-r3 = f_norm(rRaw3, nw3)
-r4 = f_norm(rRaw4, nw4)
-r5 = f_norm(rRaw5, nw5)
+// -- COMPENSAZIONE D'AMPIEZZA DEL MODO C -------------------------------------
+//  Il modo C conserva la costante di tempo ma comprime l'escursione di sqrt(k),
+//  perche' lo spostamento netto e' invariante al campionamento mentre la
+//  lunghezza del percorso cresce come la radice del numero di campioni.
+//  Vedi il tooltip di ampComp per la derivazione e i limiti.
+modeC = not modeA and not modeB
+f_amp(float r, int k) =>
+    modeC and ampComp ? math.min(100.0, math.max(0.0, 50.0 + (r - 50.0) * math.sqrt(k))) : r
+
+r1 = f_norm(f_amp(rRaw1, k1), nw1)
+r2 = f_norm(f_amp(rRaw2, k2), nw2)
+r3 = f_norm(f_amp(rRaw3, k3), nw3)
+r4 = f_norm(f_amp(rRaw4, k4), nw4)
+r5 = f_norm(f_amp(rRaw5, k5), nw5)
 
 // -- SERIE DEDICATA AL TRIGGER + RICOSTRUZIONE LIVE --------------------------
 secT   = timeframe.in_seconds(trigTf)
