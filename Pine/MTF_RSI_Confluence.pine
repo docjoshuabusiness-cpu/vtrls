@@ -1,0 +1,872 @@
+//@version=6
+// =============================================================================
+//  MTF RSI Confluence  v1.0
+//  ---------------------------------------------------------------------------
+//  Gemello dell'MTF Z-Score Confluence, costruito sull'RSI. Stessa architettura:
+//  5 sezioni (timeframe) attivabili singolarmente, 4 stream di soglie
+//  indipendenti, armamento per confluenza, trigger sulla serie piu' veloce,
+//  filtri di rischio, misura empirica della MAE, cruscotto diagnostico.
+//
+//  DIFFERENZE SOSTANZIALI RISPETTO ALLA VERSIONE Z-SCORE (leggere, non sono
+//  dettagli di implementazione):
+//
+//  1) NIENTE SORGENTE "LOG RETURN".
+//     L'RSI e' gia' una statistica sulle DIFFERENZE della serie. Applicarlo ai
+//     rendimenti significa differenziare due volte (over-differencing): si
+//     introduce autocorrelazione negativa spuria e l'oscillatore diventa rumore
+//     centrato su 50. Nello z-score aveva senso, qui e' un errore.
+//
+//  2) NON ESISTE IL TETTO ALGEBRICO sqrt(n-1).
+//     L'RSI e' limitato in [0,100] per costruzione, quindi la diagnosi "questa
+//     sezione non potra' MAI raggiungere la soglia" non si deriva: si MISURA.
+//     La colonna "n · rng" riporta la massima escursione da 50 realizzata dalla
+//     sezione su tutta la storia caricata. Se rng < distanza della soglia da 50,
+//     quella sezione non ha mai armato e non armera': riga rossa.
+//
+//  3) L'RSI NON E' AUTO-NORMALIZZANTE.
+//     z = +2 significa la stessa cosa su ogni strumento e ogni timeframe.
+//     RSI = 70 no: e' un quantile diverso su un future indice a 5s e su un
+//     cambio a 5m. Confluire 5 timeframe su soglie fisse significa confrontare
+//     quantili incoerenti. Per questo esiste l'input "Scala del segnale":
+//        RSI grezzo .. valore nudo, per replicare indicatori esterni
+//        Percentile .. rango empirico sulla propria storia (90 = piu' alto del
+//                      90% delle osservazioni). Coerente fra TF e strumenti.
+//        Sigma ...... 50 + 10*z(RSI): 70 vale ESATTAMENTE +2 sigma, 80 = +3.
+//                     E' la scala che rende questo script sovrapponibile allo
+//                     script z-score, soglia per soglia.
+//
+//  4) L'RSI E' PERSISTENTE, LO Z-SCORE NO.
+//     Lo z-score rientra in fretta verso zero, l'RSI resta esteso a lungo. Per
+//     questo l'armamento ha due modi: "Tocco nella finestra" (come nello script
+//     z) e "In soglia adesso". Su un oscillatore persistente il secondo e'
+//     quasi sempre piu' informativo e molto meno sensibile alla taratura della
+//     finestra di confluenza.
+//
+//  5) TRIGGER LIVE: RICOSTRUZIONE DIVERSA.
+//     Lo script z prendeva centro e scala dalle candele HTF chiuse e ci metteva
+//     il prezzo corrente. Per l'RSI di Wilder l'equivalente corretto e' prendere
+//     avgGain/avgLoss dall'ultima candela HTF CHIUSA e applicare UN SOLO
+//     aggiornamento di Wilder con la variazione della candela HTF in formazione:
+//         avgU_live = avgU + (max(P_now - C_htf, 0) - avgU) / n
+//         avgD_live = avgD + (max(C_htf - P_now, 0) - avgD) / n
+//     E' esattamente il valore che l'RSI avrebbe se la candela HTF chiudesse
+//     ora. Nessun dato futuro. FUNZIONA SOLO CON WILDER: con Cutler (SMA)
+//     servirebbe il termine piu' vecchio della finestra, che non e' disponibile
+//     tramite request.security, quindi il live si disattiva da solo.
+//
+//  NOTE OPERATIVE:
+//  - Mettere il grafico sul TF PIU' PICCOLO che si vuole osservare. Tutti i TF
+//    delle sezioni devono essere >= al TF del grafico, altrimenti
+//    request.security restituisce l'ultimo valore intrabar => REPAINT.
+//  - Gli RSI multi-TF sullo stesso prezzo sono FORTEMENTE collineari, esattamente
+//    come gli z-score: la "conferma di 5 TF" contiene molta meno informazione
+//    indipendente di quanto sembri. La confluenza parziale (K < N) esiste per
+//    misurare quanto vale davvero ogni sezione in piu'.
+//
+//  ===========================================================================
+//  QUALE CONFIGURAZIONE SU QUALE STRUMENTO
+//  ---------------------------------------------------------------------------
+//  Non esiste un preset universale. Le tre scelte che cambiano davvero il
+//  comportamento sono SCALA, BASE DI CALCOLO e MEDIA. Tutto il resto e' taratura.
+//
+//  --- SCALA DEL SEGNALE ------------------------------------------------------
+//  RSI GREZZO (soglie 70/30)
+//    Indici e futures su TF >= 1m: NAS100, US500, GER40, US30, JP225.
+//    Oro e argento su TF >= 5m. Qualsiasi caso in cui devi replicare un
+//    indicatore esterno o un manuale che parla di "RSI 70".
+//    Su questi strumenti 70 e 30 sono davvero quantili estremi: la convenzione
+//    coincide con la statistica e non serve normalizzare.
+//
+//  SIGMA 50+10z (soglie 70/30 = +/-2 sigma)
+//    Cambi maggiori: EURUSD, GBPUSD, USDJPY, AUDUSD, USDCHF, USDCAD, NZDUSD.
+//    E tutti gli strumenti su TF SOTTO il minuto (grafici 1s / 5s / 15S).
+//    Motivo: i maggiori sono fortemente mean-reverting e a bassa deriva, quindi
+//    la distribuzione dell'RSI e' stretta. Su EURUSD a 15S l'RSI(14) tocca 70
+//    poche volte al giorno: con soglie fisse il campione e' vuoto e la
+//    confluenza a 5 TF non si arma mai. Con la scala Sigma il tasso di segnale
+//    torna utilizzabile e 70 significa +2 sigma su OGNI strumento, esattamente
+//    come nello script z-score. E' anche l'unica scala che rende i due script
+//    confrontabili riga per riga.
+//
+//  PERCENTILE (soglie 90/10, NON 70/30)
+//    Cripto CFD (BTCUSD, ETHUSD), esotici (USDZAR, USDMXN, USDTRY, EURTRY),
+//    CFD su singole azioni, energia (XTIUSD, XNGUSD).
+//    Motivo: su questi il regime di volatilita' cambia di ordine di grandezza.
+//    RSI 70 puo' uscire quaranta volte in una sessione e mai nella successiva.
+//    Il rango empirico ancora la soglia alla distribuzione locale invece che a
+//    un numero. ATTENZIONE: con questa scala 70 significa "piu' alto del 70%
+//    delle osservazioni", che NON e' un estremo. Portare A/D a 90/10 e i
+//    trigger a 75/25, altrimenti si genera rumore puro.
+//
+//  --- MEDIA DI GAIN/LOSS -----------------------------------------------------
+//  WILDER (RMA) - default, e obbligatoria se vuoi il trigger LIVE.
+//    Scalping e intraday su qualsiasi strumento liquido.
+//  CUTLER (SMA)
+//    Analisi swing e daily; backtest che devono essere riproducibili su altre
+//    piattaforme; strumenti illiquidi o a spike (esotici, azioni singole,
+//    gas naturale) dove la memoria infinita di Wilder resta contaminata da un
+//    singolo evento per centinaia di barre. Con Cutler il modo C e' esatto.
+//
+//  --- BASE DI CALCOLO --------------------------------------------------------
+//  C (orizzonte equivalente) - default consigliato.
+//    Obbligatorio su grafici sotto il minuto: nel modo A le sezioni lente hanno
+//    pochissime barre reali e la loro curva e' una scala grossolana.
+//  A (TF nativo)
+//    Grafico >= 1m su indici e maggiori, quando vuoi che le sezioni coincidano
+//    con l'RSI che vedresti aprendo quei timeframe uno per uno.
+//  B (serie HTF sul grafico)
+//    Solo per confronto diagnostico. Mai in produzione: e' un RSI di periodo
+//    len*k con in piu' il ritardo del gradino, cioe' il peggio dei due mondi.
+//
+//  --- MODO ARMAMENTO ---------------------------------------------------------
+//  IN SOGLIA ADESSO - default. Cambi, indici, tutto l'intraday ordinato.
+//  TOCCO NELLA FINESTRA - materie prime ed energia (XTIUSD, XAUUSD su news),
+//    dove l'impulso e' violento e breve: l'RSI schizza e rientra prima che le
+//    sezioni lente possano allinearsi, quindi serve memoria della finestra.
+//
+//  --- SORGENTE ---------------------------------------------------------------
+//  CLOSE   strumenti liquidi con spread stretto: maggiori, indici principali.
+//  HLC3    spread largo o candele con lunghe ombre: esotici, cripto CFD, oro
+//          sotto il minuto, e in generale le ore di bassa liquidita' e il
+//          rollover. Riduce la sensibilita' a chiusure spinte da un solo tick.
+//
+//  --- PERIODO (Len) ----------------------------------------------------------
+//  14 e' il classico e resta un buon punto di partenza ovunque.
+//  Indici intraday .......... 9-14   (reagiscono in fretta, 21 e' gia' lento)
+//  Cambi maggiori sotto 1m .. 21-34  (14 su EURUSD a 5s e' quasi rumore bianco)
+//  Oro / energia ............ 14-21
+//  Cripto CFD ............... 14 con scala Percentile
+//  Nel modo C il periodo effettivo sul grafico e' Len*k: una sezione 5m con
+//  Len 14 su grafico 5s diventa un RSI(840) di barre a 5 secondi. E' voluto:
+//  e' la stessa costante di tempo, misurata con piu' dati.
+//
+//  --- STORIA DI NORMALIZZAZIONE (normLen) ------------------------------------
+//  Serve solo con scala Percentile o Sigma. Regola: almeno 10 volte il Len, e
+//  abbastanza da coprire un ciclo di sessione completo. 200 barre della sezione
+//  e' un default ragionevole; su strumenti con forte stagionalita' oraria
+//  (indici europei e americani) alzarlo a 400-600 per non far dipendere la
+//  soglia dall'ora del giorno in cui ti trovi.
+//  ===========================================================================
+// =============================================================================
+
+indicator("MTF RSI Confluence", shorttitle="MTF-RSI", overlay=false, max_bars_back=5000, max_labels_count=500)
+
+// -------------------------------------------------------------- MOTORE RSI --
+var string gZ = "1 · Motore RSI"
+srcMode  = input.string("Close", "Sorgente", options=["Close","HLC3"], group=gZ,
+     tooltip="Log Return volutamente assente: l'RSI opera gia' sulle differenze, applicarlo ai rendimenti equivale a differenziare due volte e produce rumore centrato su 50.")
+rsiMode  = input.string("Wilder (RMA)", "Media di gain/loss", options=["Wilder (RMA)","Cutler (SMA)"], group=gZ,
+     tooltip="WILDER: media esponenziale, memoria infinita, e' l'RSI standard. Path-dependent: due storie diverse che convergono danno RSI leggermente diversi.\n\nCUTLER: media semplice, finestra netta di n barre. Non e' path-dependent, quindi il modo C (orizzonte equivalente) e' esatto invece che approssimato. Costo: perde il trigger LIVE, che richiede lo stato ricorsivo di Wilder.")
+rsiLenSm = input.int(0, "Smoothing dell'RSI (0 = off)", minval=0, maxval=50, group=gZ,
+     tooltip="EMA applicata all'RSI. Riduce i falsi attraversamenti del livello di trigger al costo di un ritardo di circa n/2 barre. Alternativa onesta allo stimatore robusto dello script z-score, che sull'RSI non ha un analogo standard.")
+rsiScale = input.string("RSI grezzo", "Scala del segnale", options=["RSI grezzo","Percentile","Sigma (50+10z)"], group=gZ,
+     tooltip="RSI GREZZO: il valore nudo 0-100. Le soglie 70/30 sono convenzionali, non statistiche: sono quantili diversi su strumenti e timeframe diversi.\n\nPERCENTILE: rango empirico dell'RSI sulla propria storia recente. 90 significa 'piu' alto del 90% delle osservazioni di questa sezione'. Le soglie diventano confrontabili fra TF e fra strumenti. Con questa scala usare soglie 90/10, non 70/30.\n\nSIGMA: 50 + 10*z(RSI). 60 = +1 sigma, 70 = +2, 80 = +3. E' la scala che rende questo script direttamente sovrapponibile alla versione z-score.\n\nLa normalizzazione usa una finestra pari a 'Storia di normalizzazione' moltiplicata per il rapporto fra TF della sezione e TF del grafico, cosi' ogni sezione viene normalizzata sul proprio orizzonte temporale e non su un numero di barre.")
+normLen  = input.int(200, "   storia di normalizzazione (barre della sezione)", minval=20, maxval=2000, group=gZ)
+confirmed = input.bool(true, "Solo barre HTF chiuse (no repaint)", group=gZ,
+     tooltip="Applica shift di 1 barra SOLO ai TF superiori a quello del grafico. Il TF del grafico non viene ritardato.")
+zBasis   = input.string("A · TF nativo", "Base di calcolo dell'RSI",
+     options=["A · TF nativo","B · Barre grafico (serie HTF)","C · Barre grafico (orizzonte equivalente)"], group=gZ,
+     tooltip="A · TF NATIVO\nOgni sezione calcola l'RSI sulle candele del PROPRIO timeframe. Con len=14: la sezione 15S guarda 3.5 minuti, la sezione 5m ne guarda 70. Orizzonti diversi per ogni sezione, come in qualsiasi setup multi-timeframe classico.\n\nB · BARRE GRAFICO (serie HTF)\nL'RSI viene calcolato sulla serie HTF mappata sulle barre del grafico. Quella serie e' una scala a gradini: k-1 barre su k hanno variazione nulla. Gain e loss medi vengono diluiti dagli zeri nella stessa proporzione, quindi il rapporto RS sopravvive ma l'RSI risulta fortemente rallentato: in pratica e' un RSI di periodo len*k con in piu' il ritardo del gradino. Utile solo per confronto, non consigliato.\n\nC · BARRE GRAFICO (orizzonte equivalente)\nRSI di periodo len*k sulle candele del grafico. Stessa costante di tempo del modo A, molti piu' dati, nessun gradino, nessun ritardo. Con Wilder l'equivalenza e' esatta sulla costante di tempo; con Cutler e' esatta sulla finestra. E' la scelta consigliata.\n\nk = timeframe della sezione / timeframe del grafico.")
+
+// ---------------------------------------------------------- SEZIONI / TF -----
+var string gT = "2 · Sezioni (timeframe)"
+use1 = input.bool(true,  "S1", inline="s1", group=gT)
+tf1  = input.timeframe("15S", "", inline="s1", group=gT)
+len1 = input.int(14, "Len", minval=2, maxval=5000, inline="s1", group=gT)
+cz1  = input.color(color.new(#42a5f5, 0), "", inline="s1", group=gT)
+
+use2 = input.bool(true,  "S2", inline="s2", group=gT)
+tf2  = input.timeframe("30S", "", inline="s2", group=gT)
+len2 = input.int(14, "Len", minval=2, maxval=5000, inline="s2", group=gT)
+cz2  = input.color(color.new(#7e57c2, 0), "", inline="s2", group=gT)
+
+use3 = input.bool(true,  "S3", inline="s3", group=gT)
+tf3  = input.timeframe("1", "", inline="s3", group=gT)
+len3 = input.int(14, "Len", minval=2, maxval=5000, inline="s3", group=gT)
+cz3  = input.color(color.new(#ffa726, 0), "", inline="s3", group=gT)
+
+use4 = input.bool(true,  "S4", inline="s4", group=gT)
+tf4  = input.timeframe("2", "", inline="s4", group=gT)
+len4 = input.int(14, "Len", minval=2, maxval=5000, inline="s4", group=gT)
+cz4  = input.color(color.new(#ec407a, 0), "", inline="s4", group=gT)
+
+use5 = input.bool(true,  "S5", inline="s5", group=gT)
+tf5  = input.timeframe("5", "", inline="s5", group=gT)
+len5 = input.int(14, "Len", minval=2, maxval=5000, inline="s5", group=gT)
+cz5  = input.color(color.new(#bdbdbd, 0), "", inline="s5", group=gT)
+czF  = input.color(color.new(#ffffff, 25), "curva del trigger", inline="tfz", group=gT)
+
+// ------------------------------------------------------------- LOGICA SEGNALE
+var string gS = "3 · Logica segnale"
+armMode  = input.string("In soglia adesso", "Modo armamento", options=["In soglia adesso","Tocco nella finestra"], group=gS,
+     tooltip="IN SOGLIA ADESSO (default per l'RSI): la sezione conta come armata solo se il suo valore E' oltre la soglia sulla barra del trigger. L'RSI e' persistente, resta esteso a lungo: questa e' la conferma che serve davvero e non dipende dalla taratura della finestra.\n\nTOCCO NELLA FINESTRA: la sezione conta come armata se ha superato la soglia almeno una volta nelle ultime N barre. E' il comportamento dello script z-score, dove ha senso perche' lo z rientra in fretta. Sull'RSI rende l'armamento molto piu' permissivo e la finestra diventa il parametro dominante.")
+lookback = input.int(10, "Finestra di confluenza (barre del grafico)", minval=1, maxval=500, group=gS,
+     tooltip="Usata solo in modo 'Tocco nella finestra'. Tutti i TF attivi devono aver superato la soglia almeno una volta entro queste N barre del grafico.\n\nREGOLA DI TARATURA: la finestra deve contenere almeno 2 barre della sezione piu' LENTA.\n  minimo consigliato = 2 * (TF piu' lento / TF del grafico)\n  esempio: grafico 5s, sezione piu' lenta 5m -> 2 * (300/5) = 120 barre.\nCon valori troppo bassi la confluenza non si arma MAI: controlla il contatore 'armate' in fondo alla dashboard.")
+autoLb   = input.bool(true, "Finestra automatica (2 barre della sezione piu' lenta)", group=gS,
+     tooltip="Calcola la finestra minima da solo: 2 * (TF piu' lento attivo / TF del grafico), e usa il valore maggiore fra questo e quello impostato sopra.")
+trigOwn  = input.bool(true, "Serie dedicata per il trigger", group=gS,
+     tooltip="Il trigger non eredita il modo e la len della sezione piu' veloce: usa una serie propria, definita qui sotto e calcolata SEMPRE in modo nativo (RSI sulle candele del suo timeframe).\n\nCosi' l'armamento puo' usare il modo che preferisci sulle 5 sezioni, mentre il segnale cade esattamente sulla barra in cui la curva che stai guardando attraversa il livello di trigger.\n\nPer replicare un indicatore esterno: imposta qui il suo timeframe e la sua Length, e metti la scala su 'RSI grezzo'.")
+trigTf   = input.timeframe("15S", "   timeframe del trigger", group=gS)
+trigLen  = input.int(14, "   len del trigger", minval=2, maxval=5000, group=gS)
+trigLive = input.bool(true, "   trigger LIVE (nessun ritardo di gradino)", group=gS,
+     tooltip="PROBLEMA: request.security restituisce il valore dell'ultima candela HTF CHIUSA. Una candela 15S copre 3 barre di un grafico a 5s, quindi l'RSI e' una scala a gradini e il rientro viene rilevato al gradino, con ritardo medio di k-1 barre.\n\nSOLUZIONE: avgGain e avgLoss vengono presi dall'ultima candela HTF chiusa, poi si applica UN aggiornamento di Wilder usando la variazione della candela HTF in formazione (prezzo corrente meno chiusura HTF precedente). E' il valore che l'RSI avrebbe se la candela chiudesse ora.\n\nNessun dato futuro: e' cio' che un operatore vede in tempo reale.\n\nRICHIEDE WILDER. Con Cutler (SMA) servirebbe il termine piu' vecchio della finestra, non disponibile: il live si disattiva automaticamente e la dashboard lo segnala.")
+fastNow  = input.bool(true, "Trigger immediato sul TF veloce (niente attesa di chiusura)", group=gS,
+     tooltip="La sezione PIU' VELOCE non subisce lo shift anti-repaint, quindi il rientro sotto il livello di trigger viene rilevato sulla barra del grafico in cui avviene davvero.\n\nCosto: sulla barra in corso il segnale puo' comparire e sparire finche' la barra non chiude. Le barre storiche non sono toccate.\n\nIrrilevante per la serie dedicata quando il trigger LIVE e' attivo: quella usa sempre l'ultima candela chiusa piu' la ricostruzione.")
+trigMode = input.string("Rientro (reversione)", "Modalita' trigger",
+     options=["Rientro (reversione)","Primo tocco della soglia"], group=gS,
+     tooltip="Rientro: la serie di trigger riattraversa il livello tornando verso 50 (setup di esaurimento). Primo tocco: la serie buca la soglia (setup di continuazione/momentum).")
+reqSec   = input.int(0, "Sezioni richieste in soglia (0 = tutte)", minval=0, maxval=5, group=gS,
+     tooltip="Quante sezioni ATTIVE devono essere in soglia perche' il setup si armi.\n\n0 = tutte (congiunzione piena). E' la richiesta piu' severa ma anche la piu' fragile: le sezioni lente hanno frequenza naturale molto piu' bassa, quindi sono loro a dettare il ritmo e le veloci non aggiungono quasi nulla.\n\nK < numero di sezioni attive = confluenza PARZIALE. Confrontando K=2,3,4 si vede quanto vale davvero ogni sezione in piu': con RSI multi-TF, che sono fortemente collineari, la differenza fra K=3 e K=5 e' spesso solo una perdita di campione.\n\nSe K supera le sezioni attive viene ridotto automaticamente.")
+repMode  = input.string("Uno per escursione", "Ripetizione dei segnali",
+     options=["Uno per escursione","Uno per armamento","Tutti"], group=gS,
+     tooltip="UNO PER ESCURSIONE (default): dopo un segnale il latch si riarma appena la serie di trigger RIENTRA oltre la soglia. Ogni escursione nell'estremo e' un setup a se'.\n\nUNO PER ARMAMENTO: un solo segnale finche' l'armamento resta valido. Attenzione: con armamento 'In soglia adesso' su RSI persistente un armamento puo' durare ore.\n\nTUTTI: ogni attraversamento produce un segnale, limitato solo dal cooldown.")
+showSeq  = input.bool(true, "   numera i segnali dentro l'armamento", group=gS)
+cooldown = input.int(5, "Cooldown fra segnali (barre)", minval=0, maxval=500, group=gS)
+
+var string gL = "4 · Soglie (stream indipendenti)"
+enP2  = input.bool(true,  "Soglia A", inline="a", group=gL)
+thrP2 = input.float(70.0, "liv", step=1.0, inline="a", group=gL)
+trgP2 = input.float(60.0, "trigger", step=1.0, inline="a", group=gL)
+
+enP1  = input.bool(false, "Soglia B", inline="b", group=gL)
+thrP1 = input.float(60.0, "liv", step=1.0, inline="b", group=gL)
+trgP1 = input.float(50.0, "trigger", step=1.0, inline="b", group=gL)
+
+enM1  = input.bool(false, "Soglia C", inline="c", group=gL)
+thrM1 = input.float(40.0, "liv", step=1.0, inline="c", group=gL)
+trgM1 = input.float(50.0, "trigger", step=1.0, inline="c", group=gL)
+
+enM2  = input.bool(true,  "Soglia D", inline="d", group=gL)
+thrM2 = input.float(30.0, "liv", step=1.0, inline="d", group=gL)
+trgM2 = input.float(40.0, "trigger", step=1.0, inline="d", group=gL)
+
+// ------------------------------------------------------------------- RISCHIO -
+var string gR1 = "5a · Stop strutturale (sempre attivo)"
+atrLenR  = input.int(14, "ATR di riferimento", minval=2, group=gR1)
+swingLen = input.int(10, "Barre per lo stop strutturale", minval=2, maxval=200, group=gR1,
+     tooltip="Lo stop viene messo oltre l'estremo delle ultime N barre piu' un buffer. La sua DISTANZA e' il rischio del trade: e' questa la quantita' da minimizzare, non il drawdown, che non dipende da te.")
+stopBuf  = input.float(0.15, "   buffer oltre l'estremo (x ATR)", minval=0.0, maxval=2.0, step=0.05, group=gR1)
+stopPol  = input.string("Il maggiore dei due", "Stop da usare", options=["Strutturale","MAE p80","Il maggiore dei due"], group=gR1,
+     tooltip="STRUTTURALE: oltre l'estremo delle ultime N barre. E' l'invalidazione logica del setup, ma puo' cadere dentro la banda di rumore e venire colpito senza che il setup sia sbagliato.\n\nMAE p80: la distanza che l'80% dei segnali passati NON ha superato. E' la banda di rumore misurata, non stimata. Disponibile con almeno 5 osservazioni.\n\nIL MAGGIORE DEI DUE (default): rispetta sia la struttura sia il rumore misurato.")
+showRisk = input.bool(true, "Scrivi il rischio accanto al marker", group=gR1)
+riskUnit = input.string("Punti", "   unita'", options=["Punti","Tick","Entrambi"], group=gR1)
+
+var string gR2 = "5b · Filtro STOP STRETTO"
+useRisk  = input.bool(false, "Attiva", group=gR2,
+     tooltip="Scarta i segnali in cui lo stop strutturale e' piu' lontano della soglia. Non rende il segnale migliore, seleziona i casi in cui la struttura offre un'invalidazione vicina.\n\nATTENZIONE: uno stop piu' stretto NON riduce la MAE, riduce la frazione di trade che le sopravvive.")
+maxStopU = input.string("Punti", "   unita' del limite", options=["Punti","x ATR"], group=gR2,
+     tooltip="x ATR: il limite si adatta alla volatilita'. Attenzione, subito dopo uno spike l'ATR e' gia' salito, quindi il limite si allarga proprio quando servirebbe stretto.\n\nPUNTI: limite assoluto, immune a quella contaminazione.")
+maxStopA = input.float(2.0, "   limite (x ATR)", minval=0.1, maxval=10.0, step=0.1, group=gR2)
+maxStopP = input.float(8.0, "   limite (punti)", minval=0.25, step=0.25, group=gR2)
+
+var string gR3 = "5c · Filtro COMPRESSIONE"
+useComp  = input.bool(false, "Attiva", group=gR3,
+     tooltip="Richiede che la barra del segnale abbia TR/ATR sotto la soglia. Entrare su una barra di espansione significa comprare il massimo del rumore locale.")
+maxTrAtr = input.float(1.2, "   TR/ATR massimo", minval=0.2, maxval=5.0, step=0.1, group=gR3)
+expLook  = input.int(1, "   barre esaminate", minval=1, maxval=100, group=gR3,
+     tooltip="Con 1 viene controllata solo la barra del segnale. Portalo al valore di 'Barre per lo stop strutturale' cosi' il filtro copre la stessa finestra che determina lo stop.")
+
+var string gR4 = "5d · Filtro ENTROPIA"
+useEnt   = input.bool(false, "Attiva", group=gR4,
+     tooltip="Entropia binaria della direzione delle ultime N barre.\n  H = 0 -> tutte nella stessa direzione, movimento ordinato\n  H = 1 -> meta' su meta' giu', rumore puro\n\nPer un fade dopo un estremo, H bassa significa che l'impulso e' ANCORA in corso: e' il caso in cui il controtendenza viene travolto.")
+entLen   = input.int(20, "   barre", minval=5, maxval=200, group=gR4)
+entMin   = input.float(0.0, "   H min", minval=0.0, maxval=1.0, step=0.05, inline="ent", group=gR4)
+entMax   = input.float(1.0, "   H max", minval=0.0, maxval=1.0, step=0.05, inline="ent", group=gR4)
+
+var string gR5 = "5e · Misura della MAE"
+useMae   = input.bool(true, "Attiva", group=gR5,
+     tooltip="Dopo ogni segnale misura la massima escursione CONTRARIA nelle N barre successive, in ATR. I percentili sono la risposta empirica a 'quanto stretto puo' stare lo stop'. Non filtra nulla, misura soltanto.")
+maeLen   = input.int(30, "   orizzonte (barre)", minval=3, maxval=500, group=gR5)
+
+var string gV = "6 · Grafica"
+marker   = input.string("Freccia", "Marker segnale", options=["Freccia","Pallino"], group=gV)
+showZ    = input.bool(true,  "Curve RSI nel pannello", group=gV)
+showLv   = input.bool(true,  "Linee di soglia e di trigger nel pannello", group=gV)
+showArmBg= input.bool(true,  "Sfondo colorato quando un setup e' armato", group=gV)
+showTab  = input.bool(true,  "Mostra cruscotto", group=gV)
+dashSz   = input.string("Piccolo", "Dimensione testo cruscotto", options=["Minimo","Piccolo","Normale","Grande"], group=gV)
+tagSz    = input.string("Piccolo", "Dimensione etichette periodo", options=["Minimo","Piccolo","Normale","Grande"], group=gV)
+markSz   = input.string("Normale", "Dimensione marker", options=["Minimo","Piccolo","Normale","Grande"], group=gV)
+cLvlS    = input.color(color.new(#000000,  0), "Colore linee soglia",  inline="lv", group=gV)
+cLvlT    = input.color(color.new(#000000, 45), "trigger",              inline="lv", group=gV)
+cLvl0    = input.color(color.new(#000000, 55), "mediana 50",           inline="lv", group=gV)
+markWhere= input.string("Pannello", "Posizione marker", options=["Pannello","Grafico prezzi","Entrambi"], group=gV)
+markLvl  = input.float(97.0, "   livello marker nel pannello", step=1.0, minval=51.0, maxval=110.0, group=gV)
+markGap  = input.float(4.0,  "   distanza fra stream sullo stesso lato", step=0.5, minval=0.0, maxval=20.0, group=gV)
+showMiss = input.bool(false, "Marker dei SETUP MANCATI", group=gV,
+     tooltip="Disegna una × grigia dove il trigger e' scattato ma l'armamento NON era valido, elencando le sezioni che non erano in soglia. Spento di default perche' i setup mancati sono molti piu' dei segnali e consumano il budget delle label.")
+showTags = input.bool(true, "Etichette del periodo a destra delle curve", group=gV)
+tagOff   = input.int(4, "   distanza (barre)", minval=1, maxval=50, group=gV)
+cUp      = input.color(color.new(#ef5350, 0), "Colore SELL", inline="col", group=gV)
+cDn      = input.color(color.new(#1B5E20, 0), "Colore BUY",  inline="col", group=gV)
+
+// ============================================================ CALCOLO RSI ====
+f_src() => srcMode == "Close" ? close : hlc3
+
+// RSI di una serie qualsiasi nel contesto corrente.
+// Wilder e Cutler vengono entrambi calcolati: rsiMode e' costante per tutto il
+// grafico, quindi il ramo scelto e' sempre lo stesso e la storia resta coerente.
+f_rsiSer(float s, simple int len) =>
+    p  = nz(s[1], s)
+    u  = math.max(s - p, 0.0)
+    d  = math.max(p - s, 0.0)
+    uW = ta.rma(u, len)
+    dW = ta.rma(d, len)
+    uS = ta.sma(u, len)
+    dS = ta.sma(d, len)
+    au = rsiMode == "Cutler (SMA)" ? uS : uW
+    ad = rsiMode == "Cutler (SMA)" ? dS : dW
+    float r = ad <= 0.0 ? (au <= 0.0 ? 50.0 : 100.0) : au <= 0.0 ? 0.0 : 100.0 - 100.0 / (1.0 + au / ad)
+    rs = ta.ema(r, math.max(1, rsiLenSm))    // valutata sempre: storia coerente
+    rsiLenSm > 0 ? rs : r
+
+// Normalizzazione: porta l'RSI su una scala confrontabile fra timeframe.
+// La finestra e' espressa in barre del GRAFICO, gia' scalata dal chiamante.
+// Nota: la serie HTF mappata sul grafico ripete ogni valore k volte; ripetere
+// ogni osservazione lo stesso numero di volte NON altera la distribuzione
+// empirica, quindi percentile e z restano corretti anche nel modo A.
+f_norm(float r, simple int win) =>
+    float o = r
+    if rsiScale == "Percentile"
+        o := ta.percentrank(r, win)
+    else if rsiScale == "Sigma (50+10z)"
+        m  = ta.sma(r, win)
+        sd = ta.stdev(r, win)
+        o := sd > 0 ? 50.0 + 10.0 * (r - m) / sd : 50.0
+    o
+
+// Eseguita DENTRO il contesto del TF richiesto: RSI nativo (modo A) e sorgente
+// HTF grezza, che serve al modo B una volta mappata sul grafico.
+f_htf(simple int len, simple bool shift) =>
+    s = f_src()
+    r = f_rsiSer(s, len)
+    [shift ? r[1] : r, shift ? s[1] : s]
+
+// Come sopra ma restituisce anche lo STATO di Wilder (gain e loss medi) e la
+// chiusura HTF: sono i tre ingredienti della ricostruzione LIVE.
+f_htfStat(simple int len, simple bool shift) =>
+    s  = f_src()
+    p  = nz(s[1], s)
+    u  = math.max(s - p, 0.0)
+    d  = math.max(p - s, 0.0)
+    au = ta.rma(u, len)
+    ad = ta.rma(d, len)
+    r  = f_rsiSer(s, len)
+    [shift ? r[1] : r, shift ? au[1] : au, shift ? ad[1] : ad, shift ? s[1] : s]
+
+chartSec = timeframe.in_seconds()
+sec1 = timeframe.in_seconds(tf1)
+sec2 = timeframe.in_seconds(tf2)
+sec3 = timeframe.in_seconds(tf3)
+sec4 = timeframe.in_seconds(tf4)
+sec5 = timeframe.in_seconds(tf5)
+
+// k = quante barre del grafico entrano in una barra della sezione.
+k1 = int(math.max(1, math.round(sec1 / float(chartSec))))
+k2 = int(math.max(1, math.round(sec2 / float(chartSec))))
+k3 = int(math.max(1, math.round(sec3 / float(chartSec))))
+k4 = int(math.max(1, math.round(sec4 / float(chartSec))))
+k5 = int(math.max(1, math.round(sec5 / float(chartSec))))
+
+BIG = 1e12
+m1 = use1 ? sec1 : BIG
+m2 = use2 ? sec2 : BIG
+m3 = use3 ? sec3 : BIG
+m4 = use4 ? sec4 : BIG
+m5 = use5 ? sec5 : BIG
+minSec    = math.min(math.min(math.min(math.min(m1, m2), m3), m4), m5)
+anyActive = use1 or use2 or use3 or use4 or use5
+nActive   = (use1 ? 1 : 0) + (use2 ? 1 : 0) + (use3 ? 1 : 0) + (use4 ? 1 : 0) + (use5 ? 1 : 0)
+
+[rN1, sH1] = request.security(syminfo.tickerid, tf1, f_htf(len1, confirmed and sec1 > chartSec and not (fastNow and m1 == minSec)), lookahead = barmerge.lookahead_off)
+[rN2, sH2] = request.security(syminfo.tickerid, tf2, f_htf(len2, confirmed and sec2 > chartSec and not (fastNow and m2 == minSec)), lookahead = barmerge.lookahead_off)
+[rN3, sH3] = request.security(syminfo.tickerid, tf3, f_htf(len3, confirmed and sec3 > chartSec and not (fastNow and m3 == minSec)), lookahead = barmerge.lookahead_off)
+[rN4, sH4] = request.security(syminfo.tickerid, tf4, f_htf(len4, confirmed and sec4 > chartSec and not (fastNow and m4 == minSec)), lookahead = barmerge.lookahead_off)
+[rN5, sH5] = request.security(syminfo.tickerid, tf5, f_htf(len5, confirmed and sec5 > chartSec and not (fastNow and m5 == minSec)), lookahead = barmerge.lookahead_off)
+
+modeA = zBasis == "A · TF nativo"
+modeB = zBasis == "B · Barre grafico (serie HTF)"
+
+lenC1 = int(math.min(4000, len1 * k1))
+lenC2 = int(math.min(4000, len2 * k2))
+lenC3 = int(math.min(4000, len3 * k3))
+lenC4 = int(math.min(4000, len4 * k4))
+lenC5 = int(math.min(4000, len5 * k5))
+
+srcC = f_src()
+
+rRaw1 = modeA ? rN1 : modeB ? f_rsiSer(sH1, len1) : f_rsiSer(srcC, lenC1)
+rRaw2 = modeA ? rN2 : modeB ? f_rsiSer(sH2, len2) : f_rsiSer(srcC, lenC2)
+rRaw3 = modeA ? rN3 : modeB ? f_rsiSer(sH3, len3) : f_rsiSer(srcC, lenC3)
+rRaw4 = modeA ? rN4 : modeB ? f_rsiSer(sH4, len4) : f_rsiSer(srcC, lenC4)
+rRaw5 = modeA ? rN5 : modeB ? f_rsiSer(sH5, len5) : f_rsiSer(srcC, lenC5)
+
+// finestra di normalizzazione in barre del grafico = normLen barre della sezione
+nw1 = int(math.min(2000, normLen * k1))
+nw2 = int(math.min(2000, normLen * k2))
+nw3 = int(math.min(2000, normLen * k3))
+nw4 = int(math.min(2000, normLen * k4))
+nw5 = int(math.min(2000, normLen * k5))
+
+r1 = f_norm(rRaw1, nw1)
+r2 = f_norm(rRaw2, nw2)
+r3 = f_norm(rRaw3, nw3)
+r4 = f_norm(rRaw4, nw4)
+r5 = f_norm(rRaw5, nw5)
+
+// -- SERIE DEDICATA AL TRIGGER + RICOSTRUZIONE LIVE --------------------------
+secT   = timeframe.in_seconds(trigTf)
+kT     = int(math.max(1, math.round(secT / float(chartSec))))
+liveOk = trigLive and rsiMode == "Wilder (RMA)" and secT > chartSec
+// con il live si usa SEMPRE l'ultima candela chiusa: e' la base della ricostruzione
+shiftT = secT > chartSec and (liveOk or (confirmed and not fastNow))
+[rTclosed, auT, adT, sT] = request.security(syminfo.tickerid, trigTf, f_htfStat(trigLen, shiftT), lookahead = barmerge.lookahead_off)
+
+srcNow = f_src()
+dlt    = srcNow - sT
+u0     = math.max(dlt, 0.0)
+d0     = math.max(-dlt, 0.0)
+auL    = auT + (u0 - auT) / trigLen
+adL    = adT + (d0 - adT) / trigLen
+rTliveRaw = adL <= 0.0 ? (auL <= 0.0 ? 50.0 : 100.0) : auL <= 0.0 ? 0.0 : 100.0 - 100.0 / (1.0 + auL / adL)
+rTliveSm  = ta.ema(rTliveRaw, math.max(1, rsiLenSm))
+rTliveOut = rsiLenSm > 0 ? rTliveSm : rTliveRaw
+rTraw     = liveOk ? rTliveOut : rTclosed
+rT     = f_norm(rTraw, int(math.min(2000, normLen * kT)))
+
+// -- ESCURSIONE REALIZZATA: l'analogo empirico del tetto algebrico dello z ----
+//  L'RSI non ha un tetto derivabile, quindi si misura. Se una sezione non ha
+//  mai raggiunto la distanza richiesta da 50, non armera' mai: riga rossa.
+f_dev(float r) =>
+    var float m = 0.0
+    m := math.max(m, na(r) ? 0.0 : math.abs(r - 50.0))
+    m
+
+dv1 = f_dev(r1)
+dv2 = f_dev(r2)
+dv3 = f_dev(r3)
+dv4 = f_dev(r4)
+dv5 = f_dev(r5)
+
+ne1 = modeA ? float(len1) : modeB ? math.max(1.0, len1 / float(k1)) : float(lenC1)
+ne2 = modeA ? float(len2) : modeB ? math.max(1.0, len2 / float(k2)) : float(lenC2)
+ne3 = modeA ? float(len3) : modeB ? math.max(1.0, len3 / float(k3)) : float(lenC3)
+ne4 = modeA ? float(len4) : modeB ? math.max(1.0, len4 / float(k4)) : float(lenC4)
+ne5 = modeA ? float(len5) : modeB ? math.max(1.0, len5 / float(k5)) : float(lenC5)
+
+// Durata REALE della finestra statistica, in tempo: e' il numero che rende
+// confrontabile una sezione con un indicatore esterno.
+winS1 = modeA ? float(len1) * sec1 : modeB ? float(len1) * chartSec : float(lenC1) * chartSec
+winS2 = modeA ? float(len2) * sec2 : modeB ? float(len2) * chartSec : float(lenC2) * chartSec
+winS3 = modeA ? float(len3) * sec3 : modeB ? float(len3) * chartSec : float(lenC3) * chartSec
+winS4 = modeA ? float(len4) * sec4 : modeB ? float(len4) * chartSec : float(lenC4) * chartSec
+winS5 = modeA ? float(len5) * sec5 : modeB ? float(len5) * chartSec : float(lenC5) * chartSec
+
+f_n2(float v) => na(v) ? "n/a" : str.tostring(v, "#.00")
+f_wtxt(float sc) =>
+    sc < 60 ? str.tostring(math.round(sc)) + "s" : sc < 3600 ? str.tostring(math.round(sc / 60)) + "m" : str.tostring(math.round(sc / 3600.0, 1)) + "h"
+
+// distanza massima da 50 fra le soglie attive: serve alla diagnosi di "morta"
+thrMaxDev = math.max(math.max(enP2 ? math.abs(thrP2 - 50.0) : 0.0, enP1 ? math.abs(thrP1 - 50.0) : 0.0), math.max(enM1 ? math.abs(thrM1 - 50.0) : 0.0, enM2 ? math.abs(thrM2 - 50.0) : 0.0))
+
+kAct1 = use1 ? k1 : 1
+kAct2 = use2 ? k2 : 1
+kAct3 = use3 ? k3 : 1
+kAct4 = use4 ? k4 : 1
+kAct5 = use5 ? k5 : 1
+kMax  = math.max(math.max(math.max(math.max(kAct1, kAct2), kAct3), kAct4), kAct5)
+lbEff = autoLb ? int(math.max(lookback, 2 * kMax)) : lookback
+
+hi1 = ta.highest(r1, lbEff)
+lo1 = ta.lowest(r1, lbEff)
+hi2 = ta.highest(r2, lbEff)
+lo2 = ta.lowest(r2, lbEff)
+hi3 = ta.highest(r3, lbEff)
+lo3 = ta.lowest(r3, lbEff)
+hi4 = ta.highest(r4, lbEff)
+lo4 = ta.lowest(r4, lbEff)
+hi5 = ta.highest(r5, lbEff)
+lo5 = ta.lowest(r5, lbEff)
+
+// ------------------------------------------------ TF piu' veloce fra gli attivi
+rSecFast  = m1 == minSec ? r1 : m2 == minSec ? r2 : m3 == minSec ? r3 : m4 == minSec ? r4 : m5 == minSec ? r5 : na
+rFast     = trigOwn ? rT : rSecFast
+rPrev     = nz(rFast[1], rFast)
+tfSecFast = m1 == minSec ? tf1 : m2 == minSec ? tf2 : m3 == minSec ? tf3 : m4 == minSec ? tf4 : m5 == minSec ? tf5 : "-"
+tfFast    = trigOwn ? trigTf : tfSecFast
+winFast   = trigOwn ? float(trigLen) * secT : (modeA ? float(len1) * minSec : float(len1) * chartSec)
+
+f_cu(float now, float prev, float lvl) => now < lvl and prev >= lvl
+f_co(float now, float prev, float lvl) => now > lvl and prev <= lvl
+
+var array<float> maeArr = array.new_float()
+maeN   = array.size(maeArr)
+maeMed = maeN >= 5 ? array.percentile_nearest_rank(maeArr, 50) : na
+maeP80 = maeN >= 5 ? array.percentile_nearest_rank(maeArr, 80) : na
+maeP95 = maeN >= 5 ? array.percentile_nearest_rank(maeArr, 95) : na
+
+// ======================================================= ENTRATA E RISCHIO ===
+atrR   = math.max(ta.atr(atrLenR), syminfo.mintick)
+swHi   = ta.highest(high, swingLen)
+swLo   = ta.lowest(low,  swingLen)
+stpSell = swHi + stopBuf * atrR
+stpBuy  = swLo - stopBuf * atrR
+rskSellS = stpSell - close
+rskBuyS  = close - stpBuy
+maeStop  = na(maeP80) ? na : maeP80 * atrR
+
+rskSell = stopPol == "Strutturale" or na(maeStop) ? rskSellS : stopPol == "MAE p80" ? maeStop : math.max(rskSellS, maeStop)
+rskBuy  = stopPol == "Strutturale" or na(maeStop) ? rskBuyS  : stopPol == "MAE p80" ? maeStop : math.max(rskBuyS,  maeStop)
+
+trAtr    = ta.tr(true) / atrR
+trAtrMax = ta.highest(trAtr, expLook)
+
+upCnt  = math.sum(close > close[1] ? 1.0 : 0.0, entLen)
+pUp    = upCnt / entLen
+entH   = pUp <= 0.0 or pUp >= 1.0 ? 0.0 : -(pUp * math.log(pUp) + (1 - pUp) * math.log(1 - pUp)) / math.log(2)
+
+f_riskOk(bool isSell) =>
+    r      = isSell ? rskSell : rskBuy
+    cap    = maxStopU == "Punti" ? maxStopP : maxStopA * atrR
+    okStop = not useRisk or (r > 0 and r <= cap)
+    okComp = not useComp or trAtrMax <= maxTrAtr
+    okEnt  = not useEnt or (entH >= entMin and entH <= entMax)
+    okStop and okComp and okEnt
+
+// Una sezione e' "in soglia": adesso, oppure in un qualsiasi punto della finestra.
+f_inThr(bool use, float r, float h, float l, float thr, bool isUp) =>
+    persist = armMode == "In soglia adesso"
+    use and (persist ? (isUp ? r >= thr : r <= thr) : (isUp ? h >= thr : l <= thr))
+
+f_arm(float thr, bool isUp) =>
+    int okN = 0
+    if f_inThr(use1, r1, hi1, lo1, thr, isUp)
+        okN += 1
+    if f_inThr(use2, r2, hi2, lo2, thr, isUp)
+        okN += 1
+    if f_inThr(use3, r3, hi3, lo3, thr, isUp)
+        okN += 1
+    if f_inThr(use4, r4, hi4, lo4, thr, isUp)
+        okN += 1
+    if f_inThr(use5, r5, hi5, lo5, thr, isUp)
+        okN += 1
+    need = reqSec <= 0 ? nActive : math.min(reqSec, nActive)
+    [anyActive and okN >= need, okN, need]
+
+f_armOk(float thr, bool isUp) =>
+    [a, _o, _n] = f_arm(thr, isUp)
+    a
+
+f_stream(bool en, float thr, float trg, bool isUp) =>
+    var bool fired   = false
+    var int  lastSig = -100000
+    var int  seq     = 0
+    armed   = en and f_armOk(thr, isUp)
+    reEnter = isUp ? rFast >= thr : rFast <= thr
+    if not armed
+        fired := false
+        seq   := 0
+    else if repMode == "Tutti" or (repMode == "Uno per escursione" and reEnter)
+        fired := false
+    trig = false
+    if trigMode == "Primo tocco della soglia"
+        trig := isUp ? f_co(rFast, rPrev, thr) : f_cu(rFast, rPrev, thr)
+    else
+        trig := isUp ? f_cu(rFast, rPrev, trg) : f_co(rFast, rPrev, trg)
+    fire = armed and not fired and trig and not na(rFast) and f_riskOk(isUp) and (bar_index - lastSig >= cooldown)
+    if fire
+        fired   := true
+        lastSig := bar_index
+        seq     += 1
+    [fire, armed, seq, trig]
+
+[sigA, armA, seqA, trgARaw] = f_stream(enP2, thrP2, trgP2, true)
+[sigB, armB, seqB, trgBRaw] = f_stream(enP1, thrP1, trgP1, true)
+[sigC, armC, seqC, trgCRaw] = f_stream(enM1, thrM1, trgM1, false)
+[sigD, armD, seqD, trgDRaw] = f_stream(enM2, thrM2, trgM2, false)
+
+// ============================================== MISURA DELLA MAE =============
+var bool  trk   = false
+var float trkPx = 0.0
+var int   trkDir= 0
+var float trkMae= 0.0
+var int   trkBar= 0
+
+sigSell = sigA or sigB
+sigBuy  = sigC or sigD
+anySig  = sigSell or sigBuy
+
+if useMae and trk
+    trkBar += 1
+    adv = trkDir > 0 ? trkPx - low : high - trkPx
+    trkMae := math.max(trkMae, adv)
+    if trkBar >= maeLen
+        array.push(maeArr, trkMae / atrR)
+        if array.size(maeArr) > 500
+            array.shift(maeArr)
+        trk := false
+
+if useMae and anySig and not trk
+    trk    := true
+    trkPx  := close
+    trkDir := sigBuy ? 1 : -1
+    trkMae := 0.0
+    trkBar := 0
+
+// ============================================================ DIAGNOSTICA =====
+f_cnt(bool c) =>
+    var int n = 0
+    if c
+        n += 1
+    n
+
+f_hit(bool use, float r) =>
+    f_cnt(use and thrMaxDev > 0 and math.abs(r - 50.0) >= thrMaxDev and math.abs(nz(r[1], r) - 50.0) < thrMaxDev)
+
+cHit1 = f_hit(use1, r1)
+cHit2 = f_hit(use2, r2)
+cHit3 = f_hit(use3, r3)
+cHit4 = f_hit(use4, r4)
+cHit5 = f_hit(use5, r5)
+
+cArmA = f_cnt(armA)
+cArmB = f_cnt(armB)
+cArmC = f_cnt(armC)
+cArmD = f_cnt(armD)
+cSigA = f_cnt(sigA)
+cSigB = f_cnt(sigB)
+cSigC = f_cnt(sigC)
+cSigD = f_cnt(sigD)
+
+// ================================================================== PLOT ======
+plot(showZ and use1 ? r1 : na, "RSI S1", color = cz1, linewidth = 1)
+plot(showZ and use2 ? r2 : na, "RSI S2", color = cz2, linewidth = 1)
+plot(showZ and use3 ? r3 : na, "RSI S3", color = cz3, linewidth = 1)
+plot(showZ and use4 ? r4 : na, "RSI S4", color = cz4, linewidth = 1)
+plot(showZ and use5 ? r5 : na, "RSI S5", color = cz5, linewidth = 2)
+plot(showZ ? rFast : na,       "RSI trigger", color = czF, linewidth = 2)
+
+f_size(string opt) =>
+    opt == "Minimo" ? size.tiny : opt == "Piccolo" ? size.small : opt == "Normale" ? size.normal : size.large
+szDash = f_size(dashSz)
+szTag  = f_size(tagSz)
+szMark = f_size(markSz)
+
+f_tag(bool use, string tf, float r, color c) =>
+    var label lb = label.new(bar_index, 0.0, "", style = label.style_none, size = size.tiny, textalign = text.align_left)
+    if barstate.islast
+        label.set_xy(lb, bar_index + tagOff, r)
+        label.set_text(lb, showZ and showTags and use ? tf : "")
+        label.set_textcolor(lb, c)
+        label.set_size(lb, szTag)
+    lb
+
+f_tag(use1, tf1, r1, cz1)
+f_tag(use2, tf2, r2, cz2)
+f_tag(use3, tf3, r3, cz3)
+f_tag(use4, tf4, r4, cz4)
+f_tag(use5, tf5, r5, cz5)
+
+hline(50, "mediana", color = cLvl0, linestyle = hline.style_dotted)
+plot(showLv and enP2 ? thrP2 : na, "soglia A", color = cLvlS, style = plot.style_linebr)
+plot(showLv and enP1 ? thrP1 : na, "soglia B", color = cLvlS, style = plot.style_linebr)
+plot(showLv and enM1 ? thrM1 : na, "soglia C", color = cLvlS, style = plot.style_linebr)
+plot(showLv and enM2 ? thrM2 : na, "soglia D", color = cLvlS, style = plot.style_linebr)
+plot(showLv and enP2 ? trgP2 : na, "trigger A", color = cLvlT, style = plot.style_cross, linewidth = 1)
+plot(showLv and enP1 ? trgP1 : na, "trigger B", color = cLvlT, style = plot.style_cross, linewidth = 1)
+plot(showLv and enM1 ? trgM1 : na, "trigger C", color = cLvlT, style = plot.style_cross, linewidth = 1)
+plot(showLv and enM2 ? trgM2 : na, "trigger D", color = cLvlT, style = plot.style_cross, linewidth = 1)
+
+// I marker sono LABEL, non plotshape: TradingView conta due plot per ogni
+// plotshape a colore variabile e sedici di essi sfondavano il limite di 64.
+isArrow = marker == "Freccia"
+inPane  = markWhere != "Grafico prezzi"
+onChart = markWhere != "Pannello"
+
+f_markPane(bool fire, float y, string txt, color c) =>
+    if fire and inPane
+        label.new(bar_index, y, txt, style = label.style_none, textcolor = c, size = szMark, textalign = text.align_center)
+
+f_markChart(bool fire, bool isSell, string txt, color c) =>
+    if fire and onChart
+        label.new(bar_index, na, txt, yloc = isSell ? yloc.abovebar : yloc.belowbar, style = label.style_none, textcolor = c, size = szMark, textalign = text.align_center, force_overlay = true)
+
+txSell = isArrow ? "▼" : "●"
+txBuy  = isArrow ? "▲" : "●"
+
+f_missTxt(float thr, bool isUp) =>
+    t = ""
+    if not f_inThr(use1, r1, hi1, lo1, thr, isUp) and use1
+        t := t + " S1"
+    if not f_inThr(use2, r2, hi2, lo2, thr, isUp) and use2
+        t := t + " S2"
+    if not f_inThr(use3, r3, hi3, lo3, thr, isUp) and use3
+        t := t + " S3"
+    if not f_inThr(use4, r4, hi4, lo4, thr, isUp) and use4
+        t := t + " S4"
+    if not f_inThr(use5, r5, hi5, lo5, thr, isUp) and use5
+        t := t + " S5"
+    t
+
+f_miss(bool en, bool trig, bool armed, float y, string tag, float thr, bool isUp) =>
+    if showMiss and en and trig and not armed
+        [_a, okN, need] = f_arm(thr, isUp)
+        label.new(bar_index, y, "×" + tag + " " + str.tostring(okN) + "/" + str.tostring(need) + f_missTxt(thr, isUp), style = label.style_none, textcolor = color.new(color.gray, 25), size = szMark, textalign = text.align_center)
+
+f_seqTxt(int n) => showSeq and n > 1 ? str.tostring(n) : ""
+f_rskTxt(bool isSell) =>
+    r  = isSell ? rskSell : rskBuy
+    pt = str.tostring(r, format.mintick) + "pt"
+    tk = str.tostring(math.round(r / syminfo.mintick)) + "t"
+    u  = riskUnit == "Tick" ? tk : riskUnit == "Punti" ? pt : pt + " / " + tk
+    showRisk and r > 0 ? " " + u : ""
+
+f_markPane(sigA,  markLvl,            txSell + "A" + f_seqTxt(seqA) + f_rskTxt(true),  cUp)
+f_markPane(sigB,  markLvl - markGap,  txSell + "B" + f_seqTxt(seqB) + f_rskTxt(true),  color.new(cUp, 35))
+f_markPane(sigC, 100 - markLvl + markGap, txBuy + "C" + f_seqTxt(seqC) + f_rskTxt(false), color.new(cDn, 35))
+f_markPane(sigD, 100 - markLvl,       txBuy  + "D" + f_seqTxt(seqD) + f_rskTxt(false), cDn)
+
+f_markChart(sigA, true,  txSell + "A" + f_seqTxt(seqA) + f_rskTxt(true), cUp)
+f_markChart(sigB, true,  txSell + "B" + f_seqTxt(seqB) + f_rskTxt(true), color.new(cUp, 35))
+f_markChart(sigC, false, txBuy  + "C" + f_seqTxt(seqC) + f_rskTxt(false), color.new(cDn, 35))
+f_markChart(sigD, false, txBuy  + "D" + f_seqTxt(seqD) + f_rskTxt(false), cDn)
+
+f_miss(enP2, trgARaw, armA,  markLvl,                "A", thrP2, true)
+f_miss(enP1, trgBRaw, armB,  markLvl - markGap,      "B", thrP1, true)
+f_miss(enM1, trgCRaw, armC, 100 - markLvl + markGap, "C", thrM1, false)
+f_miss(enM2, trgDRaw, armD, 100 - markLvl,           "D", thrM2, false)
+
+bgcolor(not showArmBg ? na : (armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title="Sfondo armamento")
+
+// ============================================================== CRUSCOTTO =====
+//  Colonna "n · rng": campione effettivo e MASSIMA ESCURSIONE DA 50 realizzata
+//  dalla sezione su tutta la storia caricata. E' l'analogo empirico del tetto
+//  algebrico dello script z-score: se rng e' sotto la distanza della soglia
+//  attiva piu' ambiziosa, quella sezione non ha mai armato e non armera'.
+f_stat(bool use, string tf, int sec, float r, float h, float l, float ne, float win, float dev) =>
+    bad  = use and sec < chartSec
+    dead = use and dev < thrMaxDev
+    [use ? (bad ? "⚠ < grafico" : tf + " " + f_wtxt(win)) : "off",
+     use ? str.tostring(r, "#.0") : "–",
+     use ? str.tostring(l, "#.0") + " / " + str.tostring(h, "#.0") : "–",
+     use ? str.tostring(int(math.round(ne))) + " · " + str.tostring(dev, "#.0") : "–",
+     bad, dead]
+
+var table dash = table.new(position.top_right, 6, 13, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+if showTab and barstate.islast
+    hdrBg = color.new(color.gray, 70)
+    modeTag = modeA ? "A nativo" : modeB ? "B grafico/HTF" : "C orizz.equiv."
+    sclTag  = rsiScale == "Percentile" ? "pctl" : rsiScale == "Sigma (50+10z)" ? "sigma" : "grezzo"
+    table.cell(dash, 0, 0, "TF", bgcolor=hdrBg, text_color=color.white, text_size=szDash)
+    table.cell(dash, 1, 0, "RSI", bgcolor=hdrBg, text_color=color.white, text_size=szDash)
+    table.cell(dash, 2, 0, "min/max " + str.tostring(lbEff), bgcolor=hdrBg, text_color=color.white, text_size=szDash)
+    table.cell(dash, 3, 0, "n · rng", bgcolor=hdrBg, text_color=color.white, text_size=szDash)
+    table.cell(dash, 4, 0, "hit", bgcolor=hdrBg, text_color=color.white, text_size=szDash)
+    table.cell(dash, 5, 0, "stato", bgcolor=hdrBg, text_color=color.white, text_size=szDash)
+
+    [t1, v1, g1, q1, b1, d1] = f_stat(use1, tf1, sec1, r1, hi1, lo1, ne1, winS1, dv1)
+    [t2, v2, g2, q2, b2, d2] = f_stat(use2, tf2, sec2, r2, hi2, lo2, ne2, winS2, dv2)
+    [t3, v3, g3, q3, b3, d3] = f_stat(use3, tf3, sec3, r3, hi3, lo3, ne3, winS3, dv3)
+    [t4, v4, g4, q4, b4, d4] = f_stat(use4, tf4, sec4, r4, hi4, lo4, ne4, winS4, dv4)
+    [t5, v5, g5, q5, b5, d5] = f_stat(use5, tf5, sec5, r5, hi5, lo5, ne5, winS5, dv5)
+
+    ts = array.from(t1, t2, t3, t4, t5)
+    vs = array.from(v1, v2, v3, v4, v5)
+    gs = array.from(g1, g2, g3, g4, g5)
+    qs = array.from(q1, q2, q3, q4, q5)
+    bs = array.from(b1, b2, b3, b4, b5)
+    ds = array.from(d1, d2, d3, d4, d5)
+    rr = array.from(r1, r2, r3, r4, r5)
+    us = array.from(use1, use2, use3, use4, use5)
+    hs = array.from(cHit1, cHit2, cHit3, cHit4, cHit5)
+    cs = array.from(cz1, cz2, cz3, cz4, cz5)
+
+    for i = 0 to 4
+        rv   = array.get(rr, i)
+        act  = array.get(us, i)
+        dead = array.get(ds, i)
+        col  = not act ? color.new(color.gray, 60) : dead ? color.new(color.red, 25) : array.get(bs, i) ? color.new(color.orange, 30) : rv >= 70 ? color.new(cUp, 40) : rv <= 30 ? color.new(cDn, 40) : color.new(color.gray, 80)
+        st   = not act ? "off" : dead ? "rng < soglia" : (rv >= 70 or rv <= 30 ? "estremo" : "–")
+        table.cell(dash, 0, i + 1, "S" + str.tostring(i + 1) + " " + array.get(ts, i), text_size=szDash, text_color=act ? array.get(cs, i) : color.gray, bgcolor=col)
+        table.cell(dash, 1, i + 1, array.get(vs, i), text_size=szDash, text_color=color.white, bgcolor=col)
+        table.cell(dash, 2, i + 1, array.get(gs, i), text_size=szDash, text_color=color.white, bgcolor=col)
+        table.cell(dash, 3, i + 1, array.get(qs, i), text_size=szDash, text_color=color.white, bgcolor=col)
+        hitN = array.get(hs, i)
+        table.cell(dash, 4, i + 1, act ? str.tostring(hitN) : "–", text_size=szDash, text_color=act and hitN == 0 ? color.red : color.white, bgcolor=col)
+        table.cell(dash, 5, i + 1, st, text_size=szDash, text_color=color.white, bgcolor=col)
+
+    armTxt = (armA ? "A " : "") + (armB ? "B " : "") + (armC ? "C " : "") + (armD ? "D " : "")
+    // il trigger e' segnalato in aqua se usa la serie dedicata, in giallo se il
+    // LIVE e' stato richiesto ma disattivato (Cutler, oppure TF non superiore)
+    tCol = trigLive and not liveOk ? color.yellow : trigOwn ? color.aqua : color.white
+    table.cell(dash, 0, 6, "modo", text_size=szDash, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 1, 6, modeTag + " · " + sclTag, text_size=szDash, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 2, 6, "trigger", text_size=szDash, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 3, 6, tfFast + " " + f_wtxt(winFast) + (liveOk ? " ⚡" : ""), text_size=szDash, text_color=tCol, bgcolor=hdrBg)
+    table.cell(dash, 4, 6, "ora", text_size=szDash, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 5, 6, armTxt == "" ? "–" : armTxt, text_size=szDash, text_color=color.white, bgcolor=armTxt == "" ? hdrBg : color.new(color.orange, 40))
+
+    table.cell(dash, 0, 7, "K " + str.tostring(reqSec <= 0 ? nActive : math.min(reqSec, nActive)) + "/" + str.tostring(nActive), text_size=szDash, text_color=reqSec > 0 and reqSec < nActive ? color.yellow : color.white, bgcolor=hdrBg)
+    table.cell(dash, 1, 7, "A " + str.tostring(thrP2, "#.#"), text_size=szDash, text_color=enP2 ? cUp : color.gray, bgcolor=hdrBg)
+    table.cell(dash, 2, 7, "B " + str.tostring(thrP1, "#.#"), text_size=szDash, text_color=enP1 ? cUp : color.gray, bgcolor=hdrBg)
+    table.cell(dash, 3, 7, "C " + str.tostring(thrM1, "#.#"), text_size=szDash, text_color=enM1 ? cDn : color.gray, bgcolor=hdrBg)
+    table.cell(dash, 4, 7, "D " + str.tostring(thrM2, "#.#"), text_size=szDash, text_color=enM2 ? cDn : color.gray, bgcolor=hdrBg)
+    table.cell(dash, 5, 7, armMode == "In soglia adesso" ? "arm: ora" : "arm: fin.", text_size=szDash, text_color=color.silver, bgcolor=hdrBg)
+
+    ac = array.from(cArmA, cArmB, cArmC, cArmD)
+    sc = array.from(cSigA, cSigB, cSigC, cSigD)
+    ae = array.from(enP2, enP1, enM1, enM2)
+    table.cell(dash, 0, 8, "armate",  text_size=szDash, text_color=color.silver, bgcolor=color.new(color.gray, 85))
+    table.cell(dash, 0, 9, "segnali", text_size=szDash, text_color=color.silver, bgcolor=color.new(color.gray, 85))
+    for j = 0 to 3
+        av = array.get(ac, j)
+        sv = array.get(sc, j)
+        on = array.get(ae, j)
+        // rosso = mai armato (soglie o finestra troppo strette)
+        // arancio = armato ma mai scattato (livello di trigger irraggiungibile)
+        acol = not on ? color.gray : av == 0 ? color.red : color.silver
+        scol = not on ? color.gray : sv == 0 and av > 0 ? color.orange : sv == 0 ? color.red : color.lime
+        table.cell(dash, j + 1, 8, on ? str.tostring(av) : "–", text_size=szDash, text_color=acol, bgcolor=color.new(color.gray, 85))
+        table.cell(dash, j + 1, 9, on ? str.tostring(sv) : "–", text_size=szDash, text_color=scol, bgcolor=color.new(color.gray, 85))
+    table.cell(dash, 5, 8, "barre", text_size=szDash, text_color=color.gray, bgcolor=color.new(color.gray, 85))
+    table.cell(dash, 5, 9, "tot",   text_size=szDash, text_color=color.gray, bgcolor=color.new(color.gray, 85))
+
+    rbg = color.new(color.gray, 88)
+    table.cell(dash, 0, 10, "rischio", text_size=szDash, text_color=color.silver, bgcolor=rbg)
+    table.cell(dash, 1, 10, riskUnit == "Tick" ? str.tostring(math.round(rskSell / syminfo.mintick)) + "t" : str.tostring(rskSell, format.mintick) + "pt", text_size=szDash, text_color=cUp, bgcolor=rbg)
+    table.cell(dash, 2, 10, riskUnit == "Tick" ? str.tostring(math.round(rskBuy / syminfo.mintick)) + "t" : str.tostring(rskBuy, format.mintick) + "pt", text_size=szDash, text_color=cDn, bgcolor=rbg)
+    table.cell(dash, 3, 10, "TR/ATR " + str.tostring(trAtrMax, "#.0"), text_size=szDash, text_color=not useComp ? color.gray : trAtrMax > maxTrAtr ? color.red : color.lime, bgcolor=rbg)
+    table.cell(dash, 4, 10, "H " + str.tostring(entH, "#.00"), text_size=szDash, text_color=not useEnt ? color.gray : (entH < entMin or entH > entMax) ? color.red : color.lime, bgcolor=rbg)
+    table.cell(dash, 5, 10, "", bgcolor=rbg)
+
+    mbg = color.new(color.gray, 88)
+    table.cell(dash, 0, 11, "MAE atr", text_size=szDash, text_color=color.silver, bgcolor=mbg)
+    table.cell(dash, 1, 11, "med " + f_n2(maeMed), text_size=szDash, text_color=color.silver, bgcolor=mbg)
+    table.cell(dash, 2, 11, "p80 " + f_n2(maeP80), text_size=szDash, text_color=color.yellow, bgcolor=mbg)
+    table.cell(dash, 3, 11, "p95 " + f_n2(maeP95), text_size=szDash, text_color=color.silver, bgcolor=mbg)
+    table.cell(dash, 4, 11, "n " + str.tostring(maeN), text_size=szDash, text_color=maeN < 30 ? color.orange : color.silver, bgcolor=mbg)
+    table.cell(dash, 5, 11, useRisk ? "cap " + str.tostring(maxStopA, "#.0") : "", text_size=szDash, text_color=not na(maeP80) and useRisk and maxStopA < maeP80 ? color.red : color.gray, bgcolor=mbg)
+
+    sbg  = color.new(color.gray, 88)
+    sSug = na(maeP80) ? na : maeP80 * atrR
+    tickV = syminfo.mintick
+    table.cell(dash, 0, 12, "stop cons.", text_size=szDash, text_color=color.white, bgcolor=sbg)
+    table.cell(dash, 1, 12, na(sSug) ? "n/a" : str.tostring(sSug, format.mintick) + " pt", text_size=szDash, text_color=color.white, bgcolor=sbg)
+    table.cell(dash, 2, 12, na(sSug) ? "n/a" : str.tostring(math.round(sSug / tickV)) + " t", text_size=szDash, text_color=color.white, bgcolor=sbg)
+    table.cell(dash, 3, 12, na(sSug) ? "n/a" : "$" + str.tostring(math.round(sSug * syminfo.pointvalue, 2)), text_size=szDash, text_color=color.white, bgcolor=sbg)
+    table.cell(dash, 4, 12, na(sSug) ? "–" : "S " + (rskSellS < sSug ? "stretto" : "ok"), text_size=szDash, text_color=na(sSug) ? color.gray : rskSellS < sSug ? color.red : color.lime, bgcolor=sbg)
+    table.cell(dash, 5, 12, na(sSug) ? "–" : "B " + (rskBuyS < sSug ? "stretto" : "ok"), text_size=szDash, text_color=na(sSug) ? color.gray : rskBuyS < sSug ? color.red : color.lime, bgcolor=sbg)
+
+// ================================================================= ALERT ======
+alertcondition(sigA, "MTF-RSI · SELL soglia A", "MTF-RSI SELL A · confluenza")
+alertcondition(sigB, "MTF-RSI · SELL soglia B", "MTF-RSI SELL B · confluenza")
+alertcondition(sigC, "MTF-RSI · BUY soglia C",  "MTF-RSI BUY C · confluenza")
+alertcondition(sigD, "MTF-RSI · BUY soglia D",  "MTF-RSI BUY D · confluenza")
+alertcondition(sigA or sigB, "MTF-RSI · SELL (qualsiasi)", "MTF-RSI SELL · confluenza")
+alertcondition(sigC or sigD, "MTF-RSI · BUY (qualsiasi)",  "MTF-RSI BUY · confluenza")
+
+if sigA or sigB or sigC or sigD
+    dir = (sigA or sigB) ? "SELL" : "BUY"
+    tag = sigA ? "A" : sigB ? "B" : sigC ? "C" : "D"
+    nth = sigA ? seqA : sigB ? seqB : sigC ? seqC : seqD
+    alert("MTF-RSI " + dir + " [" + tag + "#" + str.tostring(nth) + "] " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | rsiTrig=" + str.tostring(rFast, "#.0") + " | risk=" + str.tostring(sigC or sigD ? rskBuy : rskSell, format.mintick) + "pt/" + str.tostring(math.round((sigC or sigD ? rskBuy : rskSell) / syminfo.mintick)) + "t | trAtr=" + str.tostring(trAtr, "#.0") + " | H=" + str.tostring(entH, "#.00"), alert.freq_once_per_bar_close)
