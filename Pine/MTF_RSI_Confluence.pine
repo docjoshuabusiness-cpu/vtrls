@@ -331,13 +331,30 @@ f_rsiSer(float s, simple int len) =>
 // Nota: la serie HTF mappata sul grafico ripete ogni valore k volte; ripetere
 // ogni osservazione lo stesso numero di volte NON altera la distribuzione
 // empirica, quindi percentile e z restano corretti anche nel modo A.
-f_norm(float r, simple int win) =>
+// Media e deviazione standard ESPONENZIALI, in forma ricorsiva (West 1979).
+// Costo O(1) e nessun limite di storia: e' cio' che permette di normalizzare
+// una sezione a 5m su grafico 5s sul suo VERO orizzonte equivalente (12000
+// barre) invece che su un troncone. Una finestra mobile la' non e' praticabile
+// e, se troncata, produce uno z-score che insegue la serie che dovrebbe
+// standardizzare: media e sigma vengono dominate dalle stesse oscillazioni
+// lente che stai misurando, e lo z risulta schiacciato verso zero.
+f_ewStat(float x, simple int n) =>
+    a = 2.0 / (n + 1.0)
+    var float mu = na
+    var float v  = 0.0
+    float d = na(mu) ? 0.0 : x - mu
+    mu := na(mu) ? x : mu + a * d
+    v  := (1.0 - a) * (v + a * d * d)
+    [mu, math.sqrt(v)]
+
+// winP = finestra per il rango empirico (deve stare nel budget di storia)
+// winE = orizzonte equivalente reale, usato dallo stimatore ricorsivo
+f_norm(float r, simple int winP, simple int winE) =>
     float o = r
     if rsiScale == "Percentile"
-        o := ta.percentrank(r, win)
+        o := ta.percentrank(r, winP)
     else if rsiScale == "Sigma (50+10z)"
-        m  = ta.sma(r, win)
-        sd = ta.stdev(r, win)
+        [m, sd] = f_ewStat(r, winE)
         o := sd > 0 ? 50.0 + 10.0 * (r - m) / sd : 50.0
     o
 
@@ -407,12 +424,24 @@ rRaw3 = modeA ? rN3 : modeB ? f_rsiSer(sH3, len3) : f_rsiSer(srcC, lenC3)
 rRaw4 = modeA ? rN4 : modeB ? f_rsiSer(sH4, len4) : f_rsiSer(srcC, lenC4)
 rRaw5 = modeA ? rN5 : modeB ? f_rsiSer(sH5, len5) : f_rsiSer(srcC, lenC5)
 
-// finestra di normalizzazione in barre del grafico = normLen barre della sezione
-nw1 = int(math.min(2000, normLen * k1))
-nw2 = int(math.min(2000, normLen * k2))
-nw3 = int(math.min(2000, normLen * k3))
-nw4 = int(math.min(2000, normLen * k4))
-nw5 = int(math.min(2000, normLen * k5))
+// Finestra di normalizzazione in barre del grafico = normLen barre della sezione.
+// ne* e' l'orizzonte VERO (usato dallo stimatore ricorsivo, senza tetto);
+// nw* e' la versione troncata che serve solo al rango empirico, che richiede
+// storia reale. Quando il troncamento morde, il cruscotto lo segnala.
+nwE1 = int(normLen * k1)
+nwE2 = int(normLen * k2)
+nwE3 = int(normLen * k3)
+nwE4 = int(normLen * k4)
+nwE5 = int(normLen * k5)
+NWCAP = 2000
+nw1 = int(math.min(NWCAP, nwE1))
+nw2 = int(math.min(NWCAP, nwE2))
+nw3 = int(math.min(NWCAP, nwE3))
+nw4 = int(math.min(NWCAP, nwE4))
+nw5 = int(math.min(NWCAP, nwE5))
+// il troncamento e' innocuo con Sigma (stimatore ricorsivo) e distorce solo il
+// rango empirico, che ha bisogno di osservazioni vere
+truncW = rsiScale == "Percentile" and (nwE1 > NWCAP or nwE2 > NWCAP or nwE3 > NWCAP or nwE4 > NWCAP or nwE5 > NWCAP)
 
 // -- COMPENSAZIONE D'AMPIEZZA DEL MODO C -------------------------------------
 //  Il modo C conserva la costante di tempo ma comprime l'escursione di sqrt(k),
@@ -423,11 +452,11 @@ modeC = not modeA and not modeB
 f_amp(float r, int k) =>
     modeC and ampComp ? math.min(100.0, math.max(0.0, 50.0 + (r - 50.0) * math.sqrt(k))) : r
 
-r1 = f_norm(f_amp(rRaw1, k1), nw1)
-r2 = f_norm(f_amp(rRaw2, k2), nw2)
-r3 = f_norm(f_amp(rRaw3, k3), nw3)
-r4 = f_norm(f_amp(rRaw4, k4), nw4)
-r5 = f_norm(f_amp(rRaw5, k5), nw5)
+r1 = f_norm(f_amp(rRaw1, k1), nw1, nwE1)
+r2 = f_norm(f_amp(rRaw2, k2), nw2, nwE2)
+r3 = f_norm(f_amp(rRaw3, k3), nw3, nwE3)
+r4 = f_norm(f_amp(rRaw4, k4), nw4, nwE4)
+r5 = f_norm(f_amp(rRaw5, k5), nw5, nwE5)
 
 // -- SERIE DEDICATA AL TRIGGER + RICOSTRUZIONE LIVE --------------------------
 secT   = timeframe.in_seconds(trigTf)
@@ -447,7 +476,7 @@ rTliveRaw = adL <= 0.0 ? (auL <= 0.0 ? 50.0 : 100.0) : auL <= 0.0 ? 0.0 : 100.0 
 rTliveSm  = ta.ema(rTliveRaw, math.max(1, rsiLenSm))
 rTliveOut = rsiLenSm > 0 ? rTliveSm : rTliveRaw
 rTraw     = liveOk ? rTliveOut : rTclosed
-rT     = f_norm(rTraw, int(math.min(2000, normLen * kT)))
+rT     = f_norm(rTraw, int(math.min(NWCAP, normLen * kT)), int(normLen * kT))
 
 // -- ESCURSIONE REALIZZATA: l'analogo empirico del tetto algebrico dello z ----
 //  L'RSI non ha un tetto derivabile, quindi si misura. Se una sezione non ha
@@ -815,7 +844,7 @@ if showTab and barstate.islast
     // LIVE e' stato richiesto ma disattivato (Cutler, oppure TF non superiore)
     tCol = trigLive and not liveOk ? color.yellow : trigOwn ? color.aqua : color.white
     table.cell(dash, 0, 6, "modo", text_size=szDash, text_color=color.white, bgcolor=hdrBg)
-    table.cell(dash, 1, 6, modeTag + " · " + sclTag, text_size=szDash, text_color=color.white, bgcolor=hdrBg)
+    table.cell(dash, 1, 6, modeTag + " · " + sclTag + (truncW ? " ⚠win" : ""), text_size=szDash, text_color=truncW ? color.yellow : color.white, bgcolor=hdrBg)
     table.cell(dash, 2, 6, "trigger", text_size=szDash, text_color=color.white, bgcolor=hdrBg)
     table.cell(dash, 3, 6, tfFast + " " + f_wtxt(winFast) + (liveOk ? " ⚡" : ""), text_size=szDash, text_color=tCol, bgcolor=hdrBg)
     table.cell(dash, 4, 6, "ora", text_size=szDash, text_color=color.white, bgcolor=hdrBg)
