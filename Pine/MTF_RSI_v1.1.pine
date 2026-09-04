@@ -134,6 +134,8 @@ dirOnly = input.bool(true, "L'estremo deve essere il PIU' RECENTE (direzionalita
 strictF = input.bool(false, "Il segnale deve cadere sull'attraversamento della sezione piu' veloce", group=gS,
      tooltip="SPENTO (default): il segnale esce sul fronte di salita della condizione completa, cioe' sulla barra in cui l'ULTIMA sezione mancante completa il percorso, qualunque essa sia.\n\nACCESO: il segnale esce solo se e' la sezione piu' veloce ad attraversare il livello di rientro proprio su quella barra.\n\nAcceso e' la lettura letterale, ma scarta molti setup validi: le sezioni lente rientrano sotto 50 molto dopo le veloci, quindi nella maggior parte dei casi quando l'ultima sezione lenta completa il percorso la veloce ha gia' attraversato da un pezzo e nessun segnale viene emesso.")
 markWh  = input.string("Entrambi", "Posizione marker", options=["Pannello","Grafico prezzi","Entrambi"], group=gS)
+markShape= input.string("Freccia ▼▲", "Forma del marker", options=["Freccia ▼▲","Freccia vuota ▽△","Freccia sottile ↓↑","Pallino ●","Cerchio ○","Quadrato ■","Rombo ◆","Stella ★","Croce ✖","Freccia (forma)","Triangolo (forma)","Cerchio (forma)","Quadrato (forma)","Rombo (forma)","Croce × (forma)","Croce + (forma)","Bandiera (forma)","Etichetta (forma)"], group=gS,
+     tooltip="Due famiglie di marker, con proprieta' diverse.\n\nGLIFO TESTUALE (le voci con il simbolo): e' TESTO. Lo colora 'textcolor', e la sua larghezza in pixel non dipende dallo zoom, quindi con una stringa lunga a zoom out sembra staccarsi dalla candela. Puo' pero' portare accanto lettera, sequenza e rischio.\n\nFORMA NATIVA (le voci con '(forma)'): e' un DISEGNO della label, non testo. Dimensione fissa data da 'Dimensione marker', larghezza testuale nulla, quindi resta incollata alla candela a qualsiasi zoom. Non puo' portare testo: lettera, sequenza e rischio finiscono nel tooltip, leggibili passandoci sopra col mouse.\n\n'Etichetta (forma)' e 'Bandiera (forma)' hanno un puntatore che tocca la candela: sono le piu' precise quando le barre sono strette.\n\nLe forme native sono colorate da 'color', quindi rispettano i colori SELL/BUY come i glifi.")
 markLv  = input.float(95, "   livello nel pannello", minval=51, maxval=110, step=1, group=gS)
 cSell   = input.color(color.new(#ef5350, 0), "SELL", inline="sc", group=gS)
 cBuy    = input.color(color.new(#1B5E20, 0), "BUY",  inline="sc", group=gS)
@@ -382,14 +384,46 @@ if shTab and barstate.islast
 inPane  = markWh != "Grafico prezzi"
 onChart = markWh != "Pannello"
 
+// FORMA DEL MARKER
+// Due famiglie. I GLIFI sono testo dentro una label style_none: colorati da
+// textcolor, larghezza in pixel indipendente dallo zoom, possono portare altro
+// testo accanto. Le FORME NATIVE sono disegni della label: colorate da color,
+// dimensione fissa data da szMark, larghezza testuale nulla, nessun testo.
+f_mkStyle(bool isSell) =>
+    markShape == "Freccia (forma)"    ? (isSell ? label.style_arrowdown    : label.style_arrowup)    :
+     markShape == "Triangolo (forma)" ? (isSell ? label.style_triangledown : label.style_triangleup) :
+     markShape == "Etichetta (forma)" ? (isSell ? label.style_label_down   : label.style_label_up)   :
+     markShape == "Cerchio (forma)"   ? label.style_circle  :
+     markShape == "Quadrato (forma)"  ? label.style_square  :
+     markShape == "Rombo (forma)"     ? label.style_diamond :
+     markShape == "Croce × (forma)"   ? label.style_xcross  :
+     markShape == "Croce + (forma)"   ? label.style_cross   :
+     markShape == "Bandiera (forma)"  ? label.style_flag    :
+     label.style_none
+
+f_mkGlyph(bool isSell) =>
+    markShape == "Freccia ▼▲"          ? (isSell ? "▼" : "▲") :
+     markShape == "Freccia vuota ▽△"   ? (isSell ? "▽" : "△") :
+     markShape == "Freccia sottile ↓↑" ? (isSell ? "↓" : "↑") :
+     markShape == "Pallino ●"          ? "●" :
+     markShape == "Cerchio ○"          ? "○" :
+     markShape == "Quadrato ■"         ? "■" :
+     markShape == "Rombo ◆"            ? "◆" :
+     markShape == "Stella ★"           ? "★" :
+     markShape == "Croce ✖"            ? "✖" :
+     ""
+
+// una forma nativa non ospita testo: quello che c'era va nel tooltip
+isShape = str.contains(markShape, "(forma)")
+
 if sigS and inPane
-    label.new(bar_index, markLv, "▼", style = label.style_none, textcolor = cSell, size = sz, textalign = text.align_center)
+    label.new(bar_index, markLv, f_mkGlyph(true), style = f_mkStyle(true), color = cSell, textcolor = cSell, size = sz, textalign = text.align_center)
 if sigB and inPane
-    label.new(bar_index, 100 - markLv, "▲", style = label.style_none, textcolor = cBuy, size = sz, textalign = text.align_center)
+    label.new(bar_index, 100 - markLv, f_mkGlyph(false), style = f_mkStyle(false), color = cBuy, textcolor = cBuy, size = sz, textalign = text.align_center)
 if sigS and onChart
-    label.new(bar_index, na, "▼", yloc = yloc.abovebar, style = label.style_none, textcolor = cSell, size = sz, textalign = text.align_center, force_overlay = true)
+    label.new(bar_index, na, f_mkGlyph(true), yloc = yloc.abovebar, style = f_mkStyle(true), color = cSell, textcolor = cSell, size = sz, textalign = text.align_center, force_overlay = true)
 if sigB and onChart
-    label.new(bar_index, na, "▲", yloc = yloc.belowbar, style = label.style_none, textcolor = cBuy, size = sz, textalign = text.align_center, force_overlay = true)
+    label.new(bar_index, na, f_mkGlyph(false), yloc = yloc.belowbar, style = f_mkStyle(false), color = cBuy, textcolor = cBuy, size = sz, textalign = text.align_center, force_overlay = true)
 
 // ==================================================================== ALERT ===
 alertcondition(sigS, "MTF-RSI · SELL", "MTF-RSI SELL · tutte le sezioni rientrate sotto il livello dopo la soglia alta")
