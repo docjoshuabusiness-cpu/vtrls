@@ -176,6 +176,26 @@ useMae   = input.bool(true, "Attiva", group=gR5,
      tooltip="Dopo ogni segnale misura la massima escursione CONTRARIA nelle N barre successive, in ATR. I percentili sono la risposta empirica a 'quanto stretto puo' stare lo stop'. Non filtra nulla, misura soltanto.")
 maeLen   = input.int(30, "   orizzonte (barre)", minval=3, maxval=500, group=gR5)
 
+var string gR6 = "5f · PIN BAR in formazione (HTF)"
+pinMode  = input.string("Off", "Modalita'", options=["Off","Solo marcatura","Filtro"], group=gR6,
+     tooltip="Individua la GEOMETRIA che precede una pin bar su un timeframe superiore: una spinta veloce e rettilinea che porta il prezzo sull'estremo di una candela HTF anomalamente ampia, quando a quella candela resta ancora tempo per ribaltarsi.\n\nNon e' il riconoscimento di una pin bar: quella esiste solo a candela chiusa, e a quel punto il movimento e' finito. Qui si misura la CONDIZIONE che la rende probabile, mentre sta accadendo.\n\nSOLO MARCATURA: non filtra nulla, disegna un rombo nel pannello quando il setup si forma e conta le occorrenze. Usala PRIMA di filtrare: con la misura MAE accesa puoi confrontare i percentili con e senza, e vedere se il filtro serve davvero o se stai solo dimezzando il campione.\n\nFILTRO: scarta i segnali privi del setup. Un SELL richiede la spinta al RIALZO nel massimo (pin ribassista in formazione), un BUY la speculare.")
+pinTf    = input.timeframe("5", "   timeframe della pin bar", group=gR6,
+     tooltip="La candela di cui si osserva la formazione. Deve essere piu' alto del grafico, altrimenti non c'e' nulla da anticipare.\n\nLa candela viene RICOSTRUITA sulle barre del grafico, non chiesta con request.security: senza shift quella restituirebbe su storico il massimo e il minimo FINALI della candela che contiene la barra, cioe' valori che in quel momento non esistevano ancora. Il filtro sembrerebbe profetico in backtest e inutile in tempo reale.\n\nLimite della ricostruzione: i confini sono calcolati dividendo il tempo in blocchi di durata pari al timeframe. Esatto per i timeframe che dividono l'ora (15S, 30S, 1, 2, 5, 15, 30, 60); su timeframe che attraversano le interruzioni di sessione i blocchi possono non coincidere con quelli di TradingView.")
+pinRng   = input.float(1.5, "   ampiezza minima della candela (x ATR del suo TF)", minval=0.2, maxval=10.0, step=0.1, group=gR6,
+     tooltip="(massimo - minimo) della candela in formazione, in ATR del suo stesso timeframe. Sotto questa soglia la candela e' ordinaria: il prezzo sara' anche sul suo estremo, ma non c'e' nessuna escursione da ribaltare. E' la condizione che separa una pin bar da una candela qualsiasi.")
+pinPos   = input.float(0.15, "   distanza massima dall'estremo (frazione del range)", minval=0.0, maxval=0.5, step=0.01, group=gR6,
+     tooltip="Posizione del prezzo dentro la candela in formazione: 0 = sul minimo, 1 = sul massimo. Con 0.15 un setup ribassista richiede che il prezzo stia nel 15% superiore del range.\n\nAlzarlo accetta setup in cui il ribaltamento e' gia' cominciato: piu' segnali, coda gia' parzialmente formata, meno margine.")
+pinThr   = input.float(0.70, "   spinta dall'apertura all'estremo (frazione del range)", minval=0.0, maxval=1.0, step=0.05, group=gR6,
+     tooltip="(massimo - apertura) / range per un setup ribassista. Distingue una SPINTA da un RIMBALZO.\n\nCon 0.70: almeno il 70% dell'escursione della candela e' stato percorso salendo dall'apertura. Se invece la candela era gia' scesa e poi e' risalita sul massimo, questo rapporto e' basso e il setup viene scartato: quella non e' la geometria di una pin bar, e' un movimento a V.")
+pinProg  = input.float(0.70, "   tempo massimo gia' trascorso nella candela", minval=0.05, maxval=1.0, step=0.05, group=gR6,
+     tooltip="LA CONDIZIONE CHE DI SOLITO MANCA. Frazione della durata della candela gia' consumata quando il setup si presenta.\n\nUna coda ha bisogno di TEMPO per formarsi: se il prezzo arriva sul massimo al 95% della vita della candela, quella candela chiudera' sul massimo e sara' un marubozu, non una pin bar. Il ribaltamento non ha materialmente il tempo di avvenire.\n\nCon 0.70 resta almeno il 30% della candela. Abbassarlo rende il filtro piu' severo e piu' anticipatorio; alzarlo verso 1 lo svuota di significato.")
+velLen   = input.int(10, "   barre per velocita' ed efficienza", minval=2, maxval=200, group=gR6)
+velMin   = input.float(1.5, "   spostamento minimo (x ATR del grafico)", minval=0.1, maxval=20.0, step=0.1, group=gR6,
+     tooltip="|prezzo ora - prezzo N barre fa| in ATR del grafico. E' l'AMPIEZZA del movimento: quanto lontano e' andato il prezzo.")
+effMin   = input.float(0.55, "   efficienza minima (0-1)", minval=0.0, maxval=1.0, step=0.05, group=gR6,
+     tooltip="Efficienza di Kaufman: spostamento netto diviso lunghezza del percorso (somma dei true range).\n  E = 1  -> linea retta, nessuna esitazione\n  E = 0  -> il prezzo e' tornato al punto di partenza\n\nE' la VELOCITA' nel senso che serve qui: non quanto e' grande il movimento, ma quanto e' diretto. Insieme allo spostamento minimo definisce 'violento e veloce in una direzione'.\n\nE' l'analogo continuo del filtro entropia (5d), ma pesato per ampiezza invece che binario sul solo segno: strettamente piu' informativo. Usare entrambi e' ridondante.")
+pinAtrLen= input.int(14, "   candele per l'ATR del TF della pin bar", minval=2, maxval=200, group=gR6)
+
 var string gV = "6 · Grafica"
 markShape= input.string("Freccia ▼▲", "Forma del marker", options=["Freccia ▼▲","Freccia vuota ▽△","Freccia sottile ↓↑","Pallino ●","Cerchio ○","Quadrato ■","Rombo ◆","Stella ★","Croce ✖","Freccia (forma)","Triangolo (forma)","Cerchio (forma)","Quadrato (forma)","Rombo (forma)","Croce × (forma)","Croce + (forma)","Bandiera (forma)","Etichetta (forma)"], group=gV,
      tooltip="Due famiglie di marker, con proprieta' diverse.\n\nGLIFO TESTUALE (le voci con il simbolo): e' TESTO. Lo colora 'textcolor', e la sua larghezza in pixel non dipende dallo zoom, quindi con una stringa lunga a zoom out sembra staccarsi dalla candela. Puo' pero' portare accanto lettera, sequenza e rischio.\n\nFORMA NATIVA (le voci con '(forma)'): e' un DISEGNO della label, non testo. Dimensione fissa data da 'Dimensione marker', larghezza testuale nulla, quindi resta incollata alla candela a qualsiasi zoom. Non puo' portare testo: lettera, sequenza e rischio finiscono nel tooltip, leggibili passandoci sopra col mouse.\n\n'Etichetta (forma)' e 'Bandiera (forma)' hanno un puntatore che tocca la candela: sono le piu' precise quando le barre sono strette.\n\nLe forme native sono colorate da 'color', quindi rispettano i colori SELL/BUY come i glifi.")
@@ -427,13 +447,81 @@ upCnt  = math.sum(close > close[1] ? 1.0 : 0.0, entLen)
 pUp    = upCnt / entLen
 entH   = pUp <= 0.0 or pUp >= 1.0 ? 0.0 : -(pUp * math.log(pUp) + (1 - pUp) * math.log(1 - pUp)) / math.log(2)
 
+// ==================================== PIN BAR IN FORMAZIONE ===================
+//  La candela del timeframe superiore viene COSTRUITA qui, sulle barre del
+//  grafico, e non chiesta con request.security. Motivo: senza shift, su storico
+//  request.security restituisce i valori FINALI della candela che contiene la
+//  barra, cioe' un massimo e un minimo che in quel momento non esistevano
+//  ancora. Il filtro sembrerebbe profetico in backtest e inutile in tempo
+//  reale. Ricostruita cosi' e' causale, e storico e live coincidono.
+pinSec = timeframe.in_seconds(pinTf)
+bkt    = math.floor(time / (pinSec * 1000.0))
+newP   = na(bkt[1]) or bkt != bkt[1]
+
+var float pO   = na
+var float pH   = na
+var float pL   = na
+var int   pT   = 0
+var float pATR = na
+
+if newP
+    // sulla barra che apre un blocco, pH[1] e pL[1] contengono ancora gli
+    // estremi del blocco appena chiuso: e' li' che si alimenta l'ATR del TF
+    if not na(pH[1]) and not na(pL[1])
+        rngPrev = pH[1] - pL[1]
+        pATR := na(pATR) ? rngPrev : pATR + (rngPrev - pATR) / pinAtrLen
+    pO := open
+    pH := high
+    pL := low
+    pT := time
+else
+    pH := math.max(pH, high)
+    pL := math.min(pL, low)
+
+pRng  = pH - pL
+// ampiezza della candela in ATR del suo stesso timeframe: separa una pin bar
+// da una candela qualsiasi che ha il prezzo sul proprio estremo
+pRngR = na(pATR) or pATR <= 0 ? na : pRng / pATR
+// posizione del prezzo dentro la candela in formazione: 1 = sul massimo
+pPos  = pRng > 0 ? (close - pL) / pRng : 0.5
+// frazione del range percorsa DALL'APERTURA verso l'estremo. Distingue una
+// spinta da un rimbalzo: e' questa la parte che, ribaltandosi, diventa coda.
+pUpTh = pRng > 0 ? (pH - pO) / pRng : 0.0
+pDnTh = pRng > 0 ? (pO - pL) / pRng : 0.0
+// tempo gia' consumato dalla candela. Una coda ha bisogno di tempo per
+// formarsi: sul massimo al 95% della vita della candela non e' una pin bar in
+// arrivo, e' un marubozu che sta per chiudere.
+pProg = math.min(1.0, math.max(0.0, (time - pT) / (pinSec * 1000.0)))
+
+// VELOCITA' del movimento sulle barre del grafico.
+//   vAtr = ampiezza   : quanto lontano e' andato il prezzo, in ATR
+//   vEff = rettilinea : efficienza di Kaufman, spostamento netto / percorso
+// Insieme definiscono "violento e veloce in una direzione": un movimento ampio
+// ma a zigzag ha vAtr alto ed vEff basso, e non e' quello che stiamo cercando.
+vDisp = math.abs(close - close[velLen])
+vPath = math.sum(ta.tr(true), velLen)
+vEff  = vPath > 0 ? vDisp / vPath : 0.0
+vAtr  = vDisp / atrR
+
+// SELL: spinta al RIALZO fino al massimo di una candela ampia, con tempo
+// residuo perche' si ribalti -> geometria di una pin bar RIBASSISTA in
+// formazione. BUY: speculare sul minimo.
+pinOn   = pinMode != "Off"
+pinBase = pinOn and not na(pRngR) and pRngR >= pinRng and pProg <= pinProg and vAtr >= velMin and vEff >= effMin
+pinSell = pinBase and pPos >= 1.0 - pinPos and pUpTh >= pinThr
+pinBuy  = pinBase and pPos <= pinPos       and pDnTh >= pinThr
+pinNew  = (pinSell and not pinSell[1]) or (pinBuy and not pinBuy[1])
+
 f_riskOk(bool isSell) =>
     r      = isSell ? rskSell : rskBuy
     cap    = maxStopU == "Punti" ? maxStopP : maxStopA * atrR
     okStop = not useRisk or (r > 0 and r <= cap)
     okComp = not useComp or trAtrMax <= maxTrAtr
     okEnt  = not useEnt or (entH >= entMin and entH <= entMax)
-    okStop and okComp and okEnt
+    // il filtro pin agisce solo in modalita' "Filtro": in "Solo marcatura"
+    // misura senza scartare, cosi' i due campioni restano confrontabili
+    okPin  = pinMode != "Filtro" or (isSell ? pinSell : pinBuy)
+    okStop and okComp and okEnt and okPin
 
 f_arm(float thr, bool isUp) =>
     int okN = 0
@@ -529,6 +617,9 @@ cHit2 = f_hit(use2, z2)
 cHit3 = f_hit(use3, z3)
 cHit4 = f_hit(use4, z4)
 cHit5 = f_hit(use5, z5)
+
+cPinS = f_cnt(pinSell and not pinSell[1])
+cPinB = f_cnt(pinBuy  and not pinBuy[1])
 
 cArmA = f_cnt(armA)
 cArmB = f_cnt(armB)
@@ -668,7 +759,7 @@ f_chartTxt(string arrow, string tag, int n, bool isSell) =>
 // marker e non occupa un solo pixel di larghezza.
 f_chartTip(string tag, int n, bool isSell) =>
     r = isSell ? rskSell : rskBuy
-    (isSell ? "SELL " : "BUY ") + tag + " #" + str.tostring(n) + "  |  rischio " + str.tostring(r, format.mintick) + " pt / " + str.tostring(math.round(r / syminfo.mintick)) + " t  |  TR/ATR " + str.tostring(trAtrMax, "#.0") + "  |  H " + str.tostring(entH, "#.00")
+    (isSell ? "SELL " : "BUY ") + tag + " #" + str.tostring(n) + "  |  rischio " + str.tostring(r, format.mintick) + " pt / " + str.tostring(math.round(r / syminfo.mintick)) + " t  |  TR/ATR " + str.tostring(trAtrMax, "#.0") + "  |  H " + str.tostring(entH, "#.00") + (pinOn ? "  |  pin rng " + f_n2(pRngR) + " pos " + str.tostring(pPos, "#.00") + " spinta " + str.tostring(isSell ? pUpTh : pDnTh, "#.00") + " t " + str.tostring(pProg, "#.00") + " vel " + str.tostring(vAtr, "#.0") + "/" + str.tostring(vEff, "#.00") : "")
 
 f_markPane(sigA,  markLvl,        true,  txSell + "A" + f_seqTxt(seqA) + f_rskTxt(true,  true), f_chartTip("A", seqA, true),  cUp)
 f_markPane(sigB,  markLvl - 0.35, true,  txSell + "B" + f_seqTxt(seqB) + f_rskTxt(true,  true), f_chartTip("B", seqB, true),  color.new(cUp, 35))
@@ -684,6 +775,11 @@ f_miss(enP2, trgARaw, armA,  markLvl,        "A", thrP2, true)
 f_miss(enP1, trgBRaw, armB,  markLvl - 0.35, "B", thrP1, true)
 f_miss(enM1, trgCRaw, armC, -markLvl + 0.35, "C", thrM1, false)
 f_miss(enM2, trgDRaw, armD, -markLvl,        "D", thrM2, false)
+
+// Marcatura del setup pin, solo sul fronte di formazione: serve a vedere DOVE
+// il filtro avrebbe agito, prima di lasciarglielo fare.
+if pinMode == "Solo marcatura" and pinNew
+    label.new(bar_index, pinSell ? markLvl + 0.6 : -markLvl - 0.6, "◇", style = label.style_none, textcolor = color.new(color.yellow, 15), size = szMark, textalign = text.align_center, tooltip = "pin in formazione | rng " + f_n2(pRngR) + "x | pos " + str.tostring(pPos, "#.00") + " | spinta " + str.tostring(pinSell ? pUpTh : pDnTh, "#.00") + " | tempo " + str.tostring(pProg, "#.00") + " | vel " + str.tostring(vAtr, "#.0") + " eff " + str.tostring(vEff, "#.00"))
 
 bgcolor(not showArmBg ? na : (armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title="Sfondo armamento")
 
@@ -702,7 +798,7 @@ f_stat(bool use, string tf, int sec, float z, float h, float l, float ne, float 
      use ? str.tostring(int(math.round(ne))) + " · " + (isLive ? "—" : str.tostring(cap, "#.0")) : "–",
      bad, dead]
 
-var table dash = table.new(position.top_right, 6, 13, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+var table dash = table.new(position.top_right, 6, 14, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
 if showTab and barstate.islast
     hdrBg = color.new(color.gray, 70)
     modeTag = (modeA ? "A nativo" : modeB ? "B grafico/HTF" : "C orizz.equiv.") + (liveOn ? " · LIVE" : modeC ? "" : " · step")
@@ -803,6 +899,17 @@ if showTab and barstate.islast
     table.cell(dash, 3, 12, na(sSug) ? "n/a" : "$" + str.tostring(math.round(sSug * syminfo.pointvalue, 2)), text_size=szDash, text_color=color.white, bgcolor=sbg)
     table.cell(dash, 4, 12, na(sSug) ? "–" : "S " + (rskSellS < sSug ? "stretto" : "ok"), text_size=szDash, text_color=na(sSug) ? color.gray : rskSellS < sSug ? color.red : color.lime, bgcolor=sbg)
     table.cell(dash, 5, 12, na(sSug) ? "–" : "B " + (rskBuyS < sSug ? "stretto" : "ok"), text_size=szDash, text_color=na(sSug) ? color.gray : rskBuyS < sSug ? color.red : color.lime, bgcolor=sbg)
+
+    // -- pin bar in formazione: ogni cella e' una delle quattro condizioni ---
+    //    verde = soddisfatta ora, rosso = e' lei a bloccare il setup
+    pbg  = color.new(color.gray, 88)
+    pAct = pinMode == "Filtro" ? "FILTRO" : pinMode == "Solo marcatura" ? "marca" : "off"
+    table.cell(dash, 0, 13, "pin " + pinTf, text_size=szDash, text_color=pinOn ? color.white : color.gray, bgcolor=pinOn ? color.new(color.blue, 55) : pbg)
+    table.cell(dash, 1, 13, "rng " + f_n2(pRngR), text_size=szDash, text_color=not pinOn ? color.gray : na(pRngR) or pRngR < pinRng ? color.red : color.lime, bgcolor=pbg)
+    table.cell(dash, 2, 13, "pos " + str.tostring(pPos, "#.00"), text_size=szDash, text_color=not pinOn ? color.gray : (pPos >= 1.0 - pinPos or pPos <= pinPos) ? color.lime : color.red, bgcolor=pbg)
+    table.cell(dash, 3, 13, "t " + str.tostring(pProg, "#.00"), text_size=szDash, text_color=not pinOn ? color.gray : pProg <= pinProg ? color.lime : color.red, bgcolor=pbg)
+    table.cell(dash, 4, 13, "v " + str.tostring(vAtr, "#.0") + " e" + str.tostring(vEff, "#.00"), text_size=szDash, text_color=not pinOn ? color.gray : (vAtr >= velMin and vEff >= effMin) ? color.lime : color.red, bgcolor=pbg)
+    table.cell(dash, 5, 13, not pinOn ? "off" : pinSell ? "▼ " + str.tostring(cPinS) : pinBuy ? "▲ " + str.tostring(cPinB) : pAct + " " + str.tostring(cPinS + cPinB), text_size=szDash, text_color=pinSell ? cUp : pinBuy ? cDn : color.silver, bgcolor=pinSell or pinBuy ? color.new(color.yellow, 55) : pbg)
 
 // ================================================================= ALERT ======
 alertcondition(sigA, "MTF-Z · SELL soglia A", "MTF-Z SELL A · confluenza")
