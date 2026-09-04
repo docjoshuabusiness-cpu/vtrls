@@ -64,22 +64,25 @@ use1 = input.bool(true,  "S1", inline="s1", group=gB)
 tf1  = input.timeframe("5", "", inline="s1", group=gB)
 len1 = input.int(20, "Len", minval=3, maxval=500, inline="s1", group=gB)
 c1   = input.color(color.new(#42a5f5, 0), "", inline="s1", group=gB)
+f1   = input.color(color.new(#42a5f5, 93), "riemp.", inline="s1", group=gB)
 
 use2 = input.bool(false, "S2", inline="s2", group=gB)
 tf2  = input.timeframe("15", "", inline="s2", group=gB)
 len2 = input.int(20, "Len", minval=3, maxval=500, inline="s2", group=gB)
 c2   = input.color(color.new(#7e57c2, 0), "", inline="s2", group=gB)
+f2   = input.color(color.new(#7e57c2, 93), "riemp.", inline="s2", group=gB)
 
 use3 = input.bool(false, "S3", inline="s3", group=gB)
 tf3  = input.timeframe("60", "", inline="s3", group=gB)
 len3 = input.int(20, "Len", minval=3, maxval=500, inline="s3", group=gB)
 c3   = input.color(color.new(#ffa726, 0), "", inline="s3", group=gB)
+f3   = input.color(color.new(#ffa726, 93), "riemp.", inline="s3", group=gB)
 
 // ----------------------------------------------------------------- GRAFICA ---
 var string gD = "3 · Grafica"
 shBasis = input.bool(true, "Disegna la media", group=gD)
-shFill  = input.bool(true, "Riempimento fra le bande", group=gD)
-fillTr  = input.int(93, "   trasparenza", minval=70, maxval=100, group=gD)
+shFill  = input.bool(false, "Riempimento fra le bande", group=gD,
+     tooltip="Il colore e la trasparenza del riempimento si impostano nel selettore accanto a ogni sezione, non qui: cosi' ogni banda puo' avere la propria sfumatura, indipendente dal colore della linea.")
 lw      = input.int(1, "Spessore linea", minval=1, maxval=4, group=gD)
 shTags  = input.bool(true, "Etichetta del timeframe a destra", group=gD)
 tagOff  = input.int(3, "   distanza (barre)", minval=1, maxval=50, group=gD)
@@ -164,9 +167,9 @@ plot(use1 and shBasis ? ba1 : na, "S1 media", color = color.new(c1, 45), linewid
 plot(use2 and shBasis ? ba2 : na, "S2 media", color = color.new(c2, 45), linewidth = 1)
 plot(use3 and shBasis ? ba3 : na, "S3 media", color = color.new(c3, 45), linewidth = 1)
 
-fill(pu1, pd1, color = shFill and use1 ? color.new(c1, fillTr) : na, title = "S1")
-fill(pu2, pd2, color = shFill and use2 ? color.new(c2, fillTr) : na, title = "S2")
-fill(pu3, pd3, color = shFill and use3 ? color.new(c3, fillTr) : na, title = "S3")
+fill(pu1, pd1, color = shFill and use1 ? f1 : na, title = "S1")
+fill(pu2, pd2, color = shFill and use2 ? f2 : na, title = "S2")
+fill(pu3, pd3, color = shFill and use3 ? f3 : na, title = "S3")
 
 f_size(string o) => o == "Minimo" ? size.tiny : o == "Piccolo" ? size.small : o == "Normale" ? size.normal : size.large
 sz = f_size(txtSz)
