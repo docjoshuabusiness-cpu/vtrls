@@ -1,0 +1,339 @@
+//@version=6
+// =============================================================================
+//  MTF Bollinger %B  v1.0
+//  ---------------------------------------------------------------------------
+//  Bollinger Bands multi-timeframe. Stessa struttura dell'MTF RSI.
+//
+//  PERCHE' %B E NON LE BANDE.
+//  Le Bollinger sono livelli di PREZZO: cinque timeframe di bande sovrapposte
+//  sono dieci linee illeggibili e, soprattutto, non confrontabili fra loro.
+//  Il %B misura dove sta il prezzo DENTRO le proprie bande:
+//        %B = 100 * (P - inferiore) / (superiore - inferiore)
+//  100 = sulla banda superiore, 50 = sulla media, 0 = sulla banda inferiore.
+//  E' limitato, adimensionale e significa la stessa cosa su ogni timeframe e
+//  su ogni strumento. E' l'unico modo di mettere cinque Bollinger nello stesso
+//  pannello e poterle confrontare.
+//  Le bande vere di UNA sezione a scelta si possono comunque disegnare sul
+//  grafico dei prezzi.
+//
+//  DUE COSE CHE LO RENDONO ONESTO:
+//
+//  1) NESSUN RITARDO DI GRADINO. request.security restituisce l'ultima candela
+//     HTF CHIUSA, quindi su un grafico piu' veloce la curva sarebbe una scala.
+//     Qui media e deviazione standard vengono dall'ultima candela chiusa, ma il
+//     numeratore usa il PREZZO CORRENTE della barra del grafico: e' la
+//     posizione del prezzo, adesso, dentro le bande come stanno adesso.
+//     Nessun dato futuro, nessun repaint dello storico.
+//
+//  2) LE SOGLIE SONO MISURATE, NON ASSUNTE. Con bande a 2 deviazioni il prezzo
+//     sta fuori circa il 5% del tempo SE i rendimenti fossero gaussiani, cosa
+//     che non sono: le code grasse e il clustering di volatilita' cambiano quel
+//     numero, e lo cambiano in modo diverso su ogni timeframe. La tabella
+//     riporta mediana, p10 e p90 del %B misurati su N candele DEL SUO
+//     timeframe. Sono quelli i livelli che quella sezione raggiunge davvero.
+//
+//  IL SEGNALE. Una sezione e' ARMATA quando ha compiuto il percorso completo:
+//     SELL  ha toccato la banda superiore entro N delle SUE candele, ed e' ora
+//           tornata sotto la media
+//     BUY   ha toccato la banda inferiore entro N delle SUE candele, ed e' ora
+//           tornata sopra la media
+//  Il segnale esce quando TUTTE le sezioni attive sono armate nella stessa
+//  direzione. Se anche una sola non ha toccato la banda, o l'ha toccata ma non
+//  e' ancora rientrata oltre la media, il segnale non esce.
+//
+//  N e' espresso nelle CANDELE DELLA SEZIONE, non del grafico: ogni timeframe
+//  ha memoria proporzionata alla propria scala.
+//
+//  NOTA: i timeframe delle sezioni devono essere >= a quello del grafico. Uno
+//  piu' basso viene segnalato con ⚠ perche' request.security restituirebbe un
+//  valore intrabar, quindi soggetto a repaint.
+// =============================================================================
+
+indicator("MTF Bollinger %B", shorttitle="MTF-%B", overlay=false, max_bars_back=5000, max_labels_count=500)
+
+// ------------------------------------------------------------------- MOTORE --
+var string gA = "1 · Bande"
+srcMode = input.string("Close", "Sorgente", options=["Close","HLC3"], group=gA)
+devK    = input.float(2.0, "Deviazioni standard", minval=0.5, maxval=5.0, step=0.1, group=gA,
+     tooltip="Larghezza delle bande. 2.0 e' la convenzione di Bollinger. Non e' una probabilita': implicherebbe che il prezzo stia fuori il 5% del tempo, cosa vera solo per rendimenti gaussiani. Con code grasse e volatilita' a grappoli il valore reale e' diverso, e diverso su ogni timeframe: la colonna p10/p90 della tabella lo misura invece di assumerlo.")
+statLen = input.int(500, "Storia per le soglie reali (candele della sezione)", minval=50, maxval=2000, group=gA,
+     tooltip="Quante candele DEL TIMEFRAME DELLA SEZIONE vengono usate per mediana, p10 e p90 del %B.\n\nE' espressa nelle candele della sezione, non del grafico: con 500 la sezione a 5m guarda circa 42 ore e la sezione a 15S circa 2 ore. Ogni sezione ha il proprio orizzonte, coerente con la propria scala temporale. La tabella scrive quell'orizzonte accanto al timeframe.")
+live    = input.bool(true, "Valore in tempo reale (niente ritardo di gradino)", group=gA,
+     tooltip="ACCESO: media e deviazione standard vengono dall'ultima candela HTF chiusa, il numeratore usa il prezzo corrente del grafico. La curva si muove a ogni barra ed e' la posizione del prezzo, adesso, dentro le bande come stanno adesso. Nessun dato futuro.\n\nSPENTO: viene mostrato il %B dell'ultima candela HTF chiusa. La curva e' una scala.\n\nNota: le bande stesse continuano a muoversi mentre la candela HTF si forma. Usare quelle dell'ultima chiusa e' la scelta che non ripinge.")
+
+// ---------------------------------------------------------------- SEZIONI ----
+var string gB = "2 · Sezioni"
+use1 = input.bool(true, "S1", inline="s1", group=gB)
+tf1  = input.timeframe("15S", "", inline="s1", group=gB)
+len1 = input.int(20, "Len", minval=3, maxval=500, inline="s1", group=gB)
+c1   = input.color(color.new(#42a5f5, 0), "", inline="s1", group=gB)
+
+use2 = input.bool(true, "S2", inline="s2", group=gB)
+tf2  = input.timeframe("30S", "", inline="s2", group=gB)
+len2 = input.int(20, "Len", minval=3, maxval=500, inline="s2", group=gB)
+c2   = input.color(color.new(#7e57c2, 0), "", inline="s2", group=gB)
+
+use3 = input.bool(true, "S3", inline="s3", group=gB)
+tf3  = input.timeframe("1", "", inline="s3", group=gB)
+len3 = input.int(20, "Len", minval=3, maxval=500, inline="s3", group=gB)
+c3   = input.color(color.new(#ffa726, 0), "", inline="s3", group=gB)
+
+use4 = input.bool(true, "S4", inline="s4", group=gB)
+tf4  = input.timeframe("2", "", inline="s4", group=gB)
+len4 = input.int(20, "Len", minval=3, maxval=500, inline="s4", group=gB)
+c4   = input.color(color.new(#ec407a, 0), "", inline="s4", group=gB)
+
+use5 = input.bool(true, "S5", inline="s5", group=gB)
+tf5  = input.timeframe("5", "", inline="s5", group=gB)
+len5 = input.int(20, "Len", minval=3, maxval=500, inline="s5", group=gB)
+c5   = input.color(color.new(#bdbdbd, 0), "", inline="s5", group=gB)
+
+// ----------------------------------------------------------------- LIVELLI ---
+var string gC = "3 · Livelli"
+lvH   = input.float(100, "Soglia alta (100 = banda superiore)", step=1, group=gC)
+lvL   = input.float(0,   "Soglia bassa (0 = banda inferiore)",  step=1, group=gC)
+lvM   = input.float(50,  "Livello di rientro (50 = media)", step=1, group=gC,
+     tooltip="Il livello che la sezione deve riattraversare perche' il percorso sia completo. 50 e' la media mobile. Se la colonna mediana della tabella mostra valori sistematicamente lontani da 50 su un certo strumento, quello e' il livello onesto da usare qui.")
+shLv  = input.bool(true, "Disegna i livelli", group=gC)
+cLv   = input.color(color.new(#000000, 20), "Colore soglie", inline="lc", group=gC)
+cMid  = input.color(color.new(#000000, 60), "rientro", inline="lc", group=gC)
+bandOf= input.int(0, "Bande reali della sezione nel pannello (0 = nessuna)", minval=0, maxval=5, group=gC,
+     tooltip="Disegna p10 e p90 MISURATI della sezione scelta al posto delle sole soglie convenzionali. Serve a vedere quanto 100 e 0 siano lontani da cio' che quel timeframe raggiunge davvero.")
+
+// ----------------------------------------------------------------- SEGNALE ---
+var string gS = "4 · Segnale"
+sigOn   = input.bool(true, "Attiva", group=gS)
+lookN   = input.int(20, "Memoria della soglia (candele della sezione)", minval=1, maxval=500, group=gS,
+     tooltip="Entro quante candele DELLA SEZIONE il tocco della banda resta valido.\n\nCon 20, la sezione a 5m ricorda il tocco per 100 minuti e la sezione a 15S per 5 minuti. Ogni timeframe ha memoria proporzionata alla propria scala.\n\nValori alti rendono l'armamento quasi permanente sulle sezioni lente; valori bassi lo rendono quasi impossibile, perche' fra il tocco della banda e il rientro sulla media passano diverse candele.")
+strictF = input.bool(false, "Il segnale deve cadere sull'attraversamento della sezione piu' veloce", group=gS,
+     tooltip="SPENTO (default): il segnale esce sul fronte di salita della condizione completa, cioe' sulla barra in cui l'ULTIMA sezione mancante completa il percorso.\n\nACCESO: il segnale esce solo se e' la sezione piu' veloce ad attraversare la media proprio su quella barra. E' la lettura letterale, ma scarta molti setup validi perche' le sezioni lente rientrano sulla media molto dopo le veloci.")
+markWh  = input.string("Entrambi", "Posizione marker", options=["Pannello","Grafico prezzi","Entrambi"], group=gS)
+markLv  = input.float(112, "   livello nel pannello", minval=101, maxval=140, step=1, group=gS)
+cSell   = input.color(color.new(#ef5350, 0), "SELL", inline="sc", group=gS)
+cBuy    = input.color(color.new(#1B5E20, 0), "BUY",  inline="sc", group=gS)
+
+// ----------------------------------------------------------------- GRAFICA ---
+var string gD = "5 · Grafica"
+shTab  = input.bool(true, "Tabella", group=gD)
+shTags = input.bool(true, "Etichette del timeframe accanto alle curve", group=gD)
+tagOff = input.int(4, "   distanza (barre)", minval=1, maxval=50, group=gD)
+ovOf   = input.int(0, "Bande VERE sul grafico prezzi (0 = nessuna)", minval=0, maxval=5, group=gD,
+     tooltip="Disegna superiore, media e inferiore della sezione scelta sul grafico dei prezzi. Una sola sezione per volta: cinque coppie di bande sovrapposte non sono leggibili e non sono confrontabili, ed e' esattamente la ragione per cui il pannello mostra il %B.")
+txtSz  = input.string("Piccolo", "Dimensione testo", options=["Minimo","Piccolo","Normale","Grande"], group=gD)
+
+// ================================================================== CALCOLO ===
+// Eseguita DENTRO il contesto del timeframe richiesto: bande e statistiche sono
+// calcolate sulle candele di quel timeframe, non del grafico.
+f_sec(simple int len, simple int sl, simple bool shift) =>
+    s  = srcMode == "Close" ? close : hlc3
+    ba = ta.sma(s, len)
+    sd = ta.stdev(s, len)
+    w  = devK * sd
+    pb = w > 0 ? 100.0 * (s - (ba - w)) / (2.0 * w) : 50.0
+    // larghezza delle bande in % della media: dice se il tocco avviene in
+    // compressione o in espansione, cioe' se vale qualcosa
+    bw = ba != 0 ? 200.0 * w / ba : 0.0
+    // barre trascorse dall'ultimo tocco di ciascuna soglia, nelle candele di
+    // QUESTO timeframe: e' la memoria su cui si basa l'armamento
+    var int shi = 1000000
+    var int slo = 1000000
+    shi := pb >= lvH ? 0 : shi + 1
+    slo := pb <= lvL ? 0 : slo + 1
+    med = ta.percentile_nearest_rank(pb, sl, 50)
+    q10 = ta.percentile_nearest_rank(pb, sl, 10)
+    q90 = ta.percentile_nearest_rank(pb, sl, 90)
+    n   = math.min(sl, bar_index + 1)
+    [shift ? pb[1]  : pb,
+     shift ? ba[1]  : ba,
+     shift ? sd[1]  : sd,
+     shift ? med[1] : med,
+     shift ? q10[1] : q10,
+     shift ? q90[1] : q90,
+     shift ? bw[1]  : bw,
+     n,
+     shift ? shi[1] : shi,
+     shift ? slo[1] : slo]
+
+// Posizione del prezzo CORRENTE dentro le bande dell'ultima candela HTF chiusa.
+// Nessun dato futuro: e' cio' che un operatore vede in tempo reale.
+f_live(float pbC, float ba, float sd, bool canLive) =>
+    sNow = srcMode == "Close" ? close : hlc3
+    w    = devK * sd
+    canLive and w > 0 ? 100.0 * (sNow - (ba - w)) / (2.0 * w) : pbC
+
+chartSec = timeframe.in_seconds()
+sc1 = timeframe.in_seconds(tf1)
+sc2 = timeframe.in_seconds(tf2)
+sc3 = timeframe.in_seconds(tf3)
+sc4 = timeframe.in_seconds(tf4)
+sc5 = timeframe.in_seconds(tf5)
+
+// Sopra il TF del grafico si prende sempre l'ultima candela CHIUSA: lo storico
+// non ripinge, e il live ricostruisce solo la posizione del prezzo attuale.
+sh1 = sc1 > chartSec
+sh2 = sc2 > chartSec
+sh3 = sc3 > chartSec
+sh4 = sc4 > chartSec
+sh5 = sc5 > chartSec
+
+[b1, ba1, sd1, md1, p101, p901, bw1, n1, sh_1, sl_1] = request.security(syminfo.tickerid, tf1, f_sec(len1, statLen, sh1), lookahead = barmerge.lookahead_off)
+[b2, ba2, sd2, md2, p102, p902, bw2, n2, sh_2, sl_2] = request.security(syminfo.tickerid, tf2, f_sec(len2, statLen, sh2), lookahead = barmerge.lookahead_off)
+[b3, ba3, sd3, md3, p103, p903, bw3, n3, sh_3, sl_3] = request.security(syminfo.tickerid, tf3, f_sec(len3, statLen, sh3), lookahead = barmerge.lookahead_off)
+[b4, ba4, sd4, md4, p104, p904, bw4, n4, sh_4, sl_4] = request.security(syminfo.tickerid, tf4, f_sec(len4, statLen, sh4), lookahead = barmerge.lookahead_off)
+[b5, ba5, sd5, md5, p105, p905, bw5, n5, sh_5, sl_5] = request.security(syminfo.tickerid, tf5, f_sec(len5, statLen, sh5), lookahead = barmerge.lookahead_off)
+
+r1 = f_live(b1, ba1, sd1, live and sh1)
+r2 = f_live(b2, ba2, sd2, live and sh2)
+r3 = f_live(b3, ba3, sd3, live and sh3)
+r4 = f_live(b4, ba4, sd4, live and sh4)
+r5 = f_live(b5, ba5, sd5, live and sh5)
+
+// =================================================================== SEGNALE ==
+//  Una sezione e' armata quando ha COMPLETATO il percorso: tocco della banda
+//  entro lookN sue candele, e prezzo ora rientrato oltre la media.
+//  Il tocco viene riconosciuto anche sulla candela in formazione, altrimenti
+//  l'armamento ritarderebbe di una candela HTF intera.
+f_armS(bool use, float r, float since) => not use or ((since <= lookN or r >= lvH) and r < lvM)
+f_armB(bool use, float r, float since) => not use or ((since <= lookN or r <= lvL) and r > lvM)
+
+aS1 = f_armS(use1, r1, sh_1)
+aS2 = f_armS(use2, r2, sh_2)
+aS3 = f_armS(use3, r3, sh_3)
+aS4 = f_armS(use4, r4, sh_4)
+aS5 = f_armS(use5, r5, sh_5)
+aB1 = f_armB(use1, r1, sl_1)
+aB2 = f_armB(use2, r2, sl_2)
+aB3 = f_armB(use3, r3, sl_3)
+aB4 = f_armB(use4, r4, sl_4)
+aB5 = f_armB(use5, r5, sl_5)
+
+anyOn = use1 or use2 or use3 or use4 or use5
+allS  = anyOn and aS1 and aS2 and aS3 and aS4 and aS5
+allB  = anyOn and aB1 and aB2 and aB3 and aB4 and aB5
+
+BIG = 1e12
+q1 = use1 ? sc1 : BIG
+q2 = use2 ? sc2 : BIG
+q3 = use3 ? sc3 : BIG
+q4 = use4 ? sc4 : BIG
+q5 = use5 ? sc5 : BIG
+qMin  = math.min(math.min(math.min(math.min(q1, q2), q3), q4), q5)
+rFast = q1 == qMin ? r1 : q2 == qMin ? r2 : q3 == qMin ? r3 : q4 == qMin ? r4 : q5 == qMin ? r5 : na
+tFast = q1 == qMin ? tf1 : q2 == qMin ? tf2 : q3 == qMin ? tf3 : q4 == qMin ? tf4 : q5 == qMin ? tf5 : "-"
+fastDn = ta.crossunder(rFast, lvM)
+fastUp = ta.crossover(rFast, lvM)
+
+sigS = sigOn and allS and not allS[1] and (not strictF or fastDn)
+sigB = sigOn and allB and not allB[1] and (not strictF or fastUp)
+
+// ==================================================================== PLOT ====
+plot(use1 ? r1 : na, "S1", color = c1, linewidth = 1)
+plot(use2 ? r2 : na, "S2", color = c2, linewidth = 1)
+plot(use3 ? r3 : na, "S3", color = c3, linewidth = 1)
+plot(use4 ? r4 : na, "S4", color = c4, linewidth = 1)
+plot(use5 ? r5 : na, "S5", color = c5, linewidth = 2)
+
+hline(shLv ? lvH : na, "banda superiore", color = cLv, linestyle = hline.style_dashed)
+hline(shLv ? lvL : na, "banda inferiore", color = cLv, linestyle = hline.style_dashed)
+plot(shLv ? lvM : na, "rientro", color = cMid, style = plot.style_linebr)
+
+bU = bandOf == 1 ? p901 : bandOf == 2 ? p902 : bandOf == 3 ? p903 : bandOf == 4 ? p904 : bandOf == 5 ? p905 : na
+bD = bandOf == 1 ? p101 : bandOf == 2 ? p102 : bandOf == 3 ? p103 : bandOf == 4 ? p104 : bandOf == 5 ? p105 : na
+bC = bandOf == 1 ? c1 : bandOf == 2 ? c2 : bandOf == 3 ? c3 : bandOf == 4 ? c4 : bandOf == 5 ? c5 : color.gray
+plot(bU, "p90 reale", color = color.new(bC, 45), style = plot.style_linebr)
+plot(bD, "p10 reale", color = color.new(bC, 45), style = plot.style_linebr)
+
+// Bande VERE della sezione scelta, sul grafico dei prezzi. Una sola per volta.
+oBa = ovOf == 1 ? ba1 : ovOf == 2 ? ba2 : ovOf == 3 ? ba3 : ovOf == 4 ? ba4 : ovOf == 5 ? ba5 : na
+oSd = ovOf == 1 ? sd1 : ovOf == 2 ? sd2 : ovOf == 3 ? sd3 : ovOf == 4 ? sd4 : ovOf == 5 ? sd5 : na
+oC  = ovOf == 1 ? c1 : ovOf == 2 ? c2 : ovOf == 3 ? c3 : ovOf == 4 ? c4 : ovOf == 5 ? c5 : color.gray
+plot(na(oBa) ? na : oBa + devK * oSd, "superiore", color = color.new(oC, 20), style = plot.style_linebr, force_overlay = true)
+plot(na(oBa) ? na : oBa,              "media",     color = color.new(oC, 55), style = plot.style_linebr, force_overlay = true)
+plot(na(oBa) ? na : oBa - devK * oSd, "inferiore", color = color.new(oC, 20), style = plot.style_linebr, force_overlay = true)
+
+f_size(string o) => o == "Minimo" ? size.tiny : o == "Piccolo" ? size.small : o == "Normale" ? size.normal : size.large
+sz = f_size(txtSz)
+
+f_tag(bool use, string tf, float r, color c) =>
+    var label lb = label.new(bar_index, 0.0, "", style = label.style_none, size = size.tiny, textalign = text.align_left)
+    if barstate.islast
+        label.set_xy(lb, bar_index + tagOff, r)
+        label.set_text(lb, shTags and use ? tf : "")
+        label.set_textcolor(lb, c)
+        label.set_size(lb, sz)
+    lb
+
+f_tag(use1, tf1, r1, c1)
+f_tag(use2, tf2, r2, c2)
+f_tag(use3, tf3, r3, c3)
+f_tag(use4, tf4, r4, c4)
+f_tag(use5, tf5, r5, c5)
+
+// =================================================================== MARKER ===
+inPane  = markWh != "Grafico prezzi"
+onChart = markWh != "Pannello"
+
+if sigS and inPane
+    label.new(bar_index, markLv, "▼", style = label.style_none, textcolor = cSell, size = sz, textalign = text.align_center)
+if sigB and inPane
+    label.new(bar_index, 100 - markLv, "▲", style = label.style_none, textcolor = cBuy, size = sz, textalign = text.align_center)
+if sigS and onChart
+    label.new(bar_index, na, "▼", yloc = yloc.abovebar, style = label.style_none, textcolor = cSell, size = sz, textalign = text.align_center, force_overlay = true)
+if sigB and onChart
+    label.new(bar_index, na, "▲", yloc = yloc.belowbar, style = label.style_none, textcolor = cBuy, size = sz, textalign = text.align_center, force_overlay = true)
+
+// =================================================================== TABELLA ==
+f_htxt(float sec) =>
+    h = sec * statLen
+    h < 3600 ? str.tostring(math.round(h / 60)) + "m" : h < 86400 ? str.tostring(math.round(h / 3600.0, 1)) + "h" : str.tostring(math.round(h / 86400.0, 1)) + "g"
+
+f_v(float v) => na(v) ? "–" : str.tostring(v, "#.0")
+
+var table t = table.new(position.top_right, 7, 7, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
+
+f_row(int i, bool use, string tf, float sec, float r, float md, float p10, float p90, float bw, float n, color c, bool aS, bool aB) =>
+    bad  = use and sec < chartSec
+    thin = use and n < statLen
+    bg   = not use ? color.new(color.gray, 70) : bad ? color.new(color.orange, 40) : r >= lvH ? color.new(color.red, 55) : r <= lvL ? color.new(color.green, 55) : color.new(color.gray, 82)
+    table.cell(t, 0, i, "S" + str.tostring(i) + " " + (use ? (bad ? "⚠ " + tf : tf + " · " + f_htxt(sec)) : "off"), text_size = sz, text_color = use ? c : color.gray, bgcolor = bg)
+    table.cell(t, 1, i, use ? f_v(r) : "–", text_size = sz, text_color = color.white, bgcolor = bg)
+    // armamento: e' la colonna che spiega perche' un segnale non e' uscito
+    aTx = not use ? "–" : aS and aB ? "▼▲" : aS ? "▼" : aB ? "▲" : "·"
+    aCl = not use ? color.gray : aS ? cSell : aB ? cBuy : color.new(color.gray, 30)
+    table.cell(t, 2, i, aTx, text_size = sz, text_color = aCl, bgcolor = bg)
+    table.cell(t, 3, i, use ? f_v(md) : "–", text_size = sz, text_color = color.silver, bgcolor = bg)
+    table.cell(t, 4, i, use ? f_v(p10) + " / " + f_v(p90) : "–", text_size = sz, text_color = color.white, bgcolor = bg)
+    table.cell(t, 5, i, use ? str.tostring(bw, "#.00") + "%" : "–", text_size = sz, text_color = color.silver, bgcolor = bg)
+    table.cell(t, 6, i, use ? str.tostring(int(n)) : "–", text_size = sz, text_color = thin ? color.orange : color.silver, bgcolor = bg)
+
+if shTab and barstate.islast
+    hb = color.new(color.gray, 65)
+    table.cell(t, 0, 0, "TF · storia", text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 1, 0, "%B",         text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 2, 0, "arm",        text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 3, 0, "mediana",    text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 4, 0, "p10 / p90",  text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 5, 0, "largh",      text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 6, 0, "n",          text_size = sz, text_color = color.white, bgcolor = hb)
+    f_row(1, use1, tf1, sc1, r1, md1, p101, p901, bw1, n1, c1, aS1, aB1)
+    f_row(2, use2, tf2, sc2, r2, md2, p102, p902, bw2, n2, c2, aS2, aB2)
+    f_row(3, use3, tf3, sc3, r3, md3, p103, p903, bw3, n3, c3, aS3, aB3)
+    f_row(4, use4, tf4, sc4, r4, md4, p104, p904, bw4, n4, c4, aS4, aB4)
+    f_row(5, use5, tf5, sc5, r5, md5, p105, p905, bw5, n5, c5, aS5, aB5)
+    nS  = (use1 and aS1 ? 1 : 0) + (use2 and aS2 ? 1 : 0) + (use3 and aS3 ? 1 : 0) + (use4 and aS4 ? 1 : 0) + (use5 and aS5 ? 1 : 0)
+    nB  = (use1 and aB1 ? 1 : 0) + (use2 and aB2 ? 1 : 0) + (use3 and aB3 ? 1 : 0) + (use4 and aB4 ? 1 : 0) + (use5 and aB5 ? 1 : 0)
+    nOn = (use1 ? 1 : 0) + (use2 ? 1 : 0) + (use3 ? 1 : 0) + (use4 ? 1 : 0) + (use5 ? 1 : 0)
+    table.cell(t, 0, 6, "armate", text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 1, 6, "▼ " + str.tostring(nS) + "/" + str.tostring(nOn), text_size = sz, text_color = allS ? cSell : color.silver, bgcolor = hb)
+    table.cell(t, 2, 6, "▲ " + str.tostring(nB) + "/" + str.tostring(nOn), text_size = sz, text_color = allB ? cBuy : color.silver, bgcolor = hb)
+    table.cell(t, 3, 6, "mem " + str.tostring(lookN), text_size = sz, text_color = color.silver, bgcolor = hb)
+    table.cell(t, 4, 6, str.tostring(devK, "#.#") + "σ", text_size = sz, text_color = color.silver, bgcolor = hb)
+    table.cell(t, 5, 6, "veloce " + tFast, text_size = sz, text_color = color.silver, bgcolor = hb)
+    table.cell(t, 6, 6, strictF ? "strict" : "", text_size = sz, text_color = color.yellow, bgcolor = hb)
+
+// ==================================================================== ALERT ===
+alertcondition(sigS, "MTF-%B · SELL", "MTF-%B SELL · tutte le sezioni rientrate sotto la media dopo la banda superiore")
+alertcondition(sigB, "MTF-%B · BUY",  "MTF-%B BUY · tutte le sezioni rientrate sopra la media dopo la banda inferiore")
+
+if sigS or sigB
+    alert("MTF-%B " + (sigS ? "SELL" : "BUY") + " " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | veloce " + tFast + " = " + str.tostring(rFast, "#.0"), alert.freq_once_per_bar_close)
