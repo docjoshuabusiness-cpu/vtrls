@@ -1,0 +1,212 @@
+//@version=6
+// =============================================================================
+//  MTF Bollinger sul grafico  v1.0
+//  ---------------------------------------------------------------------------
+//  Bande di Bollinger di uno o piu' timeframe SUPERIORI, disegnate direttamente
+//  sulle candele del grafico che stai guardando. Serve a vedere come la banda
+//  di un timeframe lento si posiziona sul prezzo osservato veloce: la 5m sul
+//  grafico a 5 secondi, la 15m sul grafico a 1 minuto, e cosi' via.
+//
+//  DUE MODI DI CALCOLO. E' la scelta che decide tutto il risultato visivo.
+//
+//  A · NATIVO (a gradini)
+//     La banda e' quella letterale del timeframe superiore, presa dall'ultima
+//     candela CHIUSA. Su un grafico piu' veloce resta ferma per k barre e poi
+//     salta: e' una scala. E' esattamente cio' che vedresti aprendo quel
+//     timeframe, niente di piu' e niente di meno. Il salto non e' un difetto
+//     del codice, e' il fatto che quella banda si aggiorna una volta ogni
+//     candela del suo timeframe.
+//
+//  B · CONTINUO (finestra equivalente)   <- default
+//     La banda viene calcolata sulla STESSA FINESTRA TEMPORALE ma usando le
+//     candele del grafico: 20 candele da 5m sono 100 minuti, cioe' 1200 barre
+//     da 5 secondi. La curva e' continua e si aggiorna a ogni barra.
+//
+//     PERCHE' E' LEGITTIMO, E NON UN ABBELLIMENTO. La banda dipende da media e
+//     deviazione standard dei LIVELLI di prezzo sulla finestra. Sono entrambe
+//     proprieta' della distribuzione del prezzo in quell'intervallo, non del
+//     percorso seguito per attraversarlo: campionare piu' fitto non le cambia,
+//     le stima meglio. Il modo B usa 60 volte piu' osservazioni per misurare la
+//     stessa quantita'.
+//     (Attenzione: per l'RSI questa stessa operazione NON e' neutra, perche'
+//     l'RSI dipende dalla lunghezza del percorso, che cresce con la frequenza
+//     di campionamento. Le Bollinger no.)
+//
+//     Non e' identica alla banda nativa: la 5m usa 20 chiusure prese ogni 5
+//     minuti, il modo B ne usa 1200. Il centro coincide quasi sempre, la
+//     larghezza puo' differire perche' 20 campioni sono una stima rumorosa
+//     della stessa dispersione. Se ti serve la banda LETTERALE, usa il modo A.
+//
+//  REPAINT. Nel modo A la banda dell'ultima candela HTF in formazione si
+//  muove finche' quella candela non chiude: e' cio' che fa davvero, non un
+//  errore. L'interruttore "solo candele chiuse" la congela al valore
+//  dell'ultima candela completata, al prezzo di un ritardo di k barre.
+//  Il modo B non ha questo problema: e' calcolato sulle barre del grafico.
+// =============================================================================
+
+indicator("MTF Bollinger sul grafico", shorttitle="MTF-BB", overlay=true, max_bars_back=5000, max_labels_count=100)
+
+// ------------------------------------------------------------------- MOTORE --
+var string gA = "1 · Bande"
+srcMode = input.string("Close", "Sorgente", options=["Close","HLC3"], group=gA)
+mode    = input.string("B · Continuo (finestra equivalente)", "Modo di calcolo",
+     options=["A · Nativo (a gradini)","B · Continuo (finestra equivalente)"], group=gA,
+     tooltip="A: la banda letterale del timeframe superiore, presa dall'ultima candela chiusa. Sul grafico veloce e' una scala che salta a ogni chiusura di quella candela.\n\nB: stessa finestra temporale, calcolata sulle candele del grafico. Curva continua, aggiornata a ogni barra, stessa quantita' statistica misurata con molti piu' dati.\n\nLa differenza fra le due dice quanto la banda nativa sia una stima rumorosa: se coincidono, 20 campioni bastavano; se il modo A e' sistematicamente piu' largo, quella banda sta reagendo al rumore di poche chiusure.")
+confirm = input.bool(false, "Modo A: solo candele HTF chiuse (niente movimento intra-candela)", group=gA,
+     tooltip="Nel modo A la banda dell'ultima candela in formazione si muove finche' quella candela non chiude. E' il comportamento reale di quella banda, non un difetto.\n\nAcceso, la banda viene congelata all'ultima candela COMPLETATA: nessun movimento, ma un ritardo pari a una intera candela del timeframe della sezione.\n\nIrrilevante nel modo B.")
+devK    = input.float(2.0, "Deviazioni standard", minval=0.5, maxval=5.0, step=0.1, group=gA)
+
+// ---------------------------------------------------------------- SEZIONI ----
+//  Di default e' attiva solo la prima: sovrapporre piu' coppie di bande rende
+//  il grafico illeggibile molto in fretta. Le altre restano pronte all'uso.
+var string gB = "2 · Sezioni"
+use1 = input.bool(true,  "S1", inline="s1", group=gB)
+tf1  = input.timeframe("5", "", inline="s1", group=gB)
+len1 = input.int(20, "Len", minval=3, maxval=500, inline="s1", group=gB)
+c1   = input.color(color.new(#42a5f5, 0), "", inline="s1", group=gB)
+
+use2 = input.bool(false, "S2", inline="s2", group=gB)
+tf2  = input.timeframe("15", "", inline="s2", group=gB)
+len2 = input.int(20, "Len", minval=3, maxval=500, inline="s2", group=gB)
+c2   = input.color(color.new(#7e57c2, 0), "", inline="s2", group=gB)
+
+use3 = input.bool(false, "S3", inline="s3", group=gB)
+tf3  = input.timeframe("60", "", inline="s3", group=gB)
+len3 = input.int(20, "Len", minval=3, maxval=500, inline="s3", group=gB)
+c3   = input.color(color.new(#ffa726, 0), "", inline="s3", group=gB)
+
+// ----------------------------------------------------------------- GRAFICA ---
+var string gD = "3 · Grafica"
+shBasis = input.bool(true, "Disegna la media", group=gD)
+shFill  = input.bool(true, "Riempimento fra le bande", group=gD)
+fillTr  = input.int(93, "   trasparenza", minval=70, maxval=100, group=gD)
+lw      = input.int(1, "Spessore linea", minval=1, maxval=4, group=gD)
+shTags  = input.bool(true, "Etichetta del timeframe a destra", group=gD)
+tagOff  = input.int(3, "   distanza (barre)", minval=1, maxval=50, group=gD)
+shTab   = input.bool(true, "Tabellina", group=gD)
+txtSz   = input.string("Piccolo", "Dimensione testo", options=["Minimo","Piccolo","Normale","Grande"], group=gD)
+
+// ================================================================== CALCOLO ===
+f_src() => srcMode == "Close" ? close : hlc3
+
+// Modo A: eseguita DENTRO il contesto del timeframe richiesto.
+f_htf(simple int len, simple bool shift) =>
+    s  = f_src()
+    ba = ta.sma(s, len)
+    sd = ta.stdev(s, len)
+    [shift ? ba[1] : ba, shift ? sd[1] : sd]
+
+chartSec = timeframe.in_seconds()
+sc1 = timeframe.in_seconds(tf1)
+sc2 = timeframe.in_seconds(tf2)
+sc3 = timeframe.in_seconds(tf3)
+
+// k = quante barre del grafico entrano in una barra della sezione
+k1 = int(math.max(1, math.round(sc1 / float(chartSec))))
+k2 = int(math.max(1, math.round(sc2 / float(chartSec))))
+k3 = int(math.max(1, math.round(sc3 / float(chartSec))))
+
+// finestra equivalente del modo B, in barre del grafico
+e1 = int(math.min(4000, len1 * k1))
+e2 = int(math.min(4000, len2 * k2))
+e3 = int(math.min(4000, len3 * k3))
+
+modeA = mode == "A · Nativo (a gradini)"
+shf   = confirm
+
+[hb1, hs1] = request.security(syminfo.tickerid, tf1, f_htf(len1, shf), lookahead = barmerge.lookahead_off)
+[hb2, hs2] = request.security(syminfo.tickerid, tf2, f_htf(len2, shf), lookahead = barmerge.lookahead_off)
+[hb3, hs3] = request.security(syminfo.tickerid, tf3, f_htf(len3, shf), lookahead = barmerge.lookahead_off)
+
+srcC = f_src()
+cb1 = ta.sma(srcC, e1)
+cs1 = ta.stdev(srcC, e1)
+cb2 = ta.sma(srcC, e2)
+cs2 = ta.stdev(srcC, e2)
+cb3 = ta.sma(srcC, e3)
+cs3 = ta.stdev(srcC, e3)
+
+ba1 = modeA ? hb1 : cb1
+sd1 = modeA ? hs1 : cs1
+ba2 = modeA ? hb2 : cb2
+sd2 = modeA ? hs2 : cs2
+ba3 = modeA ? hb3 : cb3
+sd3 = modeA ? hs3 : cs3
+
+up1 = ba1 + devK * sd1
+dn1 = ba1 - devK * sd1
+up2 = ba2 + devK * sd2
+dn2 = ba2 - devK * sd2
+up3 = ba3 + devK * sd3
+dn3 = ba3 - devK * sd3
+
+// posizione del prezzo dentro le bande: 100 = superiore, 50 = media, 0 = inferiore
+f_pb(float p, float u, float d) => u > d ? 100.0 * (p - d) / (u - d) : 50.0
+pb1 = f_pb(close, up1, dn1)
+pb2 = f_pb(close, up2, dn2)
+pb3 = f_pb(close, up3, dn3)
+
+// larghezza in % della media: distingue il tocco in compressione da quello reale
+f_bw(float u, float d, float b) => b != 0 ? 100.0 * (u - d) / b : 0.0
+bw1 = f_bw(up1, dn1, ba1)
+bw2 = f_bw(up2, dn2, ba2)
+bw3 = f_bw(up3, dn3, ba3)
+
+// ==================================================================== PLOT ====
+pu1 = plot(use1 ? up1 : na, "S1 sup", color = color.new(c1, 0),  linewidth = lw)
+pd1 = plot(use1 ? dn1 : na, "S1 inf", color = color.new(c1, 0),  linewidth = lw)
+pu2 = plot(use2 ? up2 : na, "S2 sup", color = color.new(c2, 0),  linewidth = lw)
+pd2 = plot(use2 ? dn2 : na, "S2 inf", color = color.new(c2, 0),  linewidth = lw)
+pu3 = plot(use3 ? up3 : na, "S3 sup", color = color.new(c3, 0),  linewidth = lw)
+pd3 = plot(use3 ? dn3 : na, "S3 inf", color = color.new(c3, 0),  linewidth = lw)
+
+plot(use1 and shBasis ? ba1 : na, "S1 media", color = color.new(c1, 45), linewidth = 1)
+plot(use2 and shBasis ? ba2 : na, "S2 media", color = color.new(c2, 45), linewidth = 1)
+plot(use3 and shBasis ? ba3 : na, "S3 media", color = color.new(c3, 45), linewidth = 1)
+
+fill(pu1, pd1, color = shFill and use1 ? color.new(c1, fillTr) : na, title = "S1")
+fill(pu2, pd2, color = shFill and use2 ? color.new(c2, fillTr) : na, title = "S2")
+fill(pu3, pd3, color = shFill and use3 ? color.new(c3, fillTr) : na, title = "S3")
+
+f_size(string o) => o == "Minimo" ? size.tiny : o == "Piccolo" ? size.small : o == "Normale" ? size.normal : size.large
+sz = f_size(txtSz)
+
+// Etichetta del timeframe in fondo alla banda superiore: con piu' sezioni
+// attive e' l'unico modo di sapere quale banda e' quale.
+f_tag(bool use, string tf, float y, color c) =>
+    var label lb = label.new(bar_index, 0.0, "", style = label.style_none, size = size.tiny, textalign = text.align_left)
+    if barstate.islast
+        label.set_xy(lb, bar_index + tagOff, y)
+        label.set_text(lb, shTags and use and not na(y) ? tf : "")
+        label.set_textcolor(lb, c)
+        label.set_size(lb, sz)
+    lb
+
+f_tag(use1, tf1, up1, c1)
+f_tag(use2, tf2, up2, c2)
+f_tag(use3, tf3, up3, c3)
+
+// =================================================================== TABELLA ==
+f_v(float v) => na(v) ? "–" : str.tostring(v, "#.0")
+
+var table t = table.new(position.top_right, 4, 4, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
+
+f_row(int i, bool use, string tf, float sec, float pb, float bw, int eff, color c) =>
+    bad = use and sec < chartSec
+    bg  = not use ? color.new(color.gray, 70) : bad ? color.new(color.orange, 40) : pb >= 100 ? color.new(color.red, 55) : pb <= 0 ? color.new(color.green, 55) : color.new(color.gray, 82)
+    // nel modo B mostra anche su quante barre del grafico e' calcolata la banda
+    lbl = use ? (bad ? "⚠ " + tf : tf + (modeA ? "" : " · " + str.tostring(eff) + "b")) : "off"
+    table.cell(t, 0, i, "S" + str.tostring(i) + " " + lbl, text_size = sz, text_color = use ? c : color.gray, bgcolor = bg)
+    table.cell(t, 1, i, use ? f_v(pb) + "%B" : "–", text_size = sz, text_color = color.white, bgcolor = bg)
+    table.cell(t, 2, i, use ? str.tostring(bw, "#.00") + "%" : "–", text_size = sz, text_color = color.silver, bgcolor = bg)
+    table.cell(t, 3, i, use ? str.tostring(devK, "#.#") + "σ" : "–", text_size = sz, text_color = color.silver, bgcolor = bg)
+
+if shTab and barstate.islast
+    hb = color.new(color.gray, 65)
+    table.cell(t, 0, 0, modeA ? "A gradini" : "B continuo", text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 1, 0, "pos",   text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 2, 0, "largh", text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 3, 0, "dev",   text_size = sz, text_color = color.white, bgcolor = hb)
+    f_row(1, use1, tf1, sc1, pb1, bw1, e1, c1)
+    f_row(2, use2, tf2, sc2, pb2, bw2, e2, c2)
+    f_row(3, use3, tf3, sc3, pb3, bw3, e3, c3)
