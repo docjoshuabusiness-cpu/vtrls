@@ -50,15 +50,26 @@
 //     dello script.
 //
 //  IL SEGNALE
-//  Una sezione e' ARMATA quando ha compiuto il percorso completo:
-//     SELL  ultimo estremo = soglia alta, toccata entro N delle SUE candele,
-//           e valore ora sotto 50
-//     BUY   ultimo estremo = soglia bassa, toccata entro N delle SUE candele,
-//           e valore ora sopra 50
-//  Il segnale esce quando TUTTE le sezioni attive sono armate nella stessa
-//  direzione, sul fronte di salita della condizione. Se anche una sola sezione
-//  non ha toccato la soglia, l'ha toccata ma non e' ancora rientrata oltre 50,
-//  oppure ha toccato per ultima la soglia OPPOSTA, il segnale non esce.
+//  Il percorso di una sezione ha DUE fasi, tenute separate:
+//     TOCCO   la soglia e' stata raggiunta entro N delle SUE candele, ed e'
+//             l'estremo piu' recente dei due
+//     RIENTRO il valore ha riattraversato il livello di rientro (50)
+//
+//  MODALITA' DI DEFAULT - "Tocco su tutte, poi 50 della veloce"
+//  Lo stato che autorizza il segnale e' il TOCCO su tutte le sezioni attive.
+//  L'innesco e' l'attraversamento di 50 da parte della sola sezione ATTIVA PIU'
+//  VELOCE: il rientro lo deve fare lei, ed e' precisamente cio' che il suo
+//  attraversamento misura.
+//     SELL  tutte le sezioni hanno toccato 70 -> la veloce scende sotto 50
+//     BUY   tutte le sezioni hanno toccato 30 -> la veloce sale sopra 50
+//  Le sezioni lente stabiliscono che l'estremo e' condiviso, la veloce decide
+//  il momento. E' la lettura operativa.
+//
+//  Le altre due modalita' pretendono che TUTTE siano gia' rientrate. Sono piu'
+//  tardive per una ragione strutturale: una sezione a 5 minuti rientra sotto 50
+//  molto dopo una a 15 secondi, e quando l'ultima lenta rientra il movimento e'
+//  spesso gia' andato. La terza, che chiede anche il cross simultaneo della
+//  veloce, non emette quasi nulla: le due cose non coincidono quasi mai.
 //
 //  N e' espresso nelle CANDELE DELLA SEZIONE, non del grafico: cosi' ogni
 //  timeframe ha una memoria proporzionata alla propria scala, e non e' il
@@ -131,8 +142,12 @@ lookN   = input.int(20, "Memoria della soglia (candele della sezione)", minval=1
      tooltip="Entro quante candele DELLA SEZIONE il tocco della soglia resta valido.\n\nE' espressa nelle candele della sezione, non del grafico: con 20, la sezione a 5m ricorda il tocco per 100 minuti e la sezione a 15S per 5 minuti. Ogni timeframe ha memoria proporzionata alla propria scala.\n\nValori alti rendono l'armamento quasi permanente sulle sezioni lente e il filtro perde mordente; valori bassi lo rendono quasi impossibile perche' fra il tocco e il rientro sotto 50 passano diverse candele.\n\nDalla v1.1 la memoria non basta piu' da sola: il tocco deve anche essere il PIU' RECENTE dei due estremi. Un tocco di 30 rimasto in memoria ma precedente a un tocco di 70 non arma piu' un BUY.")
 dirOnly = input.bool(true, "L'estremo deve essere il PIU' RECENTE (direzionalita' stretta)", group=gS,
      tooltip="ACCESO (default, comportamento corretto): una sezione si arma SELL solo se il tocco della soglia alta e' piu' recente di quello della soglia bassa, e viceversa.\n\nSenza questo vincolo un percorso 28 -> 75 -> sotto 50 produce il SELL giusto, ma il semplice ritorno sopra 50 subito dopo produce anche un BUY, perche' il tocco di 30 e' ancora dentro la finestra pur essendo PRECEDENTE al tocco di 70. Il segnale nasce da un estremo che il prezzo si e' gia' lasciato alle spalle, cioe' contro la direzione appena presa.\n\nCon il vincolo attivo le due direzioni si escludono per costruzione: un BUY richiede che il prezzo sia sceso sotto la soglia bassa DOPO l'ultima escursione sopra quella alta.\n\nSPENTO ripristina il comportamento della v1.0. Serve solo a confrontare i due campioni: non e' una configurazione difendibile.")
-strictF = input.bool(false, "Il segnale deve cadere sull'attraversamento della sezione piu' veloce", group=gS,
-     tooltip="SPENTO (default): il segnale esce sul fronte di salita della condizione completa, cioe' sulla barra in cui l'ULTIMA sezione mancante completa il percorso, qualunque essa sia.\n\nACCESO: il segnale esce solo se e' la sezione piu' veloce ad attraversare il livello di rientro proprio su quella barra.\n\nAcceso e' la lettura letterale, ma scarta molti setup validi: le sezioni lente rientrano sotto 50 molto dopo le veloci, quindi nella maggior parte dei casi quando l'ultima sezione lenta completa il percorso la veloce ha gia' attraversato da un pezzo e nessun segnale viene emesso.")
+sigMode = input.string("Tocco su tutte, poi 50 della veloce", "Come nasce il segnale",
+     options=["Tocco su tutte, poi 50 della veloce","Tutte rientrate (fronte)","Tutte rientrate, poi 50 della veloce"], group=gS,
+     tooltip="Il percorso di una sezione ha DUE fasi distinte, e le tre modalita' differiscono per chi deve aver completato quale.\n   TOCCO   la soglia e' stata raggiunta entro lookN candele della sezione, ed e' l'estremo piu' recente\n   RIENTRO il valore ha riattraversato il livello di rientro\n\nTOCCO SU TUTTE, POI 50 DELLA VELOCE (default)\nTutte le sezioni attive devono aver TOCCATO la soglia. Il segnale esce sulla barra in cui la sezione ATTIVA PIU' VELOCE attraversa il livello di rientro. Il rientro lo deve fare solo lei: e' esattamente cio' che il suo attraversamento misura. E' la lettura operativa: le lente dicono che l'estremo e' condiviso, la veloce decide il momento.\n\nTUTTE RIENTRATE (FRONTE)\nTutte le sezioni devono aver toccato E gia' riattraversato il livello. Il segnale esce sul fronte di salita di quella condizione, cioe' quando l'ULTIMA sezione mancante la completa, qualunque essa sia. Ingresso piu' tardivo: le sezioni lente rientrano molto dopo le veloci, e quando l'ultima lenta rientra il movimento e' spesso gia' andato.\n\nTUTTE RIENTRATE, POI 50 DELLA VELOCE\nLa piu' severa: tutte rientrate E la veloce che attraversa proprio su quella barra. Le due cose quasi non coincidono mai, perche' la veloce ha gia' attraversato da un pezzo quando l'ultima lenta rientra. Aspettati pochissimi segnali: e' li' per completezza, non per operare.")
+sigOnce = input.bool(false, "   un solo segnale per episodio di armamento", group=gS,
+     tooltip="Con l'innesco sul cross di 50, la sezione veloce puo' oscillare attorno al livello e produrre piu' attraversamenti mentre l'armamento resta valido. Acceso, ne passa solo il primo; il latch si riarma quando l'armamento decade.\n\nSpento, ogni attraversamento e' un segnale: campione piu' grande, piu' rumore. Il cooldown qui sotto e' la via di mezzo.")
+coolN   = input.int(0, "   cooldown fra segnali (barre del grafico)", minval=0, maxval=500, group=gS)
 markWh  = input.string("Entrambi", "Posizione marker", options=["Pannello","Grafico prezzi","Entrambi"], group=gS)
 markShape= input.string("Freccia ▼▲", "Forma del marker", options=["Freccia ▼▲","Freccia vuota ▽△","Freccia sottile ↓↑","Pallino ●","Cerchio ○","Quadrato ■","Rombo ◆","Stella ★","Croce ✖","Freccia (forma)","Triangolo (forma)","Cerchio (forma)","Quadrato (forma)","Rombo (forma)","Croce × (forma)","Croce + (forma)","Bandiera (forma)","Etichetta (forma)"], group=gS,
      tooltip="Due famiglie di marker, con proprieta' diverse.\n\nGLIFO TESTUALE (le voci con il simbolo): e' TESTO. Lo colora 'textcolor', e la sua larghezza in pixel non dipende dallo zoom, quindi con una stringa lunga a zoom out sembra staccarsi dalla candela. Puo' pero' portare accanto lettera, sequenza e rischio.\n\nFORMA NATIVA (le voci con '(forma)'): e' un DISEGNO della label, non testo. Dimensione fissa data da 'Dimensione marker', larghezza testuale nulla, quindi resta incollata alla candela a qualsiasi zoom. Non puo' portare testo: lettera, sequenza e rischio finiscono nel tooltip, leggibili passandoci sopra col mouse.\n\n'Etichetta (forma)' e 'Bandiera (forma)' hanno un puntatore che tocca la candela: sono le piu' precise quando le barre sono strette.\n\nLe forme native sono colorate da 'color', quindi rispettano i colori SELL/BUY come i glifi.")
@@ -247,24 +262,45 @@ slE5 = r5 <= lvL ? 0.0 : sl_5
 //  in memoria ma PRECEDENTE a un tocco di 70 arma un BUY subito dopo il SELL
 //  generato da quello stesso tocco di 70: due segnali opposti dalla stessa
 //  escursione, il secondo contro la direzione che il prezzo aveva appena preso.
-f_armS(bool use, float r, float sHi, float sLo) =>
-    not use or (sHi <= lookN and (not dirOnly or sHi < sLo) and r < lvM)
+//  Le due fasi del percorso sono tenute SEPARATE, perche' le modalita' di
+//  segnale chiedono cose diverse alle sezioni lente e a quella veloce.
+//
+//  TOCCO   la soglia e' stata raggiunta entro lookN candele DELLA SEZIONE ed e'
+//          l'estremo piu' recente dei due (vincolo di direzionalita', v1.1).
+//          Non dice nulla sul rientro.
+//  RIENTRO il valore ha riattraversato il livello di rientro.
+//
+//  Un percorso completo e' TOCCO e RIENTRO insieme: e' l'armamento della v1.0.
+f_tchS(bool use, float sHi, float sLo) => not use or (sHi <= lookN and (not dirOnly or sHi < sLo))
+f_tchB(bool use, float sHi, float sLo) => not use or (sLo <= lookN and (not dirOnly or sLo < sHi))
 
-f_armB(bool use, float r, float sHi, float sLo) =>
-    not use or (sLo <= lookN and (not dirOnly or sLo < sHi) and r > lvM)
+tS1 = f_tchS(use1, shE1, slE1)
+tS2 = f_tchS(use2, shE2, slE2)
+tS3 = f_tchS(use3, shE3, slE3)
+tS4 = f_tchS(use4, shE4, slE4)
+tS5 = f_tchS(use5, shE5, slE5)
+tB1 = f_tchB(use1, shE1, slE1)
+tB2 = f_tchB(use2, shE2, slE2)
+tB3 = f_tchB(use3, shE3, slE3)
+tB4 = f_tchB(use4, shE4, slE4)
+tB5 = f_tchB(use5, shE5, slE5)
 
-aS1 = f_armS(use1, r1, shE1, slE1)
-aS2 = f_armS(use2, r2, shE2, slE2)
-aS3 = f_armS(use3, r3, shE3, slE3)
-aS4 = f_armS(use4, r4, shE4, slE4)
-aS5 = f_armS(use5, r5, shE5, slE5)
-aB1 = f_armB(use1, r1, shE1, slE1)
-aB2 = f_armB(use2, r2, shE2, slE2)
-aB3 = f_armB(use3, r3, shE3, slE3)
-aB4 = f_armB(use4, r4, shE4, slE4)
-aB5 = f_armB(use5, r5, shE5, slE5)
+aS1 = tS1 and (not use1 or r1 < lvM)
+aS2 = tS2 and (not use2 or r2 < lvM)
+aS3 = tS3 and (not use3 or r3 < lvM)
+aS4 = tS4 and (not use4 or r4 < lvM)
+aS5 = tS5 and (not use5 or r5 < lvM)
+aB1 = tB1 and (not use1 or r1 > lvM)
+aB2 = tB2 and (not use2 or r2 > lvM)
+aB3 = tB3 and (not use3 or r3 > lvM)
+aB4 = tB4 and (not use4 or r4 > lvM)
+aB5 = tB5 and (not use5 or r5 > lvM)
 
 anyOn  = use1 or use2 or use3 or use4 or use5
+// tocco su TUTTE: e' lo stato che autorizza l'innesco della veloce
+allTS  = anyOn and tS1 and tS2 and tS3 and tS4 and tS5
+allTB  = anyOn and tB1 and tB2 and tB3 and tB4 and tB5
+// percorso completo su TUTTE
 allS   = anyOn and aS1 and aS2 and aS3 and aS4 and aS5
 allB   = anyOn and aB1 and aB2 and aB3 and aB4 and aB5
 
@@ -281,9 +317,34 @@ tFast = q1 == qMin ? tf1 : q2 == qMin ? tf2 : q3 == qMin ? tf3 : q4 == qMin ? tf
 fastDn = ta.crossunder(rFast, lvM)
 fastUp = ta.crossover(rFast, lvM)
 
-// fronte di salita della condizione completa
-sigS = sigOn and allS and not allS[1] and (not strictF or fastDn)
-sigB = sigOn and allB and not allB[1] and (not strictF or fastUp)
+//  L'ARMAMENTO E' UNO STATO, l'innesco e' un evento. Nella modalita' di default
+//  lo stato e' il tocco su tutte le sezioni, e l'evento e' l'attraversamento
+//  del livello di rientro da parte della sola sezione ATTIVA PIU' VELOCE.
+//  Il rientro lo deve fare solo lei: e' precisamente cio' che il cross misura.
+mFronte = sigMode == "Tutte rientrate (fronte)"
+mTocco  = sigMode == "Tocco su tutte, poi 50 della veloce"
+
+holdS = mTocco ? allTS : allS
+holdB = mTocco ? allTB : allB
+rawS  = mFronte ? (allS and not allS[1]) : (holdS and fastDn)
+rawB  = mFronte ? (allB and not allB[1]) : (holdB and fastUp)
+
+// latch opzionale + cooldown: con l'innesco sul cross, la veloce puo'
+// oscillare attorno al livello e produrre piu' attraversamenti mentre lo stato
+// resta valido. Il latch si riarma quando lo stato decade.
+f_gate(bool raw, bool hold) =>
+    var bool fired = false
+    var int  last  = -100000
+    if not hold
+        fired := false
+    ok = raw and (not sigOnce or not fired) and (bar_index - last >= coolN)
+    if ok
+        fired := true
+        last  := bar_index
+    ok
+
+sigS = sigOn and f_gate(rawS, holdS)
+sigB = sigOn and f_gate(rawB, holdB)
 
 // ==================================================================== PLOT ====
 plot(use1 ? r1 : na, "S1", color = c1, linewidth = 1)
@@ -333,7 +394,7 @@ f_v(float v) => na(v) ? "–" : str.tostring(v, "#.0")
 
 var table t = table.new(position.top_right, 7, 7, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
 
-f_row(int i, bool use, string tf, float sec, float r, float md, float p10, float p90, float lo, float hi, float n, color c, bool aS, bool aB, float sHi, float sLo) =>
+f_row(int i, bool use, string tf, float sec, float r, float md, float p10, float p90, float lo, float hi, float n, color c, bool aS, bool aB, bool tS, bool tB, float sHi, float sLo) =>
     bad = use and sec < chartSec
     // manca storia: la mediana e' stimata su meno candele di quelle richieste
     thin = use and n < statLen
@@ -345,8 +406,12 @@ f_row(int i, bool use, string tf, float sec, float r, float md, float p10, float
     //   ·H = ultimo estremo la soglia alta -> puo' solo maturare un SELL
     //   ·L = ultimo estremo la soglia bassa -> puo' solo maturare un BUY
     //   ·  = nessuno dei due toccato
+    //   ▼ ▲  percorso completo: toccato E rientrato
+    //   ▽ △  toccato, in attesa del rientro (in modalita' di default e' gia'
+    //        abbastanza: il rientro lo deve fare solo la sezione veloce)
+    //   ·H ·L nessun tocco valido, ma l'ultimo estremo e' stato quello
     side = sHi < sLo ? "H" : sLo < sHi ? "L" : ""
-    aTx = not use ? "–" : aS and aB ? "▼▲" : aS ? "▼" : aB ? "▲" : "·" + side
+    aTx = not use ? "–" : aS ? "▼" : aB ? "▲" : tS ? "▽" : tB ? "△" : "·" + side
     aCl = not use ? color.gray : aS ? cSell : aB ? cBuy : color.new(color.gray, 30)
     table.cell(t, 2, i, aTx, text_size = sz, text_color = aCl, bgcolor = bg)
     table.cell(t, 3, i, use ? f_v(md) : "–", text_size = sz, text_color = color.silver, bgcolor = bg)
@@ -363,22 +428,27 @@ if shTab and barstate.islast
     table.cell(t, 4, 0, "p10 / p90",  text_size = sz, text_color = color.white, bgcolor = hb)
     table.cell(t, 5, 0, "min / max",  text_size = sz, text_color = color.white, bgcolor = hb)
     table.cell(t, 6, 0, "n",          text_size = sz, text_color = color.white, bgcolor = hb)
-    f_row(1, use1, tf1, sc1, r1, md1, p101, p901, lo1, hi1, n1, c1, aS1, aB1, shE1, slE1)
-    f_row(2, use2, tf2, sc2, r2, md2, p102, p902, lo2, hi2, n2, c2, aS2, aB2, shE2, slE2)
-    f_row(3, use3, tf3, sc3, r3, md3, p103, p903, lo3, hi3, n3, c3, aS3, aB3, shE3, slE3)
-    f_row(4, use4, tf4, sc4, r4, md4, p104, p904, lo4, hi4, n4, c4, aS4, aB4, shE4, slE4)
-    f_row(5, use5, tf5, sc5, r5, md5, p105, p905, lo5, hi5, n5, c5, aS5, aB5, shE5, slE5)
+    f_row(1, use1, tf1, sc1, r1, md1, p101, p901, lo1, hi1, n1, c1, aS1, aB1, tS1, tB1, shE1, slE1)
+    f_row(2, use2, tf2, sc2, r2, md2, p102, p902, lo2, hi2, n2, c2, aS2, aB2, tS2, tB2, shE2, slE2)
+    f_row(3, use3, tf3, sc3, r3, md3, p103, p903, lo3, hi3, n3, c3, aS3, aB3, tS3, tB3, shE3, slE3)
+    f_row(4, use4, tf4, sc4, r4, md4, p104, p904, lo4, hi4, n4, c4, aS4, aB4, tS4, tB4, shE4, slE4)
+    f_row(5, use5, tf5, sc5, r5, md5, p105, p905, lo5, hi5, n5, c5, aS5, aB5, tS5, tB5, shE5, slE5)
     // riga di stato: quante sezioni armate e in quale direzione
     nS = (use1 and aS1 ? 1 : 0) + (use2 and aS2 ? 1 : 0) + (use3 and aS3 ? 1 : 0) + (use4 and aS4 ? 1 : 0) + (use5 and aS5 ? 1 : 0)
     nB = (use1 and aB1 ? 1 : 0) + (use2 and aB2 ? 1 : 0) + (use3 and aB3 ? 1 : 0) + (use4 and aB4 ? 1 : 0) + (use5 and aB5 ? 1 : 0)
+    mS = (use1 and tS1 ? 1 : 0) + (use2 and tS2 ? 1 : 0) + (use3 and tS3 ? 1 : 0) + (use4 and tS4 ? 1 : 0) + (use5 and tS5 ? 1 : 0)
+    mB = (use1 and tB1 ? 1 : 0) + (use2 and tB2 ? 1 : 0) + (use3 and tB3 ? 1 : 0) + (use4 and tB4 ? 1 : 0) + (use5 and tB5 ? 1 : 0)
     nOn = (use1 ? 1 : 0) + (use2 ? 1 : 0) + (use3 ? 1 : 0) + (use4 ? 1 : 0) + (use5 ? 1 : 0)
-    table.cell(t, 0, 6, "armate", text_size = sz, text_color = color.white, bgcolor = hb)
-    table.cell(t, 1, 6, "▼ " + str.tostring(nS) + "/" + str.tostring(nOn), text_size = sz, text_color = allS ? cSell : color.silver, bgcolor = hb)
-    table.cell(t, 2, 6, "▲ " + str.tostring(nB) + "/" + str.tostring(nOn), text_size = sz, text_color = allB ? cBuy : color.silver, bgcolor = hb)
+    // rientrate · toccate / attive. Nella modalita' di default e' la colonna
+    // TOCCATE quella che deve arrivare al totale: il rientro spetta alla veloce.
+    table.cell(t, 0, 6, "rient·tocc", text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 1, 6, "▼ " + str.tostring(nS) + "·" + str.tostring(mS) + "/" + str.tostring(nOn), text_size = sz, text_color = (mTocco ? allTS : allS) ? cSell : color.silver, bgcolor = hb)
+    table.cell(t, 2, 6, "▲ " + str.tostring(nB) + "·" + str.tostring(mB) + "/" + str.tostring(nOn), text_size = sz, text_color = (mTocco ? allTB : allB) ? cBuy : color.silver, bgcolor = hb)
     table.cell(t, 3, 6, "mem " + str.tostring(lookN), text_size = sz, text_color = color.silver, bgcolor = hb)
     table.cell(t, 4, 6, "rientro " + str.tostring(lvM, "#.#"), text_size = sz, text_color = color.silver, bgcolor = hb)
     table.cell(t, 5, 6, "veloce " + tFast, text_size = sz, text_color = color.silver, bgcolor = hb)
-    table.cell(t, 6, 6, (dirOnly ? "dir" : "") + (strictF ? " strict" : ""), text_size = sz, text_color = dirOnly ? color.lime : color.yellow, bgcolor = hb)
+    modTx = mTocco ? "50 veloce" : mFronte ? "fronte" : "50v+rient"
+    table.cell(t, 6, 6, modTx + (dirOnly ? " ·dir" : ""), text_size = sz, text_color = mTocco ? color.lime : color.yellow, bgcolor = hb)
 
 // =================================================================== MARKER ===
 inPane  = markWh != "Grafico prezzi"
