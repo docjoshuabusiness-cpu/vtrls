@@ -148,6 +148,11 @@ sigMode = input.string("Tocco su tutte, poi 50 della veloce", "Come nasce il seg
 sigOnce = input.bool(false, "   un solo segnale per episodio di armamento", group=gS,
      tooltip="Con l'innesco sul cross di 50, la sezione veloce puo' oscillare attorno al livello e produrre piu' attraversamenti mentre l'armamento resta valido. Acceso, ne passa solo il primo; il latch si riarma quando l'armamento decade.\n\nSpento, ogni attraversamento e' un segnale: campione piu' grande, piu' rumore. Il cooldown qui sotto e' la via di mezzo.")
 coolN   = input.int(0, "   cooldown fra segnali (barre del grafico)", minval=0, maxval=500, group=gS)
+exhOn   = input.bool(true, "Esaurimento del setup alla soglia OPPOSTA", group=gS,
+     tooltip="Un'escursione che ha gia' attraversato tutto l'intervallo e' finita. Dopo un BUY partito sotto 30, quando le sezioni arrivano sopra 70 quel setup e' consumato: se il prezzo poi ritraccia sotto 50 e risale, non e' un nuovo segnale, e' la coda dello stesso movimento. Speculare per il SELL.\n\nPERCHE' NON BASTA IL VINCOLO DI DIREZIONALITA'\nQuello blocca il lato BUY finche' la sezione che ha toccato 70 non ritocca 30. Ma le sezioni LENTE conservano il loro tocco di 30 per lookN delle proprie candele: basterebbe che la sola sezione veloce ritocchi 30 per far risalire la condizione riusando tocchi vecchi di un'escursione ormai chiusa.\n\nCOSA FA QUESTO FILTRO\nL'esaurimento azzera la FRESCHEZZA di ogni sezione. Perche' quel lato torni operativo, TUTTE le sezioni attive devono ritoccare la propria soglia DOPO l'esaurimento. E' letteralmente 'si aspetta che si formi un altro setup'.\n\nLa colonna arm mostra ✕ sulle sezioni che devono ancora ritoccare, e la riga 'esaurim.' conta quante ne mancano.")
+exhWho  = input.string("Tutte le sezioni", "   soglia opposta raggiunta da",
+     options=["Tutte le sezioni","La sezione piu' veloce","Una sezione qualsiasi"], group=gS,
+     tooltip="Chi deve raggiungere la soglia opposta perche' il setup si consideri esaurito.\n\nTUTTE LE SEZIONI (default): l'escursione ha attraversato l'intervallo su ogni scala temporale. E' la lettura letterale e la piu' conservativa nel numero di blocchi.\n\nLA SEZIONE PIU' VELOCE: la sola che decide gli inneschi. Compromesso ragionevole.\n\nUNA SEZIONE QUALSIASI: la piu' aggressiva. Attenzione, in un trend la sezione veloce tocca la soglia opposta di continuo, quindi il lato controtendenza resta bloccato quasi sempre. Puo' essere esattamente quello che vuoi, ma guarda il contatore prima di tenerla.")
 markWh  = input.string("Entrambi", "Posizione marker", options=["Pannello","Grafico prezzi","Entrambi"], group=gS)
 markShape= input.string("Freccia ▼▲", "Forma del marker", options=["Freccia ▼▲","Freccia vuota ▽△","Freccia sottile ↓↑","Pallino ●","Cerchio ○","Quadrato ■","Rombo ◆","Stella ★","Croce ✖","Freccia (forma)","Triangolo (forma)","Cerchio (forma)","Quadrato (forma)","Rombo (forma)","Croce × (forma)","Croce + (forma)","Bandiera (forma)","Etichetta (forma)"], group=gS,
      tooltip="Due famiglie di marker, con proprieta' diverse.\n\nGLIFO TESTUALE (le voci con il simbolo): e' TESTO. Lo colora 'textcolor', e la sua larghezza in pixel non dipende dallo zoom, quindi con una stringa lunga a zoom out sembra staccarsi dalla candela. Puo' pero' portare accanto lettera, sequenza e rischio.\n\nFORMA NATIVA (le voci con '(forma)'): e' un DISEGNO della label, non testo. Dimensione fissa data da 'Dimensione marker', larghezza testuale nulla, quindi resta incollata alla candela a qualsiasi zoom. Non puo' portare testo: lettera, sequenza e rischio finiscono nel tooltip, leggibili passandoci sopra col mouse.\n\n'Etichetta (forma)' e 'Bandiera (forma)' hanno un puntatore che tocca la candela: sono le piu' precise quando le barre sono strette.\n\nLe forme native sono colorate da 'color', quindi rispettano i colori SELL/BUY come i glifi.")
@@ -316,6 +321,74 @@ rFast = q1 == qMin ? r1 : q2 == qMin ? r2 : q3 == qMin ? r3 : q4 == qMin ? r4 : 
 tFast = q1 == qMin ? tf1 : q2 == qMin ? tf2 : q3 == qMin ? tf3 : q4 == qMin ? tf4 : q5 == qMin ? tf5 : "-"
 fastDn = ta.crossunder(rFast, lvM)
 fastUp = ta.crossover(rFast, lvM)
+shFast = q1 == qMin ? shE1 : q2 == qMin ? shE2 : q3 == qMin ? shE3 : q4 == qMin ? shE4 : q5 == qMin ? shE5 : na
+slFast = q1 == qMin ? slE1 : q2 == qMin ? slE2 : q3 == qMin ? slE3 : q4 == qMin ? slE4 : q5 == qMin ? slE5 : na
+
+// ============================================== ESAURIMENTO DEL SETUP ========
+//  Un'escursione che ha gia' attraversato tutto l'intervallo e' finita: dopo un
+//  BUY partito sotto 30, quando le sezioni arrivano sopra 70 quel setup e'
+//  consumato. Se il prezzo poi ritraccia sotto 50 e risale, NON e' un nuovo
+//  segnale, e' la coda dello stesso movimento.
+//
+//  Il vincolo di direzionalita' da solo non basta. Blocca il lato BUY finche'
+//  la sezione che ha toccato 70 non ritocca 30, ma le sezioni LENTE conservano
+//  in memoria il loro tocco di 30 per lookN delle proprie candele: basterebbe
+//  che la sola sezione veloce ritocchi 30 per far risalire la condizione,
+//  riusando tocchi appartenenti a un'escursione ormai chiusa.
+//
+//  Qui l'esaurimento azzera la FRESCHEZZA di ogni sezione: perche' quel lato
+//  torni operativo, TUTTE devono ritoccare la propria soglia dopo di esso.
+//  soglia raggiunta ORA: il contatore e' a zero (il tocco intrabar e' gia'
+//  incorporato in shE/slE, quindi si vede sulla barra in cui avviene)
+hiNow1 = use1 and shE1 <= 0
+hiNow2 = use2 and shE2 <= 0
+hiNow3 = use3 and shE3 <= 0
+hiNow4 = use4 and shE4 <= 0
+hiNow5 = use5 and shE5 <= 0
+loNow1 = use1 and slE1 <= 0
+loNow2 = use2 and slE2 <= 0
+loNow3 = use3 and slE3 <= 0
+loNow4 = use4 and slE4 <= 0
+loNow5 = use5 and slE5 <= 0
+
+exhAll  = exhWho == "Tutte le sezioni"
+exhFast = exhWho == "La sezione piu' veloce"
+
+// esaurimento del lato BUY  = e' stata raggiunta la soglia ALTA
+// esaurimento del lato SELL = e' stata raggiunta la soglia BASSA
+exhHiAll = anyOn and (not use1 or hiNow1) and (not use2 or hiNow2) and (not use3 or hiNow3) and (not use4 or hiNow4) and (not use5 or hiNow5)
+exhLoAll = anyOn and (not use1 or loNow1) and (not use2 or loNow2) and (not use3 or loNow3) and (not use4 or loNow4) and (not use5 or loNow5)
+exhHiAny = hiNow1 or hiNow2 or hiNow3 or hiNow4 or hiNow5
+exhLoAny = loNow1 or loNow2 or loNow3 or loNow4 or loNow5
+exhB = exhOn and (exhAll ? exhHiAll : exhFast ? nz(shFast, 1e9) <= 0 : exhHiAny)
+exhS = exhOn and (exhAll ? exhLoAll : exhFast ? nz(slFast, 1e9) <= 0 : exhLoAny)
+
+//  Freschezza di una sezione: parte vera, l'esaurimento la azzera, e torna vera
+//  solo quando quella sezione RITOCCA la propria soglia. Finche' anche una sola
+//  sezione non e' fresca, quel lato resta fermo: e' l'attesa di un nuovo setup.
+f_fresh(bool use, bool touchNow, bool reset) =>
+    var bool f = true
+    if reset
+        f := false
+    if not use or touchNow
+        f := true
+    f
+
+fB1 = f_fresh(use1, loNow1, exhB)
+fB2 = f_fresh(use2, loNow2, exhB)
+fB3 = f_fresh(use3, loNow3, exhB)
+fB4 = f_fresh(use4, loNow4, exhB)
+fB5 = f_fresh(use5, loNow5, exhB)
+fS1 = f_fresh(use1, hiNow1, exhS)
+fS2 = f_fresh(use2, hiNow2, exhS)
+fS3 = f_fresh(use3, hiNow3, exhS)
+fS4 = f_fresh(use4, hiNow4, exhS)
+fS5 = f_fresh(use5, hiNow5, exhS)
+
+freshB = fB1 and fB2 and fB3 and fB4 and fB5
+freshS = fS1 and fS2 and fS3 and fS4 and fS5
+blockB = exhOn and not freshB
+blockS = exhOn and not freshS
 
 //  L'ARMAMENTO E' UNO STATO, l'innesco e' un evento. Nella modalita' di default
 //  lo stato e' il tocco su tutte le sezioni, e l'evento e' l'attraversamento
@@ -324,10 +397,11 @@ fastUp = ta.crossover(rFast, lvM)
 mFronte = sigMode == "Tutte rientrate (fronte)"
 mTocco  = sigMode == "Tocco su tutte, poi 50 della veloce"
 
-holdS = mTocco ? allTS : allS
-holdB = mTocco ? allTB : allB
-rawS  = mFronte ? (allS and not allS[1]) : (holdS and fastDn)
-rawB  = mFronte ? (allB and not allB[1]) : (holdB and fastUp)
+// il blocco da esaurimento entra nello STATO, cosi' governa anche il latch
+holdS = (mTocco ? allTS : allS) and not blockS
+holdB = (mTocco ? allTB : allB) and not blockB
+rawS  = mFronte ? (allS and not allS[1] and not blockS) : (holdS and fastDn)
+rawB  = mFronte ? (allB and not allB[1] and not blockB) : (holdB and fastUp)
 
 // latch opzionale + cooldown: con l'innesco sul cross, la veloce puo'
 // oscillare attorno al livello e produrre piu' attraversamenti mentre lo stato
@@ -392,9 +466,9 @@ f_htxt(float sec) =>
 
 f_v(float v) => na(v) ? "–" : str.tostring(v, "#.0")
 
-var table t = table.new(position.top_right, 7, 7, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
+var table t = table.new(position.top_right, 7, 8, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
 
-f_row(int i, bool use, string tf, float sec, float r, float md, float p10, float p90, float lo, float hi, float n, color c, bool aS, bool aB, bool tS, bool tB, float sHi, float sLo) =>
+f_row(int i, bool use, string tf, float sec, float r, float md, float p10, float p90, float lo, float hi, float n, color c, bool aS, bool aB, bool tS, bool tB, bool fS, bool fB, float sHi, float sLo) =>
     bad = use and sec < chartSec
     // manca storia: la mediana e' stimata su meno candele di quelle richieste
     thin = use and n < statLen
@@ -411,7 +485,8 @@ f_row(int i, bool use, string tf, float sec, float r, float md, float p10, float
     //        abbastanza: il rientro lo deve fare solo la sezione veloce)
     //   ·H ·L nessun tocco valido, ma l'ultimo estremo e' stato quello
     side = sHi < sLo ? "H" : sLo < sHi ? "L" : ""
-    aTx = not use ? "–" : aS ? "▼" : aB ? "▲" : tS ? "▽" : tB ? "△" : "·" + side
+    //   ✕    la sezione deve ancora RITOCCARE la soglia dopo un esaurimento
+    aTx = not use ? "–" : not fS and not fB ? "✕✕" : aS and fS ? "▼" : aB and fB ? "▲" : not fS ? "✕▲" : not fB ? "✕▼" : tS ? "▽" : tB ? "△" : "·" + side
     aCl = not use ? color.gray : aS ? cSell : aB ? cBuy : color.new(color.gray, 30)
     table.cell(t, 2, i, aTx, text_size = sz, text_color = aCl, bgcolor = bg)
     table.cell(t, 3, i, use ? f_v(md) : "–", text_size = sz, text_color = color.silver, bgcolor = bg)
@@ -428,11 +503,11 @@ if shTab and barstate.islast
     table.cell(t, 4, 0, "p10 / p90",  text_size = sz, text_color = color.white, bgcolor = hb)
     table.cell(t, 5, 0, "min / max",  text_size = sz, text_color = color.white, bgcolor = hb)
     table.cell(t, 6, 0, "n",          text_size = sz, text_color = color.white, bgcolor = hb)
-    f_row(1, use1, tf1, sc1, r1, md1, p101, p901, lo1, hi1, n1, c1, aS1, aB1, tS1, tB1, shE1, slE1)
-    f_row(2, use2, tf2, sc2, r2, md2, p102, p902, lo2, hi2, n2, c2, aS2, aB2, tS2, tB2, shE2, slE2)
-    f_row(3, use3, tf3, sc3, r3, md3, p103, p903, lo3, hi3, n3, c3, aS3, aB3, tS3, tB3, shE3, slE3)
-    f_row(4, use4, tf4, sc4, r4, md4, p104, p904, lo4, hi4, n4, c4, aS4, aB4, tS4, tB4, shE4, slE4)
-    f_row(5, use5, tf5, sc5, r5, md5, p105, p905, lo5, hi5, n5, c5, aS5, aB5, tS5, tB5, shE5, slE5)
+    f_row(1, use1, tf1, sc1, r1, md1, p101, p901, lo1, hi1, n1, c1, aS1, aB1, tS1, tB1, fS1, fB1, shE1, slE1)
+    f_row(2, use2, tf2, sc2, r2, md2, p102, p902, lo2, hi2, n2, c2, aS2, aB2, tS2, tB2, fS2, fB2, shE2, slE2)
+    f_row(3, use3, tf3, sc3, r3, md3, p103, p903, lo3, hi3, n3, c3, aS3, aB3, tS3, tB3, fS3, fB3, shE3, slE3)
+    f_row(4, use4, tf4, sc4, r4, md4, p104, p904, lo4, hi4, n4, c4, aS4, aB4, tS4, tB4, fS4, fB4, shE4, slE4)
+    f_row(5, use5, tf5, sc5, r5, md5, p105, p905, lo5, hi5, n5, c5, aS5, aB5, tS5, tB5, fS5, fB5, shE5, slE5)
     // riga di stato: quante sezioni armate e in quale direzione
     nS = (use1 and aS1 ? 1 : 0) + (use2 and aS2 ? 1 : 0) + (use3 and aS3 ? 1 : 0) + (use4 and aS4 ? 1 : 0) + (use5 and aS5 ? 1 : 0)
     nB = (use1 and aB1 ? 1 : 0) + (use2 and aB2 ? 1 : 0) + (use3 and aB3 ? 1 : 0) + (use4 and aB4 ? 1 : 0) + (use5 and aB5 ? 1 : 0)
@@ -449,6 +524,21 @@ if shTab and barstate.islast
     table.cell(t, 5, 6, "veloce " + tFast, text_size = sz, text_color = color.silver, bgcolor = hb)
     modTx = mTocco ? "50 veloce" : mFronte ? "fronte" : "50v+rient"
     table.cell(t, 6, 6, modTx + (dirOnly ? " ·dir" : ""), text_size = sz, text_color = mTocco ? color.lime : color.yellow, bgcolor = hb)
+
+    // -- esaurimento: quante sezioni devono ancora ritoccare la soglia -------
+    //    BLOCCO significa che quel lato aspetta un setup nuovo, non che manchi
+    //    poco al segnale
+    eb = color.new(color.gray, 78)
+    kS = (use1 and not fS1 ? 1 : 0) + (use2 and not fS2 ? 1 : 0) + (use3 and not fS3 ? 1 : 0) + (use4 and not fS4 ? 1 : 0) + (use5 and not fS5 ? 1 : 0)
+    kB = (use1 and not fB1 ? 1 : 0) + (use2 and not fB2 ? 1 : 0) + (use3 and not fB3 ? 1 : 0) + (use4 and not fB4 ? 1 : 0) + (use5 and not fB5 ? 1 : 0)
+    exhTx = not exhOn ? "off" : exhAll ? "tutte" : exhFast ? "veloce" : "qualsiasi"
+    table.cell(t, 0, 7, "esaurim.", text_size = sz, text_color = exhOn ? color.white : color.gray, bgcolor = eb)
+    table.cell(t, 1, 7, not exhOn ? "–" : blockS ? "▼ BLOCCO" : "▼ ok", text_size = sz, text_color = not exhOn ? color.gray : blockS ? color.orange : color.lime, bgcolor = eb)
+    table.cell(t, 2, 7, not exhOn ? "–" : blockB ? "▲ BLOCCO" : "▲ ok", text_size = sz, text_color = not exhOn ? color.gray : blockB ? color.orange : color.lime, bgcolor = eb)
+    table.cell(t, 3, 7, not exhOn ? "–" : "da ritoccare ▼" + str.tostring(kS), text_size = sz, text_color = color.silver, bgcolor = eb)
+    table.cell(t, 4, 7, not exhOn ? "–" : "▲" + str.tostring(kB), text_size = sz, text_color = color.silver, bgcolor = eb)
+    table.cell(t, 5, 7, "soglia opp.", text_size = sz, text_color = color.silver, bgcolor = eb)
+    table.cell(t, 6, 7, exhTx, text_size = sz, text_color = exhOn ? color.aqua : color.gray, bgcolor = eb)
 
 // =================================================================== MARKER ===
 inPane  = markWh != "Grafico prezzi"
