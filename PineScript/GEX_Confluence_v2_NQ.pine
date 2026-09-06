@@ -742,9 +742,15 @@ if needsRedraw
 
     // Drift = basis di adesso meno il basis congelato nel campo S:. Va applicato
     // PRIMA di disegnare qualsiasi cosa, altrimenti linee e zone divergono.
-    float dRaw = na(basisLiveC) ? 0.0 : basisLiveC - nqNdxSpread
-    gexDriftBad := math.abs(dRaw) > confDriftCap
-    gexDrift    := confFixBasis and not gexDriftBad ? dRaw : 0.0
+    // Quanto basis e' gia' incorporato negli strike: in spazio NQ e' il campo S:,
+    // in spazio NDX e' zero e va sommato tutto il basis vivo.
+    bool  spaceNDX = strikeSpaceMode == "NDX"
+    float sRef = spaceNDX ? 0.0 : nqNdxSpread
+    float dRaw = na(basisLiveC) ? na : basisLiveC - sRef
+    // In spazio NDX senza un basis valido i livelli finirebbero sul grafico
+    // decine di punti fuori posto, quindi e' un errore, non un caso limite.
+    gexDriftBad := na(dRaw) ? spaceNDX : spaceNDX ? (dRaw < -20 or dRaw > 400) : math.abs(dRaw) > confDriftCap
+    gexDrift    := not na(dRaw) and not gexDriftBad and (confFixBasis or spaceNDX) ? dRaw : 0.0
     gexBasisUse := na(basisLiveC) or basisLiveC == 0.0 ? nqNdxSpread : basisLiveC
 
     if str.contains(rawInput, "|P:")
@@ -937,8 +943,8 @@ if needsRedraw
 
         // Il drift e' l'errore sistematico fra livelli GEX e livelli nativi del
         // grafico: e' esattamente cio' che falsa le confluenze cross-family.
-        if confFixBasis and (gexDriftBad or math.abs(gexDrift) > band)
-            string dTxt = gexDriftBad ? "BASIS DRIFT " + str.tostring(dRaw, "#.#") + " pt - FUORI SOGLIA: dato vecchio o roll in corso" : "basis drift corretto " + str.tostring(gexDrift, "+#.#") + " pt"
+        if (confFixBasis or spaceNDX) and (gexDriftBad or math.abs(gexDrift) > band)
+            string dTxt = na(dRaw) ? "BASIS NON MISURABILE: strike NDX su grafico NQ senza basis. Imposta 'Basis manuale'." : gexDriftBad and spaceNDX ? "BASIS IMPLAUSIBILE " + str.tostring(dRaw, "#.#") + " pt: il carry NQ-NDX e' positivo di qualche decina di punti. Stai misurando un artefatto (feed in ritardo o mercato chiuso)." : gexDriftBad ? "BASIS DRIFT " + str.tostring(dRaw, "#.#") + " pt - FUORI SOGLIA: dato vecchio o roll in corso" : "basis applicato " + str.tostring(gexDrift, "+#.#") + " pt"
             array.push(confluenceLabels, label.new(bar_index + profileOffset, close, dTxt, color=color.new(gexDriftBad ? color.red : color.orange, 15), textcolor=color.white, style=label.style_label_left, size=size.small))
 
         array<float>  cPx  = array.new<float>()
@@ -1183,7 +1189,7 @@ if barstate.islast and showStatus
     f_stCell(4, 0, "Basis / zone", color.new(color.gray, 10))
     // Cosa e' attivo su questo timeframe e cosa no: meglio saperlo che dedurlo
     // dall'assenza di disegni.
-    string tfTxt = (flipOnChart ? "flip su chart" : "flip su " + wallFlipTF) + (sessOK ? "" : "  sessioni OFF")
+    string tfTxt = (flipOnChart ? "flip su chart" : "flip su " + wallFlipTF) + (sessOK ? "" : "  sessioni OFF") + "  |  strike " + strikeSpaceMode
     f_stCell(5, 0, "Timeframe", color.new(color.gray, 10))
     f_stCell(5, 1, tfTxt, sessOK ? color.new(color.gray, 0) : color.new(color.orange, 0))
 
