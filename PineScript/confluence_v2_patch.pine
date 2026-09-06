@@ -1,0 +1,288 @@
+// =============================================================================
+//  CONFLUENCE ENGINE v2 — patch per "GEX Levels + Breakout Structure + AVWAP"
+//  Tre blocchi da innestare nello script esistente. Vedi README_Confluence_v2.md
+//  per il modello e la procedura.
+//
+//  COSA CAMBIA RISPETTO A v1
+//  -------------------------
+//  v1 contava livelli: N livelli entro una banda -> "Nx". Tratta un call wall
+//  da 190M e la VWAP asiatica come la stessa cosa, e conta come confluenza due
+//  strike adiacenti dello stesso libro opzioni (che sono un artefatto di
+//  griglia, non informazione).
+//
+//  v2 misura MASSA e INDIPENDENZA:
+//   1. Pesi per classe di livello, con i muri scalati sulla loro magnitudine.
+//   2. De-duplica intra-famiglia sotto il quanto di griglia.
+//   3. Rendimento decrescente sui livelli della stessa famiglia (la 2a VWAP
+//      vale 0.4, la 3a 0.16): livelli correlati non sommano come indipendenti.
+//   4. Requisito cross-family: una zona conta solo se almeno due famiglie
+//      diverse ci convergono. E' il filtro che elimina il rumore di griglia.
+//   5. Clustering per densita' + non-max suppression, non piu' walk greedy
+//      (il cui esito dipendeva da dove iniziava la scansione).
+//   6. Correzione live del drift di basis sui livelli GEX, senza la quale
+//      nessuna confluenza cross-family e' misurabile.
+// =============================================================================
+
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  BLOCCO 1 — INPUT                                                        ║
+// ║  Incolla nella sezione input, dopo il gruppo "Confluence Zones".         ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+groupC2 = "Confluence v2"
+useConfV2      = input.bool(true,  "Motore confluenze v2", group=groupC2)
+confBandPts    = input.float(12.0, "Banda cluster (punti NQ)", minval=2.0, step=0.5, group=groupC2, tooltip="Ampiezza totale della zona. Con griglie strike a 10 (QQQ) e 25 (NDX) punti, sotto i ~10 punti non intercetti mai una vera coincidenza cross-family.")
+confQuantum    = input.float(12.0, "Quanto de-dup intra-famiglia", minval=0.0, step=1.0, group=groupC2, tooltip="Due livelli della STESSA famiglia piu' vicini di questo valore vengono collassati in uno solo (si tiene il piu' pesante). Neutralizza l'arrotondamento a 10 punti degli strike QQQ.")
+confDecay      = input.float(0.40, "Decadimento intra-famiglia", minval=0.0, maxval=1.0, step=0.05, group=groupC2, tooltip="Peso del 2°, 3°, ... livello della stessa famiglia nella stessa zona. 0.4 = il secondo vale il 40%, il terzo il 16%. Livelli correlati non sono prove indipendenti.")
+confCrossOnly  = input.bool(true,  "Solo zone cross-family", group=groupC2, tooltip="Richiede almeno due famiglie diverse (GEX / PriceAction / BOS / VWAP). E' il singolo filtro che toglie piu' rumore.")
+confMinScore   = input.float(2.5,  "Score minimo", minval=0.5, step=0.25, group=groupC2)
+confMaxZones   = input.int(6,      "Zone massime", minval=1, maxval=20, group=groupC2)
+confSepMult    = input.float(1.5,  "Separazione minima (x banda)", minval=1.0, maxval=4.0, step=0.1, group=groupC2)
+
+confFixBasis   = input.bool(true,  "Correggi drift di basis sui livelli GEX", group=groupC2, tooltip="Gli strike arrivano in spazio NQ con il basis del momento dello snapshot (campo S:). Il carry NQ-NDX decade di ~15-20 punti a settimana e salta al roll. Senza questa correzione le confluenze GEX vs livelli nativi del grafico misurano rumore.")
+confBasisLen   = input.int(20,     "Finestra mediana basis (barre)", minval=1, maxval=500, group=groupC2)
+confDriftCap   = input.float(120.0,"Drift massimo accettato (punti)", minval=10.0, step=10.0, group=groupC2, tooltip="Oltre questa soglia il drift viene ignorato e segnalato: significa dato molto vecchio, roll in corso, o campo S: assente.")
+
+wZG    = input.float(3.00, "ZeroGamma", group=groupC2, inline="cw1")
+wMP    = input.float(1.50, "MaxPain",   group=groupC2, inline="cw1")
+wEM    = input.float(1.75, "EM edge",   group=groupC2, inline="cw1")
+wVB    = input.float(0.75, "VolBand",   group=groupC2, inline="cw2")
+wWall  = input.float(1.00, "Wall base", group=groupC2, inline="cw2")
+wCMDF  = input.float(1.60, "Charm/DFlip", group=groupC2, inline="cw2")
+wPDay  = input.float(1.50, "PDH/PDL",  group=groupC2, inline="cw3")
+wPWk   = input.float(2.00, "PWH/PWL",  group=groupC2, inline="cw3")
+wBosM  = input.float(3.00, "BOS M",    group=groupC2, inline="cw4")
+wBosW  = input.float(2.50, "BOS W",    group=groupC2, inline="cw4")
+wBosD  = input.float(2.00, "BOS D",    group=groupC2, inline="cw4")
+wBosI  = input.float(0.75, "BOS H1/H4",group=groupC2, inline="cw4")
+wVwUS  = input.float(1.50, "VWAP US/PD",   group=groupC2, inline="cw5")
+wVwEA  = input.float(0.90, "VWAP EU/Asia", group=groupC2, inline="cw5")
+
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  BLOCCO 2 — BASIS LIVE + FUNZIONI                                        ║
+// ║  Incolla a livello globale, subito dopo il blocco delle request.security ║
+// ║  esistenti (dopo la riga di [close5m, time5m]).                          ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+// Basis NQ-NDX misurato adesso, indipendente dal ticker a grafico.
+// MEDIANA e non media: NQ1! e' un continuous, al roll il basis salta di decine
+// di punti in un tick e una media resta sbagliata per tutta la sua finestra.
+nqLiveC  = request.security("CME_MINI:NQ1!", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+ndxLiveC = request.security("NASDAQ:NDX",    timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+float basisRawC  = nqLiveC - ndxLiveC
+float basisLiveC = ta.median(nz(basisRawC), confBasisLen)
+
+// Conversione con basis corretto: strike NQ -> unita' del grafico.
+// adj = strike + drift; su NDX si sottrae il basis vivo, e drift e basis si
+// elidono riportando esattamente lo strike NDX originale.
+f_confPx(float nqStrike, float drift, float basisUse) =>
+    float adj = nqStrike + drift
+    tickerChoice == "NDX" ? adj - basisUse : tickerChoice == "QQQ" ? (adj - basisUse) / ndxQqqRatio : adj
+
+f_pushLvl(array<float> aPx, array<float> aW, array<int> aFam, array<string> aNm, float px, float w, int fam, string nm) =>
+    if not na(px) and w > 0
+        array.push(aPx, px)
+        array.push(aW,  w)
+        array.push(aFam, fam)
+        array.push(aNm, nm)
+
+// Somma con rendimento decrescente: livelli della stessa famiglia sono
+// correlati, quindi il secondo, il terzo... contano progressivamente meno.
+f_famScore(array<float> ws, float decay) =>
+    array.sort(ws, order.descending)
+    float s = 0.0
+    float k = 1.0
+    for w in ws
+        s += w * k
+        k *= decay
+    s
+
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  BLOCCO 3 — MOTORE                                                       ║
+// ║  Sostituisce INTEGRALMENTE il vecchio blocco "CONFLUENCE ZONES",         ║
+// ║  dalla riga  "for b in confluenceBoxes"  fino a  "i := j"  compreso.     ║
+// ║  Resta dentro  if needsRedraw  (usa levelsData, qqqNoRatio, bosLevels).  ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+    for b in confluenceBoxes
+        box.delete(b)
+    array.clear(confluenceBoxes)
+    for lbl in confluenceLabels
+        label.delete(lbl)
+    array.clear(confluenceLabels)
+
+    if showConfluence and useConfV2
+        float band     = confBandPts / 2.0
+        float basisUse = na(basisLiveC) or basisLiveC == 0.0 ? nqNdxSpread : basisLiveC
+        float driftRaw = na(basisLiveC) ? 0.0 : basisLiveC - nqNdxSpread
+        bool  driftBad = math.abs(driftRaw) > confDriftCap
+        float drift    = confFixBasis and not driftBad ? driftRaw : 0.0
+
+        // Il drift e' l'errore sistematico fra livelli GEX e livelli nativi del
+        // grafico: e' esattamente cio' che falsa le confluenze cross-family.
+        if confFixBasis and (driftBad or math.abs(drift) > band)
+            string dTxt = driftBad ? "BASIS DRIFT " + str.tostring(driftRaw, "#.#") + " pt — FUORI SOGLIA: dato vecchio o roll in corso" : "basis drift corretto " + str.tostring(drift, "+#.#") + " pt"
+            array.push(confluenceLabels, label.new(bar_index + profileOffset, close, dTxt, color=color.new(driftBad ? color.red : color.orange, 15), textcolor=color.white, style=label.style_label_left, size=size.small))
+
+        array<float>  cPx  = array.new<float>()
+        array<float>  cW   = array.new<float>()
+        array<int>    cFam = array.new<int>()      // 0 GEX · 1 PriceAction · 2 BOS · 3 VWAP
+        array<string> cNm  = array.new<string>()
+
+        // ── raccolta livelli GEX ────────────────────────────────────────────
+        if levelsData != "" and not qqqNoRatio
+            array<string> lp = str.split(levelsData, ";")
+            // primo passaggio: magnitudine di riferimento per scalare i muri
+            float magRef = 0.0
+            for one in lp
+                array<string> p = str.split(one, ",")
+                if array.size(p) >= 5
+                    float m = str.tonumber(array.get(p, 4))
+                    if not na(m)
+                        magRef := math.max(magRef, m)
+            for one in lp
+                array<string> p = str.split(one, ",")
+                if array.size(p) >= 3
+                    float s = str.tonumber(array.get(p, 0))
+                    string t = array.get(p, 1)
+                    if not na(s)
+                        float mag = array.size(p) >= 5 ? nz(str.tonumber(array.get(p, 4))) : 0.0
+                        // un muro da 190M non e' un muro da 12M: peso 0.5x-2.0x
+                        float wMul = magRef > 0 and mag > 0 ? 0.5 + 1.5 * math.min(mag / magRef, 1.0) : 1.0
+                        float w = t == "ZG" ? wZG : t == "MP" ? wMP :
+                                  t == "EH" or t == "EL" ? wEM :
+                                  t == "VH" or t == "VL" ? wVB :
+                                  t == "CM" or t == "DF" ? wCMDF :
+                                  t == "CW" or t == "PW" ? wWall * wMul : 0.0
+                        if w > 0
+                            string nm = t + " " + str.tostring(math.round(s)) + (mag > 0 ? "  " + str.tostring(mag, "#.#") + "M" : "")
+                            f_pushLvl(cPx, cW, cFam, cNm, f_confPx(s, drift, basisUse), w, 0, nm)
+
+        // ── price action, dall'OHLC del grafico ─────────────────────────────
+        if showStructureLevels
+            f_pushLvl(cPx, cW, cFam, cNm, dPrevH, wPDay, 1, "PDH")
+            f_pushLvl(cPx, cW, cFam, cNm, dPrevL, wPDay, 1, "PDL")
+            f_pushLvl(cPx, cW, cFam, cNm, wPrevH, wPWk,  1, "PWH")
+            f_pushLvl(cPx, cW, cFam, cNm, wPrevL, wPWk,  1, "PWL")
+
+        // ── BOS ─────────────────────────────────────────────────────────────
+        if array.size(bosLevels) > 0
+            for bi = 0 to array.size(bosLevels) - 1
+                string tf = array.size(bosTF) > bi ? array.get(bosTF, bi) : ""
+                float wb = tf == "M" ? wBosM : tf == "W" ? wBosW : tf == "D" ? wBosD : wBosI
+                f_pushLvl(cPx, cW, cFam, cNm, array.get(bosLevels, bi), wb, 2, "BOS " + tf)
+
+        // ── AVWAP ───────────────────────────────────────────────────────────
+        f_pushLvl(cPx, cW, cFam, cNm, pUS,   wVwUS, 3, "VWAP US")
+        f_pushLvl(cPx, cW, cFam, cNm, pPD,   wVwUS, 3, "VWAP US PD")
+        f_pushLvl(cPx, cW, cFam, cNm, pEU,   wVwEA, 3, "VWAP EU")
+        f_pushLvl(cPx, cW, cFam, cNm, pAsia, wVwEA, 3, "VWAP Asia")
+
+        // ── de-duplica intra-famiglia ───────────────────────────────────────
+        // Strike QQQ arrotondati a 10 punti e strike NDX su griglia 25 creano
+        // quasi-coincidenze che sono aritmetica di griglia, non informazione.
+        // Coppie cross-family non vengono mai collassate: sono il segnale.
+        if confQuantum > 0
+            int di = array.size(cPx) - 1
+            while di > 0
+                bool drop = false
+                int dj = 0
+                while dj < di and not drop
+                    if array.get(cFam, dj) == array.get(cFam, di) and math.abs(array.get(cPx, dj) - array.get(cPx, di)) < confQuantum
+                        if array.get(cW, dj) >= array.get(cW, di)
+                            drop := true
+                        else
+                            array.set(cW,  dj, array.get(cW,  di))
+                            array.set(cPx, dj, array.get(cPx, di))
+                            array.set(cNm, dj, array.get(cNm, di))
+                            drop := true
+                    dj += 1
+                if drop
+                    array.remove(cPx, di)
+                    array.remove(cW, di)
+                    array.remove(cFam, di)
+                    array.remove(cNm, di)
+                di -= 1
+
+        int nL = array.size(cPx)
+
+        // ── score per centro candidato ──────────────────────────────────────
+        array<float> zScore = array.new<float>()
+        array<float> zCen   = array.new<float>()
+        array<float> zLo    = array.new<float>()
+        array<float> zHi    = array.new<float>()
+        array<int>   zFams  = array.new<int>()
+
+        if nL > 0
+            for i = 0 to nL - 1
+                float ctr = array.get(cPx, i)
+                float wsum = 0.0
+                float pwsum = 0.0
+                float lo = na
+                float hi = na
+                int famMask = 0
+                float total = 0.0
+                for f = 0 to 3
+                    array<float> fw = array.new<float>()
+                    for j = 0 to nL - 1
+                        if array.get(cFam, j) == f and math.abs(array.get(cPx, j) - ctr) <= band
+                            array.push(fw, array.get(cW, j))
+                            float pj = array.get(cPx, j)
+                            wsum  += array.get(cW, j)
+                            pwsum += array.get(cW, j) * pj
+                            lo := na(lo) ? pj : math.min(lo, pj)
+                            hi := na(hi) ? pj : math.max(hi, pj)
+                    if array.size(fw) > 0
+                        famMask := famMask + int(math.pow(2, f))
+                        total += f_famScore(fw, confDecay)
+                array.push(zScore, total)
+                array.push(zCen, wsum > 0 ? pwsum / wsum : ctr)
+                array.push(zLo, na(lo) ? ctr : lo)
+                array.push(zHi, na(hi) ? ctr : hi)
+                array.push(zFams, famMask)
+
+        // ── non-max suppression: zone ordinate per score, non sovrapposte ───
+        array<float> work = array.copy(zScore)
+        array<float> accCen = array.new<float>()
+        int drawn = 0
+        int guard = 0
+        while drawn < confMaxZones and guard < nL
+            guard += 1
+            int best = -1
+            float bestS = -1e18
+            for i = 0 to nL - 1
+                if array.get(work, i) > bestS
+                    bestS := array.get(work, i)
+                    best := i
+            if best < 0 or bestS < confMinScore
+                break
+            array.set(work, best, -1e18)
+            int fm = array.get(zFams, best)
+            int famCount = (fm % 2) + ((fm / 2) % 2) + ((fm / 4) % 2) + ((fm / 8) % 2)
+            bool okCross = not confCrossOnly or famCount >= 2
+            float cen = array.get(zCen, best)
+            bool okSep = true
+            if array.size(accCen) > 0
+                for a = 0 to array.size(accCen) - 1
+                    if math.abs(array.get(accCen, a) - cen) < confSepMult * confBandPts
+                        okSep := false
+            if okCross and okSep
+                array.push(accCen, cen)
+                drawn += 1
+                float lo = array.get(zLo, best)
+                float hi = array.get(zHi, best)
+                if hi - lo < confBandPts * 0.25
+                    lo := cen - confBandPts * 0.125
+                    hi := cen + confBandPts * 0.125
+                float sc = array.get(zScore, best)
+                color zc = sc >= confMinScore * 2.4 ? colorConfluence5 : sc >= confMinScore * 1.6 ? colorConfluence4 : colorConfluence3
+                array.push(confluenceBoxes, box.new(bar_index - lineLeftExt, hi, bar_index + profileOffset, lo, border_color=color.new(zc, 40), border_width=1, bgcolor=zc))
+                // badge famiglie: quali fonti indipendenti convergono qui
+                string fams = ((fm % 2) == 1 ? "G" : "") + (((fm / 2) % 2) == 1 ? "P" : "") + (((fm / 4) % 2) == 1 ? "B" : "") + (((fm / 8) % 2) == 1 ? "V" : "")
+                string tip = "Score " + str.tostring(sc, "#.##") + "   famiglie: " + fams + "\nDistanza: " + str.tostring(cen - close, "+#.#") + " pt\n"
+                for j = 0 to nL - 1
+                    if math.abs(array.get(cPx, j) - cen) <= band
+                        tip += "\n" + array.get(cNm, j) + "   w " + str.tostring(array.get(cW, j), "#.##")
+                array.push(confluenceLabels, label.new(bar_index + profileOffset, cen, str.tostring(sc, "#.#") + " " + fams, color=color.new(zc, 15), textcolor=color.white, style=label.style_label_left, size=size.small, tooltip=tip))
