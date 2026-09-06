@@ -182,6 +182,13 @@ ext6w = input.float(0.0, "w", minval=0.0, step=0.25, group=groupExt, inline="e6"
 extShowLines = input.bool(true, "Disegna anche le linee dei livelli esterni", group=groupExt)
 extColor = input.color(#a855f7, "Colore", group=groupExt)
 
+// ── Coerenza fra timeframe del grafico e logiche interne ─────────────────────
+groupTF = "Timeframe & conferme"
+wallFlipTF  = input.timeframe("5", "Timeframe conferma wall-flip", group=groupTF, tooltip="Timeframe su cui si contano le chiusure oltre un muro. NON e' quello del grafico: se il grafico e' piu' lento, si usa direttamente la chiusura del grafico (altrimenti si perderebbero chiusure); se e' piu' veloce, si legge la barra superiore GIA' CHIUSA, senza ripintura.")
+wallFlipN   = input.int(2, "Chiusure consecutive per il flip", minval=1, maxval=10, group=groupTF)
+wallFlipBuf = input.float(0.0, "Buffer oltre il livello (punti)", minval=0.0, step=0.25, group=groupTF, tooltip="Due chiusure un tick oltre un muro sono rumore: attorno a un muro e' esattamente cio' che il prezzo fa. Con 3-5 punti su NQ chiedi che il livello sia davvero superato.")
+tfGuard     = input.bool(true, "Disattiva le logiche incompatibili col timeframe", group=groupTF, tooltip="Sopra il giornaliero session box e AVWAP non hanno significato; un livello BOS su timeframe inferiore a quello del grafico non e' calcolabile. Con questa opzione vengono spenti invece di produrre valori inventati.")
+
 groupAlerts = "Alerts"
 enableAlerts = input.bool(false, "Enable Level Cross Alerts", group=groupAlerts)
 
@@ -245,8 +252,26 @@ bool h1Changed = ta.change(time("60")) != 0
 [h4PrevH, h4PrevL, h4CurrC, h4CurrH, h4CurrL] = request.security(syminfo.tickerid, "240", [high[1], low[1], close, high, low], lookahead=barmerge.lookahead_off)
 [h1PrevH, h1PrevL, h1CurrC, h1CurrH, h1CurrL] = request.security(syminfo.tickerid, "60",  [high[1], low[1], close, high, low], lookahead=barmerge.lookahead_off)
 
-[close5m, time5m] = request.security(syminfo.tickerid, "5", [close, time], lookahead=barmerge.lookahead_off)
-bool new5mBar = ta.change(time5m) != 0
+// Conferma del wall-flip, valida su QUALUNQUE timeframe.
+//  - grafico piu' lento o uguale al TF di conferma  -> si usa la chiusura del
+//    grafico stessa: chiedere un TF piu' veloce restituirebbe una sola
+//    sotto-barra per barra, perdendo le altre chiusure.
+//  - grafico piu' veloce -> si legge la barra superiore GIA' completata
+//    (valore alla barra precedente il cambio di timestamp): niente ripintura.
+float tfSec   = timeframe.in_seconds(timeframe.period)
+float flipSec = timeframe.in_seconds(wallFlipTF)
+bool  flipOnChart = tfSec >= flipSec
+
+[cFlipHTF, tFlipHTF] = request.security(syminfo.tickerid, wallFlipTF, [close, time], lookahead=barmerge.lookahead_off)
+bool  newFlipBar = flipOnChart ? barstate.isconfirmed : ta.change(tFlipHTF) != 0
+float flipClose  = flipOnChart ? close : nz(cFlipHTF[1], cFlipHTF)
+
+// Logiche che dipendono da un tempo lineare o da un TF minimo.
+bool sessOK  = not tfGuard or tfSec < 86400
+bool bosOKH1 = not tfGuard or tfSec <= 3600
+bool bosOKH4 = not tfGuard or tfSec <= 14400
+bool bosOKD  = not tfGuard or tfSec <= 86400
+bool bosOKW  = not tfGuard or tfSec <= 604800
 
 // ── Basis live: NQ - NDX misurato adesso, indipendente dal ticker a grafico ──
 // MEDIANA e non media: NQ1! e' un continuous, al roll il basis salta di decine
@@ -293,10 +318,10 @@ f_checkBOS(float prevH, float prevL, float currC, float currH, float currL, bool
     [bullLevel, bearLevel]
 
 [mBull, mBear]   = f_checkBOS(mPrevH, mPrevL, mCurrC, mCurrH, mCurrL, mChanged, showBOS_M)
-[wBull, wBear]   = f_checkBOS(wPrevH, wPrevL, wCurrC, wCurrH, wCurrL, wChanged, showBOS_W)
-[dBull, dBear]   = f_checkBOS(dPrevH, dPrevL, dCurrC, dCurrH, dCurrL, dChanged, showBOS_D)
-[h4Bull, h4Bear] = f_checkBOS(h4PrevH, h4PrevL, h4CurrC, h4CurrH, h4CurrL, h4Changed, showBOS_H4)
-[h1Bull, h1Bear] = f_checkBOS(h1PrevH, h1PrevL, h1CurrC, h1CurrH, h1CurrL, h1Changed, showBOS_H1)
+[wBull, wBear]   = f_checkBOS(wPrevH, wPrevL, wCurrC, wCurrH, wCurrL, wChanged, showBOS_W and bosOKW)
+[dBull, dBear]   = f_checkBOS(dPrevH, dPrevL, dCurrC, dCurrH, dCurrL, dChanged, showBOS_D and bosOKD)
+[h4Bull, h4Bear] = f_checkBOS(h4PrevH, h4PrevL, h4CurrC, h4CurrH, h4CurrL, h4Changed, showBOS_H4 and bosOKH4)
+[h1Bull, h1Bear] = f_checkBOS(h1PrevH, h1PrevL, h1CurrC, h1CurrH, h1CurrL, h1Changed, showBOS_H1 and bosOKH1)
 
 // I livelli BOS vengono dall'OHLC del grafico: sono GIA' in scala grafico e non
 // vanno riconvertiti (era il bug che li spostava di 178 punti su chart NDX).
@@ -395,12 +420,12 @@ if wallParseKey != gexDataActive
     wallParseKey := gexDataActive
     f_parseWalls(gexDataActive)
 
-if new5mBar and array.size(wallStrikes) > 0
-    float close5mNQ = close5m
+if newFlipBar and array.size(wallStrikes) > 0
+    float close5mNQ = flipClose
     if tickerChoice == "NDX"
-        close5mNQ := close5m + nqNdxSpread
+        close5mNQ := flipClose + nqNdxSpread
     else if tickerChoice == "QQQ"
-        close5mNQ := close5m * ndxQqqRatio + nqNdxSpread
+        close5mNQ := flipClose * ndxQqqRatio + nqNdxSpread
     int n = array.size(wallStrikes)
     for i = 0 to n - 1
         float strike = array.get(wallStrikes, i) + gexDrift
@@ -408,13 +433,17 @@ if new5mBar and array.size(wallStrikes) > 0
         bool   isF   = array.get(wallFlipped, i)
         int    cnt   = array.get(wallCounters, i)
         bool beyond = false
+        // Buffer: un muro non e' un prezzo, e' una zona. Chiusure a un tick oltre
+        // sono la normale raccolta di liquidita', non un cambio di ruolo.
+        float up = strike + wallFlipBuf
+        float dn = strike - wallFlipBuf
         if wType == "CW"
-            beyond := isF ? close5mNQ < strike : close5mNQ > strike
+            beyond := isF ? close5mNQ < dn : close5mNQ > up
         else if wType == "PW"
-            beyond := isF ? close5mNQ > strike : close5mNQ < strike
+            beyond := isF ? close5mNQ > up : close5mNQ < dn
         if beyond
             cnt += 1
-            if cnt >= 2
+            if cnt >= wallFlipN
                 isF := not isF
                 cnt := 0
         else
@@ -452,7 +481,7 @@ var float _usHi = na
 var float _usLo = na
 var bool _usActive = false
 
-bool recentSessionOnly = showHistoricalSessions or (time >= timenow - 30 * 3600000)
+bool recentSessionOnly = sessOK and (showHistoricalSessions or (time >= timenow - 30 * 3600000))
 
 if showSessions and showAsia and recentSessionOnly
     if inAsia
@@ -591,7 +620,7 @@ else if pdSumV > 0 and inCurrentDay
     pdSumV  += vol
 float avwapPD = pdSumV > 0 ? pdSumPV / pdSumV : na
 
-bool recentOnly = showHistoricalAVWAP or (time >= timenow - 30 * 3600000)
+bool recentOnly = sessOK and (showHistoricalAVWAP or (time >= timenow - 30 * 3600000))
 float pAsia = showAVWAP and showAvwapAsia and asiaActive and inCurrentDay and recentOnly ? avwapAsia : na
 float pEU   = showAVWAP and showAvwapEU   and euActive   and inCurrentDay and recentOnly ? avwapEU   : na
 float pUS   = showAVWAP and showAvwapUS   and usActive   and inUS         and recentOnly ? avwapUS   : na
@@ -1112,7 +1141,7 @@ f_parseStamp(string st) =>
             t := timestamp(syminfo.timezone, y, mo, d, hh, mi, 0)
     t
 
-var table statusTbl = table.new(position.top_right, 2, 5, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50), border_color = color.new(color.gray, 70))
+var table statusTbl = table.new(position.top_right, 2, 6, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50), border_color = color.new(color.gray, 70))
 
 f_stCell(int r, int c, string txt, color col) =>
     table.cell(statusTbl, c, r, txt, text_color = col, text_size = size.small, text_halign = c == 0 ? text.align_left : text.align_right, bgcolor = color.new(#131722, 8))
@@ -1152,6 +1181,12 @@ if barstate.islast and showStatus
     f_stCell(3, 1, ageTxt, ageCol)
 
     f_stCell(4, 0, "Basis / zone", color.new(color.gray, 10))
+    // Cosa e' attivo su questo timeframe e cosa no: meglio saperlo che dedurlo
+    // dall'assenza di disegni.
+    string tfTxt = (flipOnChart ? "flip su chart" : "flip su " + wallFlipTF) + (sessOK ? "" : "  sessioni OFF")
+    f_stCell(5, 0, "Timeframe", color.new(color.gray, 10))
+    f_stCell(5, 1, tfTxt, sessOK ? color.new(color.gray, 0) : color.new(color.orange, 0))
+
     string bsrc = confBasisManual != 0.0 ? " man" : ""
     f_stCell(4, 1, (gexDriftBad ? "ROLL!" : str.tostring(gexDrift, "+#.#") + " pt" + bsrc) + "   " + str.tostring(zonesDrawn, "#") + " zone", gexDriftBad ? colorNeg : color.new(color.gray, 0))
 
