@@ -91,15 +91,19 @@ compare un'etichetta rossa: significa dato molto vecchio, roll in corso o campo
 
 ## Installazione
 
-Tre blocchi in `confluence_v2_patch.pine`:
+**`PineScript/GEX_Confluence_v2_NQ.pine` è lo script completo.** Pine Editor →
+nuovo indicatore → seleziona tutto → incolla → Save → Add to chart. Non serve
+altro: `//@version=6` è già in testa.
 
-1. **BLOCCO 1** → nella sezione input, dopo il gruppo `Confluence Zones`.
-2. **BLOCCO 2** → a livello globale, subito dopo `[close5m, time5m] = request.security(...)`.
-3. **BLOCCO 3** → sostituisce integralmente il vecchio blocco `CONFLUENCE ZONES`,
-   da `for b in confluenceBoxes` fino a `i := j` incluso. Resta dentro
-   `if needsRedraw` e mantiene l'indentazione a 4 spazi.
+Il file contiene l'indicatore originale con tre modifiche integrate:
 
-Gli input v1 (`confluenceMinSize`, `confluenceBandPoints`) restano innocui.
+| Modifica | Effetto |
+|---|---|
+| Motore confluenze v2 | sostituisce il conteggio con lo scoring pesato |
+| `f_convertPrice` drift-aware | linee, profilo e zone condividono la stessa correzione di basis |
+| `f_addBOS` non riconverte più | correzione del bug che spostava i BOS di 178 punti su chart NDX/QQQ |
+
+Il resto — parser, BOS, wall-flip, session box, AVWAP, alert — è invariato.
 
 ## Come leggere l'output
 
@@ -144,3 +148,6 @@ Onestà su cosa resta aperto:
    sul grafico a 5 minuti, alert assenti sui livelli GEX. Il punto 3 in
    particolare **inquina questo motore**: i livelli BOS che entrano nel calcolo
    sono prodotti da una logica che non fa quello che il nome dichiara.
+   (Il bug di conversione dei BOS su chart NDX/QQQ è invece corretto in questo
+   file: `f_addBOS` non applica più `f_convertPrice` a livelli già in scala
+   grafico.)
