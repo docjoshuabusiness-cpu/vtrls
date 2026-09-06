@@ -7,9 +7,20 @@
 //  -------
 //  Rende sul grafico il profilo di Gamma Exposure (GEX) dei dealer per strike:
 //  Call Wall, Put Wall, Gamma Flip (zero-gamma), profilo a istogramma laterale,
-//  regime long/short gamma e allineamento automatico del basis fra il
-//  sottostante delle opzioni (NDX / QQQ / NQ) e lo strumento a grafico
-//  (es. NAS100 CFD su FP Markets).
+//  regime long/short gamma, allineamento automatico del basis fra il sottostante
+//  delle opzioni (NDX / QQQ) e il future a grafico (CME_MINI:NQ1! / MNQ1!), e un
+//  modulo di sizing per conto prop che lega la size al regime di gamma.
+//
+//  TARGET: future E-mini / Micro Nasdaq sul CME, conto prop (TopStep, Apex, ...).
+//
+//  PERCHE' IL SIZING STA DENTRO QUESTO INDICATORE
+//  ----------------------------------------------
+//  Su conto prop il vincolo che elimina non e' la perdita realizzata: e' la
+//  trailing drawdown, che nella maggior parte dei firm conta anche l'UNREALIZED.
+//  Quello che ti squalifica e' l'escursione avversa intraday (MAE), ed e'
+//  esattamente la variabile che il regime di gamma predice: in gamma negativo la
+//  distribuzione della MAE ha code molto piu' grasse. Size costante fra i due
+//  regimi = rischio di breach non costante. Da qui il moltiplicatore di regime.
 //
 //  LIMITE STRUTTURALE (leggere)
 //  ----------------------------
@@ -63,14 +74,16 @@ sepChar = input.string(":", "Separatore strike/valore", options = [":", ",", ";"
 var string G_ALIGN = "2 · Allineamento strumento"
 
 undSym     = input.symbol("NASDAQ:NDX", "Sottostante delle opzioni", group = G_ALIGN,
-     tooltip = "Il simbolo su cui sono quotate le opzioni da cui hai estratto il GEX.\nNDX se usi opzioni sull'indice, QQQ se usi l'ETF.")
+     tooltip = "Simbolo su cui sono quotate le opzioni da cui viene il GEX.\nNDX se usi opzioni sull'indice (o l'aggregato NDX+QQQ dello script Python), QQQ se usi solo l'ETF.")
 strikeMult = input.float(1.0, "Moltiplicatore strike", minval = 0.0001, step = 0.1, group = G_ALIGN,
      tooltip = "1.0 se gli strike sono gia' in punti NDX.\n~41 se hai usato strike QQQ (NDX/QQQ, verifica il rapporto del giorno).")
 basisMode  = input.string("Auto (chart - sottostante)", "Basis", options = ["Auto (chart - sottostante)", "Manuale", "Nessuno"], group = G_ALIGN,
      tooltip = "Il CFD NAS100 e il future NQ non quotano al livello del cash NDX.\nSenza correzione i livelli sono spostati di decine di punti.")
 basisManual = input.float(0.0, "Basis manuale (punti)", step = 1.0, group = G_ALIGN)
 basisSmooth = input.int(20, "Smoothing basis (barre)", minval = 1, maxval = 500, group = G_ALIGN,
-     tooltip = "Media il differenziale per assorbire il disallineamento dei tick fra i due feed.")
+     tooltip = "Filtra il differenziale con una MEDIANA, non una media: il continuous NQ1! rolla di contratto e il basis salta di decine di punti in un tick. Una media impiega N barre a recuperare (e per N barre i livelli sono sbagliati), la mediana assorbe il salto quasi subito.\nSu roll week, in ogni caso, verifica il valore nel pannello.")
+basisWarnPt = input.float(25.0, "Allarme salto basis (punti)", minval = 0, step = 5, group = G_ALIGN,
+     tooltip = "Se il basis grezzo si discosta dal filtrato di piu' di questo, il pannello segnala ROLL/DESYNC: i livelli non sono affidabili finche' non si stabilizza.")
 
 // -----------------------------------------------------------------------------
 // 3 · VISUALIZZAZIONE
@@ -93,6 +106,28 @@ colNeg      = input.color(color.new(#ef5350, 0),  "Gamma negativo (put/resistenz
 colFlip     = input.color(color.new(#ffb300, 0),  "Gamma flip", group = G_COL)
 showBg      = input.bool(true, "Sfondo per regime gamma", group = G_COL)
 bgAlpha     = input.int(93, "Trasparenza sfondo", minval = 70, maxval = 99, group = G_COL)
+
+var string G_SESS = "5 · Sessione"
+rthOnly   = input.bool(true, "Evidenzia solo la cash session", group = G_SESS,
+     tooltip = "Il gamma hedging dei dealer avviene sul mercato cash. Fuori dalla sessione US il profilo GEX descrive un hedging che non sta accadendo: i livelli restano riferimenti, ma il regime non e' operativo.")
+rthSpec   = input.session("0930-1600", "Sessione cash (ora exchange)", group = G_SESS)
+rthTz     = input.string("America/New_York", "Fuso della sessione", group = G_SESS)
+
+var string G_RISK = "6 · Sizing conto prop"
+useSizer  = input.bool(true, "Modulo sizing", group = G_RISK)
+instr     = input.string("NQ  ($20/pt)", "Strumento", options = ["NQ  ($20/pt)", "MNQ ($2/pt)", "Personalizzato"], group = G_RISK)
+ptValCust = input.float(20.0, "Valore punto personalizzato ($)", minval = 0.01, step = 0.5, group = G_RISK)
+tickSize  = input.float(0.25, "Tick size", minval = 0.01, step = 0.25, group = G_RISK)
+riskTrade = input.float(250.0, "Rischio per trade ($)", minval = 1, step = 25, group = G_RISK,
+     tooltip = "Frazione del tuo daily loss limit, non del saldo. Regola pratica: 1/4 del daily limit, cosi' sopravvivi a 4 stop consecutivi nella stessa giornata.")
+dailyLim  = input.float(1000.0, "Daily loss limit ($)", minval = 1, step = 50, group = G_RISK,
+     tooltip = "Valore del TUO firm e della TUA taglia di conto: verificalo sul contratto, i numeri cambiano fra firm e nel tempo.")
+trailDD   = input.float(2000.0, "Trailing drawdown ($)", minval = 1, step = 50, group = G_RISK,
+     tooltip = "Se il firm conta l'unrealized nella trailing (TopStep, Apex e simili), il vincolo vero e' l'escursione avversa aperta, non la perdita chiusa.")
+shortGMult= input.float(0.5, "Moltiplicatore size in gamma negativo", minval = 0.05, maxval = 1.0, step = 0.05, group = G_RISK,
+     tooltip = "In gamma negativo la vol realizzata e la MAE salgono: a size costante il rischio di breach della trailing NON e' costante. 0.5 e' un default prudente, va tarato sul rapporto misurato di vol fra i due regimi.")
+stopBuf   = input.float(4.0, "Buffer oltre il livello (punti)", minval = 0, step = 0.25, group = G_RISK,
+     tooltip = "I livelli GEX sono zone, non prezzi. Stop esattamente sul muro = raccolta di liquidita' garantita.")
 
 // =============================================================================
 //  PARSING
@@ -146,9 +181,12 @@ nK = array.size(kArr)
 // =============================================================================
 undClose = request.security(undSym, timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
 rawBasis = close - undClose * strikeMult
-basis    = basisMode == "Auto (chart - sottostante)" ? ta.sma(nz(rawBasis), basisSmooth) :
+// Mediana, non media: robusta al salto di basis nel giorno di roll del continuous.
+basis    = basisMode == "Auto (chart - sottostante)" ? ta.median(nz(rawBasis), basisSmooth) :
            basisMode == "Manuale"                    ? basisManual : 0.0
 basis   := nz(basis)
+basisOff = math.abs(nz(rawBasis) - basis)
+basisBad = basisMode == "Auto (chart - sottostante)" and basisWarnPt > 0 and basisOff > basisWarnPt
 
 toChart(float strike) => strike * strikeMult + basis
 toUnder(float px)     => (px - basis) / strikeMult
@@ -210,6 +248,42 @@ flipPx  = na(flipU) ? na : toChart(flipU)
 // Regime: sopra il flip => dealer long gamma; sotto => short gamma.
 // Fallback sul segno del GEX totale se il profilo non attraversa lo zero.
 longGamma = na(flipPx) ? totalGex > 0 : close > flipPx
+
+// Sessione cash: il gamma hedging e' un fenomeno di mercato cash. Fuori dalla
+// RTH i livelli restano riferimenti strutturali ma il regime non e' operativo.
+inRTH = not na(time(timeframe.period, rthSpec, rthTz))
+
+// Livelli GEX piu' vicini sopra e sotto il prezzo: sono i riferimenti naturali
+// per lo stop, molto piu' dell'ATR, perche' sono dove sta l'hedging reale.
+float nearBelow = na
+float nearAbove = na
+if nK > 0
+    for i = 0 to nK - 1
+        lvl = toChart(array.get(kArr, i))
+        if lvl < close and (na(nearBelow) or lvl > nearBelow)
+            nearBelow := lvl
+        if lvl > close and (na(nearAbove) or lvl < nearAbove)
+            nearAbove := lvl
+if not na(flipPx)
+    if flipPx < close and (na(nearBelow) or flipPx > nearBelow)
+        nearBelow := flipPx
+    if flipPx > close and (na(nearAbove) or flipPx < nearAbove)
+        nearAbove := flipPx
+
+ptVal = instr == "NQ  ($20/pt)" ? 20.0 : instr == "MNQ ($2/pt)" ? 2.0 : ptValCust
+// In gamma negativo la MAE ha code piu' grasse: la size va ridotta o il rischio
+// di breach della trailing drawdown cresce a parita' di rischio nominale.
+regMult = longGamma ? 1.0 : shortGMult
+budget  = riskTrade * regMult
+
+roundTick(float pts) => tickSize > 0 ? math.ceil(pts / tickSize) * tickSize : pts
+
+stopLongPt  = na(nearBelow) ? na : roundTick(close - nearBelow + stopBuf)
+stopShortPt = na(nearAbove) ? na : roundTick(nearAbove - close + stopBuf)
+sizeLong    = na(stopLongPt)  or stopLongPt  <= 0 ? 0 : math.floor(budget / (stopLongPt  * ptVal))
+sizeShort   = na(stopShortPt) or stopShortPt <= 0 ? 0 : math.floor(budget / (stopShortPt * ptVal))
+// Quante volte puoi sbagliare oggi prima del daily limit, alla size proposta.
+shotsLeft   = budget > 0 ? math.floor(dailyLim / budget) : 0
 
 // Contesto di volatilita' realizzata: conferma empirica del regime.
 lr    = math.log(close / close[1])
@@ -309,7 +383,10 @@ if barstate.islast and nK > 0
                  color = color.new(colFlip, 10), textcolor = color.black, size = size.small))
 
 // sfondo di regime
-bgcolor(showBg ? (longGamma ? color.new(colPos, bgAlpha) : color.new(colNeg, bgAlpha)) : na, title = "Regime gamma")
+// Fuori dalla cash session il regime non e' operativo: niente tinta, cosi' non
+// ti convince di un contesto di hedging che in quel momento non esiste.
+showTint = showBg and (not rthOnly or inRTH)
+bgcolor(showTint ? (longGamma ? color.new(colPos, bgAlpha) : color.new(colNeg, bgAlpha)) : na, title = "Regime gamma")
 
 // =============================================================================
 //  PANNELLO
@@ -318,7 +395,7 @@ tPos = tblPos == "Alto destra"   ? position.top_right   :
        tblPos == "Alto sinistra" ? position.top_left    :
        tblPos == "Basso destra"  ? position.bottom_right : position.bottom_left
 
-var table tbl = table.new(tPos, 2, 9, border_width = 1, frame_width = 1,
+var table tbl = table.new(tPos, 2, 16, border_width = 1, frame_width = 1,
      frame_color = color.new(color.gray, 50), border_color = color.new(color.gray, 70))
 
 cellL(int r, string s) =>
@@ -350,12 +427,37 @@ if barstate.islast and showTable
     cellR(8, na(rvRat) ? "n/d" : str.tostring(rvRat, "#.##") + (rvRat > 1.2 ? "  espansione" : rvRat < 0.8 ? "  compressione" : ""),
          na(rvRat) ? color.gray : rvRat > 1.2 ? colNeg : rvRat < 0.8 ? colPos : color.new(color.gray, 0))
 
+    cellL(9, "Sessione")
+    cellR(9, inRTH ? "cash US" : "fuori sessione", inRTH ? colPos : color.new(color.orange, 0))
+
+    // Il roll del continuous NQ1! sposta il basis di decine di punti: finche' non
+    // si riassesta, ogni livello sul grafico e' fuori posto.
+    cellL(10, "Stato basis")
+    cellR(10, basisBad ? "ROLL / DESYNC  " + str.tostring(basisOff, "#.#") + " pt" : "stabile",
+         basisBad ? colNeg : color.new(color.gray, 0))
+
+    if useSizer
+        table.cell(tbl, 0, 11, "SIZING", text_color = color.white, text_size = size.small, bgcolor = color.new(#1e222d, 0), text_halign = text.align_left)
+        table.cell(tbl, 1, 11, "x" + str.tostring(regMult, "#.##") + "  ($" + str.tostring(budget, "#") + ")",
+             text_color = longGamma ? colPos : colNeg, text_size = size.small, bgcolor = color.new(#1e222d, 0), text_halign = text.align_right)
+        cellL(12, "Stop long / short (pt)")
+        cellR(12, (na(stopLongPt) ? "n/d" : str.tostring(stopLongPt, "#.##")) + " / " +
+                  (na(stopShortPt) ? "n/d" : str.tostring(stopShortPt, "#.##")), color.new(color.gray, 0))
+        cellL(13, "Size long / short (ct)")
+        cellR(13, str.tostring(sizeLong, "#") + " / " + str.tostring(sizeShort, "#"),
+             sizeLong == 0 and sizeShort == 0 ? colNeg : color.white)
+        cellL(14, "Stop consecutivi ammessi")
+        cellR(14, str.tostring(shotsLeft, "#"), shotsLeft < 3 ? colNeg : color.new(color.gray, 0))
+        cellL(15, "Rischio per trade / daily")
+        cellR(15, "$" + str.tostring(budget, "#") + " / $" + str.tostring(dailyLim, "#"), color.new(color.gray, 0))
+
 // =============================================================================
 //  ALERT
 // =============================================================================
 callWallPx = na(callWallK) ? na : toChart(callWallK)
 putWallPx  = na(putWallK)  ? na : toChart(putWallK)
 
+alertcondition(basisBad, "Basis instabile (roll/desync)", "Il basis fra future e sottostante e' saltato: livelli GEX non affidabili finche' non si riassesta.")
 alertcondition(not na(flipPx) and ta.crossover(close, flipPx),  "Ingresso in LONG gamma",  "Prezzo sopra il gamma flip: attesa compressione di volatilita' e mean reversion.")
 alertcondition(not na(flipPx) and ta.crossunder(close, flipPx), "Ingresso in SHORT gamma", "Prezzo sotto il gamma flip: attesa espansione di volatilita' e continuazione.")
 alertcondition(not na(callWallPx) and ta.crossover(close, callWallPx),  "Rottura Call Wall", "Prezzo sopra il call wall.")
@@ -366,3 +468,5 @@ plot(flipPx,     "Gamma Flip", color = color.new(colFlip, 100), display = displa
 plot(callWallPx, "Call Wall",  color = color.new(colPos,  100), display = display.none)
 plot(putWallPx,  "Put Wall",   color = color.new(colNeg,  100), display = display.none)
 plot(totalGex,   "Net GEX",    color = color.new(color.gray, 100), display = display.none)
+plot(sizeLong,   "Size long",  color = color.new(color.gray, 100), display = display.none)
+plot(sizeShort,  "Size short", color = color.new(color.gray, 100), display = display.none)

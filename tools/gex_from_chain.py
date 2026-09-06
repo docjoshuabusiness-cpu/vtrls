@@ -32,13 +32,24 @@ IPOTESI (esplicite, perche' sono la parte fragile del modello)
    "gamma flip" che ne esce e' l'attraversamento dello zero del cumulato, non
    la vera superficie di zero-gamma. Differenza tipica: pochi decimi di %.
 
+5. Il CME NON quota opzioni con OI paragonabile a NDX/QQQ: il gamma che muove
+   il future NQ nasce sulle opzioni cash (NDX) e sull'ETF (QQQ). Le opzioni su
+   future NQ esistono ma pesano poco, e non sono esposte da yfinance. Quindi si
+   aggrega NDX + QQQ e si riporta tutto in punti NDX; il basis NDX->NQ lo
+   applica l'indicatore in tempo reale (il carry si muove durante la giornata).
+
 USO
 ---
     pip install yfinance numpy pandas scipy
-    python tools/gex_from_chain.py --ticker QQQ --days 21 --top 24
-    python tools/gex_from_chain.py --ticker QQQ --scale-to-ndx --days 30
 
-L'output va incollato nel campo "Profilo GEX per strike" dell'indicatore.
+    # default: aggrega opzioni NDX + QQQ, output in punti NDX su griglia da 25
+    python tools/gex_from_chain.py --days 21 --top 24
+
+    # solo QQQ, griglia piu' fitta
+    python tools/gex_from_chain.py --tickers QQQ --bin 10
+
+Output -> campo "Profilo GEX per strike" dell'indicatore.
+Nell'indicatore: sottostante = NASDAQ:NDX, moltiplicatore = 1.0, basis = Auto.
 """
 
 from __future__ import annotations
@@ -128,6 +139,25 @@ def load_chain(ticker: str, max_days: int, min_oi: int, r: float, q: float):
     return spot, prof, len(expiries)
 
 
+def ndx_spot() -> float:
+    import yfinance as yf
+
+    h = yf.Ticker("^NDX").history(period="5d")
+    if h.empty:
+        sys.exit("[errore] impossibile leggere ^NDX (serve come riferimento in punti indice)")
+    return float(h["Close"].iloc[-1])
+
+
+def bin_strikes(prof: pd.DataFrame, step: float) -> pd.DataFrame:
+    """Aggrega su griglia regolare. Serve perche' gli strike QQQ riscalati in
+    punti NDX cadono su valori non tondi e non si sommerebbero mai a quelli NDX."""
+    if step <= 0:
+        return prof.sort_values("strike")
+    out = prof.copy()
+    out["strike"] = (out["strike"] / step).round() * step
+    return out.groupby("strike", as_index=False)["gex"].sum().sort_values("strike")
+
+
 def zero_gamma(prof: pd.DataFrame, spot: float) -> float | None:
     """Attraversamento dello zero del GEX cumulato piu' vicino allo spot."""
     k = prof["strike"].to_numpy()
@@ -144,29 +174,42 @@ def zero_gamma(prof: pd.DataFrame, spot: float) -> float | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Calcolo GEX per strike -> input per GEX_Map.pine")
-    ap.add_argument("--ticker", default="QQQ", help="sottostante con opzioni liquide (QQQ, SPY, ^NDX...)")
+    ap.add_argument("--tickers", default="^NDX,QQQ",
+                    help="sottostanti da aggregare, separati da virgola (default: ^NDX,QQQ)")
     ap.add_argument("--days", type=int, default=21, help="orizzonte massimo delle scadenze in giorni")
     ap.add_argument("--min-oi", type=int, default=50, help="open interest minimo per contratto")
     ap.add_argument("--range-pct", type=float, default=6.0, help="mostra strike entro +/-%% dallo spot")
     ap.add_argument("--top", type=int, default=24, help="numero massimo di strike in output (per |GEX|)")
     ap.add_argument("--rate", type=float, default=0.04, help="tasso risk-free")
     ap.add_argument("--div", type=float, default=0.006, help="dividend yield del sottostante")
-    ap.add_argument("--scale-to-ndx", action="store_true",
-                    help="converte gli strike QQQ in punti NDX usando il rapporto NDX/QQQ corrente")
+    ap.add_argument("--bin", type=float, default=25.0,
+                    help="passo della griglia strike in punti NDX (0 = nessun binning)")
+    ap.add_argument("--no-scale", action="store_true",
+                    help="non riportare gli strike in punti NDX (usalo solo con un singolo ticker)")
     ap.add_argument("--unit", type=float, default=1e9, help="divisore di scala (1e9 = miliardi di $)")
     args = ap.parse_args()
 
-    spot, prof, n_exp = load_chain(args.ticker, args.days, args.min_oi, args.rate, args.div)
+    tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]
+    ref = None if args.no_scale else ndx_spot()
 
-    ratio = 1.0
-    if args.scale_to_ndx:
-        import yfinance as yf
-        ndx = yf.Ticker("^NDX").history(period="5d")
-        if ndx.empty:
-            sys.exit("[errore] impossibile leggere ^NDX per la conversione")
-        ratio = float(ndx["Close"].iloc[-1]) / spot
-        prof = prof.assign(strike=prof["strike"] * ratio)
-        spot *= ratio
+    parts, meta, n_exp_tot = [], [], 0
+    for tk in tickers:
+        try:
+            sp, pr, n_exp = load_chain(tk, args.days, args.min_oi, args.rate, args.div)
+        except SystemExit as exc:                     # un ticker sporco non blocca gli altri
+            print(f"[warn] {tk} scartato: {exc}", file=sys.stderr)
+            continue
+        # strike riportati in punti NDX: e' l'unica scala in cui NDX e QQQ si sommano
+        ratio = 1.0 if ref is None else ref / sp
+        parts.append(pr.assign(strike=pr["strike"] * ratio))
+        meta.append(f"{tk} x{ratio:.3f} ({n_exp} scad.)")
+        n_exp_tot += n_exp
+
+    if not parts:
+        sys.exit("[errore] nessuna catena utilizzabile")
+
+    prof = bin_strikes(pd.concat(parts, ignore_index=True), args.bin)
+    spot = ref if ref is not None else float(parts[0]["strike"].median())
 
     lo, hi = spot * (1 - args.range_pct / 100), spot * (1 + args.range_pct / 100)
     view = prof[(prof["strike"] >= lo) & (prof["strike"] <= hi)].copy()
@@ -182,10 +225,11 @@ def main() -> None:
     view = view.nlargest(args.top, "abs").sort_values("strike")
 
     dec = 0 if spot > 1000 else 1
-    print(f"# GEX {args.ticker}{' -> punti NDX (x%.3f)' % ratio if args.scale_to_ndx else ''}"
-          f"  |  generato {dt.datetime.now():%Y-%m-%d %H:%M}")
-    print(f"# spot {spot:,.2f}  |  {n_exp} scadenze <= {args.days}g  |  unita': "
-          f"{'$bn' if args.unit == 1e9 else args.unit} di delta per +1%")
+    print(f"# GEX {' + '.join(meta)}  |  generato {dt.datetime.now():%Y-%m-%d %H:%M}")
+    print(f"# scala: punti {'NDX' if ref is not None else tickers[0]}  |  griglia {args.bin:g} pt"
+          f"  |  spot {spot:,.2f}  |  {n_exp_tot} scadenze <= {args.days}g")
+    print(f"# unita': {'$bn' if args.unit == 1e9 else args.unit} di delta da ricoprire per +1% di spot")
+    print("# indicatore: sottostante = NASDAQ:NDX, moltiplicatore = 1.0, basis = Auto")
     print(f"# net GEX totale {total:+.2f}  |  call wall {call_wall:,.0f}  |  put wall {put_wall:,.0f}"
           f"  |  gamma flip {flip:,.0f}" if flip else f"# net GEX totale {total:+.2f}")
     print("# ---- incolla da qui in giu' nell'indicatore ----")
