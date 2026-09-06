@@ -128,6 +128,8 @@ confMaxZones   = input.int(6,      "Zone massime", minval=1, maxval=20, group=gr
 confSepMult    = input.float(1.5,  "Separazione minima (x banda)", minval=1.0, maxval=4.0, step=0.1, group=groupC2)
 confFixBasis   = input.bool(true,  "Correggi drift di basis sui livelli GEX", group=groupC2, tooltip="Gli strike arrivano in spazio NQ con il basis del momento dello snapshot (campo S:). Il carry NQ-NDX decade di ~15-20 punti a settimana e salta al roll. Senza correzione le confluenze cross-family misurano rumore.")
 confBasisSym   = input.symbol("CME_MINI:NQ1!", "Future di riferimento", group=groupC2)
+confBasisTF    = input.timeframe("5", "Timeframe per la misura del basis", group=groupC2, tooltip="NON usa il timeframe del grafico. NDX non ha dati sotto il minuto: su un grafico a 5 secondi la richiesta torna vuota o congelata, e il basis misurato e' un artefatto. 5 minuti e' il minimo affidabile qualunque sia il grafico.")
+confBasisManual = input.float(0.0, "Basis manuale (0 = misurato)", step=1.0, group=groupC2, tooltip="Se i tuoi feed CME o NDX sono in ritardo, il basis misurato sottrae due prezzi presi in momenti diversi ed e' inutilizzabile. In quel caso leggi NQ1! e NDX nello stesso istante a mercato aperto, fai la differenza e scrivila qui.\nControllo di sanita': il carry vale circa spot x (r - q) x giorni/365, quindi qualche decina di punti POSITIVI. Un basis negativo a scadenza lontana significa che stai misurando un artefatto.")
 confBasisLen   = input.int(20,     "Finestra mediana basis (barre)", minval=1, maxval=500, group=groupC2)
 confDriftCap   = input.float(120.0,"Drift massimo accettato (punti)", minval=10.0, step=10.0, group=groupC2, tooltip="Oltre questa soglia il drift viene ignorato e segnalato: dato molto vecchio, roll in corso, o campo S: assente.")
 
@@ -249,10 +251,12 @@ bool new5mBar = ta.change(time5m) != 0
 // ── Basis live: NQ - NDX misurato adesso, indipendente dal ticker a grafico ──
 // MEDIANA e non media: NQ1! e' un continuous, al roll il basis salta di decine
 // di punti in un tick e una media resta sbagliata per tutta la sua finestra.
-nqLiveC  = request.security(confBasisSym, timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
-ndxLiveC = request.security("NASDAQ:NDX", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+// Timeframe fisso, non quello del grafico: NDX non quota sotto il minuto, e su
+// un chart a 5 secondi la misura del basis e' rumore congelato.
+nqLiveC  = request.security(confBasisSym, confBasisTF, close, barmerge.gaps_off, barmerge.lookahead_off)
+ndxLiveC = request.security("NASDAQ:NDX", confBasisTF, close, barmerge.gaps_off, barmerge.lookahead_off)
 float basisRawC  = nqLiveC - ndxLiveC
-float basisLiveC = ta.median(nz(basisRawC), confBasisLen)
+float basisLiveC = confBasisManual != 0.0 ? confBasisManual : ta.median(nz(basisRawC), confBasisLen)
 
 f_pushLvl(array<float> aPx, array<float> aW, array<int> aFam, array<string> aNm, float px, float w, int fam, string nm) =>
     if not na(px) and w > 0
@@ -1148,7 +1152,8 @@ if barstate.islast and showStatus
     f_stCell(3, 1, ageTxt, ageCol)
 
     f_stCell(4, 0, "Basis / zone", color.new(color.gray, 10))
-    f_stCell(4, 1, (gexDriftBad ? "ROLL!" : str.tostring(gexDrift, "+#.#") + " pt") + "   " + str.tostring(zonesDrawn, "#") + " zone", gexDriftBad ? colorNeg : color.new(color.gray, 0))
+    string bsrc = confBasisManual != 0.0 ? " man" : ""
+    f_stCell(4, 1, (gexDriftBad ? "ROLL!" : str.tostring(gexDrift, "+#.#") + " pt" + bsrc) + "   " + str.tostring(zonesDrawn, "#") + " zone", gexDriftBad ? colorNeg : color.new(color.gray, 0))
 
 // ╔══════════════════════════════════════════════════════════════════════════════╗
 // ║  ALERTS                                                                      ║
