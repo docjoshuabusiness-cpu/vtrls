@@ -931,7 +931,16 @@ if needsRedraw
                         float mag = array.size(pp2) >= 5 ? nz(str.tonumber(array.get(pp2, 4))) : 0.0
                         // un muro da 190M non e' un muro da 12M: 0.5x - 2.0x
                         float wMul = magRef > 0 and mag > 0 ? 0.5 + 1.5 * math.min(mag / magRef, 1.0) : 1.0
-                        float w = t == "ZG" ? wZG : t == "MP" ? wMP : t == "EH" or t == "EL" ? wEM : t == "VH" or t == "VL" ? wVB : t == "CM" or t == "DF" ? wCMDF : t == "CW" or t == "PW" ? wWall * wMul : 0.0
+                        bool tOI  = t == "OC" or t == "OP" or t == "OA"
+                        bool tDEX = t == "DP" or t == "DN"
+                        bool tVOL = t == "VC" or t == "VP"
+                        float w = t == "ZG" ? wZG : t == "MP" ? wMP : t == "EH" or t == "EL" ? wEM : t == "VH" or t == "VL" ? wVB : t == "CM" or t == "DF" ? wCMDF : t == "AG" ? wAG : tDEX ? wDEX : tOI ? wOI : tVOL ? wVOL : t == "CW" or t == "PW" ? wWall * wMul : 0.0
+                        // AbsGEX, DEX e OI restano nella famiglia del libro opzioni:
+                        // condividono il fattore OI con il net GEX, quindi sono misure
+                        // correlate e il decadimento intra-famiglia le tratta come tali.
+                        // Il volume di sessione e' l'unico strato indipendente: guarda a
+                        // oggi, non all'OI di ieri.
+                        int famT = tVOL ? 5 : 0
                         if t == "ZG"
                             zgLevel := f_convertPrice(s)
                         if w > 0
