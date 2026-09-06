@@ -17,12 +17,17 @@ var bool  ndxQqqRatioLoaded = false
 // Correzione live del basis: gli strike arrivano in spazio NQ con il basis
 // congelato al momento dello snapshot (campo S:). Applicata a TUTTI i livelli
 // GEX, cosi' linee, profilo e zone di confluenza restano allineati fra loro.
+var float zgLevel     = na    // Zero Gamma in scala grafico: pivot di regime
+var int   zonesDrawn  = 0
 var float gexDrift    = 0.0
 var float gexBasisUse = 40.0
 var bool  gexDriftBad = false
 
 groupGex = "GEX Data"
 string WEEKLY_DATA = input.text_area("S:178.00|R:41.094|L:28932,ZG,ZERO GAMMA,Zero Gamma~Key pivot where dealer gamma flips~Price magnet,0;29068,MP,MAX PAIN,Max Pain~Strike with maximum option pain~Expiry target,0;29018,EH,EM HIGH,Expected Move HIGH~1-sigma upper boundary~Statistical resistance,0;28546,EL,EM LOW,Expected Move LOW~1-sigma lower boundary~Statistical support,0;29049,VH,VOL HIGH,Vol Band HIGH~Volatility-based resistance~ZG + 25% EM,0;28814,VL,VOL LOW,Vol Band LOW~Volatility-based support~ZG - 25% EM,0;29268,CW,Call Wall,Strike: 29268~From Spot: +0.30%~Tot GEX: 189.75M~C/P Ratio: 61.6~Hold: 80% | Break: 20%,189.8;29568,CW,Call Wall,Strike: 29568~From Spot: +1.33%~Tot GEX: 124.51M~Hold: 80% | Break: 20%,124.5;29428,CW,Call Wall,Strike: 29428~From Spot: +0.85%~Tot GEX: 73.46M~C/P Ratio: 6.1~Hold: 80% | Break: 20%,73.5;29578,CW,Call Wall,Strike: 29578~From Spot: +1.37%~Tot GEX: 53.78M~C/P Ratio: 4.6~Hold: 80% | Break: 20%,53.8;29378,CW,Call Wall,Strike: 29378~From Spot: +0.68%~Tot GEX: 42.90M~C/P Ratio: 1.5~Hold: 80% | Break: 20%,42.9;29278,CW,Call Wall,Strike: 29278~From Spot: +0.34%~Tot GEX: 31.77M~C/P Ratio: 3.2~Hold: 80% | Break: 20%,31.8;29478,CW,Call Wall,Strike: 29478~From Spot: +1.02%~Tot GEX: 29.04M~C/P Ratio: 7.1~Hold: 66% | Break: 34%,29.0;29228,CW,Call Wall,Strike: 29228~From Spot: +0.17%~Tot GEX: 27.22M~C/P Ratio: 1.6~Hold: 73% | Break: 27%,27.2;29448,CW,Call Wall,Strike: 29448~From Spot: +0.92%~Tot GEX: 26.93M~Hold: 66% | Break: 34%,26.9;29328,CW,Call Wall,Strike: 29328~From Spot: +0.51%~Tot GEX: 25.91M~C/P Ratio: 2.3~Hold: 71% | Break: 29%,25.9;29518,CW,Call Wall,Strike: 29518~From Spot: +1.16%~Tot GEX: 23.58M~C/P Ratio: 4.0~Hold: 66% | Break: 34%,23.6;29248,CW,Call Wall,Strike: 29248~From Spot: +0.24%~Tot GEX: 23.05M~C/P Ratio: 2.8~Hold: 59% | Break: 41%,23.1;29438,CW,Call Wall,Strike: 29438~From Spot: +0.89%~Tot GEX: 21.11M~C/P Ratio: 27.7~Hold: 51% | Break: 49%,21.1;29608,CW,Call Wall,Strike: 29608~From Spot: +1.47%~Tot GEX: 20.59M~Hold: 45% | Break: 55%,20.6;28778,CW,Call Wall,Strike: 28778~From Spot: -1.38%~Tot GEX: 43.26M~C/P Ratio: 2.4~Hold: 80% | Break: 20%,43.3;29178,PW,Put Wall,Strike: 29178~From Spot: -0.00%~Tot GEX: 38.69M~C/P Ratio: 0.7~Hold: 80% | Break: 20%,38.7;29078,PW,Put Wall,Strike: 29078~From Spot: -0.35%~Tot GEX: 33.04M~C/P Ratio: 0.8~Hold: 80% | Break: 20%,33.0;29028,PW,Put Wall,Strike: 29028~From Spot: -0.52%~Tot GEX: 30.75M~C/P Ratio: 0.6~Hold: 78% | Break: 22%,30.8;28978,PW,Put Wall,Strike: 28978~From Spot: -0.69%~Tot GEX: 25.45M~C/P Ratio: 0.3~Hold: 77% | Break: 23%,25.4;29128,CW,Call Wall,Strike: 29128~From Spot: -0.18%~Tot GEX: 23.83M~C/P Ratio: 2.3~Hold: 72% | Break: 28%,23.8;29053,PW,Put Wall,Strike: 29053~From Spot: -0.43%~Tot GEX: 23.22M~C/P Ratio: 0.5~Hold: 59% | Break: 41%,23.2;28878,PW,Put Wall,Strike: 28878~From Spot: -1.03%~Tot GEX: 22.04M~C/P Ratio: 0.5~Hold: 59% | Break: 41%,22.0;29158,CW,Call Wall,Strike: 29158~From Spot: -0.07%~Tot GEX: 19.00M~C/P Ratio: 1.3~Hold: 60% | Break: 40%,19.0;28928,CW,Call Wall,Strike: 28928~From Spot: -0.86%~Tot GEX: 16.47M~C/P Ratio: 1.7~Hold: 59% | Break: 41%,16.5;29088,CW,Call Wall,Strike: 29088~From Spot: -0.31%~Tot GEX: 14.13M~C/P Ratio: 21.5~Hold: 52% | Break: 48%,14.1;29168,PW,Put Wall,Strike: 29168~From Spot: -0.04%~Tot GEX: 13.98M~C/P Ratio: 0.3~Hold: 46% | Break: 54%,14.0;29098,CW,Call Wall,Strike: 29098~From Spot: -0.28%~Tot GEX: 12.98M~C/P Ratio: 2.4~Hold: 46% | Break: 54%,13.0;29038,CW,Call Wall,Strike: 29038~From Spot: -0.48%~Tot GEX: 12.83M~C/P Ratio: 1.5~Hold: 48% | Break: 52%,12.8;28968,PW,Put Wall,Strike: 28968~From Spot: -0.72%~Tot GEX: 12.74M~C/P Ratio: 0.5~Hold: 30% | Break: 70%,12.7|P:27578,-0.1,-1;27678,-0.1,-1;27778,-0.1,-1;27978,-0.1,-1;28028,-0.1,-1;28078,-0.4,-1;28178,-0.2,-1;28278,-0.1,-1;28378,-0.2,-1;28478,-0.3,-1;28528,-0.1,-1;28578,-0.3,-1;28588,-0.1,-1;28618,-0.3,-1;28628,-0.5,-1;28638,-0.1,-1;28668,-0.3,-1;28678,-0.6,-1;28708,-0.3,-1;28728,-0.3,-1;28738,-0.3,-1;28753,-0.3,-1;28778,1.0,1;28788,-0.1,-1;28798,-0.1,-1;28803,-0.2,-1;28808,-0.2,-1;28838,-0.3,-1;28848,-0.5,-1;28853,-0.2,-1;28868,-0.2,-1;28878,-0.4,-1;28908,-0.2,-1;28918,-0.2,-1;28928,0.2,1;28948,-0.2,-1;28953,-0.6,-1;28968,-0.2,-1;28978,-0.8,-1;28988,0.1,1;28998,0.2,1;29003,-0.1,-1;29008,-0.2,-1;29028,-0.4,-1;29038,0.1,1;29048,-0.3,-1;29053,-0.4,-1;29068,0.5,1;29078,-0.1,-1;29088,0.7,1;29098,0.3,1;29103,0.1,1;29108,0.3,1;29118,0.4,1;29128,0.5,1;29138,0.2,1;29148,0.6,1;29158,0.1,1;29168,-0.4,-1;29178,-0.3,-1;29188,0.2,1;29198,0.8,1;29203,0.1,1;29208,0.9,1;29228,0.3,1;29238,0.5,1;29248,0.6,1;29253,0.3,1;29258,0.1,1;29268,10.0,1;29278,0.9,1;29288,0.4,1;29298,0.2,1;29303,0.3,1;29308,0.6,1;29318,0.3,1;29328,0.6,1;29338,0.4,1;29353,-0.4,-1;29358,-0.3,-1;29378,0.5,1;29388,0.2,1;29398,0.1,1;29403,0.8,1;29408,0.9,1;29418,0.3,1;29428,2.9,1;29438,1.1,1;29448,1.5,1;29453,0.4,1;29468,0.5,1;29478,1.2,1;29488,0.3,1;29498,0.6,1;29503,0.1,1;29518,0.8,1;29528,0.3,1;29553,0.2,1;29558,0.2,1;29568,6.8,1;29578,1.9,1;29588,0.1,1;29608,1.1,1;29618,0.1,1;29628,0.3,1;29638,1.0,1;29648,0.1,1;29668,1.1,1;29678,1.5,1;29688,2.7,1;29703,-0.1,-1;29708,1.0,1;29778,0.6,1;29788,0.1,1;29798,0.2,1;29803,0.2,1;29808,0.2,1;29818,0.2,1;29828,0.2,1;29878,0.3,1;29978,0.4,1;30028,0.1,1;30058,0.2,1;30078,0.2,1;30178,1.0,1;30678,0.2,1;31278,0.3,1")
+dataStamp = input.string("", "Data/ora del paste  (YYYY-MM-DD HH:MM)", group=groupGex, tooltip="Ora exchange in cui hai incollato la stringa. L'open interest si aggiorna a fine sessione: un profilo di ieri descrive un mercato che non esiste piu', e senza questo campo niente te lo ricorda. Lascia vuoto per disattivare il controllo.")
+dataMaxAgeH = input.float(9.0, "Eta' massima dei dati (ore)", minval=0.5, step=0.5, group=groupGex)
+showStatus = input.bool(true, "Pannello di stato", group=groupGex)
 gexDataInput = input.text_area("", title="Live GEX Override", group=groupGex, tooltip="Paste live data to override weekly. Leave empty for weekly.")
 string gexDataRaw = gexDataInput != "" ? gexDataInput : WEEKLY_DATA
 string gexDataActive = gexDataRaw
@@ -798,6 +803,7 @@ if needsRedraw
                             finalTT += "\n" + (isWallFlipped ? "Flipped Sup -> Res (2x 5m close beyond)" : "Support")
                         else if lvlType == "ZG"
                             lvlColor := colorZeroGamma
+                            zgLevel := cv
                         else if lvlType == "MP"
                             lvlColor := colorMaxPain
                             sc := 2
@@ -914,6 +920,8 @@ if needsRedraw
                         // un muro da 190M non e' un muro da 12M: 0.5x - 2.0x
                         float wMul = magRef > 0 and mag > 0 ? 0.5 + 1.5 * math.min(mag / magRef, 1.0) : 1.0
                         float w = t == "ZG" ? wZG : t == "MP" ? wMP : t == "EH" or t == "EL" ? wEM : t == "VH" or t == "VL" ? wVB : t == "CM" or t == "DF" ? wCMDF : t == "CW" or t == "PW" ? wWall * wMul : 0.0
+                        if t == "ZG"
+                            zgLevel := f_convertPrice(s)
                         if w > 0
                             string nm = t + " " + str.tostring(math.round(s)) + (mag > 0 ? "  " + str.tostring(mag, "#.#") + "M" : "")
                             f_pushLvl(cPx, cW, cFam, cNm, f_convertPrice(s), w, 0, nm)
@@ -1054,7 +1062,71 @@ if needsRedraw
                         tip += "\n" + array.get(cNm, j) + "   w " + str.tostring(array.get(cW, j), "#.##")
                 array.push(confluenceLabels, label.new(bar_index + profileOffset, cen, str.tostring(scv, "#.#") + " " + fams, color=color.new(zc, 15), textcolor=color.white, style=label.style_label_left, size=size.small, tooltip=tip))
 
+        zonesDrawn := drawn
+
     prevState := stateKey
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  PANNELLO DI STATO                                                           ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+//
+// Tre fatti operativi in un posto solo: in che regime di gamma sei, quanto sono
+// vecchi i dati, e se la geometria dei livelli e' affidabile. Sono le tre cose
+// che invalidano tutto il resto quando vanno storte.
+
+f_parseStamp(string st) =>
+    float t = na
+    if str.length(st) >= 16
+        int y  = int(str.tonumber(str.substring(st, 0, 4)))
+        int mo = int(str.tonumber(str.substring(st, 5, 7)))
+        int d  = int(str.tonumber(str.substring(st, 8, 10)))
+        int hh = int(str.tonumber(str.substring(st, 11, 13)))
+        int mi = int(str.tonumber(str.substring(st, 14, 16)))
+        if not na(y) and not na(mo) and not na(d) and not na(hh) and not na(mi)
+            t := timestamp(syminfo.timezone, y, mo, d, hh, mi, 0)
+    t
+
+var table statusTbl = table.new(position.top_right, 2, 5, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50), border_color = color.new(color.gray, 70))
+
+f_stCell(int r, int c, string txt, color col) =>
+    table.cell(statusTbl, c, r, txt, text_color = col, text_size = size.small, text_halign = c == 0 ? text.align_left : text.align_right, bgcolor = color.new(#131722, 8))
+
+if barstate.islast and showStatus
+    // Regime: sopra lo Zero Gamma i dealer sono long gamma (hedging contro-trend,
+    // vol compressa); sotto, short gamma (hedging pro-trend, vol espansa).
+    // NON e' una direzione: e' un regime di volatilita'.
+    bool haveZg = not na(zgLevel)
+    bool longG  = haveZg and close > zgLevel
+    color regCol = not haveZg ? color.gray : longG ? colorPos : colorNeg
+
+    table.cell(statusTbl, 0, 0, "GEX STATUS", text_color=color.white, text_size=size.small, text_halign=text.align_left, bgcolor=color.new(#1e222d, 0))
+    table.cell(statusTbl, 1, 0, not haveZg ? "n/d" : longG ? "LONG GAMMA" : "SHORT GAMMA", text_color=regCol, text_size=size.small, text_halign=text.align_right, bgcolor=color.new(#1e222d, 0))
+
+    f_stCell(1, 0, "Regime", color.new(color.gray, 10))
+    f_stCell(1, 1, not haveZg ? "ZG assente" : (longG ? "vol compressa / range" : "vol espansa / trend"), regCol)
+
+    f_stCell(2, 0, "Zero Gamma", color.new(color.gray, 10))
+    f_stCell(2, 1, haveZg ? str.tostring(zgLevel, format.mintick) + "   " + str.tostring(close - zgLevel, "+#.#") + " pt" : "n/d", color.new(color.gray, 0))
+
+    // Eta' del dato: l'OI si aggiorna a fine sessione, un profilo vecchio
+    // descrive un book che non esiste piu'.
+    float stampT = f_parseStamp(dataStamp)
+    string ageTxt = "non impostata"
+    color  ageCol = color.new(color.orange, 0)
+    if not na(stampT)
+        float ageH = (timenow - stampT) / 3600000.0
+        if ageH < 0
+            ageTxt := "data futura?"
+        else
+            ageTxt := str.tostring(math.floor(ageH), "#") + "h " + str.tostring(math.round((ageH - math.floor(ageH)) * 60), "#") + "m"
+            ageCol := ageH > dataMaxAgeH ? colorNeg : ageH > dataMaxAgeH * 0.6 ? color.new(color.orange, 0) : colorPos
+            if ageH > dataMaxAgeH
+                ageTxt += "  RIGENERA"
+    f_stCell(3, 0, "Eta' dati", color.new(color.gray, 10))
+    f_stCell(3, 1, ageTxt, ageCol)
+
+    f_stCell(4, 0, "Basis / zone", color.new(color.gray, 10))
+    f_stCell(4, 1, (gexDriftBad ? "ROLL!" : str.tostring(gexDrift, "+#.#") + " pt") + "   " + str.tostring(zonesDrawn, "#") + " zone", gexDriftBad ? colorNeg : color.new(color.gray, 0))
 
 // ╔══════════════════════════════════════════════════════════════════════════════╗
 // ║  ALERTS                                                                      ║

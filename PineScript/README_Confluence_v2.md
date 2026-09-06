@@ -152,6 +152,31 @@ verrebbero fuori zone "UBER" costruite sul nulla.
 Scegli **"Famiglia indipendente"** solo per fonti di natura diversa da quella
 opzionaria — un volume profile, un modello di order flow, livelli istituzionali.
 
+## Pannello di stato e guardia sulla staleness
+
+Tre fatti che invalidano tutto il resto quando vanno storti, raccolti in un
+riquadro solo in alto a destra:
+
+| Riga | Cosa dice |
+|---|---|
+| **Regime** | sopra o sotto lo Zero Gamma. **È un regime di volatilità, non una direzione**: long gamma = vol compressa e mean reversion; short gamma = vol espansa, e il movimento accelera in *entrambe* le direzioni |
+| **Zero Gamma** | livello e distanza in punti |
+| **Età dati** | ore/minuti dal campo *Data/ora del paste*. Oltre la soglia (default 9h) diventa rosso e scrive `RIGENERA` |
+| **Basis / zone** | drift applicato (o `ROLL!`) e numero di zone disegnate |
+
+Il campo **Data/ora del paste** (`YYYY-MM-DD HH:MM`, ora exchange) va compilato a
+mano quando incolli la stringa. È l'unico modo: Pine non sa quando un input è
+stato modificato. Lasciato vuoto, il controllo è disattivato — e resti senza rete
+sul rischio operativo numero uno.
+
+## Timeframe e tipi di candela
+
+Non usare questo indicatore su **Renko, Kagi, Point&Figure o altre candele
+esotiche**, né su timeframe superiori a 1D. Su quelle il tempo non avanza in modo
+lineare, e session box, AVWAP e tracking wall-flip a 5m assumono tutti tempo
+lineare. Vale per noi esattamente come per qualunque altro tool basato su dati
+esterni con marca temporale.
+
 ## Cosa questo motore NON risolve
 
 Onestà su cosa resta aperto:
