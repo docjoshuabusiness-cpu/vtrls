@@ -201,10 +201,19 @@ def main() -> None:
 
     import yfinance as yf
 
-    ndx = yf.Ticker("^NDX").history(period="5d")
-    nq = yf.Ticker("NQ=F").history(period="5d")
+    # yfinance solleva invece di restituire vuoto quando la rete e' bloccata:
+    # senza questo si esce con uno stack trace invece che con un messaggio.
+    def _hist(sym):
+        try:
+            return yf.Ticker(sym).history(period="5d")
+        except Exception as exc:
+            print(f"[warn] {sym}: {exc}", file=sys.stderr)
+            return pd.DataFrame()
+
+    ndx = _hist("^NDX")
+    nq = _hist("NQ=F")
     if ndx.empty:
-        sys.exit("[errore] impossibile leggere ^NDX")
+        sys.exit("[errore] impossibile leggere ^NDX (rete, proxy o rate limit di Yahoo)")
     ndx_spot = float(ndx["Close"].iloc[-1])
     # basis NQ-NDX al momento dello snapshot: l'indicatore lo ricalcola live e
     # corregge il drift, ma serve un punto di partenza onesto.
