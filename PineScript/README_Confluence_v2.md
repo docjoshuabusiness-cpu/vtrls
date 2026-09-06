@@ -129,6 +129,29 @@ migliore di `3.1 G` — che è solo il libro opzioni che si ripete.
 - **`confCrossOnly` OFF** → riappaiono i cluster puramente GEX. Fallo solo per
   capire quanto rumore stava passando prima.
 
+## Ponte verso provider esterni (TanukiTrade, TLADe, altri)
+
+`input.source()` aggancia il **plot di un altro indicatore presente sullo stesso
+grafico**. E' l'unico modo legittimo di far parlare due script in Pine: nessun
+reverse engineering, nessun dato estratto, funziona anche con script invite-only
+purche' espongano i livelli come plot.
+
+Gruppo **"Livelli esterni"**: 6 slot, ognuno con nome, sorgente e peso.
+**Peso 0 = slot spento** — necessario perche' `input.source()` non ha un valore
+"nessuno": lasciato al default punta a `close`, e un livello sempre esattamente
+sul prezzo avvelenerebbe ogni zona.
+
+### La scelta della famiglia è la decisione importante
+
+Default: **famiglia GEX**. Se la fonte esterna è anch'essa options-derived
+(HVL, call/put wall), metterla in una famiglia separata significherebbe contare
+**due volte la stessa informazione**: due vendor che calcolano il gamma dalla
+stessa options chain non sono due prove indipendenti. Con `confCrossOnly` attivo
+verrebbero fuori zone "UBER" costruite sul nulla.
+
+Scegli **"Famiglia indipendente"** solo per fonti di natura diversa da quella
+opzionaria — un volume profile, un modello di order flow, livelli istituzionali.
+
 ## Cosa questo motore NON risolve
 
 Onestà su cosa resta aperto:

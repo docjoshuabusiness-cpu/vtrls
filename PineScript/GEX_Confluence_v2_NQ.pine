@@ -139,6 +139,36 @@ wBosI  = input.float(0.75, "BOS H1/H4",group=groupC2, inline="cw4")
 wVwUS  = input.float(1.50, "VWAP US/PD",   group=groupC2, inline="cw5")
 wVwEA  = input.float(0.90, "VWAP EU/Asia", group=groupC2, inline="cw5")
 
+// ── Livelli esterni da altri indicatori sul grafico ──────────────────────────
+// input.source() aggancia il plot di UN ALTRO indicatore presente sul grafico
+// (TanukiTrade, TLADe, qualunque cosa esponga un plot). E' l'unico ponte
+// legittimo fra due script: nessun reverse engineering, nessun dato copiato.
+// Peso 0 = slot spento. Necessario perche' input.source() non ha un valore
+// "nessuno": lasciato al default punta a close, e un livello sempre esattamente
+// sul prezzo avvelenerebbe ogni zona.
+groupExt = "Livelli esterni (altri indicatori)"
+extFamilyMode = input.string("GEX (evita doppio conteggio)", "Famiglia dei livelli esterni", options=["GEX (evita doppio conteggio)", "Famiglia indipendente"], group=groupExt, tooltip="Se la fonte esterna e' anch'essa options-derived (GEX, HVL, walls), tenerla nella famiglia GEX: altrimenti la stessa informazione verrebbe contata due volte come se fossero prove indipendenti. Scegli 'indipendente' solo per fonti di natura diversa.")
+ext1n = input.string("HVL / Zero Gamma", "1", group=groupExt, inline="e1")
+ext1s = input.source(close, "", group=groupExt, inline="e1")
+ext1w = input.float(0.0, "w", minval=0.0, step=0.25, group=groupExt, inline="e1")
+ext2n = input.string("Call Wall", "2", group=groupExt, inline="e2")
+ext2s = input.source(close, "", group=groupExt, inline="e2")
+ext2w = input.float(0.0, "w", minval=0.0, step=0.25, group=groupExt, inline="e2")
+ext3n = input.string("Put Wall", "3", group=groupExt, inline="e3")
+ext3s = input.source(close, "", group=groupExt, inline="e3")
+ext3w = input.float(0.0, "w", minval=0.0, step=0.25, group=groupExt, inline="e3")
+ext4n = input.string("Call Resistance", "4", group=groupExt, inline="e4")
+ext4s = input.source(close, "", group=groupExt, inline="e4")
+ext4w = input.float(0.0, "w", minval=0.0, step=0.25, group=groupExt, inline="e4")
+ext5n = input.string("Put Support", "5", group=groupExt, inline="e5")
+ext5s = input.source(close, "", group=groupExt, inline="e5")
+ext5w = input.float(0.0, "w", minval=0.0, step=0.25, group=groupExt, inline="e5")
+ext6n = input.string("Extra", "6", group=groupExt, inline="e6")
+ext6s = input.source(close, "", group=groupExt, inline="e6")
+ext6w = input.float(0.0, "w", minval=0.0, step=0.25, group=groupExt, inline="e6")
+extShowLines = input.bool(true, "Disegna anche le linee dei livelli esterni", group=groupExt)
+extColor = input.color(#a855f7, "Colore", group=groupExt)
+
 groupAlerts = "Alerts"
 enableAlerts = input.bool(false, "Enable Level Cross Alerts", group=groupAlerts)
 
@@ -805,6 +835,17 @@ if needsRedraw
                 int paLblX = labelSide == "Right" ? bar_index + profileOffset + profileWidth + 5 : bar_index - lineLeftExt
                 array.push(gexLabels, label.new(paLblX, paPrice, str.tostring(paPrice, format.mintick) + " " + array.get(paCodes, pi) + " " + array.get(paNames, pi), color=colorStructure, style=label.style_label_left, textcolor=color.white, size=size.small))
 
+    // ── livelli esterni ─────────────────────────────────────────────────────
+    if extShowLines
+        float[]  exP = array.from(ext1w > 0 ? ext1s : na, ext2w > 0 ? ext2s : na, ext3w > 0 ? ext3s : na, ext4w > 0 ? ext4s : na, ext5w > 0 ? ext5s : na, ext6w > 0 ? ext6s : na)
+        string[] exN = array.from(ext1n, ext2n, ext3n, ext4n, ext5n, ext6n)
+        for ei = 0 to 5
+            float exv = array.get(exP, ei)
+            if not na(exv)
+                array.push(gexLines, line.new(bar_index - lineLeftExt, exv, bar_index + profileOffset, exv, color=extColor, style=line.style_dashed, width=lineWidth, extend=extend.both))
+                int exX = labelSide == "Right" ? bar_index + profileOffset + profileWidth + 5 : bar_index - lineLeftExt
+                array.push(gexLabels, label.new(exX, exv, str.tostring(exv, format.mintick) + "  " + array.get(exN, ei), color=extColor, style=label.style_label_left, textcolor=color.white, size=size.small))
+
     // ── profilo ─────────────────────────────────────────────────────────────
     if showProfile and profileData != ""
         string[] forzaPairs = str.split(str.replace_all(profileData, "\n", ""), ";")
@@ -851,7 +892,7 @@ if needsRedraw
 
         array<float>  cPx  = array.new<float>()
         array<float>  cW   = array.new<float>()
-        array<int>    cFam = array.new<int>()
+        array<int>    cFam = array.new<int>()   // 0 GEX · 1 PriceAction · 2 BOS · 3 VWAP · 4 Esterni
         array<string> cNm  = array.new<string>()
 
         if levelsData != "" and not qqqNoRatio
@@ -888,6 +929,16 @@ if needsRedraw
                 string tf = array.size(bosTF) > bi ? array.get(bosTF, bi) : ""
                 float wb = tf == "M" ? wBosM : tf == "W" ? wBosW : tf == "D" ? wBosD : wBosI
                 f_pushLvl(cPx, cW, cFam, cNm, array.get(bosLevels, bi), wb, 2, "BOS " + tf)
+
+        // Esterni: gia' in scala grafico (li plotta un indicatore sullo stesso
+        // chart), quindi nessuna conversione e nessun drift da applicare.
+        int extFam = extFamilyMode == "Famiglia indipendente" ? 4 : 0
+        f_pushLvl(cPx, cW, cFam, cNm, ext1w > 0 ? ext1s : na, ext1w, extFam, ext1n)
+        f_pushLvl(cPx, cW, cFam, cNm, ext2w > 0 ? ext2s : na, ext2w, extFam, ext2n)
+        f_pushLvl(cPx, cW, cFam, cNm, ext3w > 0 ? ext3s : na, ext3w, extFam, ext3n)
+        f_pushLvl(cPx, cW, cFam, cNm, ext4w > 0 ? ext4s : na, ext4w, extFam, ext4n)
+        f_pushLvl(cPx, cW, cFam, cNm, ext5w > 0 ? ext5s : na, ext5w, extFam, ext5n)
+        f_pushLvl(cPx, cW, cFam, cNm, ext6w > 0 ? ext6s : na, ext6w, extFam, ext6n)
 
         f_pushLvl(cPx, cW, cFam, cNm, pUS,   wVwUS, 3, "VWAP US")
         f_pushLvl(cPx, cW, cFam, cNm, pPD,   wVwUS, 3, "VWAP US PD")
@@ -935,7 +986,7 @@ if needsRedraw
                 float hi = na
                 int famMask = 0
                 float total = 0.0
-                for f = 0 to 3
+                for f = 0 to 4
                     array<float> fw = array.new<float>()
                     for j = 0 to nL - 1
                         if array.get(cFam, j) == f and math.abs(array.get(cPx, j) - ctr) <= band
@@ -976,7 +1027,8 @@ if needsRedraw
             int b1 = int(math.floor(fm / 2)) % 2
             int b2 = int(math.floor(fm / 4)) % 2
             int b3 = int(math.floor(fm / 8)) % 2
-            int famCount = b0 + b1 + b2 + b3
+            int b4 = int(math.floor(fm / 16)) % 2
+            int famCount = b0 + b1 + b2 + b3 + b4
             bool okCross = not confCrossOnly or famCount >= 2
             float cen = array.get(zCen, best)
             bool okSep = true
@@ -995,7 +1047,7 @@ if needsRedraw
                 float scv = array.get(zScore, best)
                 color zc = scv >= confMinScore * 2.4 ? colorConfluence5 : scv >= confMinScore * 1.6 ? colorConfluence4 : colorConfluence3
                 array.push(confluenceBoxes, box.new(bar_index - lineLeftExt, hi, bar_index + profileOffset, lo, border_color=color.new(zc, 40), border_width=1, bgcolor=zc))
-                string fams = (b0 == 1 ? "G" : "") + (b1 == 1 ? "P" : "") + (b2 == 1 ? "B" : "") + (b3 == 1 ? "V" : "")
+                string fams = (b0 == 1 ? "G" : "") + (b1 == 1 ? "P" : "") + (b2 == 1 ? "B" : "") + (b3 == 1 ? "V" : "") + (b4 == 1 ? "E" : "")
                 string tip = "Score " + str.tostring(scv, "#.##") + "   famiglie: " + fams + "\nDistanza: " + str.tostring(cen - close, "+#.#") + " pt\n"
                 for j = 0 to nL - 1
                     if math.abs(array.get(cPx, j) - cen) <= band
