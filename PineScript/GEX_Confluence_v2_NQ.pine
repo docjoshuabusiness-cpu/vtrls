@@ -45,6 +45,8 @@ showStructureLevels = input.bool(true, "Structure (PDH/PDL/PWH/PWL)", group=grou
 showCharmMagnet = input.bool(true, "Charm Magnet", group=groupGexVis)
 showDeltaFlip = input.bool(true, "Delta Flip", group=groupGexVis)
 showProfile = input.bool(true, "GEX Profile Bars", group=groupGexVis)
+showSecondary = input.bool(true, "Livelli secondari (AbsGEX, DEX, OI, Volume)", group=groupGexVis, tooltip="Prodotti da tools/gex_full_string.py. AbsGEX e' gamma lorda call+put: cattura gli strike dove il netto si cancella ma l'hedging e' massimo, invisibili a una mappa net-only.")
+colorSecondary = input.color(#8b5cf6, "Colore secondari", group=groupGexVis)
 maxLevelsChoice = input.string("10", "Max GEX Levels", options=["5", "10", "15", "20", "All"], group=groupGexVis)
 int maxVisibleLevels = maxLevelsChoice == "All" ? 999 : int(str.tonumber(maxLevelsChoice))
 showOnlyNear = input.bool(false, "Show only levels near price", group=groupGexVis)
@@ -141,6 +143,10 @@ wBosM  = input.float(3.00, "BOS M",    group=groupC2, inline="cw4")
 wBosW  = input.float(2.50, "BOS W",    group=groupC2, inline="cw4")
 wBosD  = input.float(2.00, "BOS D",    group=groupC2, inline="cw4")
 wBosI  = input.float(0.75, "BOS H1/H4",group=groupC2, inline="cw4")
+wAG    = input.float(2.00, "AbsGEX",   group=groupC2, inline="cw6")
+wDEX   = input.float(1.50, "DEX",      group=groupC2, inline="cw6")
+wOI    = input.float(1.00, "OI peak",  group=groupC2, inline="cw6")
+wVOL   = input.float(1.25, "Vol flow", group=groupC2, inline="cw6")
 wVwUS  = input.float(1.50, "VWAP US/PD",   group=groupC2, inline="cw5")
 wVwEA  = input.float(0.90, "VWAP EU/Asia", group=groupC2, inline="cw5")
 
@@ -761,6 +767,7 @@ if needsRedraw
                     bool inRange = not showOnlyNear or (math.abs(close - cv) / close * 100.0 <= nearPct)
                     bool isGex = lvlType == "CW" or lvlType == "PW"
                     bool isSys = lvlType == "ZG" or lvlType == "MP" or lvlType == "EH" or lvlType == "EL" or lvlType == "VH" or lvlType == "VL"
+                    bool isSec = lvlType == "AG" or lvlType == "DP" or lvlType == "DN" or lvlType == "OC" or lvlType == "OP" or lvlType == "OA" or lvlType == "VC" or lvlType == "VP"
                     bool isCM = lvlType == "CM"
                     bool isDF = lvlType == "DF"
                     bool passThresh = not enableThreshold or not isGex or nz(lvlMag) >= gexThreshold or nz(lvlMag) == 0.0
@@ -775,6 +782,8 @@ if needsRedraw
                     else if isCM and showCharmMagnet
                         shouldShow := true
                     else if isDF and showDeltaFlip
+                        shouldShow := true
+                    else if isSec and showSecondary
                         shouldShow := true
 
                     if shouldShow and inRange
@@ -818,6 +827,9 @@ if needsRedraw
                         else if lvlType == "DF"
                             lvlColor := colorDeltaFlip
                             sc := 1
+                        else if isSec
+                            lvlColor := colorSecondary
+                            sc := 2
 
                         string ls = sc == 2 ? line.style_dotted : sc == 1 ? line.style_dashed : f_lineStyle(lineStyleInput)
                         if isCM
@@ -898,7 +910,7 @@ if needsRedraw
 
         array<float>  cPx  = array.new<float>()
         array<float>  cW   = array.new<float>()
-        array<int>    cFam = array.new<int>()   // 0 GEX · 1 PriceAction · 2 BOS · 3 VWAP · 4 Esterni
+        array<int>    cFam = array.new<int>()   // 0 libro opzioni · 1 PriceAction · 2 BOS · 3 VWAP · 4 Esterni · 5 Volume flow
         array<string> cNm  = array.new<string>()
 
         if levelsData != "" and not qqqNoRatio
@@ -924,7 +936,7 @@ if needsRedraw
                             zgLevel := f_convertPrice(s)
                         if w > 0
                             string nm = t + " " + str.tostring(math.round(s)) + (mag > 0 ? "  " + str.tostring(mag, "#.#") + "M" : "")
-                            f_pushLvl(cPx, cW, cFam, cNm, f_convertPrice(s), w, 0, nm)
+                            f_pushLvl(cPx, cW, cFam, cNm, f_convertPrice(s), w, famT, nm)
 
         if showStructureLevels
             f_pushLvl(cPx, cW, cFam, cNm, dPrevH, wPDay, 1, "PDH")
@@ -994,7 +1006,7 @@ if needsRedraw
                 float hi = na
                 int famMask = 0
                 float total = 0.0
-                for f = 0 to 4
+                for f = 0 to 5
                     array<float> fw = array.new<float>()
                     for j = 0 to nL - 1
                         if array.get(cFam, j) == f and math.abs(array.get(cPx, j) - ctr) <= band
@@ -1036,7 +1048,8 @@ if needsRedraw
             int b2 = int(math.floor(fm / 4)) % 2
             int b3 = int(math.floor(fm / 8)) % 2
             int b4 = int(math.floor(fm / 16)) % 2
-            int famCount = b0 + b1 + b2 + b3 + b4
+            int b5 = int(math.floor(fm / 32)) % 2
+            int famCount = b0 + b1 + b2 + b3 + b4 + b5
             bool okCross = not confCrossOnly or famCount >= 2
             float cen = array.get(zCen, best)
             bool okSep = true
@@ -1055,7 +1068,7 @@ if needsRedraw
                 float scv = array.get(zScore, best)
                 color zc = scv >= confMinScore * 2.4 ? colorConfluence5 : scv >= confMinScore * 1.6 ? colorConfluence4 : colorConfluence3
                 array.push(confluenceBoxes, box.new(bar_index - lineLeftExt, hi, bar_index + profileOffset, lo, border_color=color.new(zc, 40), border_width=1, bgcolor=zc))
-                string fams = (b0 == 1 ? "G" : "") + (b1 == 1 ? "P" : "") + (b2 == 1 ? "B" : "") + (b3 == 1 ? "V" : "") + (b4 == 1 ? "E" : "")
+                string fams = (b0 == 1 ? "G" : "") + (b1 == 1 ? "P" : "") + (b2 == 1 ? "B" : "") + (b3 == 1 ? "V" : "") + (b4 == 1 ? "E" : "") + (b5 == 1 ? "F" : "")
                 string tip = "Score " + str.tostring(scv, "#.##") + "   famiglie: " + fams + "\nDistanza: " + str.tostring(cen - close, "+#.#") + " pt\n"
                 for j = 0 to nL - 1
                     if math.abs(array.get(cPx, j) - cen) <= band
