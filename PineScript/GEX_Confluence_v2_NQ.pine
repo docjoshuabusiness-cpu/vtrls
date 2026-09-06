@@ -28,6 +28,7 @@ string WEEKLY_DATA = input.text_area("S:178.00|R:41.094|L:28932,ZG,ZERO GAMMA,Ze
 dataStamp = input.string("", "Data/ora del paste  (YYYY-MM-DD HH:MM)", group=groupGex, tooltip="Ora exchange in cui hai incollato la stringa. L'open interest si aggiorna a fine sessione: un profilo di ieri descrive un mercato che non esiste piu', e senza questo campo niente te lo ricorda. Lascia vuoto per disattivare il controllo.")
 dataMaxAgeH = input.float(9.0, "Eta' massima dei dati (ore)", minval=0.5, step=0.5, group=groupGex)
 showStatus = input.bool(true, "Pannello di stato", group=groupGex)
+strikeSpaceMode = input.string("NQ", "Spazio degli strike", options=["NQ", "NDX"], group=groupGex, tooltip="Non esiste un gamma nativo di NQ: qualunque livello 'NQ' e' gamma NDX/QQQ riportato nello spazio prezzo del future.\n\nNQ  = gli strike arrivano col basis gia' sommato dentro (formato TLADe, campo S:). Il basis congelato in S: viene corretto verso quello misurato adesso.\n\nNDX = incolli gli strike cash come sono (InsiderFinance, CBOE) e viene sommato per intero il basis vivo. Modalita' robusta: non c'e' nessun basis congelato, quindi non c'e' drift che invecchia.")
 gexDataInput = input.text_area("", title="Live GEX Override", group=groupGex, tooltip="Paste live data to override weekly. Leave empty for weekly.")
 string gexDataRaw = gexDataInput != "" ? gexDataInput : WEEKLY_DATA
 string gexDataActive = gexDataRaw
