@@ -1,0 +1,368 @@
+//@version=6
+// =============================================================================
+//  GEX MAP — Dealer Gamma Exposure Levels
+//  Autore: quant desk / vtrls
+//
+//  COSA FA
+//  -------
+//  Rende sul grafico il profilo di Gamma Exposure (GEX) dei dealer per strike:
+//  Call Wall, Put Wall, Gamma Flip (zero-gamma), profilo a istogramma laterale,
+//  regime long/short gamma e allineamento automatico del basis fra il
+//  sottostante delle opzioni (NDX / QQQ / NQ) e lo strumento a grafico
+//  (es. NAS100 CFD su FP Markets).
+//
+//  LIMITE STRUTTURALE (leggere)
+//  ----------------------------
+//  TradingView NON espone la options chain: nessun open interest, nessuna IV,
+//  nessuna greca per strike. Il GEX quindi NON e' calcolabile in Pine.
+//  I dati vanno prodotti fuori (vedi tools/gex_from_chain.py) e incollati nel
+//  campo "Profilo GEX" qui sotto. Aggiornamento consigliato: 1x al giorno
+//  (post-settlement OI) + eventuale refresh intraday se hai dati live.
+//
+//  CONVENZIONE DI SEGNO
+//  --------------------
+//  Net GEX > 0  => dealer LONG gamma  => hedging contro-trend, vol compressa,
+//                  mean reversion verso i muri, range.
+//  Net GEX < 0  => dealer SHORT gamma => hedging pro-trend, vol espansa,
+//                  breakout e code grasse.
+//  Il segno deve essere gia' nella convenzione dealer (call +, put -).
+// =============================================================================
+
+indicator("GEX Map — Dealer Gamma Exposure", "GEX Map", overlay = true,
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// -----------------------------------------------------------------------------
+// 1 · DATI GEX
+// -----------------------------------------------------------------------------
+var string G_DATA = "1 · Dati GEX (incolla dal calcolatore)"
+
+gexRaw = input.text_area(
+     "# strike : net GEX   (una riga per strike, righe con # ignorate)\n" +
+     "# unita' libere: $bn per 1% di movimento e' lo standard\n" +
+     "23000 : -0.42\n" +
+     "23200 : -0.61\n" +
+     "23400 : -1.35\n" +
+     "23600 : -0.88\n" +
+     "23800 : -0.31\n" +
+     "24000 :  0.95\n" +
+     "24100 :  1.42\n" +
+     "24200 :  2.87\n" +
+     "24300 :  1.11\n" +
+     "24400 :  0.73\n" +
+     "24500 :  3.64\n" +
+     "24600 :  0.52\n" +
+     "24800 :  1.28\n" +
+     "25000 :  2.05\n",
+     "Profilo GEX per strike", group = G_DATA)
+
+sepChar = input.string(":", "Separatore strike/valore", options = [":", ",", ";", "|", "="], group = G_DATA)
+
+// -----------------------------------------------------------------------------
+// 2 · ALLINEAMENTO STRUMENTO  (NDX/QQQ -> NAS100 CFD / NQ)
+// -----------------------------------------------------------------------------
+var string G_ALIGN = "2 · Allineamento strumento"
+
+undSym     = input.symbol("NASDAQ:NDX", "Sottostante delle opzioni", group = G_ALIGN,
+     tooltip = "Il simbolo su cui sono quotate le opzioni da cui hai estratto il GEX.\nNDX se usi opzioni sull'indice, QQQ se usi l'ETF.")
+strikeMult = input.float(1.0, "Moltiplicatore strike", minval = 0.0001, step = 0.1, group = G_ALIGN,
+     tooltip = "1.0 se gli strike sono gia' in punti NDX.\n~41 se hai usato strike QQQ (NDX/QQQ, verifica il rapporto del giorno).")
+basisMode  = input.string("Auto (chart - sottostante)", "Basis", options = ["Auto (chart - sottostante)", "Manuale", "Nessuno"], group = G_ALIGN,
+     tooltip = "Il CFD NAS100 e il future NQ non quotano al livello del cash NDX.\nSenza correzione i livelli sono spostati di decine di punti.")
+basisManual = input.float(0.0, "Basis manuale (punti)", step = 1.0, group = G_ALIGN)
+basisSmooth = input.int(20, "Smoothing basis (barre)", minval = 1, maxval = 500, group = G_ALIGN,
+     tooltip = "Media il differenziale per assorbire il disallineamento dei tick fra i due feed.")
+
+// -----------------------------------------------------------------------------
+// 3 · VISUALIZZAZIONE
+// -----------------------------------------------------------------------------
+var string G_VIEW = "3 · Visualizzazione"
+
+showProfile = input.bool(true,  "Istogramma profilo GEX",        group = G_VIEW)
+profileW    = input.int(60,     "Larghezza istogramma (barre)",  minval = 5, maxval = 300, group = G_VIEW)
+showLevels  = input.bool(true,  "Linee sui livelli chiave",      group = G_VIEW)
+topN        = input.int(6,      "N strike per |GEX| da tracciare", minval = 0, maxval = 30, group = G_VIEW)
+lineBack    = input.int(200,    "Estensione linee a sinistra (barre)", minval = 0, maxval = 5000, group = G_VIEW)
+showLabels  = input.bool(true,  "Etichette",                     group = G_VIEW)
+maxDistPct  = input.float(6.0,  "Filtro: mostra strike entro ±% dal prezzo", minval = 0.1, step = 0.5, group = G_VIEW)
+showTable   = input.bool(true,  "Pannello riepilogo",            group = G_VIEW)
+tblPos      = input.string("Alto destra", "Posizione pannello", options = ["Alto destra", "Alto sinistra", "Basso destra", "Basso sinistra"], group = G_VIEW)
+
+var string G_COL = "4 · Colori & regime"
+colPos      = input.color(color.new(#26a69a, 0),  "Gamma positivo (call/supporto)", group = G_COL)
+colNeg      = input.color(color.new(#ef5350, 0),  "Gamma negativo (put/resistenza)", group = G_COL)
+colFlip     = input.color(color.new(#ffb300, 0),  "Gamma flip", group = G_COL)
+showBg      = input.bool(true, "Sfondo per regime gamma", group = G_COL)
+bgAlpha     = input.int(93, "Trasparenza sfondo", minval = 70, maxval = 99, group = G_COL)
+
+// =============================================================================
+//  PARSING
+// =============================================================================
+parseGex(string txt, string sep) =>
+    strikes = array.new<float>()
+    vals    = array.new<float>()
+    rows    = str.split(txt, "\n")
+    nRows   = array.size(rows)
+    if nRows > 0
+        for i = 0 to nRows - 1
+            raw = array.get(rows, i)
+            cl  = str.replace_all(str.replace_all(str.replace_all(raw, " ", ""), "\t", ""), "\r", "")
+            if str.length(cl) > 0 and not str.startswith(cl, "#") and not str.startswith(cl, "//")
+                norm = sep == ":" ? cl : str.replace_all(cl, sep, ":")
+                parts = str.split(norm, ":")
+                if array.size(parts) >= 2
+                    k = str.tonumber(array.get(parts, 0))
+                    v = str.tonumber(array.get(parts, 1))
+                    if not na(k) and not na(v) and k > 0
+                        array.push(strikes, k)
+                        array.push(vals, v)
+    // insertion sort per strike crescente (mantiene le coppie allineate)
+    n = array.size(strikes)
+    if n > 1
+        for i = 1 to n - 1
+            ks = array.get(strikes, i)
+            vs = array.get(vals, i)
+            j = i - 1
+            while j >= 0
+                if array.get(strikes, j) <= ks
+                    break
+                array.set(strikes, j + 1, array.get(strikes, j))
+                array.set(vals,    j + 1, array.get(vals,    j))
+                j -= 1
+            array.set(strikes, j + 1, ks)
+            array.set(vals,    j + 1, vs)
+    [strikes, vals]
+
+var array<float> kArr = array.new<float>()
+var array<float> gArr = array.new<float>()
+if barstate.isfirst
+    [k_, g_] = parseGex(gexRaw, sepChar)
+    kArr := k_
+    gArr := g_
+nK = array.size(kArr)
+
+// =============================================================================
+//  BASIS: converte gli strike del sottostante nelle unita' dello strumento
+//  livello_grafico = strike * strikeMult + basis
+// =============================================================================
+undClose = request.security(undSym, timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+rawBasis = close - undClose * strikeMult
+basis    = basisMode == "Auto (chart - sottostante)" ? ta.sma(nz(rawBasis), basisSmooth) :
+           basisMode == "Manuale"                    ? basisManual : 0.0
+basis   := nz(basis)
+
+toChart(float strike) => strike * strikeMult + basis
+toUnder(float px)     => (px - basis) / strikeMult
+
+spotU = toUnder(close)   // prezzo corrente in unita' strike
+
+// =============================================================================
+//  METRICHE GEX
+// =============================================================================
+totalGex = 0.0
+maxAbs   = 0.0
+float callWallK = na
+float callWallV = na
+float putWallK  = na
+float putWallV  = na
+gexAbove = 0.0
+gexBelow = 0.0
+if nK > 0
+    for i = 0 to nK - 1
+        k = array.get(kArr, i)
+        v = array.get(gArr, i)
+        totalGex += v
+        maxAbs := math.max(maxAbs, math.abs(v))
+        if na(callWallK) or v > callWallV
+            callWallK := k
+            callWallV := v
+        if na(putWallK) or v < putWallV
+            putWallK := k
+            putWallV := v
+        if k >= spotU
+            gexAbove += v
+        else
+            gexBelow += v
+
+// Gamma flip: attraversamento dello zero del GEX cumulato dal basso.
+// Se ci sono piu' attraversamenti si prende quello piu' vicino allo spot,
+// che e' l'unico operativamente rilevante.
+computeFlip(array<float> ks, array<float> vs, float spot) =>
+    n = array.size(ks)
+    float best = na
+    if n > 1
+        cum     = 0.0
+        cumPrev = 0.0
+        for i = 0 to n - 1
+            cumPrev := cum
+            cum     += array.get(vs, i)
+            if i > 0 and cumPrev * cum < 0
+                w  = cumPrev / (cumPrev - cum)
+                x0 = array.get(ks, i - 1)
+                x1 = array.get(ks, i)
+                cross = x0 + w * (x1 - x0)
+                if na(best) or math.abs(cross - spot) < math.abs(best - spot)
+                    best := cross
+    best
+
+flipU   = computeFlip(kArr, gArr, spotU)
+flipPx  = na(flipU) ? na : toChart(flipU)
+
+// Regime: sopra il flip => dealer long gamma; sotto => short gamma.
+// Fallback sul segno del GEX totale se il profilo non attraversa lo zero.
+longGamma = na(flipPx) ? totalGex > 0 : close > flipPx
+
+// Contesto di volatilita' realizzata: conferma empirica del regime.
+lr    = math.log(close / close[1])
+rvS   = ta.stdev(lr, 5)  * math.sqrt(252) * 100
+rvL   = ta.stdev(lr, 20) * math.sqrt(252) * 100
+rvRat = rvL > 0 ? rvS / rvL : na
+atr14 = ta.atr(14)
+
+// =============================================================================
+//  RENDERING
+// =============================================================================
+var array<line>  lns = array.new<line>()
+var array<label> lbs = array.new<label>()
+var array<box>   bxs = array.new<box>()
+
+clearAll() =>
+    if array.size(lns) > 0
+        for i = 0 to array.size(lns) - 1
+            line.delete(array.get(lns, i))
+        array.clear(lns)
+    if array.size(lbs) > 0
+        for i = 0 to array.size(lbs) - 1
+            label.delete(array.get(lbs, i))
+        array.clear(lbs)
+    if array.size(bxs) > 0
+        for i = 0 to array.size(bxs) - 1
+            box.delete(array.get(bxs, i))
+        array.clear(bxs)
+
+// spacing mediano fra strike -> altezza barre istogramma
+medSpacing = 0.0
+if nK > 1
+    tot = 0.0
+    for i = 1 to nK - 1
+        tot += array.get(kArr, i) - array.get(kArr, i - 1)
+    medSpacing := tot / (nK - 1)
+
+// soglia |GEX| per il taglio topN (selection senza ordinamento distruttivo)
+thrTopN = 0.0
+if nK > 0 and topN > 0 and topN < nK
+    tmp = array.new<float>()
+    for i = 0 to nK - 1
+        array.push(tmp, math.abs(array.get(gArr, i)))
+    array.sort(tmp, order.descending)
+    thrTopN := array.get(tmp, topN - 1)
+
+if barstate.islast and nK > 0
+    clearAll()
+    xHist  = bar_index + 3
+    xEndLn = bar_index + (showProfile ? profileW + 8 : 12)
+    xLbl   = xEndLn + 2
+    hBox   = (medSpacing > 0 ? medSpacing : close * 0.001) * strikeMult * 0.35
+    band   = close * maxDistPct / 100.0
+
+    for i = 0 to nK - 1
+        k   = array.get(kArr, i)
+        v   = array.get(gArr, i)
+        lvl = toChart(k)
+        if math.abs(lvl - close) <= band
+            isCall = k == callWallK
+            isPut  = k == putWallK
+            isTop  = topN > 0 and (thrTopN == 0.0 or math.abs(v) >= thrTopN)
+            col    = v >= 0 ? colPos : colNeg
+
+            // istogramma laterale
+            if showProfile and maxAbs > 0
+                w = math.max(1, math.round(profileW * math.abs(v) / maxAbs))
+                array.push(bxs, box.new(xHist, lvl + hBox, xHist + w, lvl - hBox,
+                     border_color = color.new(col, 40), border_width = 1,
+                     bgcolor = color.new(col, 72)))
+
+            // linee sui livelli chiave
+            if showLevels and (isCall or isPut or isTop)
+                lw  = isCall or isPut ? 2 : 1
+                sty = isCall or isPut ? line.style_solid : line.style_dotted
+                transp = isCall or isPut ? 0 : math.round(30 + 45 * (1 - (maxAbs > 0 ? math.abs(v) / maxAbs : 0)))
+                array.push(lns, line.new(bar_index - lineBack, lvl, xEndLn, lvl,
+                     xloc = xloc.bar_index, color = color.new(col, transp),
+                     width = lw, style = sty))
+
+            if showLabels and (isCall or isPut or isTop)
+                txt = (isCall ? "CALL WALL  " : isPut ? "PUT WALL  " : "") +
+                      str.tostring(k, format.mintick) + "   " +
+                      (v >= 0 ? "+" : "") + str.tostring(v, "#.##")
+                array.push(lbs, label.new(xLbl, lvl, txt, xloc = xloc.bar_index,
+                     style = label.style_label_left, color = color.new(col, isCall or isPut ? 15 : 55),
+                     textcolor = color.white, size = isCall or isPut ? size.small : size.tiny))
+
+    // gamma flip
+    if not na(flipPx) and showLevels
+        array.push(lns, line.new(bar_index - lineBack, flipPx, xEndLn, flipPx,
+             xloc = xloc.bar_index, color = colFlip, width = 3, style = line.style_dashed))
+        if showLabels
+            array.push(lbs, label.new(xLbl, flipPx,
+                 "GAMMA FLIP  " + str.tostring(flipU, format.mintick),
+                 xloc = xloc.bar_index, style = label.style_label_left,
+                 color = color.new(colFlip, 10), textcolor = color.black, size = size.small))
+
+// sfondo di regime
+bgcolor(showBg ? (longGamma ? color.new(colPos, bgAlpha) : color.new(colNeg, bgAlpha)) : na, title = "Regime gamma")
+
+// =============================================================================
+//  PANNELLO
+// =============================================================================
+tPos = tblPos == "Alto destra"   ? position.top_right   :
+       tblPos == "Alto sinistra" ? position.top_left    :
+       tblPos == "Basso destra"  ? position.bottom_right : position.bottom_left
+
+var table tbl = table.new(tPos, 2, 9, border_width = 1, frame_width = 1,
+     frame_color = color.new(color.gray, 50), border_color = color.new(color.gray, 70))
+
+cellL(int r, string s) =>
+    table.cell(tbl, 0, r, s, text_color = color.new(color.gray, 10), text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#131722, 8))
+
+cellR(int r, string s, color c) =>
+    table.cell(tbl, 1, r, s, text_color = c, text_size = size.small, text_halign = text.align_right, bgcolor = color.new(#131722, 8))
+
+if barstate.islast and showTable
+    regCol = longGamma ? colPos : colNeg
+    table.cell(tbl, 0, 0, "GEX MAP", text_color = color.white, text_size = size.small, bgcolor = color.new(#1e222d, 0), text_halign = text.align_left)
+    table.cell(tbl, 1, 0, longGamma ? "LONG GAMMA" : "SHORT GAMMA", text_color = regCol, text_size = size.small, bgcolor = color.new(#1e222d, 0), text_halign = text.align_right)
+
+    cellL(1, "Net GEX totale")
+    cellR(1, (totalGex >= 0 ? "+" : "") + str.tostring(totalGex, "#.##"), totalGex >= 0 ? colPos : colNeg)
+    cellL(2, "Gamma flip")
+    cellR(2, na(flipPx) ? "n/d" : str.tostring(flipPx, format.mintick), colFlip)
+    cellL(3, "Dist. dal flip (ATR)")
+    cellR(3, na(flipPx) or atr14 == 0 ? "n/d" : str.tostring((close - flipPx) / atr14, "#.##"), close > nz(flipPx, close) ? colPos : colNeg)
+    cellL(4, "Call wall")
+    cellR(4, na(callWallK) ? "n/d" : str.tostring(toChart(callWallK), format.mintick), colPos)
+    cellL(5, "Put wall")
+    cellR(5, na(putWallK) ? "n/d" : str.tostring(toChart(putWallK), format.mintick), colNeg)
+    cellL(6, "GEX sopra / sotto")
+    cellR(6, str.tostring(gexAbove, "#.#") + " / " + str.tostring(gexBelow, "#.#"), color.new(color.gray, 0))
+    cellL(7, "Basis applicato")
+    cellR(7, str.tostring(basis, "#.#") + " pt", color.new(color.gray, 0))
+    cellL(8, "RV 5/20")
+    cellR(8, na(rvRat) ? "n/d" : str.tostring(rvRat, "#.##") + (rvRat > 1.2 ? "  espansione" : rvRat < 0.8 ? "  compressione" : ""),
+         na(rvRat) ? color.gray : rvRat > 1.2 ? colNeg : rvRat < 0.8 ? colPos : color.new(color.gray, 0))
+
+// =============================================================================
+//  ALERT
+// =============================================================================
+callWallPx = na(callWallK) ? na : toChart(callWallK)
+putWallPx  = na(putWallK)  ? na : toChart(putWallK)
+
+alertcondition(not na(flipPx) and ta.crossover(close, flipPx),  "Ingresso in LONG gamma",  "Prezzo sopra il gamma flip: attesa compressione di volatilita' e mean reversion.")
+alertcondition(not na(flipPx) and ta.crossunder(close, flipPx), "Ingresso in SHORT gamma", "Prezzo sotto il gamma flip: attesa espansione di volatilita' e continuazione.")
+alertcondition(not na(callWallPx) and ta.crossover(close, callWallPx),  "Rottura Call Wall", "Prezzo sopra il call wall.")
+alertcondition(not na(putWallPx)  and ta.crossunder(close, putWallPx),  "Rottura Put Wall",  "Prezzo sotto il put wall.")
+
+// plot invisibili: espongono i livelli ad altri script e alle alert dinamiche
+plot(flipPx,     "Gamma Flip", color = color.new(colFlip, 100), display = display.none)
+plot(callWallPx, "Call Wall",  color = color.new(colPos,  100), display = display.none)
+plot(putWallPx,  "Put Wall",   color = color.new(colNeg,  100), display = display.none)
+plot(totalGex,   "Net GEX",    color = color.new(color.gray, 100), display = display.none)
