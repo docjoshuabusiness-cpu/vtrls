@@ -112,8 +112,8 @@ cAB = input.color(color.new(#00c853, 0), "Buy A",  inline = "g1", group = gG)
 cBB = input.color(color.new(#ffd600, 0), "Buy B",  inline = "g1", group = gG)
 cAS = input.color(color.new(#d50000, 0), "Sell A", inline = "g2", group = gG)
 cBS = input.color(color.new(#ff9100, 0), "Sell B", inline = "g2", group = gG)
-drawLines = input.bool(true, "Linee di divergenza (posizione approssimata)", group = gG,
-     tooltip = "I pivot vivono nel timeframe della sezione: le loro coordinate vengono riportate sul grafico moltiplicando per il rapporto fra i timeframe. La linea indica QUALI due estremi sono stati confrontati, non la barra esatta del grafico.")
+drawLines = input.bool(true, "Linee di divergenza", group = gG,
+     tooltip = "La linea collega i due estremi confrontati. E' ancorata al TIMESTAMP della barra del pivot nel timeframe della sezione, non a un conteggio di barre convertito: resta esatta anche attraverso gap, aperture di sessione e barre mancanti.")
 lblSize = input.string("tiny", "Dimensione label", options = ["tiny","small","normal"], group = gG)
 
 // ═════════════════════════ MOTORE DI RILEVAMENTO ═════════════════════════════
@@ -172,6 +172,13 @@ f_div(simple int lk, simple int sm, simple int ld, simple bool shift) =>
     var float hS1 = na
     var int   hB0 = na
     var int   hB1 = na
+    // timestamp della barra del pivot: ancoraggio esatto sul grafico, immune
+    // ai gap. Contare k barre e' esatto solo se ogni candela della sezione ne
+    // contiene esattamente k, il che e' falso a ogni discontinuita'.
+    var float lT0 = na
+    var float lT1 = na
+    var float hT0 = na
+    var float hT1 = na
 
     bool buyA  = false
     bool buyB  = false
@@ -179,6 +186,8 @@ f_div(simple int lk, simple int sm, simple int ld, simple bool shift) =>
     bool sellB = false
     float pRec = na
     float pOld = na
+    float tRec = na
+    float tOld = na
     int   gOut = 0
 
     // BULLISH: prezzo minimo piu' basso, stocastico minimo piu' alto
@@ -186,9 +195,11 @@ f_div(simple int lk, simple int sm, simple int ld, simple bool shift) =>
         lP1 := lP0
         lS1 := lS0
         lB1 := lB0
+        lT1 := lT0
         lP0 := pl
         lS0 := st[pvR]
         lB0 := bar_index - pvR
+        lT0 := time[pvR]
         g = nz(lB0 - lB1, 0)
         base = not na(lP1) and g >= minGap and g <= maxGap
              and lP0 < lP1 - minPDelta * atrS
@@ -202,6 +213,8 @@ f_div(simple int lk, simple int sm, simple int ld, simple bool shift) =>
             buyB := not struc
             pRec := lP0
             pOld := lP1
+            tRec := lT0
+            tOld := lT1
             gOut := g
 
     // BEARISH: prezzo massimo piu' alto, stocastico massimo piu' basso
@@ -209,9 +222,11 @@ f_div(simple int lk, simple int sm, simple int ld, simple bool shift) =>
         hP1 := hP0
         hS1 := hS0
         hB1 := hB0
+        hT1 := hT0
         hP0 := ph
         hS0 := st[pvR]
         hB0 := bar_index - pvR
+        hT0 := time[pvR]
         g = nz(hB0 - hB1, 0)
         base = not na(hP1) and g >= minGap and g <= maxGap
              and hP0 > hP1 + minPDelta * atrS
@@ -225,6 +240,8 @@ f_div(simple int lk, simple int sm, simple int ld, simple bool shift) =>
             sellB := not struc
             pRec := hP0
             pOld := hP1
+            tRec := hT0
+            tOld := hT1
             gOut := g
 
     [shift ? buyA[1]  : buyA,
@@ -233,6 +250,8 @@ f_div(simple int lk, simple int sm, simple int ld, simple bool shift) =>
      shift ? sellB[1] : sellB,
      shift ? pRec[1]  : pRec,
      shift ? pOld[1]  : pOld,
+     shift ? tRec[1]  : tRec,
+     shift ? tOld[1]  : tOld,
      shift ? gOut[1]  : gOut,
      shift ? atrS[1]  : atrS,
      shift ? st[1]    : st]
@@ -247,9 +266,9 @@ kk1 = int(math.max(1, math.round(sec1 / float(chartSec))))
 kk2 = int(math.max(1, math.round(sec2 / float(chartSec))))
 kk3 = int(math.max(1, math.round(sec3 / float(chartSec))))
 
-[bA1, bB1, sA1, sB1, pR1, pO1, gp1, at1, st1] = request.security(syminfo.tickerid, tf1, f_div(k1, m1, d1, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
-[bA2, bB2, sA2, sB2, pR2, pO2, gp2, at2, st2] = request.security(syminfo.tickerid, tf2, f_div(k2, m2, d2, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
-[bA3, bB3, sA3, sB3, pR3, pO3, gp3, at3, st3] = request.security(syminfo.tickerid, tf3, f_div(k3, m3, d3, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+[bA1, bB1, sA1, sB1, pR1, pO1, tR1, tO1, gp1, at1, st1] = request.security(syminfo.tickerid, tf1, f_div(k1, m1, d1, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
+[bA2, bB2, sA2, sB2, pR2, pO2, tR2, tO2, gp2, at2, st2] = request.security(syminfo.tickerid, tf2, f_div(k2, m2, d2, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
+[bA3, bB3, sA3, sB3, pR3, pO3, tR3, tO3, gp3, at3, st3] = request.security(syminfo.tickerid, tf3, f_div(k3, m3, d3, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
 
 inSess = not useSess or not na(time(timeframe.period, sess))
 szLbl  = lblSize == "tiny" ? size.tiny : lblSize == "small" ? size.small : size.normal
@@ -284,8 +303,8 @@ f_track(int dir, int bkt, float a, int kBars) =>
 // Il valore restituito da request.security resta vero per tutte le barre del
 // grafico contenute nella candela della sezione: senza rilevamento di FRONTE
 // verrebbero emessi k segnali identici. Il cooldown e' invece l'anti-cluster.
-f_emit(bool en, bool a, bool b, bool isSell, float pRec, float pOld, int g,
-       float a_atr, int kBars, int cfg, string tag) =>
+f_emit(bool en, bool a, bool b, bool isSell, float pRec, float pOld,
+       float tRec, float tOld, int g, float a_atr, int kBars, int cfg, string tag) =>
     var int lastB = na
     var int lastS = na
     fr   = (a or b) and not (a[1] or b[1])
@@ -297,12 +316,10 @@ f_emit(bool en, bool a, bool b, bool isSell, float pRec, float pOld, int g,
         else
             lastB := bar_index
         col = isSell ? (a ? cAS : cBS) : (a ? cAB : cBB)
-        if drawLines
-            // i pivot vivono nel timeframe della sezione: coordinate riportate
-            // sul grafico moltiplicando per k. Indica QUALI estremi, non dove.
-            x0 = bar_index - pvR * kBars
-            x1 = x0 - g * kBars
-            line.new(x1, pOld, x0, pRec, xloc.bar_index, color = col,
+        if drawLines and not na(tRec) and not na(tOld)
+            // ancoraggio al TEMPO della barra del pivot, non a un conteggio di
+            // barre moltiplicato per k: esatto anche con gap e sessioni.
+            line.new(int(tOld), pOld, int(tRec), pRec, xloc.bar_time, color = col,
                  width = a ? 2 : 1, style = a ? line.style_solid : line.style_dotted)
         label.new(bar_index, isSell ? high : low,
              (isSell ? (a ? "▼A " : "▼B ") : (a ? "▲A " : "▲B ")) + tag,
@@ -317,12 +334,12 @@ f_emit(bool en, bool a, bool b, bool isSell, float pRec, float pOld, int g,
         f_track(isSell ? -1 : 1, cfg * 4 + (isSell ? (a ? 2 : 3) : (a ? 0 : 1)), a_atr, kBars)
     fire
 
-f1b = f_emit(e1, bA1, bB1, false, pR1, pO1, gp1, at1, kk1, 0, "S1 " + tf1)
-f1s = f_emit(e1, sA1, sB1, true,  pR1, pO1, gp1, at1, kk1, 0, "S1 " + tf1)
-f2b = f_emit(e2, bA2, bB2, false, pR2, pO2, gp2, at2, kk2, 1, "S2 " + tf2)
-f2s = f_emit(e2, sA2, sB2, true,  pR2, pO2, gp2, at2, kk2, 1, "S2 " + tf2)
-f3b = f_emit(e3, bA3, bB3, false, pR3, pO3, gp3, at3, kk3, 2, "S3 " + tf3)
-f3s = f_emit(e3, sA3, sB3, true,  pR3, pO3, gp3, at3, kk3, 2, "S3 " + tf3)
+f1b = f_emit(e1, bA1, bB1, false, pR1, pO1, tR1, tO1, gp1, at1, kk1, 0, "S1 " + tf1)
+f1s = f_emit(e1, sA1, sB1, true,  pR1, pO1, tR1, tO1, gp1, at1, kk1, 0, "S1 " + tf1)
+f2b = f_emit(e2, bA2, bB2, false, pR2, pO2, tR2, tO2, gp2, at2, kk2, 1, "S2 " + tf2)
+f2s = f_emit(e2, sA2, sB2, true,  pR2, pO2, tR2, tO2, gp2, at2, kk2, 1, "S2 " + tf2)
+f3b = f_emit(e3, bA3, bB3, false, pR3, pO3, tR3, tO3, gp3, at3, kk3, 2, "S3 " + tf3)
+f3s = f_emit(e3, sA3, sB3, true,  pR3, pO3, tR3, tO3, gp3, at3, kk3, 2, "S3 " + tf3)
 
 buyHi  = (f1b and bA1) or (f2b and bA2) or (f3b and bA3)
 buyLo  = (f1b and bB1) or (f2b and bB2) or (f3b and bB3)
