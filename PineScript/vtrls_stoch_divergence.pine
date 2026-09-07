@@ -48,6 +48,10 @@ atrLen    = input.int(14, "ATR length", minval = 1, group = gF)
 minPDelta = input.float(0.15, "Spostamento minimo prezzo tra i pivot (x ATR)", minval = 0, group = gF)
 useSess   = input.bool(false, "Filtro sessione", inline = "ss", group = gF)
 sess      = input.session("0930-1600", "", inline = "ss", group = gF)
+alignTol  = input.int(10, "Tolleranza allineamento pivot stoch/prezzo (barre)", minval = 1, group = gF,
+     tooltip = "Quanto lontano puo stare il pivot dello stocastico dal pivot di prezzo per contare come conferma STRUTTURALE (classe A).")
+cooldown  = input.int(20, "Cooldown: min barre tra due segnali stessa direzione", minval = 0, group = gF,
+     tooltip = "Impedisce cluster di segnali correlati che gonfiano N e falsano le statistiche.")
 
 // ─────────────────────── 4 • HIGHER TIMEFRAME ─────────────────────────
 gH = "4 • Conferma Higher Timeframe"
@@ -61,6 +65,9 @@ horizon  = input.int(60, "Orizzonte massimo (barre)", minval = 5, group = gT)
 targATR  = input.float(1.0, "Target (x ATR)", minval = 0.1, group = gT)
 stopATR  = input.float(0.7, "Stop (x ATR)",   minval = 0.1, group = gT)
 showTab  = input.bool(true, "Mostra tabella statistiche", group = gT)
+baseOn   = input.bool(true, "Benchmark nullo (ingressi ciclici)", group = gT,
+     tooltip = "Entra long e short ogni N barre senza logica. E' il livello di riferimento: se le divergenze non lo battono, non hanno edge.")
+baseN    = input.int(50, "Benchmark: una coppia ogni N barre", minval = 5, group = gT)
 
 // ───────────────────────────── 6 • GRAFICA ────────────────────────────
 gG = "6 • Grafica"
@@ -90,10 +97,33 @@ var array<float> pAtr  = array.new<float>()
 var array<float> pMfe  = array.new<float>()
 var array<float> pMae  = array.new<float>()
 
-var array<float> stTot = array.new<float>(12, 0)
-var array<float> stWin = array.new<float>(12, 0)
-var array<float> stMfe = array.new<float>(12, 0)
-var array<float> stMae = array.new<float>(12, 0)
+var array<float> stTot = array.new<float>(14, 0)
+var array<float> stWin = array.new<float>(14, 0)
+var array<float> stMfe = array.new<float>(14, 0)
+var array<float> stMae = array.new<float>(14, 0)
+
+// ── valore del pivot stocastico piu vicino a una barra target (na se nessuno)
+f_near(array<float> vals, array<int> bars, int tgt, int tol) =>
+    float best = na
+    int   bd   = 1000000
+    if array.size(bars) > 0 and not na(tgt)
+        for i = 0 to array.size(bars) - 1
+            d = math.abs(array.get(bars, i) - tgt)
+            if d <= tol and d < bd
+                bd   := d
+                best := array.get(vals, i)
+    best
+
+// ── registra un segnale nel tracker
+f_track(int dir, int bkt) =>
+    if trackOn and atr > 0
+        array.push(pDir, dir)
+        array.push(pBkt, bkt)
+        array.push(pBar, bar_index)
+        array.push(pEnt, close)
+        array.push(pAtr, atr)
+        array.push(pMfe, 0.0)
+        array.push(pMae, 0.0)
 
 // ═══════════════════════════ SCANNER ══════════════════════════════════
 // Ritorna [buyA, buyB, sellA, sellB] per la configurazione data.
@@ -122,32 +152,31 @@ f_scan(bool en, int lk, int sm, int ld, int cfg, string tag) =>
     var float hS1 = na
     var int   hB0 = na
     var int   hB1 = na
-    // memoria pivot propri dello stocastico
-    var float zL0 = na
-    var float zL1 = na
-    var int   zLb0 = na
-    var int   zLb1 = na
-    var float zH0 = na
-    var float zH1 = na
-    var int   zHb0 = na
-    var int   zHb1 = na
+    // storico dei pivot propri dello stocastico (per allineamento tollerante)
+    var array<float> zLv = array.new<float>()
+    var array<int>   zLb = array.new<int>()
+    var array<float> zHv = array.new<float>()
+    var array<int>   zHb = array.new<int>()
+    var int lastBuyBar  = na
+    var int lastSellBar = na
 
     if not na(sl)
-        zL1  := zL0
-        zLb1 := zLb0
-        zL0  := sl
-        zLb0 := bar_index - pvR
+        array.push(zLv, sl)
+        array.push(zLb, bar_index - pvR)
+        if array.size(zLv) > 30
+            array.shift(zLv)
+            array.shift(zLb)
     if not na(sh)
-        zH1  := zH0
-        zHb1 := zHb0
-        zH0  := sh
-        zHb0 := bar_index - pvR
+        array.push(zHv, sh)
+        array.push(zHb, bar_index - pvR)
+        if array.size(zHv) > 30
+            array.shift(zHv)
+            array.shift(zHb)
 
     bool buyA  = false
     bool buyB  = false
     bool sellA = false
     bool sellB = false
-    tol = pvL + pvR
 
     // ── BULLISH: prezzo LL, stocastico HL
     if not na(pl)
@@ -163,13 +192,15 @@ f_scan(bool en, int lk, int sm, int ld, int cfg, string tag) =>
              and lS0 > lS1 + minSDelta
              and (not useZone or math.min(lS0, lS1) < osLvl)
              and inSess and (not useHTF or htfUp)
-        // struttura: lo stocastico ha formato un proprio minimo crescente
-        struc = not na(zL1) and zL0 > zL1 + minSDelta
-             and math.abs(nz(zLb0, -9999) - lB0) <= tol
-             and math.abs(nz(zLb1, -9999) - lB1) <= tol
-        if base and en
+        // struttura: pivot dello stocastico allineati ai pivot di prezzo, in salita
+        v0 = f_near(zLv, zLb, lB0, alignTol)
+        v1 = f_near(zLv, zLb, lB1, alignTol)
+        struc = not na(v0) and not na(v1) and v0 > v1 + minSDelta
+        cool  = na(lastBuyBar) or bar_index - lastBuyBar >= cooldown
+        if base and en and cool
             buyA := struc
             buyB := not struc
+            lastBuyBar := bar_index
 
     // ── BEARISH: prezzo HH, stocastico LH
     if not na(ph)
@@ -185,12 +216,14 @@ f_scan(bool en, int lk, int sm, int ld, int cfg, string tag) =>
              and hS0 < hS1 - minSDelta
              and (not useZone or math.max(hS0, hS1) > obLvl)
              and inSess and (not useHTF or htfDn)
-        struc = not na(zH1) and zH0 < zH1 - minSDelta
-             and math.abs(nz(zHb0, -9999) - hB0) <= tol
-             and math.abs(nz(zHb1, -9999) - hB1) <= tol
-        if base and en
+        v0 = f_near(zHv, zHb, hB0, alignTol)
+        v1 = f_near(zHv, zHb, hB1, alignTol)
+        struc = not na(v0) and not na(v1) and v0 < v1 - minSDelta
+        cool  = na(lastSellBar) or bar_index - lastSellBar >= cooldown
+        if base and en and cool
             sellA := struc
             sellB := not struc
+            lastSellBar := bar_index
 
     // ── disegno
     if buyA or buyB
@@ -209,23 +242,10 @@ f_scan(bool en, int lk, int sm, int ld, int cfg, string tag) =>
              yloc.abovebar, c, label.style_label_down, color.white, szLbl)
 
     // ── registrazione nel tracker
-    if trackOn and atr > 0
-        if buyA or buyB
-            array.push(pDir, 1)
-            array.push(pBkt, cfg * 4 + (buyA ? 0 : 1))
-            array.push(pBar, bar_index)
-            array.push(pEnt, close)
-            array.push(pAtr, atr)
-            array.push(pMfe, 0.0)
-            array.push(pMae, 0.0)
-        if sellA or sellB
-            array.push(pDir, -1)
-            array.push(pBkt, cfg * 4 + (sellA ? 2 : 3))
-            array.push(pBar, bar_index)
-            array.push(pEnt, close)
-            array.push(pAtr, atr)
-            array.push(pMfe, 0.0)
-            array.push(pMae, 0.0)
+    if buyA or buyB
+        f_track(1, cfg * 4 + (buyA ? 0 : 1))
+    if sellA or sellB
+        f_track(-1, cfg * 4 + (sellA ? 2 : 3))
 
     [buyA, buyB, sellA, sellB]
 
@@ -237,6 +257,11 @@ buyHi  = bA1 or bA2 or bA3
 buyLo  = bB1 or bB2 or bB3
 sellHi = sA1 or sA2 or sA3
 sellLo = sB1 or sB2 or sB3
+
+// ─────────────────── BENCHMARK NULLO (livello di riferimento) ─────────
+if baseOn and bar_index % baseN == 0 and inSess
+    f_track(1, 12)
+    f_track(-1, 13)
 
 // ═════════════════════ RISOLUZIONE ESITI (MFE/MAE) ════════════════════
 if trackOn and array.size(pDir) > 0
@@ -273,7 +298,7 @@ if trackOn and array.size(pDir) > 0
             array.remove(pMae, i)
 
 // ═══════════════════════════ TABELLA ══════════════════════════════════
-var table tb = table.new(position.top_right, 5, 14, border_width = 1)
+var table tb = table.new(position.top_right, 5, 16, border_width = 1)
 if showTab and barstate.islast
     hb = color.new(color.gray, 20)
     table.cell(tb, 0, 0, "Setup",  text_color = color.white, bgcolor = hb, text_size = size.tiny)
@@ -281,21 +306,24 @@ if showTab and barstate.islast
     table.cell(tb, 2, 0, "Win%",   text_color = color.white, bgcolor = hb, text_size = size.tiny)
     table.cell(tb, 3, 0, "MFE",    text_color = color.white, bgcolor = hb, text_size = size.tiny)
     table.cell(tb, 4, 0, "MAE",    text_color = color.white, bgcolor = hb, text_size = size.tiny)
-    for b = 0 to 11
+    breakeven = stopATR / (targATR + stopATR) * 100
+    for b = 0 to 13
         cfg  = int(b / 4)
         kind = b % 4
-        nm   = "C" + str.tostring(cfg + 1) + (kind == 0 ? " Buy A" : kind == 1 ? " Buy B" : kind == 2 ? " Sell A" : " Sell B")
+        nm   = b == 12 ? "NULL Buy" : b == 13 ? "NULL Sell" :
+             "C" + str.tostring(cfg + 1) + (kind == 0 ? " Buy A" : kind == 1 ? " Buy B" : kind == 2 ? " Sell A" : " Sell B")
         n    = array.get(stTot, b)
         w    = n > 0 ? array.get(stWin, b) / n * 100 : na
         mf   = n > 0 ? array.get(stMfe, b) / n : na
         ma   = n > 0 ? array.get(stMae, b) / n : na
-        cc   = kind == 0 ? colA_B : kind == 1 ? colB_B : kind == 2 ? colA_S : colB_S
+        cc   = b >= 12 ? color.gray : kind == 0 ? colA_B : kind == 1 ? colB_B : kind == 2 ? colA_S : colB_S
+        wc   = na(w) ? color.white : w >= breakeven ? color.lime : color.red
         table.cell(tb, 0, b + 1, nm, text_color = cc, text_size = size.tiny)
         table.cell(tb, 1, b + 1, str.tostring(n, "#"), text_color = color.white, text_size = size.tiny)
-        table.cell(tb, 2, b + 1, na(w)  ? "-" : str.tostring(w,  "#.0"), text_color = color.white, text_size = size.tiny)
+        table.cell(tb, 2, b + 1, na(w)  ? "-" : str.tostring(w,  "#.0"), text_color = wc, text_size = size.tiny)
         table.cell(tb, 3, b + 1, na(mf) ? "-" : str.tostring(mf, "#.00"), text_color = color.white, text_size = size.tiny)
         table.cell(tb, 4, b + 1, na(ma) ? "-" : str.tostring(ma, "#.00"), text_color = color.white, text_size = size.tiny)
-    table.cell(tb, 0, 13, "aperti: " + str.tostring(array.size(pDir)), text_color = color.gray, text_size = size.tiny)
+    table.cell(tb, 0, 15, "BE " + str.tostring(breakeven, "#.0") + "% | aperti " + str.tostring(array.size(pDir)), text_color = color.gray, text_size = size.tiny)
 
 // ═══════════════════════════ ALERT ════════════════════════════════════
 alertcondition(buyHi,  "Divergenza BUY  classe A", "VTRLS: divergenza rialzista ALTA probabilita")
