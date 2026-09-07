@@ -72,9 +72,16 @@ htfConf = input.bool(true, "Solo candele della sezione CHIUSE (no repaint intrab
 
 // ────────────────────── 2 · PIVOT E CONFERMA ─────────────────────────────────
 gP = "2 · Pivot e conferma"
-pvL    = input.int(5, "Pivot left (candele della sezione)",  minval = 1, group = gP)
-pvR    = input.int(3, "Pivot right = ritardo di conferma",   minval = 1, group = gP,
-     tooltip = "Il pivot esiste solo pvR candele DELLA SEZIONE dopo che si e' formato. E' il 'segnale qualche candela dopo': non e' un difetto, e' cio' che impedisce di anticipare una struttura non ancora formata.")
+// geometria PER SEZIONE: i timeframe bassi hanno microstruttura piu' rumorosa
+// e chiedono piu' barre di conferma, mentre sui timeframe alti ogni barra di
+// conferma costa molto tempo reale e conviene ridurle.
+qL1 = input.int(7, "S1 left", inline = "p1", minval = 1, group = gP)
+qR1 = input.int(4, "right",   inline = "p1", minval = 1, group = gP)
+qL2 = input.int(5, "S2 left", inline = "p2", minval = 1, group = gP)
+qR2 = input.int(3, "right",   inline = "p2", minval = 1, group = gP)
+qL3 = input.int(4, "S3 left", inline = "p3", minval = 1, group = gP)
+qR3 = input.int(2, "right",   inline = "p3", minval = 1, group = gP,
+     tooltip = "Il pivot esiste solo 'right' candele DELLA SEZIONE dopo essersi formato: e' il 'segnale qualche candela dopo', ed e' cio' che impedisce di anticipare una struttura non ancora formata.\n\nSu grafico 15s, S3 a 5 minuti con right=2 costa 10 minuti di ritardo invece di 15.")
 minGap = input.int(5,  "Min candele tra i due pivot", minval = 2, group = gP)
 maxGap = input.int(60, "Max candele tra i due pivot", minval = 3, group = gP)
 
@@ -130,7 +137,7 @@ f_near(array<float> vals, array<int> bars, int tgt, int tol) =>
                 best := array.get(vals, i)
     best
 
-f_div(simple int lk, simple int sm, simple int ld, simple bool shift) =>
+f_div(simple int lk, simple int sm, simple int ld, simple int pvL, simple int pvR, simple bool shift) =>
     kv  = ta.sma(ta.stoch(close, high, low, lk), sm)
     dv  = ta.sma(kv, ld)
     st  = usePivD ? dv : kv
@@ -266,9 +273,9 @@ kk1 = int(math.max(1, math.round(sec1 / float(chartSec))))
 kk2 = int(math.max(1, math.round(sec2 / float(chartSec))))
 kk3 = int(math.max(1, math.round(sec3 / float(chartSec))))
 
-[bA1, bB1, sA1, sB1, pR1, pO1, tR1, tO1, gp1, at1, st1] = request.security(syminfo.tickerid, tf1, f_div(k1, m1, d1, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
-[bA2, bB2, sA2, sB2, pR2, pO2, tR2, tO2, gp2, at2, st2] = request.security(syminfo.tickerid, tf2, f_div(k2, m2, d2, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
-[bA3, bB3, sA3, sB3, pR3, pO3, tR3, tO3, gp3, at3, st3] = request.security(syminfo.tickerid, tf3, f_div(k3, m3, d3, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+[bA1, bB1, sA1, sB1, pR1, pO1, tR1, tO1, gp1, at1, st1] = request.security(syminfo.tickerid, tf1, f_div(k1, m1, d1, qL1, qR1, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
+[bA2, bB2, sA2, sB2, pR2, pO2, tR2, tO2, gp2, at2, st2] = request.security(syminfo.tickerid, tf2, f_div(k2, m2, d2, qL2, qR2, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
+[bA3, bB3, sA3, sB3, pR3, pO3, tR3, tO3, gp3, at3, st3] = request.security(syminfo.tickerid, tf3, f_div(k3, m3, d3, qL3, qR3, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
 
 // quante candele di ciascuna sezione contiene lo storico caricato: e' questo,
 // non il mercato, a limitare il campione delle sezioni alte su un grafico veloce

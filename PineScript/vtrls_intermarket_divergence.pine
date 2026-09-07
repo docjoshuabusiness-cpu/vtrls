@@ -66,12 +66,33 @@ tf3 = input.timeframe("5", "", inline = "s3", group = gS)
 htfConf = input.bool(true, "Solo candele della sezione CHIUSE (no repaint intrabar)", group = gS,
      tooltip = "ACCESO: il segnale viene letto dall'ultima candela CHIUSA della sezione. Costa fino a 1 candela della sezione in piu', ma il marker non appare e scompare durante la formazione, perche' l'ultima delle pvR barre di conferma non e' ancora chiusa.\n\nIrrilevante per una sezione con lo stesso timeframe del grafico.")
 
-// ───────────────────────── 3 · PIVOT E CONFERMA ──────────────────────────────
-gP = "3 · Pivot e conferma"
-pvL    = input.int(5, "Pivot left (candele della sezione)", minval = 1, group = gP)
-pvR    = input.int(3, "Pivot right = ritardo di conferma", minval = 1, group = gP,
-     tooltip = "Il pivot esiste solo pvR candele DELLA SEZIONE dopo essersi formato. Su grafico 15s con pvR=3, la sezione 5m costa 15 minuti di ritardo: quella sezione e' contesto, non timing.")
-minGap = input.int(5,  "Min candele tra i due pivot", minval = 2, group = gP)
+// ─────────────────────────── 3 · ANCORAGGIO ──────────────────────────────────
+//  LE DUE META' DELLA STESSA FAMIGLIA DI SEGNALI
+//  Ancorare i pivot al solo strumento operato scarta meta' dei casi, e con ogni
+//  probabilita' la meta' migliore.
+//    P  lo strumento operato ESTENDE l'estremo, il riferimento no.
+//       "NQ fa un nuovo minimo, ES non lo segue." La forza e' IPOTIZZATA: si
+//       deduce dal fatto che il riferimento non conferma.
+//    R  il riferimento ESTENDE l'estremo, lo strumento operato no.
+//       "ES fa un nuovo minimo, NQ tiene." La forza e' gia' MANIFESTA: NQ ha
+//       rifiutato di seguire, e lo si vede nel prezzo, non per deduzione.
+//  Significato economico identico, ancoraggio opposto. Sono tenuti separati
+//  nelle statistiche proprio per scoprire quale dei due paga davvero.
+gA = "3 · Ancoraggio del pivot"
+useAncP = input.bool(true, "P · lo strumento operato estende l'estremo", group = gA)
+useAncR = input.bool(true, "R · il riferimento estende l'estremo", group = gA)
+
+// ───────────────────────── 4 · PIVOT E CONFERMA ──────────────────────────────
+gP = "4 · Pivot e conferma (per sezione)"
+pL1 = input.int(7, "S1 left", inline = "p1", minval = 1, group = gP)
+pR1 = input.int(4, "right",   inline = "p1", minval = 1, group = gP)
+pL2 = input.int(5, "S2 left", inline = "p2", minval = 1, group = gP)
+pR2 = input.int(3, "right",   inline = "p2", minval = 1, group = gP)
+pL3 = input.int(4, "S3 left", inline = "p3", minval = 1, group = gP)
+pR3 = input.int(2, "right",   inline = "p3", minval = 1, group = gP,
+     tooltip = "Geometria del pivot PER SEZIONE. I timeframe bassi hanno microstruttura piu' rumorosa e chiedono piu' barre di conferma; sui timeframe alti ogni barra di conferma costa molto tempo reale, quindi conviene ridurle.\n\nEsempio su grafico 15s: S3 a 5 minuti con right=2 costa 10 minuti di ritardo invece di 15.")
+minGap = input.int(5,  "Min candele tra i due pivot", minval = 2, group = gP,
+     tooltip = "In candele DELLA SEZIONE, quindi gia' proporzionato alla scala di ciascuna: 5 candele significano 75 secondi su S1 a 15s e 25 minuti su S3 a 5m. Non serve differenziarlo per sezione.")
 maxGap = input.int(60, "Max candele tra i due pivot", minval = 3, group = gP)
 alignA = input.int(6,  "Classe A: allineamento max fra i pivot (candele)", minval = 0, group = gP,
      tooltip = "Quanto possono essere sfasati nel tempo il pivot del prezzo e quello del riferimento perche' le due strutture siano considerate CONTEMPORANEE.")
@@ -100,6 +121,9 @@ stopATR = input.float(0.7, "Stop (x ATR della sezione)",   minval = 0.1, group =
 baseOn  = input.bool(true, "Benchmark nullo (ingressi ciclici)", group = gT)
 baseN   = input.int(50, "   una coppia ogni N barre", minval = 5, group = gT)
 showTab = input.bool(true, "Mostra tabella", group = gT)
+tabDim  = input.string("Ancoraggio P/R", "Seconda dimensione della tabella",
+     options = ["Ancoraggio P/R", "Classe A/B"], group = gT,
+     tooltip = "Sezione x direzione fanno gia' 6 righe; incrociare ANCHE classe e ancoraggio ne farebbe 24, illeggibili e con campioni troppo piccoli. Si misura una dimensione alla volta.\n\nANCORAGGIO P/R per primo: e' la domanda aperta piu' grande. P deduce la forza dal fatto che il riferimento non conferma, R la osserva direttamente nel prezzo. Se R batte P, la meta' dei segnali che prima non rilevavo era quella buona.\n\nCLASSE A/B dopo, per capire quanto conta la contemporaneita' delle due strutture.")
 
 // ────────────────────────────── 6 · GRAFICA ──────────────────────────────────
 gV = "6 · Grafica"
@@ -121,7 +145,7 @@ f_z(float s, simple int len) =>
 //    Restituisce i due ultimi pivot e la loro DISTANZA IN BARRE dalla barra
 //    corrente della sezione: e' quel conteggio che rende confrontabili due
 //    chiamate request.security separate sullo stesso timeframe.
-f_pp(simple bool shift) =>
+f_pp(simple int pvL, simple int pvR, simple bool shift) =>
     atrS = math.max(ta.atr(atrLen), syminfo.mintick)
     pl = ta.pivotlow(low,   pvL, pvR)
     ph = ta.pivothigh(high, pvL, pvR)
@@ -171,7 +195,7 @@ f_pp(simple bool shift) =>
      shift ? ht0[1]  : ht0,  shift ? ht1[1]  : ht1]
 
 // ── B · pivot del RIFERIMENTO, nel SUO contesto nativo, stesso TF ────────────
-f_cp(simple bool shift) =>
+f_cp(simple int pvL, simple int pvR, simple bool shift) =>
     usePx = cmpMode == "Prezzo riferimento" or cmpMode == "Ratio (spread)"
     cs = cmpMode == "Z del riferimento"    ? f_z(close, statLen) :
          cmpMode == "Stoch riferimento"    ? ta.sma(ta.sma(ta.stoch(close, high, low, stoLen), stoSm), stoD) :
@@ -226,13 +250,13 @@ kk3 = int(math.max(1, math.round(sec3 / float(chartSec))))
 // il modo Ratio usa un simbolo spread; gli altri leggono il riferimento diretto
 symB = cmpMode == "Ratio (spread)" ? (spreadSym == "" ? syminfo.tickerid + "/" + refSym : spreadSym) : refSym
 
-[aL0_1, aL1_1, aLa0_1, aLa1_1, aH0_1, aH1_1, aHa0_1, aHa1_1, atr_1, nl_1, nh_1, lt0_1, lt1_1, ht0_1, ht1_1] = request.security(syminfo.tickerid, tf1, f_pp(htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
-[aL0_2, aL1_2, aLa0_2, aLa1_2, aH0_2, aH1_2, aHa0_2, aHa1_2, atr_2, nl_2, nh_2, lt0_2, lt1_2, ht0_2, ht1_2] = request.security(syminfo.tickerid, tf2, f_pp(htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
-[aL0_3, aL1_3, aLa0_3, aLa1_3, aH0_3, aH1_3, aHa0_3, aHa1_3, atr_3, nl_3, nh_3, lt0_3, lt1_3, ht0_3, ht1_3] = request.security(syminfo.tickerid, tf3, f_pp(htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+[aL0_1, aL1_1, aLa0_1, aLa1_1, aH0_1, aH1_1, aHa0_1, aHa1_1, atr_1, nl_1, nh_1, lt0_1, lt1_1, ht0_1, ht1_1] = request.security(syminfo.tickerid, tf1, f_pp(pL1, pR1, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
+[aL0_2, aL1_2, aLa0_2, aLa1_2, aH0_2, aH1_2, aHa0_2, aHa1_2, atr_2, nl_2, nh_2, lt0_2, lt1_2, ht0_2, ht1_2] = request.security(syminfo.tickerid, tf2, f_pp(pL2, pR2, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
+[aL0_3, aL1_3, aLa0_3, aLa1_3, aH0_3, aH1_3, aHa0_3, aHa1_3, atr_3, nl_3, nh_3, lt0_3, lt1_3, ht0_3, ht1_3] = request.security(syminfo.tickerid, tf3, f_pp(pL3, pR3, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
 
-[bL0_1, bL1_1, bLa0_1, bLa1_1, bH0_1, bH1_1, bHa0_1, bHa1_1, bSd_1, cnl_1, cnh_1] = request.security(symB, tf1, f_cp(htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
-[bL0_2, bL1_2, bLa0_2, bLa1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2, cnl_2, cnh_2] = request.security(symB, tf2, f_cp(htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
-[bL0_3, bL1_3, bLa0_3, bLa1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3, cnl_3, cnh_3] = request.security(symB, tf3, f_cp(htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+[bL0_1, bL1_1, bLa0_1, bLa1_1, bH0_1, bH1_1, bHa0_1, bHa1_1, bSd_1, cnl_1, cnh_1] = request.security(symB, tf1, f_cp(pL1, pR1, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
+[bL0_2, bL1_2, bLa0_2, bLa1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2, cnl_2, cnh_2] = request.security(symB, tf2, f_cp(pL2, pR2, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
+[bL0_3, bL1_3, bLa0_3, bLa1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3, cnl_3, cnh_3] = request.security(symB, tf3, f_cp(pL3, pR3, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
 
 // quante candele di ciascuna sezione contiene lo storico caricato: e' questo,
 // non il mercato, a limitare il campione delle sezioni alte su un grafico veloce
@@ -294,11 +318,18 @@ f_side(bool en, bool isSell, bool nw, bool nwB,
        float sd, float a_atr, int kBars, int cfg, string tag) =>
     var int last = na
     fr   = (nw and not nw[1]) or (nwB and not nwB[1])
-    gap  = nz(pAp - pAr, 0)
-    th   = minCDelta * sd
-    // il prezzo estende l'estremo, il riferimento no
-    ineq = isSell ? (pR > pP + minPDelta * a_atr and cR < cP - th)
-                  : (pR < pP - minPDelta * a_atr and cR > cP + th)
+    th = minCDelta * sd
+    dP = minPDelta * a_atr
+    // P: lo strumento operato estende l'estremo, il riferimento no
+    // R: il riferimento estende l'estremo, lo strumento operato no
+    // Le due condizioni si escludono a vicenda: richiedono al prezzo di
+    // muoversi in direzioni opposte fra i due pivot.
+    ineqP = isSell ? (pR > pP + dP and cR < cP - th) : (pR < pP - dP and cR > cP + th)
+    ineqR = isSell ? (cR > cP + th and pR < pP - dP) : (cR < cP - th and pR > pP + dP)
+    ancP  = ineqP
+    ineq  = (useAncP and ineqP) or (useAncR and ineqR)
+    // il vincolo di distanza vale sui pivot della serie che ANCORA il segnale
+    gap  = ancP ? nz(pAp - pAr, 0) : nz(cAp - cAr, 0)
     d0   = math.abs(nz(pAr, 1e9) - nz(cAr, -1e9))
     d1   = math.abs(nz(pAp, 1e9) - nz(cAp, -1e9))
     algA = d0 <= alignA and d1 <= alignA
@@ -318,26 +349,31 @@ f_side(bool en, bool isSell, bool nw, bool nwB,
             line.new(int(tP), pP, int(tR), pR, xloc.bar_time, color = col,
                  width = isA ? 2 : 1, style = isA ? line.style_solid : line.style_dotted)
         label.new(bar_index, isSell ? high : low,
-             (isSell ? (isA ? "▼A " : "▼B ") : (isA ? "▲A " : "▲B ")) + tag,
+             (isSell ? "▼" : "▲") + (isA ? "A" : "B") + (ancP ? "P " : "R ") + tag,
              xloc.bar_index, isSell ? yloc.abovebar : yloc.belowbar, col,
              isSell ? label.style_label_down : label.style_label_up,
              isSell ? color.white : color.black, szLbl,
-             tooltip = (isSell ? "SELL " : "BUY ") + (isA ? "classe A" : "classe B") + " · " + tag +
+             tooltip = (isSell ? "SELL " : "BUY ") + (isA ? "classe A" : "classe B") +
+                 (ancP ? " · ancoraggio P (il prezzo estende)" : " · ancoraggio R (il riferimento estende)") + " · " + tag +
                  "\nprezzo " + str.tostring(pP, format.mintick) + " → " + str.tostring(pR, format.mintick) +
                  "\nriferimento " + str.tostring(cP, "#.####") + " → " + str.tostring(cR, "#.####") +
                  " (" + str.tostring((cR - cP) / sd, "#.00") + " sd)" +
                  "\ndistanza pivot " + str.tostring(gap) + " candele · sfasamento " +
                  str.tostring(d0, "#") + "/" + str.tostring(d1, "#") +
                  "\ncorrelazione " + str.tostring(corr, "#.00"))
-        f_track(isSell ? -1 : 1, cfg * 4 + (isSell ? (isA ? 2 : 3) : (isA ? 0 : 1)), a_atr, kBars)
-    [fire, isA]
+        // la seconda dimensione della tabella e' scelta dall'utente: non ci
+        // stanno 24 righe leggibili, e misurare una dimensione alla volta e'
+        // comunque il modo corretto di leggerle
+        dim = tabDim == "Classe A/B" ? (isA ? 0 : 1) : (ancP ? 0 : 1)
+        f_track(isSell ? -1 : 1, cfg * 4 + (isSell ? 2 : 0) + dim, a_atr, kBars)
+    [fire, isA, ancP]
 
-[b1, b1A] = f_side(e1, false, nl_1, cnl_1, aL0_1, aL1_1, aLa0_1, aLa1_1, lt0_1, lt1_1, bL0_1, bL1_1, bLa0_1, bLa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
-[s1, s1A] = f_side(e1, true,  nh_1, cnh_1, aH0_1, aH1_1, aHa0_1, aHa1_1, ht0_1, ht1_1, bH0_1, bH1_1, bHa0_1, bHa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
-[b2, b2A] = f_side(e2, false, nl_2, cnl_2, aL0_2, aL1_2, aLa0_2, aLa1_2, lt0_2, lt1_2, bL0_2, bL1_2, bLa0_2, bLa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
-[s2, s2A] = f_side(e2, true,  nh_2, cnh_2, aH0_2, aH1_2, aHa0_2, aHa1_2, ht0_2, ht1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
-[b3, b3A] = f_side(e3, false, nl_3, cnl_3, aL0_3, aL1_3, aLa0_3, aLa1_3, lt0_3, lt1_3, bL0_3, bL1_3, bLa0_3, bLa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
-[s3, s3A] = f_side(e3, true,  nh_3, cnh_3, aH0_3, aH1_3, aHa0_3, aHa1_3, ht0_3, ht1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
+[b1, b1A, b1P] = f_side(e1, false, nl_1, cnl_1, aL0_1, aL1_1, aLa0_1, aLa1_1, lt0_1, lt1_1, bL0_1, bL1_1, bLa0_1, bLa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
+[s1, s1A, s1P] = f_side(e1, true,  nh_1, cnh_1, aH0_1, aH1_1, aHa0_1, aHa1_1, ht0_1, ht1_1, bH0_1, bH1_1, bHa0_1, bHa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
+[b2, b2A, b2P] = f_side(e2, false, nl_2, cnl_2, aL0_2, aL1_2, aLa0_2, aLa1_2, lt0_2, lt1_2, bL0_2, bL1_2, bLa0_2, bLa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
+[s2, s2A, s2P] = f_side(e2, true,  nh_2, cnh_2, aH0_2, aH1_2, aHa0_2, aHa1_2, ht0_2, ht1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
+[b3, b3A, b3P] = f_side(e3, false, nl_3, cnl_3, aL0_3, aL1_3, aLa0_3, aLa1_3, lt0_3, lt1_3, bL0_3, bL1_3, bLa0_3, bLa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
+[s3, s3A, s3P] = f_side(e3, true,  nh_3, cnh_3, aH0_3, aH1_3, aHa0_3, aHa1_3, ht0_3, ht1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
 
 buyA  = (b1 and b1A) or (b2 and b2A) or (b3 and b3A)
 buyB  = (b1 and not b1A) or (b2 and not b2A) or (b3 and not b3A)
@@ -402,8 +438,11 @@ if showTab and barstate.islast
         cfg  = int(b / 4)
         kind = b % 4
         isNull = b >= 12
+        d0n = tabDim == "Classe A/B" ? "A" : "P"
+        d1n = tabDim == "Classe A/B" ? "B" : "R"
         nm = isNull ? (b == 12 ? "NULL Buy" : "NULL Sell") :
-             "S" + str.tostring(cfg + 1) + (kind == 0 ? " Buy A" : kind == 1 ? " Buy B" : kind == 2 ? " Sell A" : " Sell B")
+             "S" + str.tostring(cfg + 1) + (kind == 0 ? " Buy "  + d0n : kind == 1 ? " Buy "  + d1n :
+                                            kind == 2 ? " Sell " + d0n : " Sell " + d1n)
         tfl = isNull ? "rif" : array.get(tfs, cfg)
         act = isNull ? baseOn : array.get(ens, cfg)
         n  = array.get(stTot, b)
@@ -425,8 +464,8 @@ if showTab and barstate.islast
     table.cell(tb, 3, 15, "aperti " + str.tostring(array.size(pDir)), text_color = color.gray, text_size = size.tiny)
     table.cell(tb, 4, 15, "orizz " + str.tostring(horizon), text_color = color.gray, text_size = size.tiny)
     table.cell(tb, 5, 15, htfConf ? "chiuse" : "intrabar", text_color = htfConf ? color.silver : color.yellow, text_size = size.tiny)
-    table.cell(tb, 0, 16, cmpMode, text_color = color.aqua, text_size = size.tiny)
-    table.cell(tb, 1, 16, symB, text_color = color.silver, text_size = size.tiny)
+    table.cell(tb, 0, 16, tabDim, text_color = color.aqua, text_size = size.tiny)
+    table.cell(tb, 1, 16, (useAncP ? "P" : "") + (useAncR ? "R" : ""), text_color = color.silver, text_size = size.tiny)
     table.cell(tb, 2, 16, "algA " + str.tostring(alignA), text_color = color.gray, text_size = size.tiny)
     table.cell(tb, 3, 16, "algB " + str.tostring(alignM), text_color = color.gray, text_size = size.tiny)
     table.cell(tb, 4, 16, "t " + str.tostring(targATR, "#.0"), text_color = color.gray, text_size = size.tiny)
@@ -442,6 +481,10 @@ if showTab and barstate.islast
 
 // ═══════════════════════════════ ALERT ═══════════════════════════════════════
 alertcondition(buyA,  "X-Div BUY classe A",  "VTRLS X-Div: forza relativa rialzista, classe A")
+alertcondition((b1 and b1P) or (b2 and b2P) or (b3 and b3P), "X-Div BUY ancoraggio P", "VTRLS X-Div: BUY, il prezzo estende il minimo")
+alertcondition((b1 and not b1P) or (b2 and not b2P) or (b3 and not b3P), "X-Div BUY ancoraggio R", "VTRLS X-Div: BUY, il riferimento estende il minimo")
+alertcondition((s1 and s1P) or (s2 and s2P) or (s3 and s3P), "X-Div SELL ancoraggio P", "VTRLS X-Div: SELL, il prezzo estende il massimo")
+alertcondition((s1 and not s1P) or (s2 and not s2P) or (s3 and not s3P), "X-Div SELL ancoraggio R", "VTRLS X-Div: SELL, il riferimento estende il massimo")
 alertcondition(buyB,  "X-Div BUY classe B",  "VTRLS X-Div: forza relativa rialzista, classe B")
 alertcondition(sellA, "X-Div SELL classe A", "VTRLS X-Div: debolezza relativa, classe A")
 alertcondition(sellB, "X-Div SELL classe B", "VTRLS X-Div: debolezza relativa, classe B")
