@@ -92,12 +92,12 @@ useSlo = method != "Pivot"
 
 // ───────────────────────── 4 · PIVOT E CONFERMA ──────────────────────────────
 gP = "4 · Pivot e conferma (per sezione)"
-pL1 = input.int(7, "S1 left", inline = "p1", minval = 1, group = gP)
-pR1 = input.int(4, "right",   inline = "p1", minval = 1, group = gP)
-pL2 = input.int(5, "S2 left", inline = "p2", minval = 1, group = gP)
-pR2 = input.int(3, "right",   inline = "p2", minval = 1, group = gP)
-pL3 = input.int(4, "S3 left", inline = "p3", minval = 1, group = gP)
-pR3 = input.int(2, "right",   inline = "p3", minval = 1, group = gP,
+qL1 = input.int(7, "S1 left", inline = "p1", minval = 1, group = gP)
+qR1 = input.int(4, "right",   inline = "p1", minval = 1, group = gP)
+qL2 = input.int(5, "S2 left", inline = "p2", minval = 1, group = gP)
+qR2 = input.int(3, "right",   inline = "p2", minval = 1, group = gP)
+qL3 = input.int(4, "S3 left", inline = "p3", minval = 1, group = gP)
+qR3 = input.int(2, "right",   inline = "p3", minval = 1, group = gP,
      tooltip = "Geometria del pivot PER SEZIONE. I timeframe bassi hanno microstruttura piu' rumorosa e chiedono piu' barre di conferma; sui timeframe alti ogni barra di conferma costa molto tempo reale, quindi conviene ridurle.\n\nEsempio su grafico 15s: S3 a 5 minuti con right=2 costa 10 minuti di ritardo invece di 15.")
 minGap = input.int(5,  "Min candele tra i due pivot", minval = 2, group = gP,
      tooltip = "In candele DELLA SEZIONE, quindi gia' proporzionato alla scala di ciascuna: 5 candele significano 75 secondi su S1 a 15s e 25 minuti su S3 a 5m. Non serve differenziarlo per sezione.")
@@ -151,112 +151,91 @@ f_z(float s, simple int len) =>
     d = ta.stdev(s, len)
     d > 0 ? (s - m) / d : 0.0
 
-// ── A · pivot di PREZZO, nel contesto nativo del TF della sezione ────────────
-//    Restituisce i due ultimi pivot e la loro DISTANZA IN BARRE dalla barra
-//    corrente della sezione: e' quel conteggio che rende confrontabili due
-//    chiamate request.security separate sullo stesso timeframe.
-f_pp(simple int pvL, simple int pvR, simple bool shift) =>
-    atrS = math.max(ta.atr(atrLen), syminfo.mintick)
-    pl = ta.pivotlow(low,   pvL, pvR)
-    ph = ta.pivothigh(high, pvL, pvR)
-    var float l0 = na
-    var float l1 = na
-    var int   lb0 = na
-    var int   lb1 = na
-    var float h0 = na
-    var float h1 = na
-    var int   hb0 = na
-    var int   hb1 = na
-    // timestamp della barra del pivot: ancoraggio esatto sul grafico. Contare
-    // k barre e' esatto solo se ogni candela della sezione ne contiene
-    // esattamente k, il che e' falso a ogni gap o apertura di sessione.
-    var float lt0 = na
-    var float lt1 = na
-    var float ht0 = na
-    var float ht1 = na
-    bool nl = false
-    bool nh = false
-    if not na(pl)
-        l1  := l0
-        lb1 := lb0
-        lt1 := lt0
-        l0  := pl
-        lb0 := bar_index - pvR
-        lt0 := time[pvR]
-        nl  := true
-    if not na(ph)
-        h1  := h0
-        hb1 := hb0
-        ht1 := ht0
-        h0  := ph
-        hb0 := bar_index - pvR
-        ht0 := time[pvR]
-        nh  := true
-    la0 = na(lb0) ? na : bar_index - lb0
-    la1 = na(lb1) ? na : bar_index - lb1
-    ha0 = na(hb0) ? na : bar_index - hb0
-    ha1 = na(hb1) ? na : bar_index - hb1
-    [shift ? l0[1]   : l0,   shift ? l1[1]   : l1,
-     shift ? la0[1]  : la0,  shift ? la1[1]  : la1,
-     shift ? h0[1]   : h0,   shift ? h1[1]   : h1,
-     shift ? ha0[1]  : ha0,  shift ? ha1[1]  : ha1,
-     shift ? atrS[1] : atrS, shift ? nl[1]   : nl,   shift ? nh[1]  : nh,
-     shift ? lt0[1]  : lt0,  shift ? lt1[1]  : lt1,
-     shift ? ht0[1]  : ht0,  shift ? ht1[1]  : ht1]
+// ── PIVOT · si conservano gli ULTIMI K estremi, non solo gli ultimi due ──────
+//  Confrontare solo gli ultimi due pivot e' il difetto che rende cieco questo
+//  tipo di rilevatore. Fra i due estremi che l'occhio collega ci sono quasi
+//  sempre uno o due pivot minori: la coppia che genera la divergenza non e'
+//  (1,2) ma (1,3) o (1,4), e guardando solo (1,2) non la si vede mai. Nessuna
+//  taratura di soglia puo' rimediare, perche' la coppia giusta non viene
+//  proprio esaminata.
+//  Qui si conservano quattro estremi per lato e si prova ogni coppia
+//  (piu' recente, j-esimo precedente) con j = 1, 2, 3.
+//
+//  La chiamata sul RIFERIMENTO non restituisce i timestamp: la linea disegnata
+//  collega sempre i due estremi di PREZZO, anche quando e' il riferimento ad
+//  ancorare il segnale.
+f_pivA(simple int pl, simple int pr, simple bool isHigh, simple bool shift) =>
+    a  = math.max(ta.atr(atrLen), syminfo.mintick)
+    pp = isHigh ? ta.pivothigh(high, pl, pr) : ta.pivotlow(low, pl, pr)
+    var float v0 = na
+    var float v1 = na
+    var float v2 = na
+    var float v3 = na
+    var int   b0 = na
+    var int   b1 = na
+    var int   b2 = na
+    var int   b3 = na
+    var float t0 = na
+    var float t1 = na
+    var float t2 = na
+    var float t3 = na
+    bool nw = false
+    if not na(pp)
+        v3 := v2
+        v2 := v1
+        v1 := v0
+        v0 := pp
+        b3 := b2
+        b2 := b1
+        b1 := b0
+        b0 := bar_index - pr
+        t3 := t2
+        t2 := t1
+        t1 := t0
+        t0 := time[pr]
+        nw := true
+    g0 = na(b0) ? na : bar_index - b0
+    g1 = na(b1) ? na : bar_index - b1
+    g2 = na(b2) ? na : bar_index - b2
+    g3 = na(b3) ? na : bar_index - b3
+    [shift ? v0[1] : v0, shift ? v1[1] : v1, shift ? v2[1] : v2, shift ? v3[1] : v3,
+     shift ? g0[1] : g0, shift ? g1[1] : g1, shift ? g2[1] : g2, shift ? g3[1] : g3,
+     shift ? t0[1] : t0, shift ? t1[1] : t1, shift ? t2[1] : t2, shift ? t3[1] : t3,
+     shift ? a[1]  : a,  shift ? nw[1] : nw]
 
-// ── B · pivot del RIFERIMENTO, nel SUO contesto nativo, stesso TF ────────────
-f_cp(simple int pvL, simple int pvR, simple bool shift) =>
+f_pivB(simple int pl, simple int pr, simple bool isHigh, simple bool shift) =>
     usePx = cmpMode == "Prezzo riferimento" or cmpMode == "Ratio (spread)"
-    cs = cmpMode == "Z del riferimento"    ? f_z(close, statLen) :
-         cmpMode == "Stoch riferimento"    ? ta.sma(ta.sma(ta.stoch(close, high, low, stoLen), stoSm), stoD) :
-         close
-    sLo = usePx ? low  : cs
-    sHi = usePx ? high : cs
-    // NORMALIZZATORE. Per un prezzo e' l'ATR del riferimento: stessa dimensione
-    // fisica del delta che si vuole misurare, cioe' la differenza fra due
-    // estremi vicini. La deviazione standard del LIVELLO misura invece quanto
-    // il prezzo ha vagato sull'intera finestra: un numero molto piu' grande,
-    // che come soglia lascia passare solo i casi in cui il riferimento si e'
-    // mosso MOLTO fra i due pivot. Ma la non-conferma interessante e' per
-    // definizione un movimento piccolo: quella soglia selezionava l'opposto
-    // del segnale cercato.
-    // Per un oscillatore la stdev del livello e' invece la scala giusta,
-    // perche' un oscillatore non ha ATR e il suo livello e' gia' la grandezza.
+    cs = cmpMode == "Z del riferimento" ? f_z(close, statLen) : cmpMode == "Stoch riferimento" ? ta.sma(ta.sma(ta.stoch(close, high, low, stoLen), stoSm), stoD) : close
+    // normalizzatore: ATR per un prezzo, deviazione standard per un oscillatore
     sd  = usePx ? math.max(ta.atr(atrLen), syminfo.mintick) : math.max(ta.stdev(cs, statLen), 1e-12)
-    pl = ta.pivotlow(sLo,  pvL, pvR)
-    ph = ta.pivothigh(sHi, pvL, pvR)
-    var float l0 = na
-    var float l1 = na
-    var int   lb0 = na
-    var int   lb1 = na
-    var float h0 = na
-    var float h1 = na
-    var int   hb0 = na
-    var int   hb1 = na
-    bool cnl = false
-    bool cnh = false
-    if not na(pl)
-        l1  := l0
-        lb1 := lb0
-        l0  := pl
-        lb0 := bar_index - pvR
-        cnl := true
-    if not na(ph)
-        h1  := h0
-        hb1 := hb0
-        h0  := ph
-        hb0 := bar_index - pvR
-        cnh := true
-    la0 = na(lb0) ? na : bar_index - lb0
-    la1 = na(lb1) ? na : bar_index - lb1
-    ha0 = na(hb0) ? na : bar_index - hb0
-    ha1 = na(hb1) ? na : bar_index - hb1
-    [shift ? l0[1]  : l0,  shift ? l1[1]  : l1,
-     shift ? la0[1] : la0, shift ? la1[1] : la1,
-     shift ? h0[1]  : h0,  shift ? h1[1]  : h1,
-     shift ? ha0[1] : ha0, shift ? ha1[1] : ha1,
-     shift ? sd[1]  : sd,
-     shift ? cnl[1] : cnl,  shift ? cnh[1] : cnh]
+    src = usePx ? (isHigh ? high : low) : cs
+    pp  = isHigh ? ta.pivothigh(src, pl, pr) : ta.pivotlow(src, pl, pr)
+    var float v0 = na
+    var float v1 = na
+    var float v2 = na
+    var float v3 = na
+    var int   b0 = na
+    var int   b1 = na
+    var int   b2 = na
+    var int   b3 = na
+    bool nw = false
+    if not na(pp)
+        v3 := v2
+        v2 := v1
+        v1 := v0
+        v0 := pp
+        b3 := b2
+        b2 := b1
+        b1 := b0
+        b0 := bar_index - pr
+        nw := true
+    g0 = na(b0) ? na : bar_index - b0
+    g1 = na(b1) ? na : bar_index - b1
+    g2 = na(b2) ? na : bar_index - b2
+    g3 = na(b3) ? na : bar_index - b3
+    [shift ? v0[1] : v0, shift ? v1[1] : v1, shift ? v2[1] : v2, shift ? v3[1] : v3,
+     shift ? g0[1] : g0, shift ? g1[1] : g1, shift ? g2[1] : g2, shift ? g3[1] : g3,
+     shift ? sd[1] : sd, shift ? nw[1] : nw]
 
 // ── PENDENZA · regressione sugli estremi nel contesto nativo della sezione ───
 //  E' la formalizzazione della riga tracciata a mano sopra un gruppo di massimi:
@@ -277,23 +256,33 @@ kk1 = int(math.max(1, math.round(sec1 / float(chartSec))))
 kk2 = int(math.max(1, math.round(sec2 / float(chartSec))))
 kk3 = int(math.max(1, math.round(sec3 / float(chartSec))))
 
+sh1 = htfConf and sec1 > chartSec
+sh2 = htfConf and sec2 > chartSec
+sh3 = htfConf and sec3 > chartSec
+
 // il modo Ratio usa un simbolo spread; gli altri leggono il riferimento diretto
 symB = cmpMode == "Ratio (spread)" ? (spreadSym == "" ? syminfo.tickerid + "/" + refSym : spreadSym) : refSym
 
-[aL0_1, aL1_1, aLa0_1, aLa1_1, aH0_1, aH1_1, aHa0_1, aHa1_1, atr_1, nl_1, nh_1, lt0_1, lt1_1, ht0_1, ht1_1] = request.security(syminfo.tickerid, tf1, f_pp(pL1, pR1, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
-[aL0_2, aL1_2, aLa0_2, aLa1_2, aH0_2, aH1_2, aHa0_2, aHa1_2, atr_2, nl_2, nh_2, lt0_2, lt1_2, ht0_2, ht1_2] = request.security(syminfo.tickerid, tf2, f_pp(pL2, pR2, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
-[aL0_3, aL1_3, aLa0_3, aLa1_3, aH0_3, aH1_3, aHa0_3, aHa1_3, atr_3, nl_3, nh_3, lt0_3, lt1_3, ht0_3, ht1_3] = request.security(syminfo.tickerid, tf3, f_pp(pL3, pR3, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+[aLv0_1, aLv1_1, aLv2_1, aLv3_1, aLg0_1, aLg1_1, aLg2_1, aLg3_1, aLt0_1, aLt1_1, aLt2_1, aLt3_1, aAtr_1, aLn_1] = request.security(syminfo.tickerid, tf1, f_pivA(qL1, qR1, false, sh1), lookahead = barmerge.lookahead_off)
+[aHv0_1, aHv1_1, aHv2_1, aHv3_1, aHg0_1, aHg1_1, aHg2_1, aHg3_1, aHt0_1, aHt1_1, aHt2_1, aHt3_1, aAtrH_1, aHn_1] = request.security(syminfo.tickerid, tf1, f_pivA(qL1, qR1, true, sh1), lookahead = barmerge.lookahead_off)
+[aLv0_2, aLv1_2, aLv2_2, aLv3_2, aLg0_2, aLg1_2, aLg2_2, aLg3_2, aLt0_2, aLt1_2, aLt2_2, aLt3_2, aAtr_2, aLn_2] = request.security(syminfo.tickerid, tf2, f_pivA(qL2, qR2, false, sh2), lookahead = barmerge.lookahead_off)
+[aHv0_2, aHv1_2, aHv2_2, aHv3_2, aHg0_2, aHg1_2, aHg2_2, aHg3_2, aHt0_2, aHt1_2, aHt2_2, aHt3_2, aAtrH_2, aHn_2] = request.security(syminfo.tickerid, tf2, f_pivA(qL2, qR2, true, sh2), lookahead = barmerge.lookahead_off)
+[aLv0_3, aLv1_3, aLv2_3, aLv3_3, aLg0_3, aLg1_3, aLg2_3, aLg3_3, aLt0_3, aLt1_3, aLt2_3, aLt3_3, aAtr_3, aLn_3] = request.security(syminfo.tickerid, tf3, f_pivA(qL3, qR3, false, sh3), lookahead = barmerge.lookahead_off)
+[aHv0_3, aHv1_3, aHv2_3, aHv3_3, aHg0_3, aHg1_3, aHg2_3, aHg3_3, aHt0_3, aHt1_3, aHt2_3, aHt3_3, aAtrH_3, aHn_3] = request.security(syminfo.tickerid, tf3, f_pivA(qL3, qR3, true, sh3), lookahead = barmerge.lookahead_off)
 
-[bL0_1, bL1_1, bLa0_1, bLa1_1, bH0_1, bH1_1, bHa0_1, bHa1_1, bSd_1, cnl_1, cnh_1] = request.security(symB, tf1, f_cp(pL1, pR1, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
-[bL0_2, bL1_2, bLa0_2, bLa1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2, cnl_2, cnh_2] = request.security(symB, tf2, f_cp(pL2, pR2, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
-[bL0_3, bL1_3, bLa0_3, bLa1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3, cnl_3, cnh_3] = request.security(symB, tf3, f_cp(pL3, pR3, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+[bLv0_1, bLv1_1, bLv2_1, bLv3_1, bLg0_1, bLg1_1, bLg2_1, bLg3_1, bSd_1, bLn_1] = request.security(symB, tf1, f_pivB(qL1, qR1, false, sh1), lookahead = barmerge.lookahead_off)
+[bHv0_1, bHv1_1, bHv2_1, bHv3_1, bHg0_1, bHg1_1, bHg2_1, bHg3_1, bSdH_1, bHn_1] = request.security(symB, tf1, f_pivB(qL1, qR1, true, sh1), lookahead = barmerge.lookahead_off)
+[bLv0_2, bLv1_2, bLv2_2, bLv3_2, bLg0_2, bLg1_2, bLg2_2, bLg3_2, bSd_2, bLn_2] = request.security(symB, tf2, f_pivB(qL2, qR2, false, sh2), lookahead = barmerge.lookahead_off)
+[bHv0_2, bHv1_2, bHv2_2, bHv3_2, bHg0_2, bHg1_2, bHg2_2, bHg3_2, bSdH_2, bHn_2] = request.security(symB, tf2, f_pivB(qL2, qR2, true, sh2), lookahead = barmerge.lookahead_off)
+[bLv0_3, bLv1_3, bLv2_3, bLv3_3, bLg0_3, bLg1_3, bLg2_3, bLg3_3, bSd_3, bLn_3] = request.security(symB, tf3, f_pivB(qL3, qR3, false, sh3), lookahead = barmerge.lookahead_off)
+[bHv0_3, bHv1_3, bHv2_3, bHv3_3, bHg0_3, bHg1_3, bHg2_3, bHg3_3, bSdH_3, bHn_3] = request.security(symB, tf3, f_pivB(qL3, qR3, true, sh3), lookahead = barmerge.lookahead_off)
 
-[pSh1, pSl1] = request.security(syminfo.tickerid, tf1, f_slope(slopeLen, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
-[pSh2, pSl2] = request.security(syminfo.tickerid, tf2, f_slope(slopeLen, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
-[pSh3, pSl3] = request.security(syminfo.tickerid, tf3, f_slope(slopeLen, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
-[cSh1, cSl1] = request.security(symB, tf1, f_slope(slopeLen, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
-[cSh2, cSl2] = request.security(symB, tf2, f_slope(slopeLen, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
-[cSh3, cSl3] = request.security(symB, tf3, f_slope(slopeLen, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+[pSh1, pSl1] = request.security(syminfo.tickerid, tf1, f_slope(slopeLen, sh1), lookahead = barmerge.lookahead_off)
+[pSh2, pSl2] = request.security(syminfo.tickerid, tf2, f_slope(slopeLen, sh2), lookahead = barmerge.lookahead_off)
+[pSh3, pSl3] = request.security(syminfo.tickerid, tf3, f_slope(slopeLen, sh3), lookahead = barmerge.lookahead_off)
+[cSh1, cSl1] = request.security(symB, tf1, f_slope(slopeLen, sh1), lookahead = barmerge.lookahead_off)
+[cSh2, cSl2] = request.security(symB, tf2, f_slope(slopeLen, sh2), lookahead = barmerge.lookahead_off)
+[cSh3, cSl3] = request.security(symB, tf3, f_slope(slopeLen, sh3), lookahead = barmerge.lookahead_off)
 
 // quante candele di ciascuna sezione contiene lo storico caricato: e' questo,
 // non il mercato, a limitare il campione delle sezioni alte su un grafico veloce
@@ -345,83 +334,122 @@ f_track(int dir, int bkt, float a, int kBars) =>
         array.push(pMfe, 0.0)
         array.push(pMae, 0.0)
 
-// ═══════════════════ VALUTAZIONE DI UNA SEZIONE, LATO GRAFICO ════════════════
-//  Il valore restituito da request.security resta vero per tutte le barre del
-//  grafico contenute in una candela della sezione: senza rilevamento di FRONTE
-//  verrebbero emessi k marker identici.
-//  IL TRIGGER E' LA CONFERMA DI UNO QUALSIASI DEI DUE PIVOT, non solo di
-//  quello del prezzo. I due strumenti girano su barre diverse: se il minimo del
-//  riferimento cade due barre dopo quello dello strumento operato, al momento
-//  della conferma del prezzo il "pivot recente" del riferimento e' ancora
-//  quello PRECEDENTE, lo sfasamento risulta enorme e il setup viene scartato.
-//  Cosi' si perdevano sistematicamente tutti i casi in cui il riferimento gira
-//  per secondo, cioe' circa la meta'. Valutando su entrambe le conferme, e'
-//  il secondo dei due ad attivare il controllo, quando entrambe le strutture
-//  esistono. Il cooldown impedisce il doppio conteggio.
-f_side(bool en, bool isSell, bool nw, bool nwB,
-       float pR, float pP, float pAr, float pAp, float tR, float tP,
-       float cR, float cP, float cAr, float cAp,
-       float sd, float a_atr, int kBars, int cfg, string tag) =>
-    var int last = na
-    fr   = (nw and not nw[1]) or (nwB and not nwB[1])
-    th = minCDelta * sd
-    dP = minPDelta * a_atr
-    // P: lo strumento operato estende l'estremo, il riferimento no
-    // R: il riferimento estende l'estremo, lo strumento operato no
-    // Le due condizioni si escludono a vicenda: richiedono al prezzo di
-    // muoversi in direzioni opposte fra i due pivot.
-    ineqP = isSell ? (pR > pP + dP and cR < cP - th) : (pR < pP - dP and cR > cP + th)
-    ineqR = isSell ? (cR > cP + th and pR < pP - dP) : (cR < cP - th and pR > pP + dP)
-    ancP  = ineqP
-    ineq  = (useAncP and ineqP) or (useAncR and ineqR)
-    // il vincolo di distanza vale sui pivot della serie che ANCORA il segnale
-    gap  = ancP ? nz(pAp - pAr, 0) : nz(cAp - cAr, 0)
-    d0   = math.abs(nz(pAr, 1e9) - nz(cAr, -1e9))
-    d1   = math.abs(nz(pAp, 1e9) - nz(cAp, -1e9))
-    algA = d0 <= alignA and d1 <= alignA
-    algB = d0 <= alignM and d1 <= alignM
-    base = en and usePiv and fr and ineq and algB and corrOk and inSess
-         and gap >= minGap and gap <= maxGap
-         and not na(pP) and not na(cP)
-    cool = na(last) or bar_index - last >= cooldown
-    fire = base and cool
-    isA  = algA
+// ═════════════════════════ RICERCA DELLA COPPIA ══════════════════════════════
+// indice del pivot della serie B temporalmente piu' vicino a un dato istante
+f_nearIdx(array<float> gg, float tgt, int tol) =>
+    int best = -1
+    float bd = 1e12
+    if not na(tgt)
+        for i = 0 to array.size(gg) - 1
+            x = array.get(gg, i)
+            if not na(x)
+                d = math.abs(x - tgt)
+                if d <= tol and d < bd
+                    bd   := d
+                    best := i
+    best
 
-    // ── DIAGNOSTICA ──────────────────────────────────────────────────────────
-    // La sola GEOMETRIA, senza soglie di ampiezza: il prezzo va da una parte,
-    // il riferimento dall'altra. Se questa c'e' ma il segnale non esce, e' un
-    // filtro ad aver deciso, e va nominato invece che lasciato indovinare.
-    geoP = isSell ? (pR > pP and cR < cP) : (pR < pP and cR > cP)
-    geoR = isSell ? (cR > cP and pR < pP) : (cR < cP and pR > pP)
-    geo  = (useAncP and geoP) or (useAncR and geoR)
-    if showMiss and en and fr and geo and not fire and not na(pP) and not na(cP)
-        dPx = math.abs(pR - pP) / a_atr
-        dRf = math.abs(cR - cP) / sd
-        why = ""
-        why := why + (math.abs(pR - pP) <= dP  ? "prezzo<" + str.tostring(minPDelta, "#.00") + " " : "")
-        why := why + (math.abs(cR - cP) <= th  ? "rifer.<" + str.tostring(minCDelta, "#.00") + " " : "")
-        why := why + (gap < minGap ? "gap<min " : gap > maxGap ? "gap>max " : "")
-        why := why + (not algB     ? "sfasati " : "")
-        why := why + (not corrOk   ? "corr " : "")
-        why := why + (not inSess   ? "sessione " : "")
-        why := why + (not cool     ? "cooldown " : "")
-        label.new(bar_index, isSell ? high : low, "×", xloc.bar_index,
-             isSell ? yloc.abovebar : yloc.belowbar, color.new(color.gray, 100),
-             label.style_none, color.new(color.gray, 25), szLbl,
-             tooltip = "SCARTATO · " + (isSell ? "SELL " : "BUY ") + tag +
-                 "\nbloccato da: " + (why == "" ? "?" : why) +
-                 "\ndelta prezzo " + str.tostring(dPx, "#.00") + " ATR (soglia " + str.tostring(minPDelta, "#.00") + ")" +
-                 "\ndelta riferimento " + str.tostring(dRf, "#.00") + " (soglia " + str.tostring(minCDelta, "#.00") + ")" +
-                 "\ndistanza pivot " + str.tostring(gap) + " · sfasamento " +
-                 str.tostring(d0, "#") + "/" + str.tostring(d1, "#") + " (max " + str.tostring(alignM) + ")" +
-                 "\ncorrelazione " + str.tostring(corr, "#.00"))
+//  A = serie che ANCORA il segnale: e' lei a estendere l'estremo, e la coppia
+//      esaminata e' fatta dai SUOI pivot.
+//  B = serie confrontata: deve NON estenderlo, letta sui pivot allineati.
+//  Si prova j = 1, 2, 3 e ci si ferma alla prima coppia valida: la piu'
+//  recente, cioe' quella con la struttura ancora fresca.
+f_search(bool isSell, array<float> av, array<float> ag, array<float> bv, array<float> bg, float thA, float thB) =>
+    int jj = -1
+    int k0 = -1
+    int kj = -1
+    i0 = f_nearIdx(bg, array.get(ag, 0), alignM)
+    if i0 >= 0 and not na(array.get(av, 0))
+        for j = 1 to 3
+            if jj < 0
+                vj = array.get(av, j)
+                gp = nz(array.get(ag, j) - array.get(ag, 0), 0)
+                if not na(vj) and gp >= minGap and gp <= maxGap
+                    ext = isSell ? array.get(av, 0) > vj + thA : array.get(av, 0) < vj - thA
+                    if ext
+                        ij = f_nearIdx(bg, array.get(ag, j), alignM)
+                        if ij >= 0 and ij != i0
+                            b0v = array.get(bv, i0)
+                            bjv = array.get(bv, ij)
+                            noc = isSell ? b0v < bjv - thB : b0v > bjv + thB
+                            if noc
+                                jj := j
+                                k0 := i0
+                                kj := ij
+    [jj, k0, kj]
+
+// ═══════════════ VALUTAZIONE DI UNA SEZIONE, LATO GRAFICO ════════════════════
+//  Il trigger e' la conferma di UNO QUALSIASI dei due pivot: i due strumenti
+//  girano su barre diverse, e attendere solo il prezzo scarta ogni caso in cui
+//  e' il riferimento a girare per secondo.
+f_eval(bool en, bool isSell, bool nwA, bool nwB,
+       array<float> pv, array<float> pg, array<float> pt,
+       array<float> cv, array<float> cg,
+       float a_atr, float sd, int kBars, int cfg, string tag) =>
+    var int last = na
+    fr = (nwA and not nwA[1]) or (nwB and not nwB[1])
+    dP = minPDelta * a_atr
+    th = minCDelta * sd
+
+    int jP = -1
+    int kP0 = -1
+    int kPj = -1
+    if useAncP
+        [x1, x2, x3] = f_search(isSell, pv, pg, cv, cg, dP, th)
+        jP  := x1
+        kP0 := x2
+        kPj := x3
+    int jR = -1
+    int kR0 = -1
+    int kRj = -1
+    if useAncR and jP < 0
+        [y1, y2, y3] = f_search(isSell, cv, cg, pv, pg, th, dP)
+        jR  := y1
+        kR0 := y2
+        kRj := y3
+
+    ancP  = jP >= 0
+    found = ancP or jR >= 0
+
+    float pRv = na
+    float pOv = na
+    float tRv = na
+    float tOv = na
+    float cRv = na
+    float cOv = na
+    float dd0 = na
+    float dd1 = na
+    int   gp  = 0
+    if ancP
+        pRv := array.get(pv, 0)
+        pOv := array.get(pv, jP)
+        tRv := array.get(pt, 0)
+        tOv := array.get(pt, jP)
+        cRv := array.get(cv, kP0)
+        cOv := array.get(cv, kPj)
+        dd0 := math.abs(array.get(pg, 0)  - array.get(cg, kP0))
+        dd1 := math.abs(array.get(pg, jP) - array.get(cg, kPj))
+        gp  := int(nz(array.get(pg, jP) - array.get(pg, 0), 0))
+    else if jR >= 0
+        cRv := array.get(cv, 0)
+        cOv := array.get(cv, jR)
+        pRv := array.get(pv, kR0)
+        pOv := array.get(pv, kRj)
+        tRv := array.get(pt, kR0)
+        tOv := array.get(pt, kRj)
+        dd0 := math.abs(array.get(cg, 0)  - array.get(pg, kR0))
+        dd1 := math.abs(array.get(cg, jR) - array.get(pg, kRj))
+        gp  := int(nz(array.get(cg, jR) - array.get(cg, 0), 0))
+
+    isA  = dd0 <= alignA and dd1 <= alignA
+    cool = na(last) or bar_index - last >= cooldown
+    fire = en and usePiv and found and fr and cool and corrOk and inSess
     if fire
         last := bar_index
         col = isSell ? (isA ? cAS : cBS) : (isA ? cAB : cBB)
-        if drawLines and not na(tR) and not na(tP)
-            // ancoraggio al TEMPO della barra del pivot, non a un conteggio di
-            // barre moltiplicato per k: esatto anche con gap e sessioni.
-            line.new(int(tP), pP, int(tR), pR, xloc.bar_time, color = col,
+        if drawLines and not na(tRv) and not na(tOv)
+            // ancoraggio al TEMPO della barra del pivot: esatto anche con gap
+            line.new(int(tOv), pOv, int(tRv), pRv, xloc.bar_time, color = col,
                  width = isA ? 2 : 1, style = isA ? line.style_solid : line.style_dotted)
         label.new(bar_index, isSell ? high : low,
              (isSell ? "▼" : "▲") + (isA ? "A" : "B") + (ancP ? "P " : "R ") + tag,
@@ -430,64 +458,56 @@ f_side(bool en, bool isSell, bool nw, bool nwB,
              isSell ? color.white : color.black, szLbl,
              tooltip = (isSell ? "SELL " : "BUY ") + (isA ? "classe A" : "classe B") +
                  (ancP ? " · ancoraggio P (il prezzo estende)" : " · ancoraggio R (il riferimento estende)") + " · " + tag +
-                 "\nprezzo " + str.tostring(pP, format.mintick) + " → " + str.tostring(pR, format.mintick) +
-                 "\nriferimento " + str.tostring(cP, "#.####") + " → " + str.tostring(cR, "#.####") +
-                 " (" + str.tostring((cR - cP) / sd, "#.00") + " sd)" +
-                 "\ndistanza pivot " + str.tostring(gap) + " candele · sfasamento " +
-                 str.tostring(d0, "#") + "/" + str.tostring(d1, "#") +
+                 "\ncoppia pivot (1," + str.tostring((ancP ? jP : jR) + 1) + ")" +
+                 "\nprezzo " + str.tostring(pOv, format.mintick) + " → " + str.tostring(pRv, format.mintick) +
+                 "\nriferimento " + str.tostring(cOv, "#.####") + " → " + str.tostring(cRv, "#.####") +
+                 " (" + str.tostring((cRv - cOv) / sd, "#.00") + ")" +
+                 "\ndistanza pivot " + str.tostring(gp) + " · sfasamento " +
+                 str.tostring(dd0, "#") + "/" + str.tostring(dd1, "#") +
                  "\ncorrelazione " + str.tostring(corr, "#.00"))
-        // la seconda dimensione della tabella e' scelta dall'utente: non ci
-        // stanno 24 righe leggibili, e misurare una dimensione alla volta e'
-        // comunque il modo corretto di leggerle
         dim = tabDim == "Classe A/B" ? (isA ? 0 : 1) : tabDim == "Metodo Pivot/Pendenza" ? 0 : (ancP ? 0 : 1)
         f_track(isSell ? -1 : 1, cfg * 4 + (isSell ? 2 : 0) + dim, a_atr, kBars)
+
+    // ── DIAGNOSTICA: la geometria c'era ma un filtro l'ha scartata ───────────
+    if showMiss and en and usePiv and fr and not fire and not na(array.get(pv, 1)) and not na(array.get(cv, 1))
+        gv0 = isSell ? (array.get(pv, 0) > array.get(pv, 1) and array.get(cv, 0) < array.get(cv, 1)) : (array.get(pv, 0) < array.get(pv, 1) and array.get(cv, 0) > array.get(cv, 1))
+        gv1 = isSell ? (array.get(cv, 0) > array.get(cv, 1) and array.get(pv, 0) < array.get(pv, 1)) : (array.get(cv, 0) < array.get(cv, 1) and array.get(pv, 0) > array.get(pv, 1))
+        if gv0 or gv1
+            dpx = math.abs(array.get(pv, 0) - array.get(pv, 1)) / a_atr
+            drf = math.abs(array.get(cv, 0) - array.get(cv, 1)) / sd
+            gg  = nz(array.get(pg, 1) - array.get(pg, 0), 0)
+            sf  = math.abs(nz(array.get(pg, 0), 1e9) - nz(array.get(cg, 0), -1e9))
+            why = ""
+            why := why + (dpx <= minPDelta ? "prezzo<" + str.tostring(minPDelta, "#.00") + " " : "")
+            why := why + (drf <= minCDelta ? "rifer.<" + str.tostring(minCDelta, "#.00") + " " : "")
+            why := why + (gg < minGap ? "gap<min " : gg > maxGap ? "gap>max " : "")
+            why := why + (sf > alignM ? "sfasati " : "")
+            why := why + (not corrOk ? "corr " : "")
+            why := why + (not cool ? "cooldown " : "")
+            label.new(bar_index, isSell ? high : low, "×", xloc.bar_index,
+                 isSell ? yloc.abovebar : yloc.belowbar, color.new(color.gray, 100),
+                 label.style_none, color.new(color.gray, 25), szLbl,
+                 tooltip = "SCARTATO · " + (isSell ? "SELL " : "BUY ") + tag +
+                     "\nbloccato da: " + (why == "" ? "nessuna coppia (1,j) valida" : why) +
+                     "\ndelta prezzo " + str.tostring(dpx, "#.00") + " ATR (soglia " + str.tostring(minPDelta, "#.00") + ")" +
+                     "\ndelta riferimento " + str.tostring(drf, "#.00") + " (soglia " + str.tostring(minCDelta, "#.00") + ")" +
+                     "\ndistanza pivot " + str.tostring(gg) + " · sfasamento " + str.tostring(sf, "#") + " (max " + str.tostring(alignM) + ")" +
+                     "\ncorrelazione " + str.tostring(corr, "#.00"))
     [fire, isA, ancP]
 
-//  SEGNALE DI PENDENZA. Nessun pivot, quindi nessuna distanza minima e nessun
-//  allineamento: cadono tutti i filtri che scartavano il caso visivamente ovvio.
-//  Le due pendenze devono avere segno OPPOSTO e superare entrambe la soglia.
-//  Classe A quando entrambe la superano del doppio: inclinazione inequivocabile
-//  su tutti e due i lati, non una deriva marginale.
-f_slopeSig(bool en, bool isSell, float pS, float cS, float a_atr, int kBars, int cfg, string tag) =>
-    var int last = na
-    cond = isSell ? (pS < -slopeEps and cS > slopeEps) : (pS > slopeEps and cS < -slopeEps)
-    fr   = cond and not cond[1]
-    cool = na(last) or bar_index - last >= cooldown
-    fire = en and useSlo and fr and cool and corrOk and inSess and not na(pS) and not na(cS)
-    isA  = math.abs(pS) > 2 * slopeEps and math.abs(cS) > 2 * slopeEps
-    if fire
-        last := bar_index
-        col = isSell ? (isA ? cAS : cBS) : (isA ? cAB : cBB)
-        label.new(bar_index, isSell ? high : low,
-             (isSell ? "▼" : "▲") + "S" + (isA ? "A " : "B ") + tag,
-             xloc.bar_index, isSell ? yloc.abovebar : yloc.belowbar, col,
-             isSell ? label.style_label_down : label.style_label_up,
-             isSell ? color.white : color.black, szLbl,
-             tooltip = (isSell ? "SELL " : "BUY ") + "pendenza · classe " + (isA ? "A" : "B") + " · " + tag +
-                 "\npendenza prezzo " + str.tostring(pS, "#.0000") + " ATR/candela" +
-                 "\npendenza riferimento " + str.tostring(cS, "#.0000") + " ATR/candela" +
-                 "\nsoglia " + str.tostring(slopeEps, "#.0000") + " · finestra " + str.tostring(slopeLen) +
-                 "\ncorrelazione " + str.tostring(corr, "#.00"))
-        // con la tabella su ancoraggio P/R i segnali di pendenza non hanno una
-        // colonna sensata e restano fuori dal conteggio, invece di inquinarlo
-        if tabDim != "Ancoraggio P/R"
-            dim = tabDim == "Classe A/B" ? (isA ? 0 : 1) : 1
-            f_track(isSell ? -1 : 1, cfg * 4 + (isSell ? 2 : 0) + dim, a_atr, kBars)
-    [fire, isA]
+[b1, b1A, b1P] = f_eval(e1v, false, aLn_1, bLn_1, array.from(aLv0_1, aLv1_1, aLv2_1, aLv3_1), array.from(aLg0_1, aLg1_1, aLg2_1, aLg3_1), array.from(aLt0_1, aLt1_1, aLt2_1, aLt3_1), array.from(bLv0_1, bLv1_1, bLv2_1, bLv3_1), array.from(bLg0_1, bLg1_1, bLg2_1, bLg3_1), aAtr_1, bSd_1, kk1, 0, "S1 " + tf1)
+[s1, s1A, s1P] = f_eval(e1v, true,  aHn_1, bHn_1, array.from(aHv0_1, aHv1_1, aHv2_1, aHv3_1), array.from(aHg0_1, aHg1_1, aHg2_1, aHg3_1), array.from(aHt0_1, aHt1_1, aHt2_1, aHt3_1), array.from(bHv0_1, bHv1_1, bHv2_1, bHv3_1), array.from(bHg0_1, bHg1_1, bHg2_1, bHg3_1), aAtrH_1, bSdH_1, kk1, 0, "S1 " + tf1)
+[b2, b2A, b2P] = f_eval(e2v, false, aLn_2, bLn_2, array.from(aLv0_2, aLv1_2, aLv2_2, aLv3_2), array.from(aLg0_2, aLg1_2, aLg2_2, aLg3_2), array.from(aLt0_2, aLt1_2, aLt2_2, aLt3_2), array.from(bLv0_2, bLv1_2, bLv2_2, bLv3_2), array.from(bLg0_2, bLg1_2, bLg2_2, bLg3_2), aAtr_2, bSd_2, kk2, 1, "S2 " + tf2)
+[s2, s2A, s2P] = f_eval(e2v, true,  aHn_2, bHn_2, array.from(aHv0_2, aHv1_2, aHv2_2, aHv3_2), array.from(aHg0_2, aHg1_2, aHg2_2, aHg3_2), array.from(aHt0_2, aHt1_2, aHt2_2, aHt3_2), array.from(bHv0_2, bHv1_2, bHv2_2, bHv3_2), array.from(bHg0_2, bHg1_2, bHg2_2, bHg3_2), aAtrH_2, bSdH_2, kk2, 1, "S2 " + tf2)
+[b3, b3A, b3P] = f_eval(e3v, false, aLn_3, bLn_3, array.from(aLv0_3, aLv1_3, aLv2_3, aLv3_3), array.from(aLg0_3, aLg1_3, aLg2_3, aLg3_3), array.from(aLt0_3, aLt1_3, aLt2_3, aLt3_3), array.from(bLv0_3, bLv1_3, bLv2_3, bLv3_3), array.from(bLg0_3, bLg1_3, bLg2_3, bLg3_3), aAtr_3, bSd_3, kk3, 2, "S3 " + tf3)
+[s3, s3A, s3P] = f_eval(e3v, true,  aHn_3, bHn_3, array.from(aHv0_3, aHv1_3, aHv2_3, aHv3_3), array.from(aHg0_3, aHg1_3, aHg2_3, aHg3_3), array.from(aHt0_3, aHt1_3, aHt2_3, aHt3_3), array.from(bHv0_3, bHv1_3, bHv2_3, bHv3_3), array.from(bHg0_3, bHg1_3, bHg2_3, bHg3_3), aAtrH_3, bSdH_3, kk3, 2, "S3 " + tf3)
 
-[b1, b1A, b1P] = f_side(e1v, false, nl_1, cnl_1, aL0_1, aL1_1, aLa0_1, aLa1_1, lt0_1, lt1_1, bL0_1, bL1_1, bLa0_1, bLa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
-[s1, s1A, s1P] = f_side(e1v, true,  nh_1, cnh_1, aH0_1, aH1_1, aHa0_1, aHa1_1, ht0_1, ht1_1, bH0_1, bH1_1, bHa0_1, bHa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
-[b2, b2A, b2P] = f_side(e2v, false, nl_2, cnl_2, aL0_2, aL1_2, aLa0_2, aLa1_2, lt0_2, lt1_2, bL0_2, bL1_2, bLa0_2, bLa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
-[s2, s2A, s2P] = f_side(e2v, true,  nh_2, cnh_2, aH0_2, aH1_2, aHa0_2, aHa1_2, ht0_2, ht1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
-[b3, b3A, b3P] = f_side(e3v, false, nl_3, cnl_3, aL0_3, aL1_3, aLa0_3, aLa1_3, lt0_3, lt1_3, bL0_3, bL1_3, bLa0_3, bLa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
-[s3, s3A, s3P] = f_side(e3v, true,  nh_3, cnh_3, aH0_3, aH1_3, aHa0_3, aHa1_3, ht0_3, ht1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
-
-[y1, y1A] = f_slopeSig(e1v, false, pSl1, cSl1, atr_1, kk1, 0, "S1 " + tf1)
-[w1, w1A] = f_slopeSig(e1v, true,  pSh1, cSh1, atr_1, kk1, 0, "S1 " + tf1)
-[y2, y2A] = f_slopeSig(e2v, false, pSl2, cSl2, atr_2, kk2, 1, "S2 " + tf2)
-[w2, w2A] = f_slopeSig(e2v, true,  pSh2, cSh2, atr_2, kk2, 1, "S2 " + tf2)
-[y3, y3A] = f_slopeSig(e3v, false, pSl3, cSl3, atr_3, kk3, 2, "S3 " + tf3)
-[w3, w3A] = f_slopeSig(e3v, true,  pSh3, cSh3, atr_3, kk3, 2, "S3 " + tf3)
+[y1, y1A] = f_slopeSig(e1v, false, pSl1, cSl1, aAtr_1, kk1, 0, "S1 " + tf1)
+[w1, w1A] = f_slopeSig(e1v, true,  pSh1, cSh1, aAtr_1, kk1, 0, "S1 " + tf1)
+[y2, y2A] = f_slopeSig(e2v, false, pSl2, cSl2, aAtr_2, kk2, 1, "S2 " + tf2)
+[w2, w2A] = f_slopeSig(e2v, true,  pSh2, cSh2, aAtr_2, kk2, 1, "S2 " + tf2)
+[y3, y3A] = f_slopeSig(e3v, false, pSl3, cSl3, aAtr_3, kk3, 2, "S3 " + tf3)
+[w3, w3A] = f_slopeSig(e3v, true,  pSh3, cSh3, aAtr_3, kk3, 2, "S3 " + tf3)
 
 buyA  = (b1 and b1A) or (b2 and b2A) or (b3 and b3A) or (y1 and y1A) or (y2 and y2A) or (y3 and y3A)
 buyB  = (b1 and not b1A) or (b2 and not b2A) or (b3 and not b3A) or (y1 and not y1A) or (y2 and not y2A) or (y3 and not y3A)
