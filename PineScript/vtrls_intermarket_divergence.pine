@@ -38,7 +38,7 @@
 //  BENCHMARK NULLO: ingressi ciclici senza logica, stesso target e stesso stop.
 //  Un setup che non lo batte non ha edge, per quanto convincente sia il grafico.
 // =============================================================================
-indicator("VTRLS · Intermarket Divergence", "VTRLS X-Div", overlay = true,
+indicator("VTRLS · Intermarket Divergence", "VTRLS XDiv", overlay = true,
      max_labels_count = 500, max_lines_count = 500)
 
 // ─────────────────────── 1 · RIFERIMENTO E CONFRONTO ─────────────────────────
@@ -214,8 +214,7 @@ f_cp(simple int pvL, simple int pvR, simple bool shift) =>
     // del segnale cercato.
     // Per un oscillatore la stdev del livello e' invece la scala giusta,
     // perche' un oscillatore non ha ATR e il suo livello e' gia' la grandezza.
-    sd  = usePx ? math.max(ta.atr(atrLen), syminfo.mintick)
-                : math.max(ta.stdev(cs, statLen), 1e-12)
+    sd  = usePx ? math.max(ta.atr(atrLen), syminfo.mintick) : math.max(ta.stdev(cs, statLen), 1e-12)
     pl = ta.pivotlow(sLo,  pvL, pvR)
     ph = ta.pivothigh(sHi, pvL, pvR)
     var float l0 = na
@@ -483,8 +482,7 @@ if showTab and barstate.islast
         d0n = tabDim == "Classe A/B" ? "A" : "P"
         d1n = tabDim == "Classe A/B" ? "B" : "R"
         nm = isNull ? (b == 12 ? "NULL Buy" : "NULL Sell") :
-             "S" + str.tostring(cfg + 1) + (kind == 0 ? " Buy "  + d0n : kind == 1 ? " Buy "  + d1n :
-                                            kind == 2 ? " Sell " + d0n : " Sell " + d1n)
+             "S" + str.tostring(cfg + 1) + (kind == 0 ? " Buy " + d0n : kind == 1 ? " Buy " + d1n : kind == 2 ? " Sell " + d0n : " Sell " + d1n)
         tfl = isNull ? "rif" : array.get(tfs, cfg)
         act = isNull ? baseOn : array.get(ens, cfg)
         n  = array.get(stTot, b)
