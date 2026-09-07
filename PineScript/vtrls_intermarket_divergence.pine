@@ -529,6 +529,52 @@ f_eval(bool en, bool isSell, bool nwA, bool nwB,
 [b3, b3A, b3P] = f_eval(e3v, false, aLn_3, bLn_3, array.from(aLv0_3, aLv1_3, aLv2_3, aLv3_3), array.from(aLg0_3, aLg1_3, aLg2_3, aLg3_3), array.from(aLt0_3, aLt1_3, aLt2_3, aLt3_3), array.from(bLv0_3, bLv1_3, bLv2_3, bLv3_3), array.from(bLg0_3, bLg1_3, bLg2_3, bLg3_3), aAtr_3, bSd_3, aBB_3, kk3, 2, "S3 " + tf3)
 [s3, s3A, s3P] = f_eval(e3v, true,  aHn_3, bHn_3, array.from(aHv0_3, aHv1_3, aHv2_3, aHv3_3), array.from(aHg0_3, aHg1_3, aHg2_3, aHg3_3), array.from(aHt0_3, aHt1_3, aHt2_3, aHt3_3), array.from(bHv0_3, bHv1_3, bHv2_3, bHv3_3), array.from(bHg0_3, bHg1_3, bHg2_3, bHg3_3), aAtrH_3, bSdH_3, aBBH_3, kk3, 2, "S3 " + tf3)
 
+// ═══════════════════════ SEGNALE DI PENDENZA ═════════════════════════════════
+//  Nessun pivot, quindi nessuna distanza minima e nessun allineamento: cadono
+//  tutti i filtri che scartano il caso visivamente ovvio. Le due pendenze
+//  devono avere segno OPPOSTO e superare entrambe la soglia.
+//  Classe A quando entrambe la superano del doppio: inclinazione inequivocabile
+//  su tutti e due i lati, non una deriva marginale.
+f_slopeSig(bool en, bool isSell, float p1, float p2, float p3, float c1, float c2, float c3,
+           float a_atr, float bbPos, int kBars, int cfg, string tag) =>
+    var int last = na
+    // il disaccordo di pendenza deve valere su ALMENO UNO dei tre orizzonti:
+    // una deriva che dura 12 candele e' invisibile a una finestra da 40, e una
+    // che dura 50 viene diluita da una da 10. Scandire piu' orizzonti toglie
+    // l'arbitrio di scegliere quanto indietro guardare.
+    ok1 = isSell ? (p1 < -slopeEps and c1 > slopeEps) : (p1 > slopeEps and c1 < -slopeEps)
+    ok2 = isSell ? (p2 < -slopeEps and c2 > slopeEps) : (p2 > slopeEps and c2 < -slopeEps)
+    ok3 = isSell ? (p3 < -slopeEps and c3 > slopeEps) : (p3 > slopeEps and c3 < -slopeEps)
+    cond = ok1 or ok2 or ok3
+    win  = ok1 ? slopeL1 : ok2 ? slopeL2 : slopeL3
+    pS   = ok1 ? p1 : ok2 ? p2 : p3
+    cS   = ok1 ? c1 : ok2 ? c2 : c3
+    zoneOk = not useBB or (isSell ? bbPos >= bbHi : bbPos <= bbLo)
+    fr   = cond and not cond[1]
+    cool = na(last) or bar_index - last >= cooldown
+    fire = en and useSlo and fr and cool and corrOk and inSess and zoneOk and not na(pS) and not na(cS)
+    isA  = math.abs(pS) > 2 * slopeEps and math.abs(cS) > 2 * slopeEps
+    if fire
+        last := bar_index
+        col = isSell ? (isA ? cAS : cBS) : (isA ? cAB : cBB)
+        label.new(bar_index, isSell ? high : low,
+             (isSell ? "▼" : "▲") + "S" + (isA ? "A " : "B ") + tag,
+             xloc.bar_index, isSell ? yloc.abovebar : yloc.belowbar, col,
+             isSell ? label.style_label_down : label.style_label_up,
+             isSell ? color.white : color.black, szLbl,
+             tooltip = (isSell ? "SELL " : "BUY ") + "pendenza · classe " + (isA ? "A" : "B") + " · " + tag +
+                 "\npendenza prezzo " + str.tostring(pS, "#.0000") + " ATR/candela" +
+                 "\npendenza riferimento " + str.tostring(cS, "#.0000") + " ATR/candela" +
+                 "\nsoglia " + str.tostring(slopeEps, "#.0000") + " · finestra " + str.tostring(win) +
+                 "\nbanda " + str.tostring(bbPos, "#.00") +
+                 "\ncorrelazione " + str.tostring(corr, "#.00"))
+        // con la tabella su ancoraggio P/R i segnali di pendenza non hanno una
+        // colonna sensata e restano fuori dal conteggio, invece di inquinarlo
+        if tabDim != "Ancoraggio P/R"
+            dim = tabDim == "Classe A/B" ? (isA ? 0 : 1) : 1
+            f_track(isSell ? -1 : 1, cfg * 4 + (isSell ? 2 : 0) + dim, a_atr, kBars)
+    [fire, isA]
+
 [y1, y1A] = f_slopeSig(e1v, false, pL1_1, pL2_1, pL3_1, cL1_1, cL2_1, cL3_1, aAtr_1, aBB_1, kk1, 0, "S1 " + tf1)
 [w1, w1A] = f_slopeSig(e1v, true,  pH1_1, pH2_1, pH3_1, cH1_1, cH2_1, cH3_1, aAtrH_1, aBBH_1, kk1, 0, "S1 " + tf1)
 [y2, y2A] = f_slopeSig(e2v, false, pL1_2, pL2_2, pL3_2, cL1_2, cL2_2, cL3_2, aAtr_2, aBB_2, kk2, 1, "S2 " + tf2)
