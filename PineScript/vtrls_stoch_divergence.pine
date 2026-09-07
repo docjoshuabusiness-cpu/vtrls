@@ -1,165 +1,151 @@
 //@version=6
-// ═══════════════════════════════════════════════════════════════════════════
-//  VTRLS • Stochastic / Price Divergence Scanner
-//  - Divergenze regolari prezzo vs stocastico, multi-periodo + filtro HTF
-//  - Classe A (alta prob.): confermata dalla STRUTTURA dei pivot dello stoch
-//  - Classe B (bassa prob.): confermata solo dal VALORE stoch sui pivot prezzo
-//  - Nessun repaint: il segnale esce N barre dopo il pivot (Pivot right)
-//  - Tracker di esito integrato: MFE/MAE in ATR, hit-rate per configurazione
-// ═══════════════════════════════════════════════════════════════════════════
-indicator("VTRLS • Stoch Divergence Scanner", "VTRLS Div", overlay = true,
+// =============================================================================
+//  VTRLS · Stochastic / Price Divergence Scanner   v2
+//  ---------------------------------------------------------------------------
+//  TRE SEZIONI INDIPENDENTI: ognuna ha il PROPRIO TIMEFRAME e il proprio
+//  periodo di stocastico. La divergenza viene cercata NATIVAMENTE dentro il
+//  contesto di quel timeframe, non su una serie HTF mappata sul grafico.
+//
+//  PERCHE' NATIVAMENTE, E PERCHE' QUI LA RICOSTRUZIONE LIVE NON SI PUO' USARE
+//  Un attraversamento di soglia e' definito sul valore puntuale: chiedere
+//  "quanto varrebbe adesso" ha senso, ed e' la ragione per cui la ricostruzione
+//  live funziona su z-score e RSI. Un PIVOT no: e' definito dalle barre VICINE
+//  di quella serie. I pivot di una curva ricostruita a risoluzione del grafico
+//  non sono i pivot delle candele HTF, sono un altro oggetto. Su una serie a
+//  gradini si otterrebbero plateau e pivot fantasma.
+//  Quindi: pivot di prezzo e pivot di stocastico vengono entrambi calcolati
+//  DENTRO request.security, sulle candele del timeframe della sezione.
+//
+//  RITARDO, DICHIARATO
+//    - pvR candele DELLA SEZIONE: e' la conferma del pivot, ed e' voluta.
+//    - +1 candela della sezione se "Solo candele HTF chiuse" e' acceso.
+//      Serve: durante la formazione dell'ultima candela il pivot puo' apparire
+//      e sparire, perche' l'ultima delle pvR barre non e' ancora chiusa.
+//  Nessun repaint dello storico in nessuna delle due configurazioni.
+//
+//  DUE CLASSI DI QUALITA'
+//    A  il prezzo fa un minimo piu' basso E lo stocastico ha formato un PROPRIO
+//       pivot di minimo piu' alto del precedente, allineato temporalmente ai
+//       pivot di prezzo. Struttura confermata su entrambe le serie.
+//    B  la divergenza esiste solo leggendo il valore dello stocastico sulle
+//       barre dei pivot di prezzo. Nessuna conferma strutturale.
+//    Speculare per il lato ribassista.
+//
+//  MISURA DELL'EDGE
+//  Ogni segnale viene seguito per un orizzonte espresso in CANDELE DELLA
+//  SEZIONE, con target e stop in ATR DELLA SEZIONE: cosi' una divergenza su 5m
+//  e una su 15s sono confrontabili. La tabella riporta hit-rate, MFE e MAE per
+//  sezione x direzione x classe, piu' un BENCHMARK NULLO (ingressi ciclici
+//  senza logica). Un setup che non batte il benchmark non ha edge.
+//
+//  LIMITE DEI DATI: i timeframe a secondi hanno storico molto corto. La
+//  taratura va fatta su 1m-5m, dove il campione esiste, e poi trasferita.
+// =============================================================================
+indicator("VTRLS · Stoch Divergence Scanner", "VTRLS Div", overlay = true,
      max_labels_count = 500, max_lines_count = 500)
 
-// ─────────────────────────── 1 • STOCASTICO ───────────────────────────
-gS = "1 • Stocastico (multi-periodo)"
-usePivD = input.bool(true, "Rileva i pivot su %D (smussato)", group = gS,
-     tooltip = "Su TF a secondi %K è rumorosissimo. %D riduce i pivot spuri.")
+// ───────────────────── 1 · SEZIONI (timeframe + periodo) ──────────────────────
+gS = "1 · Sezioni · timeframe e periodo dello stocastico"
+usePivD = input.bool(true, "Rileva i pivot su %D invece che su %K", group = gS,
+     tooltip = "%K grezzo su timeframe bassi produce pivot spuri. %D e' la sua media mobile: meno pivot, piu' significativi.")
 
-e1 = input.bool(true,  "Cfg1", inline = "c1", group = gS)
-k1 = input.int(14, "%K", inline = "c1", minval = 1, group = gS)
-m1 = input.int(3,  "sm", inline = "c1", minval = 1, group = gS)
-d1 = input.int(3,  "%D", inline = "c1", minval = 1, group = gS)
+e1  = input.bool(true,  "S1", inline = "c1", group = gS)
+tf1 = input.timeframe("15S", "", inline = "c1", group = gS)
+k1  = input.int(14, "K",  inline = "c1", minval = 1, group = gS)
+m1  = input.int(3,  "sm", inline = "c1", minval = 1, group = gS)
+d1  = input.int(3,  "D",  inline = "c1", minval = 1, group = gS)
 
-e2 = input.bool(true,  "Cfg2", inline = "c2", group = gS)
-k2 = input.int(21, "%K", inline = "c2", minval = 1, group = gS)
-m2 = input.int(5,  "sm", inline = "c2", minval = 1, group = gS)
-d2 = input.int(5,  "%D", inline = "c2", minval = 1, group = gS)
+e2  = input.bool(true,  "S2", inline = "c2", group = gS)
+tf2 = input.timeframe("1", "", inline = "c2", group = gS)
+k2  = input.int(14, "K",  inline = "c2", minval = 1, group = gS)
+m2  = input.int(3,  "sm", inline = "c2", minval = 1, group = gS)
+d2  = input.int(3,  "D",  inline = "c2", minval = 1, group = gS)
 
-e3 = input.bool(false, "Cfg3", inline = "c3", group = gS)
-k3 = input.int(40, "%K", inline = "c3", minval = 1, group = gS)
-m3 = input.int(5,  "sm", inline = "c3", minval = 1, group = gS)
-d3 = input.int(8,  "%D", inline = "c3", minval = 1, group = gS)
+e3  = input.bool(true,  "S3", inline = "c3", group = gS)
+tf3 = input.timeframe("5", "", inline = "c3", group = gS)
+k3  = input.int(14, "K",  inline = "c3", minval = 1, group = gS)
+m3  = input.int(3,  "sm", inline = "c3", minval = 1, group = gS)
+d3  = input.int(3,  "D",  inline = "c3", minval = 1, group = gS)
 
-// ─────────────────────── 2 • PIVOT & CONFERMA ─────────────────────────
-gP = "2 • Pivot & conferma (ritardo)"
-pvL    = input.int(5, "Pivot left",  minval = 1, group = gP)
-pvR    = input.int(3, "Pivot right = barre di ritardo/conferma", minval = 1, group = gP,
-     tooltip = "Il segnale viene emesso pvR barre DOPO il pivot. Alzalo per meno falsi, piu ritardo.")
-minGap = input.int(5,  "Min barre tra i due pivot", minval = 2, group = gP)
-maxGap = input.int(60, "Max barre tra i due pivot", minval = 3, group = gP)
+htfConf = input.bool(true, "Solo candele della sezione CHIUSE (no repaint intrabar)", group = gS,
+     tooltip = "ACCESO (consigliato): il segnale viene letto dall'ultima candela CHIUSA della sezione. Costa fino a 1 candella della sezione di ritardo in piu', ma il marker non appare e scompare durante la formazione.\n\nSPENTO: il pivot puo' confermarsi durante la candela in corso e poi annullarsi, perche' l'ultima delle pvR barre non e' ancora chiusa. Piu' reattivo, ma il marker lampeggia.\n\nIrrilevante per una sezione con lo stesso timeframe del grafico.")
 
-// ───────────────────────────── 3 • FILTRI ─────────────────────────────
-gF = "3 • Filtri qualita"
+// ────────────────────── 2 · PIVOT E CONFERMA ─────────────────────────────────
+gP = "2 · Pivot e conferma"
+pvL    = input.int(5, "Pivot left (candele della sezione)",  minval = 1, group = gP)
+pvR    = input.int(3, "Pivot right = ritardo di conferma",   minval = 1, group = gP,
+     tooltip = "Il pivot esiste solo pvR candele DELLA SEZIONE dopo che si e' formato. E' il 'segnale qualche candela dopo': non e' un difetto, e' cio' che impedisce di anticipare una struttura non ancora formata.")
+minGap = input.int(5,  "Min candele tra i due pivot", minval = 2, group = gP)
+maxGap = input.int(60, "Max candele tra i due pivot", minval = 3, group = gP)
+
+// ───────────────────────────── 3 · FILTRI ────────────────────────────────────
+gF = "3 · Filtri qualita"
 useZone   = input.bool(true, "Richiedi zona OS/OB", group = gF)
 osLvl     = input.float(25, "Oversold  <", group = gF)
 obLvl     = input.float(75, "Overbought >", group = gF)
 minSDelta = input.float(2.0, "Delta minimo stocastico (punti)", minval = 0, group = gF)
-atrLen    = input.int(14, "ATR length", minval = 1, group = gF)
-minPDelta = input.float(0.15, "Spostamento minimo prezzo tra i pivot (x ATR)", minval = 0, group = gF)
+atrLen    = input.int(14, "ATR della sezione (candele)", minval = 1, group = gF)
+minPDelta = input.float(0.15, "Spostamento minimo del prezzo tra i pivot (x ATR sezione)", minval = 0, group = gF,
+     tooltip = "Uccide le micro-divergenze: due minimi distanti mezzo tick non sono un minimo piu' basso, sono rumore di quotazione.")
+alignTol  = input.int(10, "Tolleranza allineamento pivot stoch/prezzo (candele sezione)", minval = 1, group = gF,
+     tooltip = "Quanto lontano puo' stare il pivot dello stocastico dal pivot di prezzo per contare come conferma STRUTTURALE (classe A). Troppo stretto e la classe A non scatta mai, rendendo la distinzione A/B priva di significato.")
+cooldown  = input.int(20, "Cooldown fra segnali stessa direzione (barre del grafico)", minval = 0, group = gF,
+     tooltip = "Impedisce cluster di segnali correlati, che gonfiano N e falsano le statistiche.")
 useSess   = input.bool(false, "Filtro sessione", inline = "ss", group = gF)
 sess      = input.session("0930-1600", "", inline = "ss", group = gF)
-alignTol  = input.int(10, "Tolleranza allineamento pivot stoch/prezzo (barre)", minval = 1, group = gF,
-     tooltip = "Quanto lontano puo stare il pivot dello stocastico dal pivot di prezzo per contare come conferma STRUTTURALE (classe A).")
-cooldown  = input.int(20, "Cooldown: min barre tra due segnali stessa direzione", minval = 0, group = gF,
-     tooltip = "Impedisce cluster di segnali correlati che gonfiano N e falsano le statistiche.")
 
-// ─────────────────────── 4 • HIGHER TIMEFRAME ─────────────────────────
-gH = "4 • Conferma Higher Timeframe"
-useHTF = input.bool(false, "Attiva conferma HTF", group = gH)
-htfTF  = input.timeframe("1", "Timeframe superiore", group = gH)
+// ─────────────────── 4 · TRACKER DI ESITO (misura dell'edge) ─────────────────
+gT = "4 · Tracker di esito"
+trackOn = input.bool(true, "Attiva", group = gT)
+horizon = input.int(30, "Orizzonte (candele DELLA SEZIONE)", minval = 3, group = gT,
+     tooltip = "Espresso nelle candele della sezione, non del grafico: una divergenza su 5m ha 30 candele da 5 minuti, una su 15s ne ha 30 da 15 secondi. E' l'unico modo per confrontare timeframe diversi.")
+targATR = input.float(1.0, "Target (x ATR della sezione)", minval = 0.1, group = gT)
+stopATR = input.float(0.7, "Stop (x ATR della sezione)",   minval = 0.1, group = gT)
+showTab = input.bool(true, "Mostra tabella", group = gT)
+baseOn  = input.bool(true, "Benchmark nullo (ingressi ciclici)", group = gT,
+     tooltip = "Entra long e short ogni N barre senza alcuna logica, con lo stesso target e lo stesso stop. E' il livello di riferimento: un setup che non lo batte non ha edge, indipendentemente da quanto sia bello sul grafico.")
+baseN   = input.int(50, "   una coppia ogni N barre del grafico", minval = 5, group = gT)
 
-// ─────────────────────── 5 • TRACKER DI ESITO ─────────────────────────
-gT = "5 • Tracker di esito (edge measurement)"
-trackOn  = input.bool(true, "Attiva tracker", group = gT)
-horizon  = input.int(60, "Orizzonte massimo (barre)", minval = 5, group = gT)
-targATR  = input.float(1.0, "Target (x ATR)", minval = 0.1, group = gT)
-stopATR  = input.float(0.7, "Stop (x ATR)",   minval = 0.1, group = gT)
-showTab  = input.bool(true, "Mostra tabella statistiche", group = gT)
-baseOn   = input.bool(true, "Benchmark nullo (ingressi ciclici)", group = gT,
-     tooltip = "Entra long e short ogni N barre senza logica. E' il livello di riferimento: se le divergenze non lo battono, non hanno edge.")
-baseN    = input.int(50, "Benchmark: una coppia ogni N barre", minval = 5, group = gT)
+// ──────────────────────────── 5 · GRAFICA ────────────────────────────────────
+gG = "5 · Grafica"
+cAB = input.color(color.new(#00c853, 0), "Buy A",  inline = "g1", group = gG)
+cBB = input.color(color.new(#ffd600, 0), "Buy B",  inline = "g1", group = gG)
+cAS = input.color(color.new(#d50000, 0), "Sell A", inline = "g2", group = gG)
+cBS = input.color(color.new(#ff9100, 0), "Sell B", inline = "g2", group = gG)
+drawLines = input.bool(true, "Linee di divergenza (posizione approssimata)", group = gG,
+     tooltip = "I pivot vivono nel timeframe della sezione: le loro coordinate vengono riportate sul grafico moltiplicando per il rapporto fra i timeframe. La linea indica QUALI due estremi sono stati confrontati, non la barra esatta del grafico.")
+lblSize = input.string("tiny", "Dimensione label", options = ["tiny","small","normal"], group = gG)
 
-// ───────────────────────────── 6 • GRAFICA ────────────────────────────
-gG = "6 • Grafica"
-colA_B = input.color(color.new(#00c853, 0),  "Buy  classe A", inline = "g1", group = gG)
-colB_B = input.color(color.new(#ffd600, 0),  "Buy  classe B", inline = "g1", group = gG)
-colA_S = input.color(color.new(#d50000, 0),  "Sell classe A", inline = "g2", group = gG)
-colB_S = input.color(color.new(#ff9100, 0),  "Sell classe B", inline = "g2", group = gG)
-drawLines = input.bool(true, "Disegna linee di divergenza", group = gG)
-lblSize   = input.string("tiny", "Dimensione label", options = ["tiny","small","normal"], group = gG)
-
-// ═══════════════════════════ CALCOLI BASE ═════════════════════════════
-atr    = ta.atr(atrLen)
-inSess = not useSess or not na(time(timeframe.period, sess))
-szLbl  = lblSize == "tiny" ? size.tiny : lblSize == "small" ? size.small : size.normal
-
-htfK   = request.security(syminfo.tickerid, htfTF,
-             ta.sma(ta.stoch(close, high, low, k1), m1), lookahead = barmerge.lookahead_off)
-htfUp  = htfK > htfK[1]
-htfDn  = htfK < htfK[1]
-
-// ═══════════════════════ STATO TRACKER (globale) ══════════════════════
-var array<int>   pDir  = array.new<int>()
-var array<int>   pBkt  = array.new<int>()
-var array<int>   pBar  = array.new<int>()
-var array<float> pEnt  = array.new<float>()
-var array<float> pAtr  = array.new<float>()
-var array<float> pMfe  = array.new<float>()
-var array<float> pMae  = array.new<float>()
-
-var array<float> stTot = array.new<float>(14, 0)
-var array<float> stWin = array.new<float>(14, 0)
-var array<float> stMfe = array.new<float>(14, 0)
-var array<float> stMae = array.new<float>(14, 0)
-
-// ── valore del pivot stocastico piu vicino a una barra target (na se nessuno)
+// ═════════════════════════ MOTORE DI RILEVAMENTO ═════════════════════════════
+// Eseguita DENTRO il contesto del timeframe della sezione. Pivot di prezzo e
+// pivot di stocastico appartengono entrambi a quelle candele.
 f_near(array<float> vals, array<int> bars, int tgt, int tol) =>
     float best = na
     int   bd   = 1000000
     if array.size(bars) > 0 and not na(tgt)
         for i = 0 to array.size(bars) - 1
-            d = math.abs(array.get(bars, i) - tgt)
-            if d <= tol and d < bd
-                bd   := d
+            dd = math.abs(array.get(bars, i) - tgt)
+            if dd <= tol and dd < bd
+                bd   := dd
                 best := array.get(vals, i)
     best
 
-// ── registra un segnale nel tracker
-f_track(int dir, int bkt) =>
-    if trackOn and atr > 0
-        array.push(pDir, dir)
-        array.push(pBkt, bkt)
-        array.push(pBar, bar_index)
-        array.push(pEnt, close)
-        array.push(pAtr, atr)
-        array.push(pMfe, 0.0)
-        array.push(pMae, 0.0)
+f_div(simple int lk, simple int sm, simple int ld, simple bool shift) =>
+    kv  = ta.sma(ta.stoch(close, high, low, lk), sm)
+    dv  = ta.sma(kv, ld)
+    st  = usePivD ? dv : kv
+    atrS = math.max(ta.atr(atrLen), syminfo.mintick)
 
-// ═══════════════════════════ SCANNER ══════════════════════════════════
-// Ritorna [buyA, buyB, sellA, sellB] per la configurazione data.
-f_scan(bool en, int lk, int sm, int ld, int cfg, string tag) =>
-    kv = ta.sma(ta.stoch(close, high, low, lk), sm)
-    dv = ta.sma(kv, ld)
-    st = usePivD ? dv : kv
-
-    // pivot di prezzo e pivot dello stocastico (stessa geometria)
     pl = ta.pivotlow(low,   pvL, pvR)
     ph = ta.pivothigh(high, pvL, pvR)
     sl = ta.pivotlow(st,    pvL, pvR)
     sh = ta.pivothigh(st,   pvL, pvR)
 
-    // memoria pivot di prezzo (min)
-    var float lP0 = na
-    var float lP1 = na
-    var float lS0 = na
-    var float lS1 = na
-    var int   lB0 = na
-    var int   lB1 = na
-    // memoria pivot di prezzo (max)
-    var float hP0 = na
-    var float hP1 = na
-    var float hS0 = na
-    var float hS1 = na
-    var int   hB0 = na
-    var int   hB1 = na
-    // storico dei pivot propri dello stocastico (per allineamento tollerante)
+    // storico dei pivot propri dello stocastico, per l'allineamento tollerante
     var array<float> zLv = array.new<float>()
     var array<int>   zLb = array.new<int>()
     var array<float> zHv = array.new<float>()
     var array<int>   zHb = array.new<int>()
-    var int lastBuyBar  = na
-    var int lastSellBar = na
-
     if not na(sl)
         array.push(zLv, sl)
         array.push(zLb, bar_index - pvR)
@@ -173,12 +159,29 @@ f_scan(bool en, int lk, int sm, int ld, int cfg, string tag) =>
             array.shift(zHv)
             array.shift(zHb)
 
+    // ultimi due pivot di prezzo, con il valore dello stocastico su quelle barre
+    var float lP0 = na
+    var float lP1 = na
+    var float lS0 = na
+    var float lS1 = na
+    var int   lB0 = na
+    var int   lB1 = na
+    var float hP0 = na
+    var float hP1 = na
+    var float hS0 = na
+    var float hS1 = na
+    var int   hB0 = na
+    var int   hB1 = na
+
     bool buyA  = false
     bool buyB  = false
     bool sellA = false
     bool sellB = false
+    float pRec = na
+    float pOld = na
+    int   gOut = 0
 
-    // ── BULLISH: prezzo LL, stocastico HL
+    // BULLISH: prezzo minimo piu' basso, stocastico minimo piu' alto
     if not na(pl)
         lP1 := lP0
         lS1 := lS0
@@ -186,23 +189,22 @@ f_scan(bool en, int lk, int sm, int ld, int cfg, string tag) =>
         lP0 := pl
         lS0 := st[pvR]
         lB0 := bar_index - pvR
-        gap = nz(lB0 - lB1, 0)
-        base = not na(lP1) and gap >= minGap and gap <= maxGap
-             and lP0 < lP1 - minPDelta * atr
+        g = nz(lB0 - lB1, 0)
+        base = not na(lP1) and g >= minGap and g <= maxGap
+             and lP0 < lP1 - minPDelta * atrS
              and lS0 > lS1 + minSDelta
              and (not useZone or math.min(lS0, lS1) < osLvl)
-             and inSess and (not useHTF or htfUp)
-        // struttura: pivot dello stocastico allineati ai pivot di prezzo, in salita
         v0 = f_near(zLv, zLb, lB0, alignTol)
         v1 = f_near(zLv, zLb, lB1, alignTol)
         struc = not na(v0) and not na(v1) and v0 > v1 + minSDelta
-        cool  = na(lastBuyBar) or bar_index - lastBuyBar >= cooldown
-        if base and en and cool
+        if base
             buyA := struc
             buyB := not struc
-            lastBuyBar := bar_index
+            pRec := lP0
+            pOld := lP1
+            gOut := g
 
-    // ── BEARISH: prezzo HH, stocastico LH
+    // BEARISH: prezzo massimo piu' alto, stocastico massimo piu' basso
     if not na(ph)
         hP1 := hP0
         hS1 := hS0
@@ -210,128 +212,225 @@ f_scan(bool en, int lk, int sm, int ld, int cfg, string tag) =>
         hP0 := ph
         hS0 := st[pvR]
         hB0 := bar_index - pvR
-        gap = nz(hB0 - hB1, 0)
-        base = not na(hP1) and gap >= minGap and gap <= maxGap
-             and hP0 > hP1 + minPDelta * atr
+        g = nz(hB0 - hB1, 0)
+        base = not na(hP1) and g >= minGap and g <= maxGap
+             and hP0 > hP1 + minPDelta * atrS
              and hS0 < hS1 - minSDelta
              and (not useZone or math.max(hS0, hS1) > obLvl)
-             and inSess and (not useHTF or htfDn)
         v0 = f_near(zHv, zHb, hB0, alignTol)
         v1 = f_near(zHv, zHb, hB1, alignTol)
         struc = not na(v0) and not na(v1) and v0 < v1 - minSDelta
-        cool  = na(lastSellBar) or bar_index - lastSellBar >= cooldown
-        if base and en and cool
+        if base and not (buyA or buyB)
             sellA := struc
             sellB := not struc
-            lastSellBar := bar_index
+            pRec := hP0
+            pOld := hP1
+            gOut := g
 
-    // ── disegno
-    if buyA or buyB
-        c = buyA ? colA_B : colB_B
+    [shift ? buyA[1]  : buyA,
+     shift ? buyB[1]  : buyB,
+     shift ? sellA[1] : sellA,
+     shift ? sellB[1] : sellB,
+     shift ? pRec[1]  : pRec,
+     shift ? pOld[1]  : pOld,
+     shift ? gOut[1]  : gOut,
+     shift ? atrS[1]  : atrS,
+     shift ? st[1]    : st]
+
+// ═════════════════════════ CONTESTO DEL GRAFICO ══════════════════════════════
+chartSec = timeframe.in_seconds()
+sec1 = timeframe.in_seconds(tf1)
+sec2 = timeframe.in_seconds(tf2)
+sec3 = timeframe.in_seconds(tf3)
+// k = quante barre del grafico entrano in una candela della sezione
+kk1 = int(math.max(1, math.round(sec1 / float(chartSec))))
+kk2 = int(math.max(1, math.round(sec2 / float(chartSec))))
+kk3 = int(math.max(1, math.round(sec3 / float(chartSec))))
+
+[bA1, bB1, sA1, sB1, pR1, pO1, gp1, at1, st1] = request.security(syminfo.tickerid, tf1, f_div(k1, m1, d1, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
+[bA2, bB2, sA2, sB2, pR2, pO2, gp2, at2, st2] = request.security(syminfo.tickerid, tf2, f_div(k2, m2, d2, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
+[bA3, bB3, sA3, sB3, pR3, pO3, gp3, at3, st3] = request.security(syminfo.tickerid, tf3, f_div(k3, m3, d3, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+
+inSess = not useSess or not na(time(timeframe.period, sess))
+szLbl  = lblSize == "tiny" ? size.tiny : lblSize == "small" ? size.small : size.normal
+
+// ═════════════════════════ STATO DEL TRACKER ═════════════════════════════════
+var array<int>   pDir = array.new<int>()
+var array<int>   pBkt = array.new<int>()
+var array<int>   pBar = array.new<int>()
+var array<int>   pHor = array.new<int>()
+var array<float> pEnt = array.new<float>()
+var array<float> pAtr = array.new<float>()
+var array<float> pMfe = array.new<float>()
+var array<float> pMae = array.new<float>()
+
+var array<float> stTot = array.new<float>(14, 0)
+var array<float> stWin = array.new<float>(14, 0)
+var array<float> stMfe = array.new<float>(14, 0)
+var array<float> stMae = array.new<float>(14, 0)
+
+f_track(int dir, int bkt, float a, int kBars) =>
+    if trackOn and a > 0
+        array.push(pDir, dir)
+        array.push(pBkt, bkt)
+        array.push(pBar, bar_index)
+        array.push(pHor, horizon * kBars)
+        array.push(pEnt, close)
+        array.push(pAtr, a)
+        array.push(pMfe, 0.0)
+        array.push(pMae, 0.0)
+
+// ═══════════════ EMISSIONE SUL GRAFICO (fronte + cooldown) ═══════════════════
+// Il valore restituito da request.security resta vero per tutte le barre del
+// grafico contenute nella candela della sezione: senza rilevamento di FRONTE
+// verrebbero emessi k segnali identici. Il cooldown e' invece l'anti-cluster.
+f_emit(bool en, bool a, bool b, bool isSell, float pRec, float pOld, int g,
+       float a_atr, int kBars, int cfg, string tag) =>
+    var int lastB = na
+    var int lastS = na
+    fr   = (a or b) and not (a[1] or b[1])
+    cool = isSell ? (na(lastS) or bar_index - lastS >= cooldown) : (na(lastB) or bar_index - lastB >= cooldown)
+    fire = en and fr and cool and inSess and not na(pRec)
+    if fire
+        if isSell
+            lastS := bar_index
+        else
+            lastB := bar_index
+        col = isSell ? (a ? cAS : cBS) : (a ? cAB : cBB)
         if drawLines
-            line.new(lB1, lP1, lB0, lP0, xloc.bar_index, color = c, width = buyA ? 2 : 1,
-                 style = buyA ? line.style_solid : line.style_dotted)
-        label.new(bar_index, low, (buyA ? "▲A " : "▲B ") + tag, xloc.bar_index,
-             yloc.belowbar, c, label.style_label_up, color.black, szLbl)
-    if sellA or sellB
-        c = sellA ? colA_S : colB_S
-        if drawLines
-            line.new(hB1, hP1, hB0, hP0, xloc.bar_index, color = c, width = sellA ? 2 : 1,
-                 style = sellA ? line.style_solid : line.style_dotted)
-        label.new(bar_index, high, (sellA ? "▼A " : "▼B ") + tag, xloc.bar_index,
-             yloc.abovebar, c, label.style_label_down, color.white, szLbl)
+            // i pivot vivono nel timeframe della sezione: coordinate riportate
+            // sul grafico moltiplicando per k. Indica QUALI estremi, non dove.
+            x0 = bar_index - pvR * kBars
+            x1 = x0 - g * kBars
+            line.new(x1, pOld, x0, pRec, xloc.bar_index, color = col,
+                 width = a ? 2 : 1, style = a ? line.style_solid : line.style_dotted)
+        label.new(bar_index, isSell ? high : low,
+             (isSell ? (a ? "▼A " : "▼B ") : (a ? "▲A " : "▲B ")) + tag,
+             xloc.bar_index, isSell ? yloc.abovebar : yloc.belowbar, col,
+             isSell ? label.style_label_down : label.style_label_up,
+             isSell ? color.white : color.black, szLbl,
+             tooltip = (isSell ? "SELL " : "BUY ") + (a ? "classe A" : "classe B") + " · " + tag +
+                 "\npivot recente " + str.tostring(pRec, format.mintick) +
+                 " · precedente " + str.tostring(pOld, format.mintick) +
+                 "\ndistanza " + str.tostring(g) + " candele della sezione" +
+                 "\nATR sezione " + str.tostring(a_atr, format.mintick))
+        f_track(isSell ? -1 : 1, cfg * 4 + (isSell ? (a ? 2 : 3) : (a ? 0 : 1)), a_atr, kBars)
+    fire
 
-    // ── registrazione nel tracker
-    if buyA or buyB
-        f_track(1, cfg * 4 + (buyA ? 0 : 1))
-    if sellA or sellB
-        f_track(-1, cfg * 4 + (sellA ? 2 : 3))
+f1b = f_emit(e1, bA1, bB1, false, pR1, pO1, gp1, at1, kk1, 0, "S1 " + tf1)
+f1s = f_emit(e1, sA1, sB1, true,  pR1, pO1, gp1, at1, kk1, 0, "S1 " + tf1)
+f2b = f_emit(e2, bA2, bB2, false, pR2, pO2, gp2, at2, kk2, 1, "S2 " + tf2)
+f2s = f_emit(e2, sA2, sB2, true,  pR2, pO2, gp2, at2, kk2, 1, "S2 " + tf2)
+f3b = f_emit(e3, bA3, bB3, false, pR3, pO3, gp3, at3, kk3, 2, "S3 " + tf3)
+f3s = f_emit(e3, sA3, sB3, true,  pR3, pO3, gp3, at3, kk3, 2, "S3 " + tf3)
 
-    [buyA, buyB, sellA, sellB]
+buyHi  = (f1b and bA1) or (f2b and bA2) or (f3b and bA3)
+buyLo  = (f1b and bB1) or (f2b and bB2) or (f3b and bB3)
+sellHi = (f1s and sA1) or (f2s and sA2) or (f3s and sA3)
+sellLo = (f1s and sB1) or (f2s and sB2) or (f3s and sB3)
 
-[bA1, bB1, sA1, sB1] = f_scan(e1, k1, m1, d1, 0, "C1")
-[bA2, bB2, sA2, sB2] = f_scan(e2, k2, m2, d2, 1, "C2")
-[bA3, bB3, sA3, sB3] = f_scan(e3, k3, m3, d3, 2, "C3")
-
-buyHi  = bA1 or bA2 or bA3
-buyLo  = bB1 or bB2 or bB3
-sellHi = sA1 or sA2 or sA3
-sellLo = sB1 or sB2 or sB3
-
-// ─────────────────── BENCHMARK NULLO (livello di riferimento) ─────────
+// ─────────────── BENCHMARK NULLO: stessa scala della sezione 1 ───────────────
 if baseOn and bar_index % baseN == 0 and inSess
-    f_track(1, 12)
-    f_track(-1, 13)
+    f_track(1,  12, at1, kk1)
+    f_track(-1, 13, at1, kk1)
 
-// ═════════════════════ RISOLUZIONE ESITI (MFE/MAE) ════════════════════
+// ═════════════════════ RISOLUZIONE DEGLI ESITI (MFE/MAE) ═════════════════════
 if trackOn and array.size(pDir) > 0
     for i = array.size(pDir) - 1 to 0
         ent = array.get(pEnt, i)
-        a   = array.get(pAtr, i)
+        aa  = array.get(pAtr, i)
         dir = array.get(pDir, i)
-        mfe = math.max(array.get(pMfe, i), (dir == 1 ? high - ent : ent - low)  / a)
-        mae = math.min(array.get(pMae, i), (dir == 1 ? low  - ent : ent - high) / a)
+        mfe = math.max(array.get(pMfe, i), (dir == 1 ? high - ent : ent - low)  / aa)
+        mae = math.min(array.get(pMae, i), (dir == 1 ? low  - ent : ent - high) / aa)
         array.set(pMfe, i, mfe)
         array.set(pMae, i, mae)
         age  = bar_index - array.get(pBar, i)
         done = false
         win  = false
+        // lo stop viene controllato PRIMA del target: senza dati intrabar e'
+        // l'ipotesi conservativa, e sovrastimare l'edge e' l'errore costoso
         if mae <= -stopATR
             done := true
         else if mfe >= targATR
             done := true
             win  := true
-        else if age >= horizon
+        else if age >= array.get(pHor, i)
             done := true
         if done
-            b = array.get(pBkt, i)
-            array.set(stTot, b, array.get(stTot, b) + 1)
-            array.set(stWin, b, array.get(stWin, b) + (win ? 1 : 0))
-            array.set(stMfe, b, array.get(stMfe, b) + mfe)
-            array.set(stMae, b, array.get(stMae, b) + mae)
+            bk = array.get(pBkt, i)
+            array.set(stTot, bk, array.get(stTot, bk) + 1)
+            array.set(stWin, bk, array.get(stWin, bk) + (win ? 1 : 0))
+            array.set(stMfe, bk, array.get(stMfe, bk) + mfe)
+            array.set(stMae, bk, array.get(stMae, bk) + mae)
             array.remove(pDir, i)
             array.remove(pBkt, i)
             array.remove(pBar, i)
+            array.remove(pHor, i)
             array.remove(pEnt, i)
             array.remove(pAtr, i)
             array.remove(pMfe, i)
             array.remove(pMae, i)
 
-// ═══════════════════════════ TABELLA ══════════════════════════════════
-var table tb = table.new(position.top_right, 5, 16, border_width = 1)
+// ════════════════════════════════ TABELLA ════════════════════════════════════
+var table tb = table.new(position.top_right, 6, 17, border_width = 1)
 if showTab and barstate.islast
     hb = color.new(color.gray, 20)
-    table.cell(tb, 0, 0, "Setup",  text_color = color.white, bgcolor = hb, text_size = size.tiny)
-    table.cell(tb, 1, 0, "N",      text_color = color.white, bgcolor = hb, text_size = size.tiny)
-    table.cell(tb, 2, 0, "Win%",   text_color = color.white, bgcolor = hb, text_size = size.tiny)
-    table.cell(tb, 3, 0, "MFE",    text_color = color.white, bgcolor = hb, text_size = size.tiny)
-    table.cell(tb, 4, 0, "MAE",    text_color = color.white, bgcolor = hb, text_size = size.tiny)
-    breakeven = stopATR / (targATR + stopATR) * 100
+    table.cell(tb, 0, 0, "Setup", text_color = color.white, bgcolor = hb, text_size = size.tiny)
+    table.cell(tb, 1, 0, "TF",    text_color = color.white, bgcolor = hb, text_size = size.tiny)
+    table.cell(tb, 2, 0, "N",     text_color = color.white, bgcolor = hb, text_size = size.tiny)
+    table.cell(tb, 3, 0, "Win%",  text_color = color.white, bgcolor = hb, text_size = size.tiny)
+    table.cell(tb, 4, 0, "MFE",   text_color = color.white, bgcolor = hb, text_size = size.tiny)
+    table.cell(tb, 5, 0, "MAE",   text_color = color.white, bgcolor = hb, text_size = size.tiny)
+    tfs = array.from(tf1, tf2, tf3)
+    ens = array.from(e1, e2, e3)
+    // soglia di pareggio implicita in target/stop: sotto questa, perdi
+    be  = stopATR / (targATR + stopATR) * 100
     for b = 0 to 13
         cfg  = int(b / 4)
         kind = b % 4
-        nm   = b == 12 ? "NULL Buy" : b == 13 ? "NULL Sell" :
-             "C" + str.tostring(cfg + 1) + (kind == 0 ? " Buy A" : kind == 1 ? " Buy B" : kind == 2 ? " Sell A" : " Sell B")
-        n    = array.get(stTot, b)
-        w    = n > 0 ? array.get(stWin, b) / n * 100 : na
-        mf   = n > 0 ? array.get(stMfe, b) / n : na
-        ma   = n > 0 ? array.get(stMae, b) / n : na
-        cc   = b >= 12 ? color.gray : kind == 0 ? colA_B : kind == 1 ? colB_B : kind == 2 ? colA_S : colB_S
-        wc   = na(w) ? color.white : w >= breakeven ? color.lime : color.red
-        table.cell(tb, 0, b + 1, nm, text_color = cc, text_size = size.tiny)
-        table.cell(tb, 1, b + 1, str.tostring(n, "#"), text_color = color.white, text_size = size.tiny)
-        table.cell(tb, 2, b + 1, na(w)  ? "-" : str.tostring(w,  "#.0"), text_color = wc, text_size = size.tiny)
-        table.cell(tb, 3, b + 1, na(mf) ? "-" : str.tostring(mf, "#.00"), text_color = color.white, text_size = size.tiny)
-        table.cell(tb, 4, b + 1, na(ma) ? "-" : str.tostring(ma, "#.00"), text_color = color.white, text_size = size.tiny)
-    table.cell(tb, 0, 15, "BE " + str.tostring(breakeven, "#.0") + "% | aperti " + str.tostring(array.size(pDir)), text_color = color.gray, text_size = size.tiny)
+        isNull = b >= 12
+        nm  = isNull ? (b == 12 ? "NULL Buy" : "NULL Sell") :
+             "S" + str.tostring(cfg + 1) + (kind == 0 ? " Buy A" : kind == 1 ? " Buy B" : kind == 2 ? " Sell A" : " Sell B")
+        tfl = isNull ? "rif" : array.get(tfs, cfg)
+        act = isNull ? baseOn : array.get(ens, cfg)
+        n   = array.get(stTot, b)
+        w   = n > 0 ? array.get(stWin, b) / n * 100 : na
+        mf  = n > 0 ? array.get(stMfe, b) / n : na
+        ma  = n > 0 ? array.get(stMae, b) / n : na
+        cc  = not act ? color.gray : isNull ? color.silver :
+             kind == 0 ? cAB : kind == 1 ? cBB : kind == 2 ? cAS : cBS
+        wc  = na(w) ? color.gray : w >= be ? color.lime : color.red
+        table.cell(tb, 0, b + 1, nm,  text_color = cc, text_size = size.tiny)
+        table.cell(tb, 1, b + 1, tfl, text_color = color.silver, text_size = size.tiny)
+        table.cell(tb, 2, b + 1, str.tostring(n, "#"), text_color = n < 30 ? color.orange : color.white, text_size = size.tiny)
+        table.cell(tb, 3, b + 1, na(w)  ? "–" : str.tostring(w,  "#.0"), text_color = wc, text_size = size.tiny)
+        table.cell(tb, 4, b + 1, na(mf) ? "–" : str.tostring(mf, "#.00"), text_color = color.white, text_size = size.tiny)
+        table.cell(tb, 5, b + 1, na(ma) ? "–" : str.tostring(ma, "#.00"), text_color = color.white, text_size = size.tiny)
+    warn = (e1 and sec1 < chartSec) or (e2 and sec2 < chartSec) or (e3 and sec3 < chartSec)
+    table.cell(tb, 0, 15, warn ? "⚠ TF < grafico" : "pareggio", text_color = warn ? color.orange : color.silver, text_size = size.tiny)
+    table.cell(tb, 1, 15, str.tostring(be, "#.0") + "%", text_color = color.silver, text_size = size.tiny)
+    table.cell(tb, 2, 15, "aperti " + str.tostring(array.size(pDir)), text_color = color.gray, text_size = size.tiny)
+    table.cell(tb, 3, 15, "orizz " + str.tostring(horizon), text_color = color.gray, text_size = size.tiny)
+    table.cell(tb, 4, 15, "t " + str.tostring(targATR, "#.0"), text_color = color.gray, text_size = size.tiny)
+    table.cell(tb, 5, 15, "s " + str.tostring(stopATR, "#.0"), text_color = color.gray, text_size = size.tiny)
+    table.cell(tb, 0, 16, "stoch ora", text_color = color.silver, text_size = size.tiny)
+    table.cell(tb, 1, 16, e1 ? str.tostring(st1, "#.0") : "–", text_color = color.white, text_size = size.tiny)
+    table.cell(tb, 2, 16, e2 ? str.tostring(st2, "#.0") : "–", text_color = color.white, text_size = size.tiny)
+    table.cell(tb, 3, 16, e3 ? str.tostring(st3, "#.0") : "–", text_color = color.white, text_size = size.tiny)
+    table.cell(tb, 4, 16, "", text_size = size.tiny)
+    table.cell(tb, 5, 16, htfConf ? "chiuse" : "intrabar", text_color = htfConf ? color.silver : color.yellow, text_size = size.tiny)
 
-// ═══════════════════════════ ALERT ════════════════════════════════════
-alertcondition(buyHi,  "Divergenza BUY  classe A", "VTRLS: divergenza rialzista ALTA probabilita")
-alertcondition(buyLo,  "Divergenza BUY  classe B", "VTRLS: divergenza rialzista BASSA probabilita")
-alertcondition(sellHi, "Divergenza SELL classe A", "VTRLS: divergenza ribassista ALTA probabilita")
-alertcondition(sellLo, "Divergenza SELL classe B", "VTRLS: divergenza ribassista BASSA probabilita")
+// ═══════════════════════════════ ALERT ═══════════════════════════════════════
+alertcondition(buyHi,  "Divergenza BUY classe A",  "VTRLS: divergenza rialzista classe A")
+alertcondition(buyLo,  "Divergenza BUY classe B",  "VTRLS: divergenza rialzista classe B")
+alertcondition(sellHi, "Divergenza SELL classe A", "VTRLS: divergenza ribassista classe A")
+alertcondition(sellLo, "Divergenza SELL classe B", "VTRLS: divergenza ribassista classe B")
+alertcondition(buyHi or buyLo,   "Divergenza BUY (qualsiasi)",  "VTRLS: divergenza rialzista")
+alertcondition(sellHi or sellLo, "Divergenza SELL (qualsiasi)", "VTRLS: divergenza ribassista")
 
 if buyHi or buyLo or sellHi or sellLo
-    dirTxt = (buyHi or buyLo) ? "BUY" : "SELL"
-    clsTxt = (buyHi or sellHi) ? "A (alta prob.)" : "B (bassa prob.)"
-    alert("VTRLS Div " + dirTxt + " " + clsTxt + " @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    dirT = (buyHi or buyLo) ? "BUY" : "SELL"
+    clsT = (buyHi or sellHi) ? "A" : "B"
+    tfT  = (f1b or f1s) ? tf1 : (f2b or f2s) ? tf2 : tf3
+    alert("VTRLS Div " + dirT + " [" + clsT + "] " + tfT + " · " + syminfo.ticker +
+         " @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
