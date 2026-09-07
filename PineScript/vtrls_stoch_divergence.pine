@@ -270,6 +270,12 @@ kk3 = int(math.max(1, math.round(sec3 / float(chartSec))))
 [bA2, bB2, sA2, sB2, pR2, pO2, tR2, tO2, gp2, at2, st2] = request.security(syminfo.tickerid, tf2, f_div(k2, m2, d2, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
 [bA3, bB3, sA3, sB3, pR3, pO3, tR3, tO3, gp3, at3, st3] = request.security(syminfo.tickerid, tf3, f_div(k3, m3, d3, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
 
+// quante candele di ciascuna sezione contiene lo storico caricato: e' questo,
+// non il mercato, a limitare il campione delle sezioni alte su un grafico veloce
+nb1 = request.security(syminfo.tickerid, tf1, bar_index, lookahead = barmerge.lookahead_off)
+nb2 = request.security(syminfo.tickerid, tf2, bar_index, lookahead = barmerge.lookahead_off)
+nb3 = request.security(syminfo.tickerid, tf3, bar_index, lookahead = barmerge.lookahead_off)
+
 inSess = not useSess or not na(time(timeframe.period, sess))
 szLbl  = lblSize == "tiny" ? size.tiny : lblSize == "small" ? size.small : size.normal
 
@@ -389,7 +395,7 @@ if trackOn and array.size(pDir) > 0
             array.remove(pMae, i)
 
 // ════════════════════════════════ TABELLA ════════════════════════════════════
-var table tb = table.new(position.top_right, 6, 17, border_width = 1)
+var table tb = table.new(position.top_right, 6, 18, border_width = 1)
 if showTab and barstate.islast
     hb = color.new(color.gray, 20)
     table.cell(tb, 0, 0, "Setup", text_color = color.white, bgcolor = hb, text_size = size.tiny)
@@ -436,6 +442,14 @@ if showTab and barstate.islast
     table.cell(tb, 3, 16, e3 ? str.tostring(st3, "#.0") : "–", text_color = color.white, text_size = size.tiny)
     table.cell(tb, 4, 16, "", text_size = size.tiny)
     table.cell(tb, 5, 16, htfConf ? "chiuse" : "intrabar", text_color = htfConf ? color.silver : color.yellow, text_size = size.tiny)
+    // storico disponibile per sezione: sotto ~300 candele nessuna statistica
+    // e' credibile, e il numero va letto PRIMA delle colonne Win%
+    table.cell(tb, 0, 17, "candele sez.", text_color = color.silver, text_size = size.tiny)
+    table.cell(tb, 1, 17, str.tostring(nb1, "#"), text_color = nb1 < 300 ? color.red : color.lime, text_size = size.tiny)
+    table.cell(tb, 2, 17, str.tostring(nb2, "#"), text_color = nb2 < 300 ? color.red : color.lime, text_size = size.tiny)
+    table.cell(tb, 3, 17, str.tostring(nb3, "#"), text_color = nb3 < 300 ? color.red : color.lime, text_size = size.tiny)
+    table.cell(tb, 4, 17, "rosso = campione", text_color = color.gray, text_size = size.tiny)
+    table.cell(tb, 5, 17, "non misurabile", text_color = color.gray, text_size = size.tiny)
 
 // ═══════════════════════════════ ALERT ═══════════════════════════════════════
 alertcondition(buyHi,  "Divergenza BUY classe A",  "VTRLS: divergenza rialzista classe A")

@@ -189,16 +189,20 @@ f_cp(simple bool shift) =>
     var float h1 = na
     var int   hb0 = na
     var int   hb1 = na
+    bool cnl = false
+    bool cnh = false
     if not na(pl)
         l1  := l0
         lb1 := lb0
         l0  := pl
         lb0 := bar_index - pvR
+        cnl := true
     if not na(ph)
         h1  := h0
         hb1 := hb0
         h0  := ph
         hb0 := bar_index - pvR
+        cnh := true
     la0 = na(lb0) ? na : bar_index - lb0
     la1 = na(lb1) ? na : bar_index - lb1
     ha0 = na(hb0) ? na : bar_index - hb0
@@ -207,7 +211,8 @@ f_cp(simple bool shift) =>
      shift ? la0[1] : la0, shift ? la1[1] : la1,
      shift ? h0[1]  : h0,  shift ? h1[1]  : h1,
      shift ? ha0[1] : ha0, shift ? ha1[1] : ha1,
-     shift ? sd[1]  : sd]
+     shift ? sd[1]  : sd,
+     shift ? cnl[1] : cnl,  shift ? cnh[1] : cnh]
 
 // ═══════════════════════ CONTESTO E CHIAMATE HTF ═════════════════════════════
 chartSec = timeframe.in_seconds()
@@ -225,9 +230,15 @@ symB = cmpMode == "Ratio (spread)" ? (spreadSym == "" ? syminfo.tickerid + "/" +
 [aL0_2, aL1_2, aLa0_2, aLa1_2, aH0_2, aH1_2, aHa0_2, aHa1_2, atr_2, nl_2, nh_2, lt0_2, lt1_2, ht0_2, ht1_2] = request.security(syminfo.tickerid, tf2, f_pp(htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
 [aL0_3, aL1_3, aLa0_3, aLa1_3, aH0_3, aH1_3, aHa0_3, aHa1_3, atr_3, nl_3, nh_3, lt0_3, lt1_3, ht0_3, ht1_3] = request.security(syminfo.tickerid, tf3, f_pp(htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
 
-[bL0_1, bL1_1, bLa0_1, bLa1_1, bH0_1, bH1_1, bHa0_1, bHa1_1, bSd_1] = request.security(symB, tf1, f_cp(htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
-[bL0_2, bL1_2, bLa0_2, bLa1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2] = request.security(symB, tf2, f_cp(htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
-[bL0_3, bL1_3, bLa0_3, bLa1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3] = request.security(symB, tf3, f_cp(htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+[bL0_1, bL1_1, bLa0_1, bLa1_1, bH0_1, bH1_1, bHa0_1, bHa1_1, bSd_1, cnl_1, cnh_1] = request.security(symB, tf1, f_cp(htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
+[bL0_2, bL1_2, bLa0_2, bLa1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2, cnl_2, cnh_2] = request.security(symB, tf2, f_cp(htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
+[bL0_3, bL1_3, bLa0_3, bLa1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3, cnl_3, cnh_3] = request.security(symB, tf3, f_cp(htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+
+// quante candele di ciascuna sezione contiene lo storico caricato: e' questo,
+// non il mercato, a limitare il campione delle sezioni alte su un grafico veloce
+nb1 = request.security(syminfo.tickerid, tf1, bar_index, lookahead = barmerge.lookahead_off)
+nb2 = request.security(syminfo.tickerid, tf2, bar_index, lookahead = barmerge.lookahead_off)
+nb3 = request.security(syminfo.tickerid, tf3, bar_index, lookahead = barmerge.lookahead_off)
 
 // guardia di correlazione, al timeframe del grafico
 refNow = request.security(refSym, timeframe.period, close, lookahead = barmerge.lookahead_off)
@@ -268,12 +279,21 @@ f_track(int dir, int bkt, float a, int kBars) =>
 //  Il valore restituito da request.security resta vero per tutte le barre del
 //  grafico contenute in una candela della sezione: senza rilevamento di FRONTE
 //  verrebbero emessi k marker identici.
-f_side(bool en, bool isSell, bool nw,
+//  IL TRIGGER E' LA CONFERMA DI UNO QUALSIASI DEI DUE PIVOT, non solo di
+//  quello del prezzo. I due strumenti girano su barre diverse: se il minimo del
+//  riferimento cade due barre dopo quello dello strumento operato, al momento
+//  della conferma del prezzo il "pivot recente" del riferimento e' ancora
+//  quello PRECEDENTE, lo sfasamento risulta enorme e il setup viene scartato.
+//  Cosi' si perdevano sistematicamente tutti i casi in cui il riferimento gira
+//  per secondo, cioe' circa la meta'. Valutando su entrambe le conferme, e'
+//  il secondo dei due ad attivare il controllo, quando entrambe le strutture
+//  esistono. Il cooldown impedisce il doppio conteggio.
+f_side(bool en, bool isSell, bool nw, bool nwB,
        float pR, float pP, float pAr, float pAp, float tR, float tP,
        float cR, float cP, float cAr, float cAp,
        float sd, float a_atr, int kBars, int cfg, string tag) =>
     var int last = na
-    fr   = nw and not nw[1]
+    fr   = (nw and not nw[1]) or (nwB and not nwB[1])
     gap  = nz(pAp - pAr, 0)
     th   = minCDelta * sd
     // il prezzo estende l'estremo, il riferimento no
@@ -312,12 +332,12 @@ f_side(bool en, bool isSell, bool nw,
         f_track(isSell ? -1 : 1, cfg * 4 + (isSell ? (isA ? 2 : 3) : (isA ? 0 : 1)), a_atr, kBars)
     [fire, isA]
 
-[b1, b1A] = f_side(e1, false, nl_1, aL0_1, aL1_1, aLa0_1, aLa1_1, lt0_1, lt1_1, bL0_1, bL1_1, bLa0_1, bLa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
-[s1, s1A] = f_side(e1, true,  nh_1, aH0_1, aH1_1, aHa0_1, aHa1_1, ht0_1, ht1_1, bH0_1, bH1_1, bHa0_1, bHa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
-[b2, b2A] = f_side(e2, false, nl_2, aL0_2, aL1_2, aLa0_2, aLa1_2, lt0_2, lt1_2, bL0_2, bL1_2, bLa0_2, bLa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
-[s2, s2A] = f_side(e2, true,  nh_2, aH0_2, aH1_2, aHa0_2, aHa1_2, ht0_2, ht1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
-[b3, b3A] = f_side(e3, false, nl_3, aL0_3, aL1_3, aLa0_3, aLa1_3, lt0_3, lt1_3, bL0_3, bL1_3, bLa0_3, bLa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
-[s3, s3A] = f_side(e3, true,  nh_3, aH0_3, aH1_3, aHa0_3, aHa1_3, ht0_3, ht1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
+[b1, b1A] = f_side(e1, false, nl_1, cnl_1, aL0_1, aL1_1, aLa0_1, aLa1_1, lt0_1, lt1_1, bL0_1, bL1_1, bLa0_1, bLa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
+[s1, s1A] = f_side(e1, true,  nh_1, cnh_1, aH0_1, aH1_1, aHa0_1, aHa1_1, ht0_1, ht1_1, bH0_1, bH1_1, bHa0_1, bHa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
+[b2, b2A] = f_side(e2, false, nl_2, cnl_2, aL0_2, aL1_2, aLa0_2, aLa1_2, lt0_2, lt1_2, bL0_2, bL1_2, bLa0_2, bLa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
+[s2, s2A] = f_side(e2, true,  nh_2, cnh_2, aH0_2, aH1_2, aHa0_2, aHa1_2, ht0_2, ht1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
+[b3, b3A] = f_side(e3, false, nl_3, cnl_3, aL0_3, aL1_3, aLa0_3, aLa1_3, lt0_3, lt1_3, bL0_3, bL1_3, bLa0_3, bLa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
+[s3, s3A] = f_side(e3, true,  nh_3, cnh_3, aH0_3, aH1_3, aHa0_3, aHa1_3, ht0_3, ht1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
 
 buyA  = (b1 and b1A) or (b2 and b2A) or (b3 and b3A)
 buyB  = (b1 and not b1A) or (b2 and not b2A) or (b3 and not b3A)
@@ -366,7 +386,7 @@ if trackOn and array.size(pDir) > 0
             array.remove(pMae, i)
 
 // ════════════════════════════════ TABELLA ════════════════════════════════════
-var table tb = table.new(position.top_right, 6, 17, border_width = 1)
+var table tb = table.new(position.top_right, 6, 18, border_width = 1)
 if showTab and barstate.islast
     hb = color.new(color.gray, 20)
     table.cell(tb, 0, 0, "Setup", text_color = color.white, bgcolor = hb, text_size = size.tiny)
@@ -411,6 +431,14 @@ if showTab and barstate.islast
     table.cell(tb, 3, 16, "algB " + str.tostring(alignM), text_color = color.gray, text_size = size.tiny)
     table.cell(tb, 4, 16, "t " + str.tostring(targATR, "#.0"), text_color = color.gray, text_size = size.tiny)
     table.cell(tb, 5, 16, "s " + str.tostring(stopATR, "#.0"), text_color = color.gray, text_size = size.tiny)
+    // storico disponibile per sezione: sotto ~300 candele nessuna statistica
+    // e' credibile, e il numero va letto PRIMA delle colonne Win%
+    table.cell(tb, 0, 17, "candele sez.", text_color = color.silver, text_size = size.tiny)
+    table.cell(tb, 1, 17, str.tostring(nb1, "#"), text_color = nb1 < 300 ? color.red : color.lime, text_size = size.tiny)
+    table.cell(tb, 2, 17, str.tostring(nb2, "#"), text_color = nb2 < 300 ? color.red : color.lime, text_size = size.tiny)
+    table.cell(tb, 3, 17, str.tostring(nb3, "#"), text_color = nb3 < 300 ? color.red : color.lime, text_size = size.tiny)
+    table.cell(tb, 4, 17, "rosso = campione", text_color = color.gray, text_size = size.tiny)
+    table.cell(tb, 5, 17, "non misurabile", text_color = color.gray, text_size = size.tiny)
 
 // ═══════════════════════════════ ALERT ═══════════════════════════════════════
 alertcondition(buyA,  "X-Div BUY classe A",  "VTRLS X-Div: forza relativa rialzista, classe A")
