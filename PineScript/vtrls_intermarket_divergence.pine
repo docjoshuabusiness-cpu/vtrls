@@ -78,9 +78,17 @@ htfConf = input.bool(true, "Solo candele della sezione CHIUSE (no repaint intrab
 //       rifiutato di seguire, e lo si vede nel prezzo, non per deduzione.
 //  Significato economico identico, ancoraggio opposto. Sono tenuti separati
 //  nelle statistiche proprio per scoprire quale dei due paga davvero.
-gA = "3 · Ancoraggio del pivot"
+gA = "3 · Metodo e ancoraggio"
+method  = input.string("Entrambi", "Metodo di rilevamento",
+     options = ["Pivot", "Pendenza", "Entrambi"], group = gA,
+     tooltip = "PIVOT: confronta due estremi DISCRETI. Preciso quando la struttura e' pulita, ma dipende da left/right, distanza minima e allineamento: in un massimo affollato due cime vicine spesso non si qualificano entrambe come pivot, e il setup che a occhio e' ovvio non viene visto.\n\nPENDENZA: regressione lineare sugli estremi in una finestra, e confronto delle due PENDENZE. E' cio' che disegna una riga tracciata a mano sopra un gruppo di massimi. Non ha pivot, quindi non ha distanza minima ne' allineamento: nessuno dei filtri che scartano il caso ovvio. In compenso non individua l'estremo esatto, quindi il livello di ingresso e' meno definito.\n\nENTRAMBI: i due metodi coesistono e la tabella puo' misurarli separatamente. E' cosi' che si scopre quale dei due descrive davvero quello che vedi.")
 useAncP = input.bool(true, "P · lo strumento operato estende l'estremo", group = gA)
 useAncR = input.bool(true, "R · il riferimento estende l'estremo", group = gA)
+slopeLen = input.int(20, "Pendenza: finestra di regressione (candele)", minval = 5, group = gA)
+slopeEps = input.float(0.02, "Pendenza: soglia minima (ATR per candela)", minval = 0.001, step = 0.005, group = gA,
+     tooltip = "Pendenza minima perche' un lato conti come inclinato, in ATR per candela. Con 0.02 su una finestra di 20 candele la retta percorre 0.4 ATR: una deriva modesta ma inequivocabile.\n\nLe due pendenze devono avere segno OPPOSTO e superare entrambe questa soglia.")
+usePiv = method != "Pendenza"
+useSlo = method != "Pivot"
 
 // ───────────────────────── 4 · PIVOT E CONFERMA ──────────────────────────────
 gP = "4 · Pivot e conferma (per sezione)"
@@ -121,8 +129,8 @@ stopATR = input.float(0.7, "Stop (x ATR della sezione)",   minval = 0.1, group =
 baseOn  = input.bool(true, "Benchmark nullo (ingressi ciclici)", group = gT)
 baseN   = input.int(50, "   una coppia ogni N barre", minval = 5, group = gT)
 showTab = input.bool(true, "Mostra tabella", group = gT)
-tabDim  = input.string("Ancoraggio P/R", "Seconda dimensione della tabella",
-     options = ["Ancoraggio P/R", "Classe A/B"], group = gT,
+tabDim  = input.string("Metodo Pivot/Pendenza", "Seconda dimensione della tabella",
+     options = ["Metodo Pivot/Pendenza", "Ancoraggio P/R", "Classe A/B"], group = gT,
      tooltip = "Sezione x direzione fanno gia' 6 righe; incrociare ANCHE classe e ancoraggio ne farebbe 24, illeggibili e con campioni troppo piccoli. Si misura una dimensione alla volta.\n\nANCORAGGIO P/R per primo: e' la domanda aperta piu' grande. P deduce la forza dal fatto che il riferimento non conferma, R la osserva direttamente nel prezzo. Se R batte P, la meta' dei segnali che prima non rilevavo era quella buona.\n\nCLASSE A/B dopo, per capire quanto conta la contemporaneita' delle due strutture.")
 
 // ────────────────────────────── 6 · GRAFICA ──────────────────────────────────
@@ -250,6 +258,16 @@ f_cp(simple int pvL, simple int pvR, simple bool shift) =>
      shift ? sd[1]  : sd,
      shift ? cnl[1] : cnl,  shift ? cnh[1] : cnh]
 
+// ── PENDENZA · regressione sugli estremi nel contesto nativo della sezione ───
+//  E' la formalizzazione della riga tracciata a mano sopra un gruppo di massimi:
+//  non cerca due punti, misura l'inclinazione dell'inviluppo. Normalizzata in
+//  ATR per candela, quindi confrontabile fra strumenti e fra timeframe.
+f_slope(simple int len, simple bool shift) =>
+    a  = math.max(ta.atr(atrLen), syminfo.mintick)
+    sh = (ta.linreg(high, len, 0) - ta.linreg(high, len, 1)) / a
+    sl = (ta.linreg(low,  len, 0) - ta.linreg(low,  len, 1)) / a
+    [shift ? sh[1] : sh, shift ? sl[1] : sl]
+
 // ═══════════════════════ CONTESTO E CHIAMATE HTF ═════════════════════════════
 chartSec = timeframe.in_seconds()
 sec1 = timeframe.in_seconds(tf1)
@@ -270,6 +288,13 @@ symB = cmpMode == "Ratio (spread)" ? (spreadSym == "" ? syminfo.tickerid + "/" +
 [bL0_2, bL1_2, bLa0_2, bLa1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2, cnl_2, cnh_2] = request.security(symB, tf2, f_cp(pL2, pR2, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
 [bL0_3, bL1_3, bLa0_3, bLa1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3, cnl_3, cnh_3] = request.security(symB, tf3, f_cp(pL3, pR3, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
 
+[pSh1, pSl1] = request.security(syminfo.tickerid, tf1, f_slope(slopeLen, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
+[pSh2, pSl2] = request.security(syminfo.tickerid, tf2, f_slope(slopeLen, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
+[pSh3, pSl3] = request.security(syminfo.tickerid, tf3, f_slope(slopeLen, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+[cSh1, cSl1] = request.security(symB, tf1, f_slope(slopeLen, htfConf and sec1 > chartSec), lookahead = barmerge.lookahead_off)
+[cSh2, cSl2] = request.security(symB, tf2, f_slope(slopeLen, htfConf and sec2 > chartSec), lookahead = barmerge.lookahead_off)
+[cSh3, cSl3] = request.security(symB, tf3, f_slope(slopeLen, htfConf and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+
 // quante candele di ciascuna sezione contiene lo storico caricato: e' questo,
 // non il mercato, a limitare il campione delle sezioni alte su un grafico veloce
 nb1 = request.security(syminfo.tickerid, tf1, bar_index, lookahead = barmerge.lookahead_off)
@@ -283,6 +308,15 @@ rR   = not na(refNow) and not na(refNow[1]) and refNow[1] > 0 ? math.log(refNow 
 corr = ta.correlation(rC, rR, corrLen)
 corrOk = not na(corr) and corr >= minCorr
 
+// UNA SEZIONE SOTTO IL TIMEFRAME DEL GRAFICO NON E' UN AVVISO, E' UN ERRORE.
+// request.security su un timeframe piu' basso restituisce valori INTRABAR: il
+// segnale ripinge e le statistiche misurano qualcosa che in tempo reale non
+// esisteva. Viene disattivata, non segnalata e lasciata correre.
+e1v = e1 and sec1 >= chartSec
+e2v = e2 and sec2 >= chartSec
+e3v = e3 and sec3 >= chartSec
+
+atrCh  = math.max(ta.atr(atrLen), syminfo.mintick)
 inSess = not useSess or not na(time(timeframe.period, sess))
 szLbl  = lblSize == "tiny" ? size.tiny : lblSize == "small" ? size.small : size.normal
 
@@ -346,7 +380,7 @@ f_side(bool en, bool isSell, bool nw, bool nwB,
     d1   = math.abs(nz(pAp, 1e9) - nz(cAp, -1e9))
     algA = d0 <= alignA and d1 <= alignA
     algB = d0 <= alignM and d1 <= alignM
-    base = en and fr and ineq and algB and corrOk and inSess
+    base = en and usePiv and fr and ineq and algB and corrOk and inSess
          and gap >= minGap and gap <= maxGap
          and not na(pP) and not na(cP)
     cool = na(last) or bar_index - last >= cooldown
@@ -405,25 +439,68 @@ f_side(bool en, bool isSell, bool nw, bool nwB,
         // la seconda dimensione della tabella e' scelta dall'utente: non ci
         // stanno 24 righe leggibili, e misurare una dimensione alla volta e'
         // comunque il modo corretto di leggerle
-        dim = tabDim == "Classe A/B" ? (isA ? 0 : 1) : (ancP ? 0 : 1)
+        dim = tabDim == "Classe A/B" ? (isA ? 0 : 1) : tabDim == "Metodo Pivot/Pendenza" ? 0 : (ancP ? 0 : 1)
         f_track(isSell ? -1 : 1, cfg * 4 + (isSell ? 2 : 0) + dim, a_atr, kBars)
     [fire, isA, ancP]
 
-[b1, b1A, b1P] = f_side(e1, false, nl_1, cnl_1, aL0_1, aL1_1, aLa0_1, aLa1_1, lt0_1, lt1_1, bL0_1, bL1_1, bLa0_1, bLa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
-[s1, s1A, s1P] = f_side(e1, true,  nh_1, cnh_1, aH0_1, aH1_1, aHa0_1, aHa1_1, ht0_1, ht1_1, bH0_1, bH1_1, bHa0_1, bHa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
-[b2, b2A, b2P] = f_side(e2, false, nl_2, cnl_2, aL0_2, aL1_2, aLa0_2, aLa1_2, lt0_2, lt1_2, bL0_2, bL1_2, bLa0_2, bLa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
-[s2, s2A, s2P] = f_side(e2, true,  nh_2, cnh_2, aH0_2, aH1_2, aHa0_2, aHa1_2, ht0_2, ht1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
-[b3, b3A, b3P] = f_side(e3, false, nl_3, cnl_3, aL0_3, aL1_3, aLa0_3, aLa1_3, lt0_3, lt1_3, bL0_3, bL1_3, bLa0_3, bLa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
-[s3, s3A, s3P] = f_side(e3, true,  nh_3, cnh_3, aH0_3, aH1_3, aHa0_3, aHa1_3, ht0_3, ht1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
+//  SEGNALE DI PENDENZA. Nessun pivot, quindi nessuna distanza minima e nessun
+//  allineamento: cadono tutti i filtri che scartavano il caso visivamente ovvio.
+//  Le due pendenze devono avere segno OPPOSTO e superare entrambe la soglia.
+//  Classe A quando entrambe la superano del doppio: inclinazione inequivocabile
+//  su tutti e due i lati, non una deriva marginale.
+f_slopeSig(bool en, bool isSell, float pS, float cS, float a_atr, int kBars, int cfg, string tag) =>
+    var int last = na
+    cond = isSell ? (pS < -slopeEps and cS > slopeEps) : (pS > slopeEps and cS < -slopeEps)
+    fr   = cond and not cond[1]
+    cool = na(last) or bar_index - last >= cooldown
+    fire = en and useSlo and fr and cool and corrOk and inSess and not na(pS) and not na(cS)
+    isA  = math.abs(pS) > 2 * slopeEps and math.abs(cS) > 2 * slopeEps
+    if fire
+        last := bar_index
+        col = isSell ? (isA ? cAS : cBS) : (isA ? cAB : cBB)
+        label.new(bar_index, isSell ? high : low,
+             (isSell ? "▼" : "▲") + "S" + (isA ? "A " : "B ") + tag,
+             xloc.bar_index, isSell ? yloc.abovebar : yloc.belowbar, col,
+             isSell ? label.style_label_down : label.style_label_up,
+             isSell ? color.white : color.black, szLbl,
+             tooltip = (isSell ? "SELL " : "BUY ") + "pendenza · classe " + (isA ? "A" : "B") + " · " + tag +
+                 "\npendenza prezzo " + str.tostring(pS, "#.0000") + " ATR/candela" +
+                 "\npendenza riferimento " + str.tostring(cS, "#.0000") + " ATR/candela" +
+                 "\nsoglia " + str.tostring(slopeEps, "#.0000") + " · finestra " + str.tostring(slopeLen) +
+                 "\ncorrelazione " + str.tostring(corr, "#.00"))
+        // con la tabella su ancoraggio P/R i segnali di pendenza non hanno una
+        // colonna sensata e restano fuori dal conteggio, invece di inquinarlo
+        if tabDim != "Ancoraggio P/R"
+            dim = tabDim == "Classe A/B" ? (isA ? 0 : 1) : 1
+            f_track(isSell ? -1 : 1, cfg * 4 + (isSell ? 2 : 0) + dim, a_atr, kBars)
+    [fire, isA]
 
-buyA  = (b1 and b1A) or (b2 and b2A) or (b3 and b3A)
-buyB  = (b1 and not b1A) or (b2 and not b2A) or (b3 and not b3A)
-sellA = (s1 and s1A) or (s2 and s2A) or (s3 and s3A)
-sellB = (s1 and not s1A) or (s2 and not s2A) or (s3 and not s3A)
+[b1, b1A, b1P] = f_side(e1v, false, nl_1, cnl_1, aL0_1, aL1_1, aLa0_1, aLa1_1, lt0_1, lt1_1, bL0_1, bL1_1, bLa0_1, bLa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
+[s1, s1A, s1P] = f_side(e1v, true,  nh_1, cnh_1, aH0_1, aH1_1, aHa0_1, aHa1_1, ht0_1, ht1_1, bH0_1, bH1_1, bHa0_1, bHa1_1, bSd_1, atr_1, kk1, 0, "S1 " + tf1)
+[b2, b2A, b2P] = f_side(e2v, false, nl_2, cnl_2, aL0_2, aL1_2, aLa0_2, aLa1_2, lt0_2, lt1_2, bL0_2, bL1_2, bLa0_2, bLa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
+[s2, s2A, s2P] = f_side(e2v, true,  nh_2, cnh_2, aH0_2, aH1_2, aHa0_2, aHa1_2, ht0_2, ht1_2, bH0_2, bH1_2, bHa0_2, bHa1_2, bSd_2, atr_2, kk2, 1, "S2 " + tf2)
+[b3, b3A, b3P] = f_side(e3v, false, nl_3, cnl_3, aL0_3, aL1_3, aLa0_3, aLa1_3, lt0_3, lt1_3, bL0_3, bL1_3, bLa0_3, bLa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
+[s3, s3A, s3P] = f_side(e3v, true,  nh_3, cnh_3, aH0_3, aH1_3, aHa0_3, aHa1_3, ht0_3, ht1_3, bH0_3, bH1_3, bHa0_3, bHa1_3, bSd_3, atr_3, kk3, 2, "S3 " + tf3)
 
+[y1, y1A] = f_slopeSig(e1v, false, pSl1, cSl1, atr_1, kk1, 0, "S1 " + tf1)
+[w1, w1A] = f_slopeSig(e1v, true,  pSh1, cSh1, atr_1, kk1, 0, "S1 " + tf1)
+[y2, y2A] = f_slopeSig(e2v, false, pSl2, cSl2, atr_2, kk2, 1, "S2 " + tf2)
+[w2, w2A] = f_slopeSig(e2v, true,  pSh2, cSh2, atr_2, kk2, 1, "S2 " + tf2)
+[y3, y3A] = f_slopeSig(e3v, false, pSl3, cSl3, atr_3, kk3, 2, "S3 " + tf3)
+[w3, w3A] = f_slopeSig(e3v, true,  pSh3, cSh3, atr_3, kk3, 2, "S3 " + tf3)
+
+buyA  = (b1 and b1A) or (b2 and b2A) or (b3 and b3A) or (y1 and y1A) or (y2 and y2A) or (y3 and y3A)
+buyB  = (b1 and not b1A) or (b2 and not b2A) or (b3 and not b3A) or (y1 and not y1A) or (y2 and not y2A) or (y3 and not y3A)
+sellA = (s1 and s1A) or (s2 and s2A) or (s3 and s3A) or (w1 and w1A) or (w2 and w2A) or (w3 and w3A)
+sellB = (s1 and not s1A) or (s2 and not s2A) or (s3 and not s3A) or (w1 and not w1A) or (w2 and not w2A) or (w3 and not w3A)
+
+// Il benchmark usa l'ATR e l'orologio DEL GRAFICO. Prima ereditava quelli di
+// S1: con S1 a 15 secondi su un grafico a 5 minuti l'ATR era minuscolo, target
+// e stop venivano colpiti entrambi sulla prima barra e vinceva sempre lo stop.
+// Un benchmark cosi' non e' un riferimento, e' un numero inventato.
 if baseOn and bar_index % baseN == 0 and inSess
-    f_track(1,  12, atr_1, kk1)
-    f_track(-1, 13, atr_1, kk1)
+    f_track(1,  12, atrCh, 1)
+    f_track(-1, 13, atrCh, 1)
 
 // ══════════════════════ RISOLUZIONE DEGLI ESITI ══════════════════════════════
 if trackOn and array.size(pDir) > 0
@@ -473,14 +550,14 @@ if showTab and barstate.islast
     table.cell(tb, 4, 0, "MFE",   text_color = color.white, bgcolor = hb, text_size = size.tiny)
     table.cell(tb, 5, 0, "MAE",   text_color = color.white, bgcolor = hb, text_size = size.tiny)
     tfs = array.from(tf1, tf2, tf3)
-    ens = array.from(e1, e2, e3)
+    ens = array.from(e1v, e2v, e3v)
     be  = stopATR / (targATR + stopATR) * 100
     for b = 0 to 13
         cfg  = int(b / 4)
         kind = b % 4
         isNull = b >= 12
-        d0n = tabDim == "Classe A/B" ? "A" : "P"
-        d1n = tabDim == "Classe A/B" ? "B" : "R"
+        d0n = tabDim == "Classe A/B" ? "A" : tabDim == "Metodo Pivot/Pendenza" ? "piv" : "P"
+        d1n = tabDim == "Classe A/B" ? "B" : tabDim == "Metodo Pivot/Pendenza" ? "pnd" : "R"
         nm = isNull ? (b == 12 ? "NULL Buy" : "NULL Sell") :
              "S" + str.tostring(cfg + 1) + (kind == 0 ? " Buy " + d0n : kind == 1 ? " Buy " + d1n : kind == 2 ? " Sell " + d0n : " Sell " + d1n)
         tfl = isNull ? "rif" : array.get(tfs, cfg)
@@ -497,15 +574,16 @@ if showTab and barstate.islast
         table.cell(tb, 3, b + 1, na(w)  ? "–" : str.tostring(w,  "#.0"), text_color = na(w) ? color.gray : w >= be ? color.lime : color.red, text_size = size.tiny)
         table.cell(tb, 4, b + 1, na(mf) ? "–" : str.tostring(mf, "#.00"), text_color = color.white, text_size = size.tiny)
         table.cell(tb, 5, b + 1, na(ma) ? "–" : str.tostring(ma, "#.00"), text_color = color.white, text_size = size.tiny)
-    warn = (e1 and sec1 < chartSec) or (e2 and sec2 < chartSec) or (e3 and sec3 < chartSec)
-    table.cell(tb, 0, 15, warn ? "⚠ TF < grafico" : "corr", text_color = warn ? color.orange : color.silver, text_size = size.tiny)
+    // una sezione richiesta ma sotto il TF del grafico e' stata DISATTIVATA
+    off = (e1 and not e1v) or (e2 and not e2v) or (e3 and not e3v)
+    table.cell(tb, 0, 15, off ? "⚠ sez. spenta" : "corr", text_color = off ? color.red : color.silver, text_size = size.tiny)
     table.cell(tb, 1, 15, str.tostring(corr, "#.00"), text_color = corrOk ? color.lime : color.red, text_size = size.tiny)
     table.cell(tb, 2, 15, "pareggio " + str.tostring(be, "#.0") + "%", text_color = color.silver, text_size = size.tiny)
     table.cell(tb, 3, 15, "aperti " + str.tostring(array.size(pDir)), text_color = color.gray, text_size = size.tiny)
     table.cell(tb, 4, 15, "orizz " + str.tostring(horizon), text_color = color.gray, text_size = size.tiny)
     table.cell(tb, 5, 15, htfConf ? "chiuse" : "intrabar", text_color = htfConf ? color.silver : color.yellow, text_size = size.tiny)
     table.cell(tb, 0, 16, tabDim, text_color = color.aqua, text_size = size.tiny)
-    table.cell(tb, 1, 16, (useAncP ? "P" : "") + (useAncR ? "R" : ""), text_color = color.silver, text_size = size.tiny)
+    table.cell(tb, 1, 16, method + (useAncP ? " P" : "") + (useAncR ? "R" : ""), text_color = color.silver, text_size = size.tiny)
     table.cell(tb, 2, 16, "algA " + str.tostring(alignA), text_color = color.gray, text_size = size.tiny)
     table.cell(tb, 3, 16, "algB " + str.tostring(alignM), text_color = color.gray, text_size = size.tiny)
     table.cell(tb, 4, 16, "t " + str.tostring(targATR, "#.0"), text_color = color.gray, text_size = size.tiny)
