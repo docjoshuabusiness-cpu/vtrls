@@ -100,8 +100,8 @@ alignM = input.int(20, "Classe B: sfasamento massimo tollerato", minval = 1, gro
 
 // ────────────────────────────── 4 · FILTRI ───────────────────────────────────
 gF = "4 · Filtri"
-minCDelta = input.float(0.5, "Delta minimo del riferimento (x sua stdev)", minval = 0, group = gF,
-     tooltip = "Espresso nella deviazione standard della serie di confronto, non in unita' assolute: cosi' '0.5' significa la stessa cosa passando dal prezzo di ES al suo stocastico.")
+minCDelta = input.float(0.10, "Delta minimo del riferimento (x ATR o stdev del riferimento)", minval = 0, group = gF,
+     tooltip = "Quanto deve essere marcato l'estremo del riferimento perche' conti.\n\nNei modi a PREZZO la scala e' l'ATR DEL RIFERIMENTO: stessa dimensione fisica della differenza fra due estremi vicini. Nei modi a OSCILLATORE e' la deviazione standard della serie, che per un oscillatore e' la scala naturale.\n\nTIENILO BASSO. La non-conferma interessante e' per definizione un movimento PICCOLO del riferimento: alzare questa soglia non filtra il rumore, seleziona i casi in cui il riferimento si e' mosso molto, che sono l'opposto di cio' che stai cercando.")
 atrLen    = input.int(14, "ATR della sezione", minval = 1, group = gF)
 minPDelta = input.float(0.15, "Spostamento minimo del prezzo tra i pivot (x ATR sezione)", minval = 0, group = gF)
 corrLen   = input.int(100, "Finestra di correlazione", minval = 20, group = gF)
@@ -131,6 +131,8 @@ cAB = input.color(color.new(#00c853, 0), "Buy A",  inline = "g1", group = gV)
 cBB = input.color(color.new(#ffd600, 0), "Buy B",  inline = "g1", group = gV)
 cAS = input.color(color.new(#d50000, 0), "Sell A", inline = "g2", group = gV)
 cBS = input.color(color.new(#ff9100, 0), "Sell B", inline = "g2", group = gV)
+showMiss = input.bool(true, "Marker dei SETUP SCARTATI (diagnostica)", group = gV,
+     tooltip = "Disegna una × grigia dove la GEOMETRIA della divergenza c'era ma un filtro l'ha scartata, e nel tooltip nomina il filtro che ha bloccato.\n\nE' lo strumento con cui si tara: senza, un setup che a occhio e' evidente e che l'indicatore non segnala non si distingue da un setup che l'indicatore non ha proprio visto. Da spegnere quando i parametri sono fermi, perche' i setup scartati sono molti piu' dei segnali e consumano il budget delle label.")
 drawLines = input.bool(true, "Linea fra i due pivot di prezzo", group = gV,
      tooltip = "Ancorata al TIMESTAMP della barra del pivot nel timeframe della sezione, non a un conteggio di barre convertito: resta esatta anche attraverso gap, aperture di sessione e barre mancanti.")
 lblSize   = input.string("tiny", "Dimensione label", options = ["tiny","small","normal"], group = gV)
@@ -202,7 +204,18 @@ f_cp(simple int pvL, simple int pvR, simple bool shift) =>
          close
     sLo = usePx ? low  : cs
     sHi = usePx ? high : cs
-    sd  = math.max(ta.stdev(usePx ? close : cs, statLen), 1e-12)
+    // NORMALIZZATORE. Per un prezzo e' l'ATR del riferimento: stessa dimensione
+    // fisica del delta che si vuole misurare, cioe' la differenza fra due
+    // estremi vicini. La deviazione standard del LIVELLO misura invece quanto
+    // il prezzo ha vagato sull'intera finestra: un numero molto piu' grande,
+    // che come soglia lascia passare solo i casi in cui il riferimento si e'
+    // mosso MOLTO fra i due pivot. Ma la non-conferma interessante e' per
+    // definizione un movimento piccolo: quella soglia selezionava l'opposto
+    // del segnale cercato.
+    // Per un oscillatore la stdev del livello e' invece la scala giusta,
+    // perche' un oscillatore non ha ATR e il suo livello e' gia' la grandezza.
+    sd  = usePx ? math.max(ta.atr(atrLen), syminfo.mintick)
+                : math.max(ta.stdev(cs, statLen), 1e-12)
     pl = ta.pivotlow(sLo,  pvL, pvR)
     ph = ta.pivothigh(sHi, pvL, pvR)
     var float l0 = na
@@ -340,6 +353,35 @@ f_side(bool en, bool isSell, bool nw, bool nwB,
     cool = na(last) or bar_index - last >= cooldown
     fire = base and cool
     isA  = algA
+
+    // ── DIAGNOSTICA ──────────────────────────────────────────────────────────
+    // La sola GEOMETRIA, senza soglie di ampiezza: il prezzo va da una parte,
+    // il riferimento dall'altra. Se questa c'e' ma il segnale non esce, e' un
+    // filtro ad aver deciso, e va nominato invece che lasciato indovinare.
+    geoP = isSell ? (pR > pP and cR < cP) : (pR < pP and cR > cP)
+    geoR = isSell ? (cR > cP and pR < pP) : (cR < cP and pR > pP)
+    geo  = (useAncP and geoP) or (useAncR and geoR)
+    if showMiss and en and fr and geo and not fire and not na(pP) and not na(cP)
+        dPx = math.abs(pR - pP) / a_atr
+        dRf = math.abs(cR - cP) / sd
+        why = ""
+        why := why + (math.abs(pR - pP) <= dP  ? "prezzo<" + str.tostring(minPDelta, "#.00") + " " : "")
+        why := why + (math.abs(cR - cP) <= th  ? "rifer.<" + str.tostring(minCDelta, "#.00") + " " : "")
+        why := why + (gap < minGap ? "gap<min " : gap > maxGap ? "gap>max " : "")
+        why := why + (not algB     ? "sfasati " : "")
+        why := why + (not corrOk   ? "corr " : "")
+        why := why + (not inSess   ? "sessione " : "")
+        why := why + (not cool     ? "cooldown " : "")
+        label.new(bar_index, isSell ? high : low, "×", xloc.bar_index,
+             isSell ? yloc.abovebar : yloc.belowbar, color.new(color.gray, 100),
+             label.style_none, color.new(color.gray, 25), szLbl,
+             tooltip = "SCARTATO · " + (isSell ? "SELL " : "BUY ") + tag +
+                 "\nbloccato da: " + (why == "" ? "?" : why) +
+                 "\ndelta prezzo " + str.tostring(dPx, "#.00") + " ATR (soglia " + str.tostring(minPDelta, "#.00") + ")" +
+                 "\ndelta riferimento " + str.tostring(dRf, "#.00") + " (soglia " + str.tostring(minCDelta, "#.00") + ")" +
+                 "\ndistanza pivot " + str.tostring(gap) + " · sfasamento " +
+                 str.tostring(d0, "#") + "/" + str.tostring(d1, "#") + " (max " + str.tostring(alignM) + ")" +
+                 "\ncorrelazione " + str.tostring(corr, "#.00"))
     if fire
         last := bar_index
         col = isSell ? (isA ? cAS : cBS) : (isA ? cAB : cBB)
