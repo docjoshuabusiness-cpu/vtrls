@@ -84,7 +84,10 @@ method  = input.string("Entrambi", "Metodo di rilevamento",
      tooltip = "PIVOT: confronta due estremi DISCRETI. Preciso quando la struttura e' pulita, ma dipende da left/right, distanza minima e allineamento: in un massimo affollato due cime vicine spesso non si qualificano entrambe come pivot, e il setup che a occhio e' ovvio non viene visto.\n\nPENDENZA: regressione lineare sugli estremi in una finestra, e confronto delle due PENDENZE. E' cio' che disegna una riga tracciata a mano sopra un gruppo di massimi. Non ha pivot, quindi non ha distanza minima ne' allineamento: nessuno dei filtri che scartano il caso ovvio. In compenso non individua l'estremo esatto, quindi il livello di ingresso e' meno definito.\n\nENTRAMBI: i due metodi coesistono e la tabella puo' misurarli separatamente. E' cosi' che si scopre quale dei due descrive davvero quello che vedi.")
 useAncP = input.bool(true, "P · lo strumento operato estende l'estremo", group = gA)
 useAncR = input.bool(true, "R · il riferimento estende l'estremo", group = gA)
-slopeLen = input.int(20, "Pendenza: finestra di regressione (candele)", minval = 5, group = gA)
+slopeL1 = input.int(10, "Pendenza: finestre", inline = "sl", minval = 3, group = gA)
+slopeL2 = input.int(20, "", inline = "sl", minval = 3, group = gA)
+slopeL3 = input.int(40, "", inline = "sl", minval = 3, group = gA,
+     tooltip = "TRE orizzonti, non uno. La divergenza scatta se il disaccordo di pendenza vale su ALMENO UNO dei tre, e il tooltip dice quale.\n\nUna sola finestra e' una scelta arbitraria su quanto indietro guardare: una deriva che dura 12 candele e' invisibile a una finestra da 40, e una che dura 50 viene diluita da una da 10. Scandire piu' orizzonti toglie quell'arbitrio.\n\nE' la stessa idea del confronto contro piu' pivot precedenti, applicata a uno stimatore che usa TUTTE le barre della finestra invece di due soli punti: la differenza fra due estremi e' il modo piu' rumoroso di misurare una pendenza.")
 slopeEps = input.float(0.02, "Pendenza: soglia minima (ATR per candela)", minval = 0.001, step = 0.005, group = gA,
      tooltip = "Pendenza minima perche' un lato conti come inclinato, in ATR per candela. Con 0.02 su una finestra di 20 candele la retta percorre 0.4 ATR: una deriva modesta ma inequivocabile.\n\nLe due pendenze devono avere segno OPPOSTO e superare entrambe questa soglia.")
 usePiv = method != "Pendenza"
@@ -112,6 +115,12 @@ minCDelta = input.float(0.10, "Delta minimo del riferimento (x ATR o stdev del r
      tooltip = "Quanto deve essere marcato l'estremo del riferimento perche' conti.\n\nNei modi a PREZZO la scala e' l'ATR DEL RIFERIMENTO: stessa dimensione fisica della differenza fra due estremi vicini. Nei modi a OSCILLATORE e' la deviazione standard della serie, che per un oscillatore e' la scala naturale.\n\nTIENILO BASSO. La non-conferma interessante e' per definizione un movimento PICCOLO del riferimento: alzare questa soglia non filtra il rumore, seleziona i casi in cui il riferimento si e' mosso molto, che sono l'opposto di cio' che stai cercando.")
 atrLen    = input.int(14, "ATR della sezione", minval = 1, group = gF)
 minPDelta = input.float(0.15, "Spostamento minimo del prezzo tra i pivot (x ATR sezione)", minval = 0, group = gF)
+useBB   = input.bool(true, "Richiedi estremita' di banda di Bollinger", group = gF,
+     tooltip = "La posizione del prezzo dentro le sue bande di Bollinger e' uno z-score schiacciato in [0,1], quindi adattivo alla volatilita'. Richiedere che la divergenza avvenga a una estremita' significa richiedere che accada dove il prezzo e' statisticamente TESO, che e' dove il ritorno alla media ha le probabilita' migliori.\n\nE' un filtro di regime, non un filtro di rumore: non rende i segnali piu' puliti, li limita al contesto in cui hanno senso.\n\nMisurato sul piu' recente pivot di PREZZO della sezione, nel suo contesto nativo.")
+bbLen   = input.int(20, "   Bollinger lunghezza", inline = "bb", minval = 2, group = gF)
+bbMult  = input.float(2.0, "dev", inline = "bb", minval = 0.1, step = 0.1, group = gF)
+bbLo    = input.float(0.30, "   BUY se posizione <", minval = 0, maxval = 1, step = 0.05, group = gF)
+bbHi    = input.float(0.70, "   SELL se posizione >", minval = 0, maxval = 1, step = 0.05, group = gF)
 corrLen   = input.int(100, "Finestra di correlazione", minval = 20, group = gF)
 minCorr   = input.float(0.5, "Correlazione minima fra i due strumenti", minval = -1, maxval = 1, step = 0.05, group = gF,
      tooltip = "Sotto questa soglia il legame fra i due strumenti non c'e': una divergenza fra serie scollegate non e' forza relativa, e' rumore. Su NQ/ES in sessione sta tipicamente sopra 0.7; valori bassi segnalano halt, gap o un riferimento sbagliato.")
@@ -166,6 +175,10 @@ f_z(float s, simple int len) =>
 //  ancorare il segnale.
 f_pivA(simple int pl, simple int pr, simple bool isHigh, simple bool shift) =>
     a  = math.max(ta.atr(atrLen), syminfo.mintick)
+    // posizione del prezzo dentro le sue bande: z-score schiacciato in [0,1]
+    bbB = ta.sma(close, bbLen)
+    bbD = bbMult * ta.stdev(close, bbLen)
+    bbP = math.min(math.max((close - (bbB - bbD)) / (2 * bbD + 1e-10), 0), 1)
     pp = isHigh ? ta.pivothigh(high, pl, pr) : ta.pivotlow(low, pl, pr)
     var float v0 = na
     var float v1 = na
@@ -179,8 +192,10 @@ f_pivA(simple int pl, simple int pr, simple bool isHigh, simple bool shift) =>
     var float t1 = na
     var float t2 = na
     var float t3 = na
+    var float z0 = na
     bool nw = false
     if not na(pp)
+        z0 := bbP[pr]
         v3 := v2
         v2 := v1
         v1 := v0
@@ -201,7 +216,7 @@ f_pivA(simple int pl, simple int pr, simple bool isHigh, simple bool shift) =>
     [shift ? v0[1] : v0, shift ? v1[1] : v1, shift ? v2[1] : v2, shift ? v3[1] : v3,
      shift ? g0[1] : g0, shift ? g1[1] : g1, shift ? g2[1] : g2, shift ? g3[1] : g3,
      shift ? t0[1] : t0, shift ? t1[1] : t1, shift ? t2[1] : t2, shift ? t3[1] : t3,
-     shift ? a[1]  : a,  shift ? nw[1] : nw]
+     shift ? a[1]  : a,  shift ? nw[1] : nw, shift ? z0[1] : z0]
 
 f_pivB(simple int pl, simple int pr, simple bool isHigh, simple bool shift) =>
     usePx = cmpMode == "Prezzo riferimento" or cmpMode == "Ratio (spread)"
@@ -241,11 +256,18 @@ f_pivB(simple int pl, simple int pr, simple bool isHigh, simple bool shift) =>
 //  E' la formalizzazione della riga tracciata a mano sopra un gruppo di massimi:
 //  non cerca due punti, misura l'inclinazione dell'inviluppo. Normalizzata in
 //  ATR per candela, quindi confrontabile fra strumenti e fra timeframe.
-f_slope(simple int len, simple bool shift) =>
-    a  = math.max(ta.atr(atrLen), syminfo.mintick)
-    sh = (ta.linreg(high, len, 0) - ta.linreg(high, len, 1)) / a
-    sl = (ta.linreg(low,  len, 0) - ta.linreg(low,  len, 1)) / a
-    [shift ? sh[1] : sh, shift ? sl[1] : sl]
+f_slope1(simple int len) => (ta.linreg(high, len, 0) - ta.linreg(high, len, 1))
+f_slope0(simple int len) => (ta.linreg(low,  len, 0) - ta.linreg(low,  len, 1))
+f_slope(simple int l1, simple int l2, simple int l3, simple bool shift) =>
+    a   = math.max(ta.atr(atrLen), syminfo.mintick)
+    h1  = f_slope1(l1) / a
+    h2  = f_slope1(l2) / a
+    h3  = f_slope1(l3) / a
+    o1  = f_slope0(l1) / a
+    o2  = f_slope0(l2) / a
+    o3  = f_slope0(l3) / a
+    [shift ? h1[1] : h1, shift ? h2[1] : h2, shift ? h3[1] : h3,
+     shift ? o1[1] : o1, shift ? o2[1] : o2, shift ? o3[1] : o3]
 
 // ═══════════════════════ CONTESTO E CHIAMATE HTF ═════════════════════════════
 chartSec = timeframe.in_seconds()
@@ -263,12 +285,12 @@ sh3 = htfConf and sec3 > chartSec
 // il modo Ratio usa un simbolo spread; gli altri leggono il riferimento diretto
 symB = cmpMode == "Ratio (spread)" ? (spreadSym == "" ? syminfo.tickerid + "/" + refSym : spreadSym) : refSym
 
-[aLv0_1, aLv1_1, aLv2_1, aLv3_1, aLg0_1, aLg1_1, aLg2_1, aLg3_1, aLt0_1, aLt1_1, aLt2_1, aLt3_1, aAtr_1, aLn_1] = request.security(syminfo.tickerid, tf1, f_pivA(qL1, qR1, false, sh1), lookahead = barmerge.lookahead_off)
-[aHv0_1, aHv1_1, aHv2_1, aHv3_1, aHg0_1, aHg1_1, aHg2_1, aHg3_1, aHt0_1, aHt1_1, aHt2_1, aHt3_1, aAtrH_1, aHn_1] = request.security(syminfo.tickerid, tf1, f_pivA(qL1, qR1, true, sh1), lookahead = barmerge.lookahead_off)
-[aLv0_2, aLv1_2, aLv2_2, aLv3_2, aLg0_2, aLg1_2, aLg2_2, aLg3_2, aLt0_2, aLt1_2, aLt2_2, aLt3_2, aAtr_2, aLn_2] = request.security(syminfo.tickerid, tf2, f_pivA(qL2, qR2, false, sh2), lookahead = barmerge.lookahead_off)
-[aHv0_2, aHv1_2, aHv2_2, aHv3_2, aHg0_2, aHg1_2, aHg2_2, aHg3_2, aHt0_2, aHt1_2, aHt2_2, aHt3_2, aAtrH_2, aHn_2] = request.security(syminfo.tickerid, tf2, f_pivA(qL2, qR2, true, sh2), lookahead = barmerge.lookahead_off)
-[aLv0_3, aLv1_3, aLv2_3, aLv3_3, aLg0_3, aLg1_3, aLg2_3, aLg3_3, aLt0_3, aLt1_3, aLt2_3, aLt3_3, aAtr_3, aLn_3] = request.security(syminfo.tickerid, tf3, f_pivA(qL3, qR3, false, sh3), lookahead = barmerge.lookahead_off)
-[aHv0_3, aHv1_3, aHv2_3, aHv3_3, aHg0_3, aHg1_3, aHg2_3, aHg3_3, aHt0_3, aHt1_3, aHt2_3, aHt3_3, aAtrH_3, aHn_3] = request.security(syminfo.tickerid, tf3, f_pivA(qL3, qR3, true, sh3), lookahead = barmerge.lookahead_off)
+[aLv0_1, aLv1_1, aLv2_1, aLv3_1, aLg0_1, aLg1_1, aLg2_1, aLg3_1, aLt0_1, aLt1_1, aLt2_1, aLt3_1, aAtr_1, aLn_1, aBB_1] = request.security(syminfo.tickerid, tf1, f_pivA(qL1, qR1, false, sh1), lookahead = barmerge.lookahead_off)
+[aHv0_1, aHv1_1, aHv2_1, aHv3_1, aHg0_1, aHg1_1, aHg2_1, aHg3_1, aHt0_1, aHt1_1, aHt2_1, aHt3_1, aAtrH_1, aHn_1, aBBH_1] = request.security(syminfo.tickerid, tf1, f_pivA(qL1, qR1, true, sh1), lookahead = barmerge.lookahead_off)
+[aLv0_2, aLv1_2, aLv2_2, aLv3_2, aLg0_2, aLg1_2, aLg2_2, aLg3_2, aLt0_2, aLt1_2, aLt2_2, aLt3_2, aAtr_2, aLn_2, aBB_2] = request.security(syminfo.tickerid, tf2, f_pivA(qL2, qR2, false, sh2), lookahead = barmerge.lookahead_off)
+[aHv0_2, aHv1_2, aHv2_2, aHv3_2, aHg0_2, aHg1_2, aHg2_2, aHg3_2, aHt0_2, aHt1_2, aHt2_2, aHt3_2, aAtrH_2, aHn_2, aBBH_2] = request.security(syminfo.tickerid, tf2, f_pivA(qL2, qR2, true, sh2), lookahead = barmerge.lookahead_off)
+[aLv0_3, aLv1_3, aLv2_3, aLv3_3, aLg0_3, aLg1_3, aLg2_3, aLg3_3, aLt0_3, aLt1_3, aLt2_3, aLt3_3, aAtr_3, aLn_3, aBB_3] = request.security(syminfo.tickerid, tf3, f_pivA(qL3, qR3, false, sh3), lookahead = barmerge.lookahead_off)
+[aHv0_3, aHv1_3, aHv2_3, aHv3_3, aHg0_3, aHg1_3, aHg2_3, aHg3_3, aHt0_3, aHt1_3, aHt2_3, aHt3_3, aAtrH_3, aHn_3, aBBH_3] = request.security(syminfo.tickerid, tf3, f_pivA(qL3, qR3, true, sh3), lookahead = barmerge.lookahead_off)
 
 [bLv0_1, bLv1_1, bLv2_1, bLv3_1, bLg0_1, bLg1_1, bLg2_1, bLg3_1, bSd_1, bLn_1] = request.security(symB, tf1, f_pivB(qL1, qR1, false, sh1), lookahead = barmerge.lookahead_off)
 [bHv0_1, bHv1_1, bHv2_1, bHv3_1, bHg0_1, bHg1_1, bHg2_1, bHg3_1, bSdH_1, bHn_1] = request.security(symB, tf1, f_pivB(qL1, qR1, true, sh1), lookahead = barmerge.lookahead_off)
@@ -277,12 +299,12 @@ symB = cmpMode == "Ratio (spread)" ? (spreadSym == "" ? syminfo.tickerid + "/" +
 [bLv0_3, bLv1_3, bLv2_3, bLv3_3, bLg0_3, bLg1_3, bLg2_3, bLg3_3, bSd_3, bLn_3] = request.security(symB, tf3, f_pivB(qL3, qR3, false, sh3), lookahead = barmerge.lookahead_off)
 [bHv0_3, bHv1_3, bHv2_3, bHv3_3, bHg0_3, bHg1_3, bHg2_3, bHg3_3, bSdH_3, bHn_3] = request.security(symB, tf3, f_pivB(qL3, qR3, true, sh3), lookahead = barmerge.lookahead_off)
 
-[pSh1, pSl1] = request.security(syminfo.tickerid, tf1, f_slope(slopeLen, sh1), lookahead = barmerge.lookahead_off)
-[pSh2, pSl2] = request.security(syminfo.tickerid, tf2, f_slope(slopeLen, sh2), lookahead = barmerge.lookahead_off)
-[pSh3, pSl3] = request.security(syminfo.tickerid, tf3, f_slope(slopeLen, sh3), lookahead = barmerge.lookahead_off)
-[cSh1, cSl1] = request.security(symB, tf1, f_slope(slopeLen, sh1), lookahead = barmerge.lookahead_off)
-[cSh2, cSl2] = request.security(symB, tf2, f_slope(slopeLen, sh2), lookahead = barmerge.lookahead_off)
-[cSh3, cSl3] = request.security(symB, tf3, f_slope(slopeLen, sh3), lookahead = barmerge.lookahead_off)
+[pH1_1, pH2_1, pH3_1, pL1_1, pL2_1, pL3_1] = request.security(syminfo.tickerid, tf1, f_slope(slopeL1, slopeL2, slopeL3, sh1), lookahead = barmerge.lookahead_off)
+[pH1_2, pH2_2, pH3_2, pL1_2, pL2_2, pL3_2] = request.security(syminfo.tickerid, tf2, f_slope(slopeL1, slopeL2, slopeL3, sh2), lookahead = barmerge.lookahead_off)
+[pH1_3, pH2_3, pH3_3, pL1_3, pL2_3, pL3_3] = request.security(syminfo.tickerid, tf3, f_slope(slopeL1, slopeL2, slopeL3, sh3), lookahead = barmerge.lookahead_off)
+[cH1_1, cH2_1, cH3_1, cL1_1, cL2_1, cL3_1] = request.security(symB, tf1, f_slope(slopeL1, slopeL2, slopeL3, sh1), lookahead = barmerge.lookahead_off)
+[cH1_2, cH2_2, cH3_2, cL1_2, cL2_2, cL3_2] = request.security(symB, tf2, f_slope(slopeL1, slopeL2, slopeL3, sh2), lookahead = barmerge.lookahead_off)
+[cH1_3, cH2_3, cH3_3, cL1_3, cL2_3, cL3_3] = request.security(symB, tf3, f_slope(slopeL1, slopeL2, slopeL3, sh3), lookahead = barmerge.lookahead_off)
 
 // quante candele di ciascuna sezione contiene lo storico caricato: e' questo,
 // non il mercato, a limitare il campione delle sezioni alte su un grafico veloce
@@ -385,7 +407,7 @@ f_search(bool isSell, array<float> av, array<float> ag, array<float> bv, array<f
 f_eval(bool en, bool isSell, bool nwA, bool nwB,
        array<float> pv, array<float> pg, array<float> pt,
        array<float> cv, array<float> cg,
-       float a_atr, float sd, int kBars, int cfg, string tag) =>
+       float a_atr, float sd, float bbPos, int kBars, int cfg, string tag) =>
     var int last = na
     fr = (nwA and not nwA[1]) or (nwB and not nwB[1])
     dP = minPDelta * a_atr
@@ -442,8 +464,12 @@ f_eval(bool en, bool isSell, bool nwA, bool nwB,
         gp  := int(nz(array.get(cg, jR) - array.get(cg, 0), 0))
 
     isA  = dd0 <= alignA and dd1 <= alignA
+    // estremita' di banda: misurata sul piu' recente pivot di PREZZO, che con
+    // ancoraggio R non e' il pivot che ancora il segnale. E' un'approssimazione
+    // voluta: la domanda e' se lo STRUMENTO OPERATO e' teso, non il riferimento.
+    zoneOk = not useBB or (isSell ? bbPos >= bbHi : bbPos <= bbLo)
     cool = na(last) or bar_index - last >= cooldown
-    fire = en and usePiv and found and fr and cool and corrOk and inSess
+    fire = en and usePiv and found and fr and cool and corrOk and inSess and zoneOk
     if fire
         last := bar_index
         col = isSell ? (isA ? cAS : cBS) : (isA ? cAB : cBB)
@@ -464,7 +490,7 @@ f_eval(bool en, bool isSell, bool nwA, bool nwB,
                  " (" + str.tostring((cRv - cOv) / sd, "#.00") + ")" +
                  "\ndistanza pivot " + str.tostring(gp) + " · sfasamento " +
                  str.tostring(dd0, "#") + "/" + str.tostring(dd1, "#") +
-                 "\ncorrelazione " + str.tostring(corr, "#.00"))
+                 "\nbanda " + str.tostring(bbPos, "#.00") + " · correlazione " + str.tostring(corr, "#.00"))
         dim = tabDim == "Classe A/B" ? (isA ? 0 : 1) : tabDim == "Metodo Pivot/Pendenza" ? 0 : (ancP ? 0 : 1)
         f_track(isSell ? -1 : 1, cfg * 4 + (isSell ? 2 : 0) + dim, a_atr, kBars)
 
@@ -484,6 +510,7 @@ f_eval(bool en, bool isSell, bool nwA, bool nwB,
             why := why + (sf > alignM ? "sfasati " : "")
             why := why + (not corrOk ? "corr " : "")
             why := why + (not cool ? "cooldown " : "")
+            why := why + (not zoneOk ? "banda " + str.tostring(bbPos, "#.00") + " " : "")
             label.new(bar_index, isSell ? high : low, "×", xloc.bar_index,
                  isSell ? yloc.abovebar : yloc.belowbar, color.new(color.gray, 100),
                  label.style_none, color.new(color.gray, 25), szLbl,
@@ -495,19 +522,19 @@ f_eval(bool en, bool isSell, bool nwA, bool nwB,
                      "\ncorrelazione " + str.tostring(corr, "#.00"))
     [fire, isA, ancP]
 
-[b1, b1A, b1P] = f_eval(e1v, false, aLn_1, bLn_1, array.from(aLv0_1, aLv1_1, aLv2_1, aLv3_1), array.from(aLg0_1, aLg1_1, aLg2_1, aLg3_1), array.from(aLt0_1, aLt1_1, aLt2_1, aLt3_1), array.from(bLv0_1, bLv1_1, bLv2_1, bLv3_1), array.from(bLg0_1, bLg1_1, bLg2_1, bLg3_1), aAtr_1, bSd_1, kk1, 0, "S1 " + tf1)
-[s1, s1A, s1P] = f_eval(e1v, true,  aHn_1, bHn_1, array.from(aHv0_1, aHv1_1, aHv2_1, aHv3_1), array.from(aHg0_1, aHg1_1, aHg2_1, aHg3_1), array.from(aHt0_1, aHt1_1, aHt2_1, aHt3_1), array.from(bHv0_1, bHv1_1, bHv2_1, bHv3_1), array.from(bHg0_1, bHg1_1, bHg2_1, bHg3_1), aAtrH_1, bSdH_1, kk1, 0, "S1 " + tf1)
-[b2, b2A, b2P] = f_eval(e2v, false, aLn_2, bLn_2, array.from(aLv0_2, aLv1_2, aLv2_2, aLv3_2), array.from(aLg0_2, aLg1_2, aLg2_2, aLg3_2), array.from(aLt0_2, aLt1_2, aLt2_2, aLt3_2), array.from(bLv0_2, bLv1_2, bLv2_2, bLv3_2), array.from(bLg0_2, bLg1_2, bLg2_2, bLg3_2), aAtr_2, bSd_2, kk2, 1, "S2 " + tf2)
-[s2, s2A, s2P] = f_eval(e2v, true,  aHn_2, bHn_2, array.from(aHv0_2, aHv1_2, aHv2_2, aHv3_2), array.from(aHg0_2, aHg1_2, aHg2_2, aHg3_2), array.from(aHt0_2, aHt1_2, aHt2_2, aHt3_2), array.from(bHv0_2, bHv1_2, bHv2_2, bHv3_2), array.from(bHg0_2, bHg1_2, bHg2_2, bHg3_2), aAtrH_2, bSdH_2, kk2, 1, "S2 " + tf2)
-[b3, b3A, b3P] = f_eval(e3v, false, aLn_3, bLn_3, array.from(aLv0_3, aLv1_3, aLv2_3, aLv3_3), array.from(aLg0_3, aLg1_3, aLg2_3, aLg3_3), array.from(aLt0_3, aLt1_3, aLt2_3, aLt3_3), array.from(bLv0_3, bLv1_3, bLv2_3, bLv3_3), array.from(bLg0_3, bLg1_3, bLg2_3, bLg3_3), aAtr_3, bSd_3, kk3, 2, "S3 " + tf3)
-[s3, s3A, s3P] = f_eval(e3v, true,  aHn_3, bHn_3, array.from(aHv0_3, aHv1_3, aHv2_3, aHv3_3), array.from(aHg0_3, aHg1_3, aHg2_3, aHg3_3), array.from(aHt0_3, aHt1_3, aHt2_3, aHt3_3), array.from(bHv0_3, bHv1_3, bHv2_3, bHv3_3), array.from(bHg0_3, bHg1_3, bHg2_3, bHg3_3), aAtrH_3, bSdH_3, kk3, 2, "S3 " + tf3)
+[b1, b1A, b1P] = f_eval(e1v, false, aLn_1, bLn_1, array.from(aLv0_1, aLv1_1, aLv2_1, aLv3_1), array.from(aLg0_1, aLg1_1, aLg2_1, aLg3_1), array.from(aLt0_1, aLt1_1, aLt2_1, aLt3_1), array.from(bLv0_1, bLv1_1, bLv2_1, bLv3_1), array.from(bLg0_1, bLg1_1, bLg2_1, bLg3_1), aAtr_1, bSd_1, aBB_1, kk1, 0, "S1 " + tf1)
+[s1, s1A, s1P] = f_eval(e1v, true,  aHn_1, bHn_1, array.from(aHv0_1, aHv1_1, aHv2_1, aHv3_1), array.from(aHg0_1, aHg1_1, aHg2_1, aHg3_1), array.from(aHt0_1, aHt1_1, aHt2_1, aHt3_1), array.from(bHv0_1, bHv1_1, bHv2_1, bHv3_1), array.from(bHg0_1, bHg1_1, bHg2_1, bHg3_1), aAtrH_1, bSdH_1, aBBH_1, kk1, 0, "S1 " + tf1)
+[b2, b2A, b2P] = f_eval(e2v, false, aLn_2, bLn_2, array.from(aLv0_2, aLv1_2, aLv2_2, aLv3_2), array.from(aLg0_2, aLg1_2, aLg2_2, aLg3_2), array.from(aLt0_2, aLt1_2, aLt2_2, aLt3_2), array.from(bLv0_2, bLv1_2, bLv2_2, bLv3_2), array.from(bLg0_2, bLg1_2, bLg2_2, bLg3_2), aAtr_2, bSd_2, aBB_2, kk2, 1, "S2 " + tf2)
+[s2, s2A, s2P] = f_eval(e2v, true,  aHn_2, bHn_2, array.from(aHv0_2, aHv1_2, aHv2_2, aHv3_2), array.from(aHg0_2, aHg1_2, aHg2_2, aHg3_2), array.from(aHt0_2, aHt1_2, aHt2_2, aHt3_2), array.from(bHv0_2, bHv1_2, bHv2_2, bHv3_2), array.from(bHg0_2, bHg1_2, bHg2_2, bHg3_2), aAtrH_2, bSdH_2, aBBH_2, kk2, 1, "S2 " + tf2)
+[b3, b3A, b3P] = f_eval(e3v, false, aLn_3, bLn_3, array.from(aLv0_3, aLv1_3, aLv2_3, aLv3_3), array.from(aLg0_3, aLg1_3, aLg2_3, aLg3_3), array.from(aLt0_3, aLt1_3, aLt2_3, aLt3_3), array.from(bLv0_3, bLv1_3, bLv2_3, bLv3_3), array.from(bLg0_3, bLg1_3, bLg2_3, bLg3_3), aAtr_3, bSd_3, aBB_3, kk3, 2, "S3 " + tf3)
+[s3, s3A, s3P] = f_eval(e3v, true,  aHn_3, bHn_3, array.from(aHv0_3, aHv1_3, aHv2_3, aHv3_3), array.from(aHg0_3, aHg1_3, aHg2_3, aHg3_3), array.from(aHt0_3, aHt1_3, aHt2_3, aHt3_3), array.from(bHv0_3, bHv1_3, bHv2_3, bHv3_3), array.from(bHg0_3, bHg1_3, bHg2_3, bHg3_3), aAtrH_3, bSdH_3, aBBH_3, kk3, 2, "S3 " + tf3)
 
-[y1, y1A] = f_slopeSig(e1v, false, pSl1, cSl1, aAtr_1, kk1, 0, "S1 " + tf1)
-[w1, w1A] = f_slopeSig(e1v, true,  pSh1, cSh1, aAtr_1, kk1, 0, "S1 " + tf1)
-[y2, y2A] = f_slopeSig(e2v, false, pSl2, cSl2, aAtr_2, kk2, 1, "S2 " + tf2)
-[w2, w2A] = f_slopeSig(e2v, true,  pSh2, cSh2, aAtr_2, kk2, 1, "S2 " + tf2)
-[y3, y3A] = f_slopeSig(e3v, false, pSl3, cSl3, aAtr_3, kk3, 2, "S3 " + tf3)
-[w3, w3A] = f_slopeSig(e3v, true,  pSh3, cSh3, aAtr_3, kk3, 2, "S3 " + tf3)
+[y1, y1A] = f_slopeSig(e1v, false, pL1_1, pL2_1, pL3_1, cL1_1, cL2_1, cL3_1, aAtr_1, aBB_1, kk1, 0, "S1 " + tf1)
+[w1, w1A] = f_slopeSig(e1v, true,  pH1_1, pH2_1, pH3_1, cH1_1, cH2_1, cH3_1, aAtrH_1, aBBH_1, kk1, 0, "S1 " + tf1)
+[y2, y2A] = f_slopeSig(e2v, false, pL1_2, pL2_2, pL3_2, cL1_2, cL2_2, cL3_2, aAtr_2, aBB_2, kk2, 1, "S2 " + tf2)
+[w2, w2A] = f_slopeSig(e2v, true,  pH1_2, pH2_2, pH3_2, cH1_2, cH2_2, cH3_2, aAtrH_2, aBBH_2, kk2, 1, "S2 " + tf2)
+[y3, y3A] = f_slopeSig(e3v, false, pL1_3, pL2_3, pL3_3, cL1_3, cL2_3, cL3_3, aAtr_3, aBB_3, kk3, 2, "S3 " + tf3)
+[w3, w3A] = f_slopeSig(e3v, true,  pH1_3, pH2_3, pH3_3, cH1_3, cH2_3, cH3_3, aAtrH_3, aBBH_3, kk3, 2, "S3 " + tf3)
 
 buyA  = (b1 and b1A) or (b2 and b2A) or (b3 and b3A) or (y1 and y1A) or (y2 and y2A) or (y3 and y3A)
 buyB  = (b1 and not b1A) or (b2 and not b2A) or (b3 and not b3A) or (y1 and not y1A) or (y2 and not y2A) or (y3 and not y3A)
