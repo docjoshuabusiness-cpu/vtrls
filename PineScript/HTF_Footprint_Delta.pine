@@ -1,0 +1,413 @@
+//@version=6
+// =============================================================================
+//  HTF Footprint + Delta   v1.0
+//  Ricostruzione del volume profile per candela HTF con stima del delta.
+//  ---------------------------------------------------------------------------
+//  LEGGERE PRIMA DI USARLO. QUESTO NON E' UN FOOTPRINT.
+//
+//  Il footprint nativo di TradingView non e' uno script Pine: e' un TIPO DI
+//  GRAFICO calcolato lato server sui tick, con il LATO AGGRESSORE di ogni
+//  scambio (volume eseguito al bid contro volume eseguito all'ask). Pine non ha
+//  accesso ne' ai tick ne' al book: non esiste alcuna funzione che restituisca
+//  bid e ask. Punto.
+//
+//  Quello che questo script fa e' l'unica cosa che Pine consente:
+//    1. per ogni barra del grafico chiede le barre di un timeframe INFERIORE
+//       con request.security_lower_tf()
+//    2. accumula il loro volume in una griglia di livelli di prezzo
+//    3. INFERISCE il lato aggressore di ciascuna barra inferiore con una regola
+//       statistica, perche' il dato vero non esiste
+//
+//  Il delta che ne esce e' una STIMA. Con un LTF abbastanza fine e uno
+//  strumento liquido e' una stima decente; su barre grosse o su strumenti
+//  illiquidi e' rumore ben formattato. La differenza fra le due situazioni la
+//  vedi nella tabella diagnostica: guarda "intrabar/candela".
+//
+//  ---------------------------------------------------------------------------
+//  I TRE VINCOLI CHE NON SI AGGIRANO
+//
+//  1. max_boxes_count = 500. Ogni cella e' un box. Con 14 righe in modalita'
+//     divisa (bid | ask) sono 28 box per candela: 17 candele e hai finito il
+//     budget. Non e' un difetto dello script, e' il limite di Pine. Lo script
+//     cancella automaticamente le candele piu' vecchie.
+//
+//  2. request.security_lower_tf() ha un tetto di intrabar (dell'ordine di
+//     100.000 in totale). Con LTF a 1S copri pochissimo storico: le candele
+//     piu' vecchie tornano semplicemente VUOTE. La tabella lo segnala.
+//
+//  3. Il volume dev'essere un volume vero. Su CFD forex e su molti CFD su
+//     indici il "volume" e' il CONTEGGIO DEI TICK, non i contratti scambiati.
+//     Un delta calcolato su conteggi di tick misura asimmetria di attivita',
+//     non flusso ordini. La tabella lo segnala in rosso quando rileva forex.
+//     Su futures (NQ, ES, CL...) il volume e' reale e il delta ha significato.
+//
+//  ---------------------------------------------------------------------------
+//  LARGHEZZA DELLE CELLE
+//  Una candela HTF e' larga k barre del grafico, con k = TF_HTF / TF_grafico.
+//  In modalita' divisa ogni colonna e' larga k/2 barre. Se k e' piccolo il
+//  testo non ci sta e le celle si sovrappongono. Usare k >= 20, meglio 40.
+//  Esempio buono: grafico 1m, HTF 30m -> k = 30, colonne da 15 barre.
+//  Esempio inutilizzabile: grafico 1m, HTF 5m -> k = 5, colonne da 2.5 barre.
+// =============================================================================
+
+indicator("HTF Footprint + Delta", shorttitle="HTF-FP", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500)
+
+// ------------------------------------------------------------------ STRUTTURA
+var string gA = "1 · Struttura"
+htfTf   = input.timeframe("30", "Timeframe della candela", group=gA,
+     tooltip="Il timeframe di cui si costruisce il footprint. Deve essere PIU' ALTO di quello del grafico, e di parecchio: il rapporto k = TF candela / TF grafico e' la larghezza della candela in barre. Sotto k = 20 le celle sono troppo strette per il testo.")
+ltfTf   = input.timeframe("1S", "Timeframe dei dati (intrabar)", group=gA,
+     tooltip="Il timeframe da cui si prende il volume. Deve essere PIU' BASSO di quello del grafico.\n\nPiu' e' fine, piu' la stima del lato aggressore e' attendibile, e MENO storico riesci a coprire: il tetto di intrabar di Pine e' globale. 1S da' la stima migliore su pochissime candele; 1 minuto copre molto piu' storico con una stima piu' grossolana.\n\nSe le candele vecchie escono vuote hai superato il tetto: alza questo timeframe.")
+maxCandles = input.int(12, "Candele footprint da disegnare", minval=1, maxval=60, group=gA,
+     tooltip="Le piu' recenti. Il budget e' 500 box in totale: righe x colonne x candele deve stargli sotto, altrimenti TradingView smette di disegnare senza avvisare. La tabella mostra i box effettivamente usati.")
+showLive = input.bool(true, "Aggiorna anche la candela in corso", group=gA)
+
+// -------------------------------------------------------------------- GRIGLIA
+var string gB = "2 · Griglia dei prezzi"
+rowMode = input.string("Auto (da ATR)", "Altezza delle righe", options=["Auto (da ATR)","Tick fissi"], group=gB,
+     tooltip="AUTO: l'altezza di riga viene dall'ATR del timeframe della candela diviso il numero di righe desiderato, arrotondata al tick. Si adatta allo strumento e alla volatilita', e resta stabile nel tempo perche' l'ATR e' lento: le righe restano allineate fra candele diverse.\n\nTICK FISSI: altezza costante. E' la griglia di un footprint vero, ma va tarata a mano per ogni strumento e va rifatta quando la volatilita' cambia regime.")
+tgtRows = input.int(14, "   righe desiderate (auto)", minval=4, maxval=40, group=gB)
+rowTicks= input.int(4,  "   tick per riga (fisso)", minval=1, maxval=10000, group=gB)
+atrHtfL = input.int(20, "   periodi ATR per l'auto", minval=2, maxval=200, group=gB)
+maxRows = input.int(24, "Righe massime per candela", minval=6, maxval=60, group=gB,
+     tooltip="Guardia sul budget dei box. Se una candela HTF e' cosi' ampia da superare questo numero di righe, le celle NON vengono disegnate (restano la candela e l'etichetta del delta) e la tabella lo segnala. Meglio una candela senza celle che il disegno che si interrompe a meta' grafico senza dire perche'.")
+
+// ------------------------------------------------------------- STIMA DEL LATO
+var string gC = "3 · Stima del lato aggressore"
+clsMode = input.string("Tick rule", "Regola", options=["Tick rule","Direzione della barra","Ripartizione proporzionale"], group=gC,
+     tooltip="Nessuna delle tre e' il dato vero. Sono tre approssimazioni con difetti diversi.\n\nTICK RULE (consigliata): il volume di una barra intrabar e' tutto ASK se la sua chiusura e' sopra la chiusura precedente, tutto BID se sotto, e mantiene il segno precedente se uguale. E' la regola di Lee-Ready senza le quotazioni. Con un LTF fine e' la migliore delle tre. Sbaglia sistematicamente sui rimbalzi dentro lo spread.\n\nDIREZIONE DELLA BARRA: ask se close > open. Piu' grossolana: ignora del tutto la sequenza degli scambi dentro la barra.\n\nRIPARTIZIONE PROPORZIONALE: quota ask = (close - low) / (high - low). Non fa errori discreti e la curva e' liscia, ma COMPRIME SISTEMATICAMENTE il delta verso zero, perche' ogni barra contribuisce a entrambi i lati. I valori assoluti non sono confrontabili con quelli di un footprint vero.")
+posMode = input.string("Alla chiusura", "Assegnazione al livello", options=["Alla chiusura","Distribuita sul range"], group=gC,
+     tooltip="ALLA CHIUSURA: tutto il volume della barra intrabar va sul livello della sua chiusura. Corretto quando la barra intrabar e' piu' stretta di una riga, cioe' quando l'LTF e' abbastanza fine.\n\nDISTRIBUITA: il volume viene spalmato uniformemente sui livelli attraversati dalla barra. Serve quando l'LTF e' grosso rispetto all'altezza di riga. L'uniformita' e' comunque un'assunzione arbitraria: il volume reale dentro una barra non e' uniforme.")
+
+// -------------------------------------------------------------------- GRAFICA
+var string gD = "4 · Celle"
+cellMode= input.string("Divisa (bid | ask)", "Disposizione", options=["Divisa (bid | ask)","Unica (delta)"], group=gD,
+     tooltip="DIVISA: due celle per riga, volume al bid a sinistra e all'ask a destra, come nel footprint nativo. Costa 2 box per riga.\n\nUNICA: una cella per riga con il delta del livello. Meta' dei box, quindi il doppio delle candele visibili, ma perdi la lettura degli squilibri diagonali.")
+cBid    = input.color(color.new(#ef5350, 0), "Bid", inline="cc", group=gD)
+cAsk    = input.color(color.new(#26a69a, 0), "Ask", inline="cc", group=gD)
+cellTxt = input.color(color.new(#ffffff, 0), "testo", inline="cc", group=gD)
+cellSz  = input.string("Minimo", "Dimensione testo celle", options=["Automatico","Minimo","Piccolo","Normale"], group=gD)
+shadeVol= input.bool(true, "Intensita' proporzionale al volume", group=gD,
+     tooltip="La trasparenza di ogni cella scala con il suo volume rapportato alla cella piu' grossa della stessa candela. E' l'unico modo per vedere la struttura del profilo a colpo d'occhio invece di leggere venti numeri.")
+showPoc = input.bool(true, "Evidenzia il POC", group=gD,
+     tooltip="Point of Control: il livello col volume totale piu' alto della candela.")
+cPoc    = input.color(color.new(#ffeb3b, 0), "", inline="poc", group=gD)
+
+var string gE = "5 · Squilibri diagonali"
+showImb = input.bool(true, "Marca gli squilibri", group=gE,
+     tooltip="Confronto DIAGONALE, che e' il modo corretto: l'ask a un livello si confronta col bid del livello SOTTO, perche' sono i due lati che si sono incrociati allo stesso prezzo. Confrontare ask e bid sulla stessa riga e' un errore diffuso e non significa nulla.\n\nUno squilibrio segnala che a quel prezzo un lato ha assorbito l'altro. Su una ricostruzione da OHLCV va preso per quello che e': un indizio, non una misura.")
+imbRatio= input.float(3.0, "   rapporto minimo", minval=1.5, maxval=20.0, step=0.5, group=gE)
+imbMin  = input.float(0.0, "   volume minimo della cella", minval=0.0, group=gE,
+     tooltip="Sotto questo volume la cella non viene mai marcata. Senza questo filtro un 3 contro 0 conta come squilibrio 'infinito' e il grafico si riempie di marcature senza contenuto.")
+
+var string gF = "6 · Candela HTF"
+showBox = input.bool(true, "Disegna il contorno della candela", inline="bx", group=gF)
+cBoxUp  = input.color(color.new(#26a69a, 70), "", inline="bx", group=gF)
+cBoxDn  = input.color(color.new(#ef5350, 70), "", inline="bx", group=gF)
+showBody= input.bool(true, "Disegna il corpo (open-close)", group=gF)
+
+var string gG = "7 · Etichetta del delta"
+showDlt = input.bool(true, "Mostra Delta / Total sotto la candela", group=gG,
+     tooltip="Total e' il VOLUME TOTALE della candela, non il delta cumulato: e' la stessa semantica del footprint nativo, dove vale sempre |Delta| <= Total.")
+showBA  = input.bool(true, "   aggiungi i totali bid e ask", group=gG)
+showCum = input.bool(false, "   aggiungi il delta cumulato", group=gG,
+     tooltip="Somma progressiva dei delta dall'inizio dello storico caricato. Il livello assoluto non significa nulla (dipende da dove comincia il grafico): quello che si legge sono le DIVERGENZE fra la sua pendenza e quella del prezzo.")
+dltOff  = input.float(0.6, "   distanza sotto il minimo (x ATR)", minval=0.0, maxval=5.0, step=0.1, group=gG)
+dltBg   = input.color(color.new(#ffffff, 5), "Sfondo", inline="dl", group=gG)
+dltTx   = input.color(color.new(#000000, 0), "testo", inline="dl", group=gG)
+dltUp   = input.color(color.new(#00897b, 0), "delta +", inline="d2", group=gG)
+dltDn   = input.color(color.new(#e53935, 0), "delta -", inline="d2", group=gG)
+dltSz   = input.string("Piccolo", "Dimensione", options=["Minimo","Piccolo","Normale"], group=gG)
+showTab = input.bool(true, "Mostra tabella diagnostica", group=gG)
+
+// ============================================================== CONTROLLI ====
+chartSec = timeframe.in_seconds()
+htfSec   = timeframe.in_seconds(htfTf)
+ltfSec   = timeframe.in_seconds(ltfTf)
+kBars    = int(math.max(1, math.round(htfSec / float(chartSec))))
+
+if barstate.isfirst
+    if ltfSec >= chartSec
+        runtime.error("Il timeframe dei dati intrabar (" + ltfTf + ") deve essere PIU' BASSO di quello del grafico (" + timeframe.period + "). Abbassalo, oppure alza il timeframe del grafico.")
+    if htfSec <= chartSec
+        runtime.error("Il timeframe della candela (" + htfTf + ") deve essere PIU' ALTO di quello del grafico (" + timeframe.period + "). Il footprint aggrega piu' barre del grafico in una candela: se coincidono non c'e' nulla da aggregare.")
+
+// ============================================================ DATI INTRABAR ==
+[lO, lH, lL, lC, lV] = request.security_lower_tf(syminfo.tickerid, ltfTf, [open, high, low, close, volume])
+
+atrHtfRaw = request.security(syminfo.tickerid, htfTf, ta.atr(atrHtfL)[1], lookahead = barmerge.lookahead_off)
+atrChart  = math.max(ta.atr(14), syminfo.mintick)
+
+f_fmt(float v) =>
+    a = math.abs(v)
+    a >= 1e9 ? str.tostring(v / 1e9, "#.##") + "B" : a >= 1e6 ? str.tostring(v / 1e6, "#.##") + "M" : a >= 1000.0 ? str.tostring(v / 1000.0, "#.##") + "K" : str.tostring(math.round(v))
+
+f_sz(string s) => s == "Automatico" ? size.auto : s == "Minimo" ? size.tiny : s == "Piccolo" ? size.small : size.normal
+szCell = f_sz(cellSz)
+szDlt  = f_sz(dltSz)
+
+// =============================================== STATO DELLA CANDELA IN CORSO
+var map<int, float> mBid = map.new<int, float>()
+var map<int, float> mAsk = map.new<int, float>()
+var int   minLvl  = 2147483647
+var int   maxLvl  = -2147483648
+var float curRow  = na          // altezza di riga CONGELATA all'apertura della
+                                // candela: se cambiasse a meta' candela i
+                                // livelli gia' accumulati non sarebbero piu'
+                                // confrontabili con quelli nuovi
+var int   leftIdx = 0
+var float hOpen   = na
+var float hHigh   = na
+var float hLow    = na
+var float vTot    = 0.0
+var float vBid    = 0.0
+var float vAsk    = 0.0
+var int   nIntra  = 0
+var float prevC   = na
+var int   prevDir = 1
+var float cumDlt  = 0.0
+var int   nSkipRows = 0
+
+var array<box>   fpBox   = array.new<box>()
+var array<label> fpLab   = array.new<label>()
+var array<int>   fpCnt   = array.new<int>()
+var array<box>   liveBox = array.new<box>()
+var array<label> liveLab = array.new<label>()
+
+f_rowSize() =>
+    rowMode == "Tick fissi" ? rowTicks * syminfo.mintick : math.max(syminfo.mintick, math.round(nz(atrHtfRaw, atrChart) / tgtRows / syminfo.mintick) * syminfo.mintick)
+
+// Le mappe sono tipi RIFERIMENTO e si possono mutare da dentro una funzione.
+// Gli scalari globali NO: Pine vieta l'assegnazione a una variabile globale nel
+// corpo di una funzione. Percio' minLvl/maxLvl vengono aggiornati dal chiamante,
+// che sta nello scope globale.
+f_add(int lvl, float vB, float vA) =>
+    if vB > 0
+        map.put(mBid, lvl, nz(map.get(mBid, lvl)) + vB)
+    if vA > 0
+        map.put(mAsk, lvl, nz(map.get(mAsk, lvl)) + vA)
+    lvl
+
+// ---------------------------------------------------------------- RENDERING --
+//  Disegna le celle, il contorno e l'etichetta di UNA candela, dai dati
+//  attualmente nelle mappe. La stessa funzione serve per le candele chiuse e
+//  per quella in corso: cambia solo l'array in cui i box vengono depositati.
+f_render(int lft, int rgt, float cls, array<box> bStore, array<label> lStore) =>
+    int made = 0
+    if maxLvl >= minLvl and not na(curRow)
+        nRows = maxLvl - minLvl + 1
+        if nRows <= maxRows
+            // massimo di cella, per l'intensita' e per il POC
+            float vMax  = 0.0
+            int   pocLv = minLvl
+            float pocV  = -1.0
+            for l = minLvl to maxLvl
+                b = nz(map.get(mBid, l))
+                a = nz(map.get(mAsk, l))
+                vMax := math.max(vMax, math.max(b, a))
+                if b + a > pocV
+                    pocV  := b + a
+                    pocLv := l
+            mid = lft + int(math.max(1, (rgt - lft) / 2))
+            for l = minLvl to maxLvl
+                b   = nz(map.get(mBid, l))
+                a   = nz(map.get(mAsk, l))
+                if b + a > 0
+                    yLo = l * curRow
+                    yHi = (l + 1) * curRow
+                    isPoc = showPoc and l == pocLv
+                    // squilibrio DIAGONALE: l'ask a questo livello contro il
+                    // bid del livello sotto, e viceversa. Sono i due lati che
+                    // si sono incrociati allo stesso prezzo.
+                    bDn = nz(map.get(mBid, l - 1))
+                    aUp = nz(map.get(mAsk, l + 1))
+                    imbA = showImb and a >= imbMin and a > 0 and a >= imbRatio * math.max(bDn, 1e-9)
+                    imbB = showImb and b >= imbMin and b > 0 and b >= imbRatio * math.max(aUp, 1e-9)
+                    if cellMode == "Divisa (bid | ask)"
+                        tB = shadeVol and vMax > 0 ? int(85 - 60 * math.min(1.0, b / vMax)) : 30
+                        tA = shadeVol and vMax > 0 ? int(85 - 60 * math.min(1.0, a / vMax)) : 30
+                        bb = box.new(lft, yHi, mid, yLo, border_width = imbB ? 2 : isPoc ? 1 : 0, border_color = imbB ? cBid : isPoc ? cPoc : color.new(color.gray, 100), bgcolor = color.new(cBid, b > 0 ? tB : 95), text = b > 0 ? f_fmt(b) : "", text_color = cellTxt, text_size = szCell, text_halign = text.align_center, text_valign = text.align_center)
+                        ba = box.new(mid, yHi, rgt, yLo, border_width = imbA ? 2 : isPoc ? 1 : 0, border_color = imbA ? cAsk : isPoc ? cPoc : color.new(color.gray, 100), bgcolor = color.new(cAsk, a > 0 ? tA : 95), text = a > 0 ? f_fmt(a) : "", text_color = cellTxt, text_size = szCell, text_halign = text.align_center, text_valign = text.align_center)
+                        array.push(bStore, bb)
+                        array.push(bStore, ba)
+                        made += 2
+                    else
+                        d  = a - b
+                        tD = shadeVol and vMax > 0 ? int(85 - 60 * math.min(1.0, math.abs(d) / vMax)) : 30
+                        bd = box.new(lft, yHi, rgt, yLo, border_width = isPoc ? 2 : 0, border_color = isPoc ? cPoc : color.new(color.gray, 100), bgcolor = color.new(d >= 0 ? cAsk : cBid, tD), text = f_fmt(d), text_color = cellTxt, text_size = szCell, text_halign = text.align_center, text_valign = text.align_center)
+                        array.push(bStore, bd)
+                        made += 1
+
+    // contorno e corpo della candela
+    if showBox and not na(hHigh)
+        up = cls > hOpen
+        bx = box.new(lft, hHigh, rgt, hLow, border_width = 1, border_color = up ? cBoxUp : cBoxDn, bgcolor = color.new(color.gray, 100))
+        array.push(bStore, bx)
+        made += 1
+        if showBody
+            bTop = math.max(hOpen, cls)
+            bBot = math.min(hOpen, cls)
+            if bTop > bBot
+                by = box.new(lft, bTop, rgt, bBot, border_width = 1, border_color = up ? cBoxUp : cBoxDn, bgcolor = color.new(up ? cBoxUp : cBoxDn, 85))
+                array.push(bStore, by)
+                made += 1
+
+    // etichetta Delta / Total. Total = volume totale della candela, non delta
+    // cumulato: e' la semantica del footprint nativo, dove |Delta| <= Total.
+    if showDlt and not na(hLow)
+        dlt = vAsk - vBid
+        txt = "Delta " + (dlt >= 0 ? "+" : "") + f_fmt(dlt) + "\nTotal " + f_fmt(vTot)
+        if showBA
+            txt := txt + "\nB " + f_fmt(vBid) + " | A " + f_fmt(vAsk)
+        if showCum
+            txt := txt + "\nCum " + f_fmt(cumDlt)
+        lb = label.new(lft + int((rgt - lft) / 2), hLow - dltOff * atrChart, txt, xloc = xloc.bar_index, style = label.style_label_up, color = dltBg, textcolor = dltTx, size = szDlt, textalign = text.align_left)
+        array.push(lStore, lb)
+    made
+
+f_clearLive() =>
+    if array.size(liveBox) > 0
+        for i = 0 to array.size(liveBox) - 1
+            box.delete(array.get(liveBox, i))
+        array.clear(liveBox)
+    if array.size(liveLab) > 0
+        for i = 0 to array.size(liveLab) - 1
+            label.delete(array.get(liveLab, i))
+        array.clear(liveLab)
+    true
+
+// ============================================ CICLO DELLA CANDELA HTF ========
+newHtf = ta.change(time(htfTf)) != 0
+
+if newHtf
+    // Siamo sulla PRIMA barra del nuovo periodo: la candela precedente e'
+    // chiusa e finisce a bar_index - 1. Va disegnata adesso, prima di
+    // azzerare gli accumulatori.
+    if nIntra > 0 and bar_index > leftIdx
+        f_clearLive()
+        // il cumulato va aggiornato PRIMA di disegnare, altrimenti l'etichetta
+        // mostra un cumulato che esclude la candela a cui e' attaccata
+        cumDlt += vAsk - vBid
+        if maxLvl >= minLvl and maxLvl - minLvl + 1 > maxRows
+            nSkipRows += 1
+        // close[1] e non close: siamo gia' sulla prima barra del nuovo periodo,
+        // la candela che stiamo disegnando ha chiuso sulla barra precedente
+        n = f_render(leftIdx, bar_index - 1, close[1], fpBox, fpLab)
+        array.push(fpCnt, n)
+        // budget dei box: si cancella la candela piu' vecchia per intero
+        while array.size(fpCnt) > maxCandles
+            nDel = array.shift(fpCnt)
+            if nDel > 0
+                for i = 1 to nDel
+                    if array.size(fpBox) > 0
+                        box.delete(array.shift(fpBox))
+            if array.size(fpLab) > 0
+                label.delete(array.shift(fpLab))
+    map.clear(mBid)
+    map.clear(mAsk)
+    minLvl  := 2147483647
+    maxLvl  := -2147483648
+    curRow  := f_rowSize()
+    leftIdx := bar_index
+    hOpen   := open
+    hHigh   := high
+    hLow    := low
+    vTot    := 0.0
+    vBid    := 0.0
+    vAsk    := 0.0
+    nIntra  := 0
+else
+    hHigh := math.max(nz(hHigh, high), high)
+    hLow  := math.min(nz(hLow, low), low)
+    if na(curRow)
+        curRow := f_rowSize()
+
+// ------------------------------------------------- accumulo delle intrabar --
+nLtf = array.size(lC)
+if nLtf > 0 and not na(curRow) and curRow > 0
+    for i = 0 to nLtf - 1
+        o = array.get(lO, i)
+        h = array.get(lH, i)
+        l = array.get(lL, i)
+        c = array.get(lC, i)
+        v = nz(array.get(lV, i))
+        if v > 0 and not na(c)
+            float buyF = 0.5
+            if clsMode == "Tick rule"
+                int dir = prevDir
+                if na(prevC)
+                    dir := c >= o ? 1 : -1
+                else if c > prevC
+                    dir := 1
+                else if c < prevC
+                    dir := -1
+                prevDir := dir
+                buyF := dir > 0 ? 1.0 : 0.0
+            else if clsMode == "Direzione della barra"
+                buyF := c > o ? 1.0 : c < o ? 0.0 : 0.5
+            else
+                rng = h - l
+                buyF := rng > 0 ? math.min(1.0, math.max(0.0, (c - l) / rng)) : 0.5
+            vA = v * buyF
+            vB = v - vA
+            if posMode == "Alla chiusura"
+                lv = int(math.floor(c / curRow))
+                f_add(lv, vB, vA)
+                minLvl := math.min(minLvl, lv)
+                maxLvl := math.max(maxLvl, lv)
+            else
+                l0 = int(math.floor(l / curRow))
+                l1 = int(math.floor(h / curRow))
+                nL = math.min(50, l1 - l0 + 1)
+                if nL <= 1
+                    f_add(l0, vB, vA)
+                    minLvl := math.min(minLvl, l0)
+                    maxLvl := math.max(maxLvl, l0)
+                else
+                    for j = 0 to nL - 1
+                        f_add(l0 + j, vB / nL, vA / nL)
+                    minLvl := math.min(minLvl, l0)
+                    maxLvl := math.max(maxLvl, l0 + nL - 1)
+            vTot += v
+            vBid += vB
+            vAsk += vA
+            nIntra += 1
+        if not na(c)
+            prevC := c
+
+// ------------------------------------------- candela in corso, ridisegnata --
+if showLive and barstate.islast and nIntra > 0
+    f_clearLive()
+    f_render(leftIdx, math.max(bar_index, leftIdx + 1), close, liveBox, liveLab)
+
+// ============================================================ DIAGNOSTICA ====
+//  Serve a rispondere a UNA domanda: i numeri che sto guardando hanno dietro
+//  abbastanza dati per significare qualcosa? La riga "intrabar/candela" e' la
+//  risposta. Sotto qualche centinaio, il delta e' rumore ben formattato.
+var table tb = table.new(position.bottom_right, 2, 8, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+if showTab and barstate.islast
+    hb = color.new(color.gray, 70)
+    bg = color.new(color.gray, 88)
+    isTick = syminfo.type == "forex" or syminfo.type == "cfd"
+    boxUse = array.size(fpBox) + array.size(liveBox)
+    perC   = cellMode == "Divisa (bid | ask)" ? 2 : 1
+    est    = (maxLvl >= minLvl ? maxLvl - minLvl + 1 : 0) * perC * maxCandles
+    table.cell(tb, 0, 0, "HTF-FP", bgcolor=hb, text_color=color.white, text_size=size.small)
+    table.cell(tb, 1, 0, htfTf + " · k=" + str.tostring(kBars), bgcolor=hb, text_color=kBars < 20 ? color.orange : color.white, text_size=size.small, tooltip="k = larghezza della candela in barre del grafico. Sotto 20 le celle sono troppo strette perche' il testo ci stia.")
+    table.cell(tb, 0, 1, "intrabar/candela", bgcolor=bg, text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 1, str.tostring(nIntra), bgcolor=bg, text_color=nIntra < 100 ? color.red : nIntra < 400 ? color.orange : color.lime, text_size=size.small, tooltip="Barre intrabar entrate nella candela in corso. E' la dimensione del campione su cui e' stimato il delta. Sotto 100 la stima non regge; se e' ZERO su candele vecchie hai esaurito il tetto di intrabar di Pine: alza il timeframe dei dati.")
+    table.cell(tb, 0, 2, "riga", bgcolor=bg, text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 2, na(curRow) ? "n/a" : str.tostring(curRow, format.mintick) + " (" + str.tostring(math.round(curRow / syminfo.mintick)) + "t)", bgcolor=bg, text_color=color.white, text_size=size.small)
+    table.cell(tb, 0, 3, "righe candela", bgcolor=bg, text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 3, (maxLvl >= minLvl ? str.tostring(maxLvl - minLvl + 1) : "0") + " / " + str.tostring(maxRows), bgcolor=bg, text_color=nSkipRows > 0 ? color.red : color.white, text_size=size.small, tooltip=nSkipRows > 0 ? str.tostring(nSkipRows) + " candele NON hanno le celle: superavano il massimo di righe. Aumenta i tick per riga o riduci le righe desiderate." : "")
+    table.cell(tb, 0, 4, "box usati", bgcolor=bg, text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 4, str.tostring(boxUse) + " / 500", bgcolor=bg, text_color=boxUse > 450 ? color.red : boxUse > 350 ? color.orange : color.lime, text_size=size.small, tooltip="Stima a regime: " + str.tostring(est) + ". Oltre 500 TradingView smette di disegnare senza avvisare.")
+    table.cell(tb, 0, 5, "volume", bgcolor=bg, text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 5, isTick ? "TICK COUNT" : "reale", bgcolor=bg, text_color=isTick ? color.red : color.lime, text_size=size.small, tooltip=isTick ? "Su questo strumento il volume e' quasi certamente il CONTEGGIO DEI TICK, non i contratti scambiati. Il delta misura asimmetria di attivita', non flusso ordini. Non confrontarlo con il delta di un future." : "Volume di scambio reale: il delta ha significato, entro i limiti della stima del lato aggressore.")
+    table.cell(tb, 0, 6, "stima lato", bgcolor=bg, text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 6, clsMode == "Tick rule" ? "tick rule" : clsMode == "Direzione della barra" ? "barra" : "proporz.", bgcolor=bg, text_color=clsMode == "Ripartizione proporzionale" ? color.orange : color.white, text_size=size.small, tooltip=clsMode == "Ripartizione proporzionale" ? "La ripartizione proporzionale comprime il delta verso zero: i valori assoluti non sono confrontabili con un footprint vero." : "")
+    table.cell(tb, 0, 7, "cum delta", bgcolor=bg, text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 7, f_fmt(cumDlt), bgcolor=bg, text_color=cumDlt >= 0 ? dltUp : dltDn, text_size=size.small, tooltip="Somma dei delta delle candele chiuse. Il livello assoluto dipende da dove comincia lo storico caricato e non significa nulla: si leggono le divergenze di pendenza contro il prezzo.")
+
+// ================================================================== ALERT ====
+alertcondition(newHtf, "HTF-FP · nuova candela", "HTF-FP: nuova candela HTF")
