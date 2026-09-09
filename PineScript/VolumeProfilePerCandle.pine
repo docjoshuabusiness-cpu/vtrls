@@ -1,0 +1,288 @@
+//@version=6
+// =============================================================================
+//  VOLUME PROFILE PER CANDELA  —  bucket multi-timeframe
+// -----------------------------------------------------------------------------
+//  Ricostruisce il volume profile di una "candela" di timeframe superiore
+//  (es. 5 min) usando le barre del chart corrente (es. 5s / 15s / 1m).
+//
+//  Il bucket NON dipende dal timeframe del chart: viene allineato tramite
+//  request.security(..., time, lookahead_on), quindi funziona identico a
+//  1s / 5s / 15s / 30s / 1m, cambiando solo il numero di barre aggregate.
+//
+//  Requisito: TF del chart < TF del bucket. Altrimenti compare un warning
+//  rosso e il calcolo viene disattivato (fail loud, non silenzioso).
+//
+//  Limiti dichiarati:
+//   - Pine ammette max 500 box: il numero di profili storici viene clampato
+//     automaticamente a floor(490 / bins).
+//   - Il volume dei broker FX su TradingView e' tick volume, non volume reale.
+//   - Distribuzione "Range H/L": il volume della barra viene ripartito sui bin
+//     in proporzione all'overlap con il range della barra (approssimazione
+//     lineare). Distribuzione "Close": tutto il volume nel bin del close.
+//     Nessuna delle due e' un vero profilo tick-by-tick.
+// =============================================================================
+
+indicator("VP per Candela", "VP/Candle", overlay = true,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 10)
+
+// ------------------------------- INPUT ---------------------------------------
+gB = "1 · Bucket"
+bucketTf    = input.timeframe("5", "Timeframe bucket", group = gB,
+     tooltip = "Timeframe della candela di cui costruire il profilo. Deve essere maggiore del TF del chart.")
+bins        = input.int(24, "Bin per profilo", minval = 4,  maxval = 60, group = gB)
+maxProfiles = input.int(12, "Profili storici",  minval = 1,  maxval = 40, group = gB)
+distMode    = input.string("Range H/L", "Distribuzione volume", options = ["Range H/L", "Close"], group = gB)
+
+gD = "2 · Disegno"
+widthPct   = input.float(90, "Larghezza profilo (% del bucket)", minval = 10, maxval = 200, step = 5, group = gD)
+anchorStr  = input.string("Sinistra", "Ancoraggio", options = ["Sinistra", "Destra"], group = gD)
+colBin     = input.color(color.new(#2962FF, 78), "Bin", group = gD, inline = "c")
+colVAc     = input.color(color.new(#00BCD4, 62), "VA",  group = gD, inline = "c")
+colPOCc    = input.color(color.new(#FF9800, 25), "POC", group = gD, inline = "c")
+
+gV = "3 · Value Area / POC"
+showVA      = input.bool(true,  "Mostra Value Area", group = gV)
+vaPct       = input.float(70, "Value Area %", minval = 30, maxval = 99, step = 1, group = gV)
+showVALines = input.bool(false, "Linee VAH / VAL", group = gV)
+showPocLine = input.bool(true,  "Linea POC estesa", group = gV)
+pocExtend   = input.int(20, "Estensione linea POC (barre)", minval = 1, maxval = 500, group = gV)
+
+gL = "4 · Live"
+liveUpdate = input.bool(true, "Profilo live sul bucket in formazione", group = gL)
+
+gA = "5 · Alert POC"
+alertOn     = input.bool(false, "Alert rientro nel POC", group = gA)
+pocLookback = input.int(3, "POC precedenti monitorati", minval = 1, maxval = 20, group = gA)
+
+useRange   = distMode == "Range H/L"
+anchorLeft = anchorStr == "Sinistra"
+
+// ------------------------------- STATO ---------------------------------------
+chartSec  = timeframe.in_seconds(timeframe.period)
+bucketSec = timeframe.in_seconds(bucketTf)
+tfOk      = chartSec > 0 and bucketSec > chartSec
+
+htfTime   = request.security(syminfo.tickerid, bucketTf, time, lookahead = barmerge.lookahead_on)
+bucketEnd = nz(htfTime) + bucketSec * 1000
+
+// buffer del bucket in accumulo
+var bH = array.new_float()
+var bL = array.new_float()
+var bC = array.new_float()
+var bV = array.new_float()
+var int startIdx = na
+
+// oggetti disegnati (storico) + contatori per profilo, per la pulizia FIFO
+var hBoxes  = array.new<box>()
+var hSizes  = array.new<int>()
+var hLines  = array.new<line>()
+var hLSizes = array.new<int>()
+var pocTop  = array.new_float()
+var pocBot  = array.new_float()
+var liveBox = array.new<box>()
+
+effMax = math.max(1, math.min(maxProfiles, int(math.floor(490.0 / bins))))
+
+// ------------------------------ FUNZIONI -------------------------------------
+binIndex(p, lo, bs, nb) =>
+    i = int(math.floor((p - lo) / bs))
+    math.max(0, math.min(nb - 1, i))
+
+// Costruisce il vettore dei volumi per bin sul range del bucket.
+buildProfile(hs, ls, cs, vs, nb, byRange) =>
+    n = array.size(hs)
+    float hi = na
+    float lo = na
+    vols = array.new_float(nb, 0.0)
+    if n > 0
+        hi := array.max(hs)
+        lo := array.min(ls)
+        if hi <= lo
+            hi := lo + syminfo.mintick
+        bs = (hi - lo) / nb
+        for k = 0 to n - 1
+            v = array.get(vs, k)
+            if v > 0
+                if byRange
+                    bh = array.get(hs, k)
+                    bl = array.get(ls, k)
+                    if bh <= bl
+                        idx = binIndex(bl, lo, bs, nb)
+                        array.set(vols, idx, array.get(vols, idx) + v)
+                    else
+                        i0  = binIndex(bl, lo, bs, nb)
+                        i1  = binIndex(bh, lo, bs, nb)
+                        rng = bh - bl
+                        for i = i0 to i1
+                            eb = lo + i * bs
+                            et = eb + bs
+                            ov = math.min(bh, et) - math.max(bl, eb)
+                            if ov > 0
+                                array.set(vols, i, array.get(vols, i) + v * ov / rng)
+                else
+                    idx = binIndex(array.get(cs, k), lo, bs, nb)
+                    array.set(vols, idx, array.get(vols, idx) + v)
+    [vols, hi, lo]
+
+// Value Area: espansione dal POC verso il bin adiacente a volume maggiore
+// finche' il volume cumulato raggiunge vaPct del totale.
+valueArea(vols, poc, pct) =>
+    nb     = array.size(vols)
+    total  = array.sum(vols)
+    target = total * pct / 100.0
+    acc = array.get(vols, poc)
+    up  = poc + 1
+    dn  = poc - 1
+    while acc < target and (up < nb or dn >= 0)
+        vu = up < nb  ? array.get(vols, up) : -1.0
+        vd = dn >= 0  ? array.get(vols, dn) : -1.0
+        if vu >= vd
+            acc += vu
+            up  += 1
+        else
+            acc += vd
+            dn  -= 1
+    [dn + 1, up - 1]
+
+// Disegna un profilo tra le barre xa..xb. Ritorna box, linee e range del POC.
+drawProfile(vols, hi, lo, xa, xb, live) =>
+    bxs = array.new<box>()
+    lns = array.new<line>()
+    nb  = array.size(vols)
+    bs  = (hi - lo) / nb
+    mx  = array.max(vols)
+    poc = mx > 0 ? array.indexof(vols, mx) : 0
+    pT  = lo + (poc + 1) * bs
+    pB  = lo + poc * bs
+    vaL = poc
+    vaH = poc
+    if showVA and mx > 0
+        [a, b] = valueArea(vols, poc, vaPct)
+        vaL := a
+        vaH := b
+    span = math.max(1, xb - xa + 1)
+    wMax = math.max(1, int(math.round(span * widthPct / 100.0)))
+    if mx > 0
+        for i = 0 to nb - 1
+            v = array.get(vols, i)
+            if v > 0
+                w = math.max(1, int(math.round(wMax * v / mx)))
+                l = anchorLeft ? xa : xb - w
+                r = anchorLeft ? xa + w : xb
+                c = i == poc ? colPOCc : (showVA and i >= vaL and i <= vaH ? colVAc : colBin)
+                array.push(bxs, box.new(l, lo + (i + 1) * bs, r, lo + i * bs,
+                     border_color = color.new(color.white, 100), border_width = 0, bgcolor = c))
+        if not live
+            if showPocLine
+                array.push(lns, line.new(xb, (pT + pB) / 2, xb + pocExtend, (pT + pB) / 2,
+                     color = colPOCc, width = 1, style = line.style_solid))
+            if showVA and showVALines
+                array.push(lns, line.new(xa, lo + (vaH + 1) * bs, xb, lo + (vaH + 1) * bs,
+                     color = colVAc, style = line.style_dashed))
+                array.push(lns, line.new(xa, lo + vaL * bs, xb, lo + vaL * bs,
+                     color = colVAc, style = line.style_dashed))
+    [bxs, lns, pT, pB]
+
+// Chiude il bucket: disegna, registra il POC per gli alert, applica FIFO, svuota.
+commitProfile(xa, xb) =>
+    [vols, hi, lo] = buildProfile(bH, bL, bC, bV, bins, useRange)
+    if not na(hi)
+        [bxs, lns, pT, pB] = drawProfile(vols, hi, lo, xa, xb, false)
+        if array.size(bxs) > 0
+            for i = 0 to array.size(bxs) - 1
+                array.push(hBoxes, array.get(bxs, i))
+        if array.size(lns) > 0
+            for i = 0 to array.size(lns) - 1
+                array.push(hLines, array.get(lns, i))
+        array.push(hSizes,  array.size(bxs))
+        array.push(hLSizes, array.size(lns))
+        array.push(pocTop, pT)
+        array.push(pocBot, pB)
+        while array.size(pocTop) > pocLookback
+            array.shift(pocTop)
+            array.shift(pocBot)
+        while array.size(hSizes) > effMax
+            n = array.shift(hSizes)
+            if n > 0
+                for i = 1 to n
+                    box.delete(array.shift(hBoxes))
+            m = array.shift(hLSizes)
+            if m > 0
+                for i = 1 to m
+                    line.delete(array.shift(hLines))
+    array.clear(bH)
+    array.clear(bL)
+    array.clear(bC)
+    array.clear(bV)
+
+// ------------------------------ MOTORE ---------------------------------------
+if tfOk and barstate.isconfirmed
+    // 1) bucket precedente chiuso ma non ancora disegnato (gap / cambio sessione)
+    if array.size(bH) > 0 and htfTime != nz(htfTime[1], htfTime)
+        commitProfile(startIdx, bar_index - 1)
+    // 2) accumulo la barra corrente
+    if array.size(bH) == 0
+        startIdx := bar_index
+    array.push(bH, high)
+    array.push(bL, low)
+    array.push(bC, close)
+    array.push(bV, volume)
+    // 3) questa barra chiude il bucket -> disegno immediato, senza ritardo
+    if time_close >= bucketEnd
+        commitProfile(startIdx, bar_index)
+
+// ------------------------------ LIVE -----------------------------------------
+if tfOk and barstate.islast
+    if array.size(liveBox) > 0
+        for i = 1 to array.size(liveBox)
+            box.delete(array.shift(liveBox))
+    if liveUpdate
+        lh = array.copy(bH)
+        ll = array.copy(bL)
+        lc = array.copy(bC)
+        lv = array.copy(bV)
+        if not barstate.isconfirmed
+            array.push(lh, high)
+            array.push(ll, low)
+            array.push(lc, close)
+            array.push(lv, volume)
+        if array.size(lh) > 0
+            xa = array.size(bH) == 0 ? bar_index : startIdx
+            [vols, hi, lo] = buildProfile(lh, ll, lc, lv, bins, useRange)
+            if not na(hi)
+                [bxs, lns, pT, pB] = drawProfile(vols, hi, lo, xa, bar_index, true)
+                if array.size(bxs) > 0
+                    for i = 0 to array.size(bxs) - 1
+                        array.push(liveBox, array.get(bxs, i))
+
+// ------------------------------ ALERT ----------------------------------------
+inPoc = false
+if alertOn and array.size(pocTop) > 0
+    for i = 0 to array.size(pocTop) - 1
+        if close <= array.get(pocTop, i) and close >= array.get(pocBot, i)
+            inPoc := true
+            break
+
+var bool wasIn = false
+pocEntry = alertOn and inPoc and not wasIn
+wasIn := inPoc
+
+if pocEntry and barstate.isconfirmed
+    alert("Rientro nel POC di un bucket precedente @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar)
+
+alertcondition(pocEntry, "Rientro POC", "Prezzo rientrato nel POC di un bucket precedente")
+
+// ------------------------------ WARNING TF -----------------------------------
+var label warn = na
+if barstate.islast
+    if not tfOk
+        txt = "⚠ TF chart (" + timeframe.period + ") >= bucket (" + bucketTf + ")\nProfilo disattivato: scendi di timeframe."
+        if na(warn)
+            warn := label.new(bar_index, high, txt, style = label.style_label_left,
+                 color = color.new(color.red, 10), textcolor = color.white, size = size.normal)
+        else
+            label.set_xy(warn, bar_index, high)
+            label.set_text(warn, txt)
+    else if not na(warn)
+        label.delete(warn)
+        warn := na
