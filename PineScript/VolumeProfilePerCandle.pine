@@ -86,6 +86,8 @@ pocExtend   = input.int(20, "Estensione linea POC (barre)", minval = 1, maxval =
 
 gL = "5 · Live"
 liveUpdate = input.bool(true, "Profilo live sul bucket in formazione", group = gL)
+liveTick   = input.bool(false, "Aggiorna a ogni tick (piu' pesante)", group = gL,
+     tooltip = "Disattivo: il profilo live si aggiorna alla chiusura di ogni barra del chart. Su 5s/15s la differenza visiva e' trascurabile, il carico si riduce di un ordine di grandezza.")
 
 gA = "6 · Alert POC"
 alertOn     = input.bool(false, "Alert rientro nel POC", group = gA)
@@ -111,6 +113,7 @@ var bH = array.new_float()
 var bL = array.new_float()
 var bC = array.new_float()
 var bV = array.new_float()
+var bool armed  = false
 var int startTm = na
 var int endTm   = na
 
@@ -164,6 +167,15 @@ capC       = math.max(0, lineCap - linesUsedA - outlineEff * linePerB)
 levelsEff  = math.max(0, math.min(lookback - fullEff - outlineEff, capC))
 drawMax    = fullEff + outlineEff + levelsEff
 keepMax    = math.max(drawMax, pocLookback)
+
+// FINESTRA ATTIVA — il chart puo' contenere decine di migliaia di barre, ma
+// servono solo quelle degli ultimi keepMax bucket. Fuori da questa finestra lo
+// script non accumula, non costruisce profili e non tocca la matrice: il costo
+// di caricamento scende in proporzione al rapporto fra barre totali e barre
+// utili (su 15s con 200 bucket: ~4.000 barre invece di tutto lo storico).
+barsPerBucket = math.max(1, int(math.ceil(bucketSec / math.max(1, chartSec))))
+barsNeeded    = (keepMax + 2) * barsPerBucket + 10
+active        = bar_index >= last_bar_index - barsNeeded
 
 // ------------------------------ FUNZIONI -------------------------------------
 binIndex(p, lo, bs, nb) =>
@@ -322,12 +334,16 @@ commitProfile(xa, xb) =>
         array.push(bkLo, lo)
         array.push(bkXa, xa)
         array.push(bkXb, xb)
-        while matrix.rows(mVol) > keepMax
-            matrix.remove_row(mVol, 0)
-            array.shift(bkHi)
-            array.shift(bkLo)
-            array.shift(bkXa)
-            array.shift(bkXb)
+        // Trim a blocchi: matrix.remove_row(0) ricopia l'intera matrice, quindi
+        // farlo a ogni bucket costerebbe O(n) per bucket. Si lascia crescere di
+        // un margine e si taglia in un colpo solo.
+        if matrix.rows(mVol) > keepMax + 32
+            while matrix.rows(mVol) > keepMax
+                matrix.remove_row(mVol, 0)
+                array.shift(bkHi)
+                array.shift(bkLo)
+                array.shift(bkXa)
+                array.shift(bkXb)
         [poc, vaL, vaH, mx] = profileStats(vols)
         bs = (hi - lo) / bins
         array.push(pocT, lo + (poc + 1) * bs)
@@ -353,7 +369,7 @@ redrawAll() =>
             polyline.delete(array.shift(dPolys))
     n = matrix.rows(mVol)
     if n > 0
-        last = math.min(n, drawMax)
+        last = math.min(n, drawMax)   // le righe eccedenti il margine di trim restano semplicemente non disegnate
         aN   = math.min(last, fullEff)
         // Livello A
         if aN > 0
@@ -388,23 +404,29 @@ redrawAll() =>
                      array.get(bkXa, idx), array.get(bkXb, idx))
 
 // ------------------------------ MOTORE ---------------------------------------
-if tfOk and barstate.isconfirmed
+if tfOk and active and barstate.isconfirmed
     bool committed = false
-    // bucket precedente chiuso ma non ancora registrato (gap / cambio sessione)
-    if array.size(bH) > 0 and htfTime != nz(htfTime[1], htfTime)
-        commitProfile(startTm, endTm)
-        committed := true
-    if array.size(bH) == 0
-        startTm := time
-    array.push(bH, high)
-    array.push(bL, low)
-    array.push(bC, close)
-    array.push(bV, volume)
-    endTm := time + chartMs
-    // questa barra chiude il bucket -> registrazione immediata, senza ritardo
-    if time_close >= bucketEnd
-        commitProfile(startTm, endTm)
-        committed := true
+    boundary = htfTime != nz(htfTime[1], htfTime)
+    // L'accumulo parte solo su un confine di bucket: entrando nella finestra
+    // attiva a meta' candela il primo profilo sarebbe troncato.
+    if boundary
+        armed := true
+    if armed
+        // bucket precedente chiuso ma non ancora registrato (gap / sessione)
+        if array.size(bH) > 0 and boundary
+            commitProfile(startTm, endTm)
+            committed := true
+        if array.size(bH) == 0
+            startTm := time
+        array.push(bH, high)
+        array.push(bL, low)
+        array.push(bC, close)
+        array.push(bV, volume)
+        endTm := time + chartMs
+        // questa barra chiude il bucket -> registrazione immediata, senza ritardo
+        if time_close >= bucketEnd
+            commitProfile(startTm, endTm)
+            committed := true
     if committed
         dirty := true
 
@@ -413,7 +435,7 @@ if tfOk and barstate.islast and dirty
     dirty := false
 
 // ------------------------------ LIVE -----------------------------------------
-if tfOk and barstate.islast
+if tfOk and barstate.islast and (liveTick or barstate.isconfirmed)
     if array.size(liveBx) > 0
         for i = 1 to array.size(liveBx)
             box.delete(array.shift(liveBx))
