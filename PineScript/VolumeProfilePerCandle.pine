@@ -5,9 +5,11 @@
 //  Ricostruisce il volume profile di una "candela" di timeframe superiore
 //  (es. 5 min) usando le barre del chart corrente (es. 5s / 15s / 1m).
 //
-//  Il bucket NON dipende dal timeframe del chart: e' allineato via
-//  request.security(..., time, lookahead_on), quindi funziona identico a
-//  1s / 5s / 15s / 30s / 1m; cambia solo il numero di barre aggregate.
+//  Il bucket NON dipende dal timeframe del chart: e' allineato sull'orologio
+//  per aritmetica sull'epoch, quindi funziona identico a 1s / 5s / 15s / 30s /
+//  1m; cambia solo il numero di barre aggregate. Nessuna richiesta di serie
+//  aggiuntive: su chart a secondi il caricamento resta proporzionale alle sole
+//  barre della finestra attiva.
 //
 //  STORICO ESTESO (>= 200 candele) — budget di disegno di Pine: 500 box,
 //  500 linee, 100 polyline. 200 profili a box (24 bin) ne richiederebbero
@@ -105,8 +107,17 @@ bucketSec = timeframe.in_seconds(bucketTf)
 chartMs   = chartSec * 1000
 tfOk      = chartSec > 0 and bucketSec > chartSec
 
-htfTime   = request.security(syminfo.tickerid, bucketTf, time, lookahead = barmerge.lookahead_on)
-bucketEnd = nz(htfTime) + bucketSec * 1000
+// Confine del bucket per aritmetica sull'epoch: nessuna serie aggiuntiva da
+// caricare. request.security avrebbe dato l'allineamento di sessione di
+// TradingView, ma costringe a costruire un secondo dataset sull'intero storico
+// del chart e viene valutato su ogni barra anche quando il risultato non serve:
+// su un chart a 5 secondi e' il costo dominante del caricamento.
+// I bucket a minuti sono allineati all'orologio su qualunque strumento, quindi
+// il risultato coincide con quello di TradingView. Per bucket >= 1 giorno
+// l'allineamento sarebbe a mezzanotte UTC: uso non previsto, segnalato a video.
+bucketMs  = bucketSec * 1000
+bucketId  = int(math.floor(time / bucketMs))
+bucketEnd = (bucketId + 1) * bucketMs
 
 // buffer del bucket in accumulo
 var bH = array.new_float()
@@ -406,7 +417,7 @@ redrawAll() =>
 // ------------------------------ MOTORE ---------------------------------------
 if tfOk and active and barstate.isconfirmed
     bool committed = false
-    boundary = htfTime != nz(htfTime[1], htfTime)
+    boundary = bucketId != nz(bucketId[1], bucketId)
     // L'accumulo parte solo su un confine di bucket: entrando nella finestra
     // attiva a meta' candela il primo profilo sarebbe troncato.
     if boundary
@@ -498,7 +509,8 @@ if barstate.islast
              (perPoly > 1 ? "  (" + str.tostring(perPoly) + " sagome per polyline)" : "") +
              "\nbucket mostrati: " + str.tostring(shown) + " di " + str.tostring(lookback) + " richiesti" +
              (avail < drawMax ? "\n⚠ storico chart insufficiente: " + str.tostring(avail) + " bucket disponibili" : "") +
-             (drawMax < lookback ? "\n⚠ budget Pine: tetto a " + str.tostring(drawMax) + " profili" : "")
+             (drawMax < lookback ? "\n⚠ budget Pine: tetto a " + str.tostring(drawMax) + " profili" : "") +
+             (bucketSec >= 86400 ? "\n⚠ bucket >= 1 giorno: allineamento a mezzanotte UTC" : "")
         if na(infoLbl)
             infoLbl := label.new(bar_index, high, info, style = label.style_label_left,
                  color = color.new(color.gray, 25), textcolor = color.white, size = size.small)
