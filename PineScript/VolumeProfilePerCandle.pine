@@ -1,58 +1,80 @@
 //@version=6
 // =============================================================================
-//  VOLUME PROFILE PER CANDELA  —  bucket multi-timeframe
+//  VOLUME PROFILE PER CANDELA  —  bucket multi-timeframe, storico esteso
 // -----------------------------------------------------------------------------
 //  Ricostruisce il volume profile di una "candela" di timeframe superiore
 //  (es. 5 min) usando le barre del chart corrente (es. 5s / 15s / 1m).
 //
-//  Il bucket NON dipende dal timeframe del chart: viene allineato tramite
+//  Il bucket NON dipende dal timeframe del chart: e' allineato via
 //  request.security(..., time, lookahead_on), quindi funziona identico a
-//  1s / 5s / 15s / 30s / 1m, cambiando solo il numero di barre aggregate.
+//  1s / 5s / 15s / 30s / 1m; cambia solo il numero di barre aggregate.
 //
-//  Requisito: TF del chart < TF del bucket. Altrimenti compare un warning
-//  rosso e il calcolo viene disattivato (fail loud, non silenzioso).
+//  STORICO ESTESO (>= 200 candele) — Pine ammette al massimo 500 box, quindi
+//  200 profili pieni sono fisicamente impossibili. Soluzione: tre livelli di
+//  dettaglio decrescente in base all'eta' del profilo.
+//    Livello A (recenti)  : profilo a box, un box per bin, POC e VA colorati.
+//    Livello B (medi)     : sagoma piena in polyline (1 oggetto per profilo,
+//                           max 100 in Pine) + box del solo POC.
+//    Livello C (vecchi)   : solo la linea del POC sull'ampiezza del bucket.
+//  I conteggi vengono clampati automaticamente ai budget di Pine e il totale
+//  effettivo e' scritto nell'etichetta informativa in alto a destra.
+//
+//  Il disegno storico avviene solo sull'ultima barra e viene ricostruito solo
+//  quando un bucket si chiude (flag varip), non a ogni tick.
 //
 //  Limiti dichiarati:
-//   - Pine ammette max 500 box: il numero di profili storici viene clampato
-//     automaticamente a floor(490 / bins).
-//   - Il volume dei broker FX su TradingView e' tick volume, non volume reale.
-//   - Distribuzione "Range H/L": il volume della barra viene ripartito sui bin
-//     in proporzione all'overlap con il range della barra (approssimazione
-//     lineare). Distribuzione "Close": tutto il volume nel bin del close.
-//     Nessuna delle due e' un vero profilo tick-by-tick.
+//   - Il volume dei broker FX su TradingView e' tick volume del data provider,
+//     non volume scambiato: il POC e' un proxy di attivita', non di liquidita'.
+//   - "Range H/L" ripartisce il volume della barra sui bin in proporzione
+//     all'overlap col range; "Close" mette tutto nel bin del close. Nessuna
+//     delle due e' un profilo tick-by-tick: quel dato Pine non lo espone.
+//   - Su chart a 5s/15s la profondita' storica dipende dal piano TradingView:
+//     se il chart non ha abbastanza barre vedrai meno bucket di quanti ne
+//     chiedi. L'etichetta informativa mostra il numero realmente disponibile.
 // =============================================================================
 
 indicator("VP per Candela", "VP/Candle", overlay = true,
-     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 10)
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 20, max_polylines_count = 100)
 
 // ------------------------------- INPUT ---------------------------------------
 gB = "1 · Bucket"
-bucketTf    = input.timeframe("5", "Timeframe bucket", group = gB,
+bucketTf = input.timeframe("5", "Timeframe bucket", group = gB,
      tooltip = "Timeframe della candela di cui costruire il profilo. Deve essere maggiore del TF del chart.")
-bins        = input.int(24, "Bin per profilo", minval = 4,  maxval = 60, group = gB)
-maxProfiles = input.int(12, "Profili storici",  minval = 1,  maxval = 40, group = gB)
-distMode    = input.string("Range H/L", "Distribuzione volume", options = ["Range H/L", "Close"], group = gB)
+bins     = input.int(24, "Bin per profilo", minval = 4, maxval = 60, group = gB)
+distMode = input.string("Range H/L", "Distribuzione volume", options = ["Range H/L", "Close"], group = gB)
 
-gD = "2 · Disegno"
-widthPct   = input.float(90, "Larghezza profilo (% del bucket)", minval = 10, maxval = 200, step = 5, group = gD)
-anchorStr  = input.string("Sinistra", "Ancoraggio", options = ["Sinistra", "Destra"], group = gD)
-colBin     = input.color(color.new(#2962FF, 78), "Bin", group = gD, inline = "c")
-colVAc     = input.color(color.new(#00BCD4, 62), "VA",  group = gD, inline = "c")
-colPOCc    = input.color(color.new(#FF9800, 25), "POC", group = gD, inline = "c")
+gH = "2 · Storico"
+lookback = input.int(200, "Bucket storici totali", minval = 1, maxval = 500, group = gH,
+     tooltip = "Quante candele indietro mostrare. Viene clampato ai budget di Pine.")
+fullN    = input.int(10, "· di cui a box (dettaglio pieno)", minval = 0, maxval = 40, group = gH)
+outlineN = input.int(90, "· di cui a sagoma (polyline)",     minval = 0, maxval = 100, group = gH)
 
-gV = "3 · Value Area / POC"
+gD = "3 · Disegno"
+widthPct  = input.float(90, "Larghezza profilo (% del bucket)", minval = 10, maxval = 200, step = 5, group = gD)
+anchorStr = input.string("Sinistra", "Ancoraggio", options = ["Sinistra", "Destra"], group = gD)
+colBin    = input.color(color.new(#2962FF, 78), "Bin", group = gD, inline = "c1")
+colVAc    = input.color(color.new(#00BCD4, 62), "VA",  group = gD, inline = "c1")
+colPOCc   = input.color(color.new(#FF9800, 25), "POC", group = gD, inline = "c1")
+colFill   = input.color(color.new(#2962FF, 88), "Sagoma",    group = gD, inline = "c2")
+colEdge   = input.color(color.new(#2962FF, 55), "Bordo",     group = gD, inline = "c2")
+colHist   = input.color(color.new(#FF9800, 45), "POC stor.", group = gD, inline = "c2")
+
+gV = "4 · Value Area / POC"
 showVA      = input.bool(true,  "Mostra Value Area", group = gV)
 vaPct       = input.float(70, "Value Area %", minval = 30, maxval = 99, step = 1, group = gV)
 showVALines = input.bool(false, "Linee VAH / VAL", group = gV)
-showPocLine = input.bool(true,  "Linea POC estesa", group = gV)
+showPocLine = input.bool(true,  "Linea POC estesa (solo livello a box)", group = gV)
 pocExtend   = input.int(20, "Estensione linea POC (barre)", minval = 1, maxval = 500, group = gV)
 
-gL = "4 · Live"
+gL = "5 · Live"
 liveUpdate = input.bool(true, "Profilo live sul bucket in formazione", group = gL)
 
-gA = "5 · Alert POC"
+gA = "6 · Alert POC"
 alertOn     = input.bool(false, "Alert rientro nel POC", group = gA)
 pocLookback = input.int(3, "POC precedenti monitorati", minval = 1, maxval = 20, group = gA)
+
+gI = "7 · Info"
+showInfo = input.bool(true, "Etichetta diagnostica", group = gI)
 
 useRange   = distMode == "Range H/L"
 anchorLeft = anchorStr == "Sinistra"
@@ -72,23 +94,50 @@ var bC = array.new_float()
 var bV = array.new_float()
 var int startIdx = na
 
-// oggetti disegnati (storico) + contatori per profilo, per la pulizia FIFO
-var hBoxes  = array.new<box>()
-var hSizes  = array.new<int>()
-var hLines  = array.new<line>()
-var hLSizes = array.new<int>()
-var pocTop  = array.new_float()
-var pocBot  = array.new_float()
-var liveBox = array.new<box>()
+// storico dei bucket chiusi: una riga di matrice per bucket (volumi per bin)
+var mVol = matrix.new<float>(0, bins)
+var bkHi = array.new_float()
+var bkLo = array.new_float()
+var bkXa = array.new_int()
+var bkXb = array.new_int()
 
-effMax = math.max(1, math.min(maxProfiles, int(math.floor(490.0 / bins))))
+// POC recenti per gli alert
+var pocT = array.new_float()
+var pocB = array.new_float()
+
+// oggetti disegnati
+var dBoxes = array.new<box>()
+var dLines = array.new<line>()
+var dPolys = array.new<polyline>()
+var liveBx = array.new<box>()
+var label  infoLbl = na
+var label  warnLbl = na
+
+// varip: non subisce rollback sui tick, quindi il ridisegno pesante avviene
+// una sola volta per chiusura di bucket e non a ogni tick.
+varip bool dirty = true
+
+// ------------------------- BUDGET E CLAMPING ---------------------------------
+boxCap  = 480
+lineCap = 480
+polyCap = 100
+
+outlineEff   = math.min(outlineN, polyCap)
+maxFullByBox = int(math.floor((boxCap - outlineEff - bins) / bins))
+fullEff      = math.max(0, math.min(fullN, maxFullByBox))
+linesPerFull = (showPocLine ? 1 : 0) + (showVA and showVALines ? 2 : 0)
+linesPerLvl  = 1 + (showVA and showVALines ? 2 : 0)
+levelsCap    = int(math.floor((lineCap - fullEff * linesPerFull) / linesPerLvl))
+levelsEff    = math.max(0, math.min(lookback - fullEff - outlineEff, levelsCap))
+drawMax      = fullEff + outlineEff + levelsEff
+keepMax      = math.max(drawMax, pocLookback)
 
 // ------------------------------ FUNZIONI -------------------------------------
 binIndex(p, lo, bs, nb) =>
     i = int(math.floor((p - lo) / bs))
     math.max(0, math.min(nb - 1, i))
 
-// Costruisce il vettore dei volumi per bin sul range del bucket.
+// Vettore dei volumi per bin sul range del bucket.
 buildProfile(hs, ls, cs, vs, nb, byRange) =>
     n = array.size(hs)
     float hi = na
@@ -125,7 +174,7 @@ buildProfile(hs, ls, cs, vs, nb, byRange) =>
     [vols, hi, lo]
 
 // Value Area: espansione dal POC verso il bin adiacente a volume maggiore
-// finche' il volume cumulato raggiunge vaPct del totale.
+// finche' il cumulato raggiunge vaPct del totale.
 valueArea(vols, poc, pct) =>
     nb     = array.size(vols)
     total  = array.sum(vols)
@@ -134,8 +183,8 @@ valueArea(vols, poc, pct) =>
     up  = poc + 1
     dn  = poc - 1
     while acc < target and (up < nb or dn >= 0)
-        vu = up < nb  ? array.get(vols, up) : -1.0
-        vd = dn >= 0  ? array.get(vols, dn) : -1.0
+        vu = up < nb ? array.get(vols, up) : -1.0
+        vd = dn >= 0 ? array.get(vols, dn) : -1.0
         if vu >= vd
             acc += vu
             up  += 1
@@ -144,24 +193,23 @@ valueArea(vols, poc, pct) =>
             dn  -= 1
     [dn + 1, up - 1]
 
-// Disegna un profilo tra le barre xa..xb. Ritorna box, linee e range del POC.
-drawProfile(vols, hi, lo, xa, xb, live) =>
-    bxs = array.new<box>()
-    lns = array.new<line>()
-    nb  = array.size(vols)
-    bs  = (hi - lo) / nb
+profileStats(vols) =>
     mx  = array.max(vols)
     poc = mx > 0 ? array.indexof(vols, mx) : 0
-    pT  = lo + (poc + 1) * bs
-    pB  = lo + poc * bs
     vaL = poc
     vaH = poc
     if showVA and mx > 0
         [a, b] = valueArea(vols, poc, vaPct)
         vaL := a
         vaH := b
-    span = math.max(1, xb - xa + 1)
-    wMax = math.max(1, int(math.round(span * widthPct / 100.0)))
+    [poc, vaL, vaH, mx]
+
+// --- LIVELLO A: profilo pieno a box (un box per bin) --------------------------
+drawFull(vols, hi, lo, xa, xb, sink) =>
+    nb = array.size(vols)
+    bs = (hi - lo) / nb
+    [poc, vaL, vaH, mx] = profileStats(vols)
+    wMax = math.max(1, int(math.round(math.max(1, xb - xa + 1) * widthPct / 100.0)))
     if mx > 0
         for i = 0 to nb - 1
             v = array.get(vols, i)
@@ -170,72 +218,139 @@ drawProfile(vols, hi, lo, xa, xb, live) =>
                 l = anchorLeft ? xa : xb - w
                 r = anchorLeft ? xa + w : xb
                 c = i == poc ? colPOCc : (showVA and i >= vaL and i <= vaH ? colVAc : colBin)
-                array.push(bxs, box.new(l, lo + (i + 1) * bs, r, lo + i * bs,
+                array.push(sink, box.new(l, lo + (i + 1) * bs, r, lo + i * bs,
                      border_color = color.new(color.white, 100), border_width = 0, bgcolor = c))
-        if not live
-            if showPocLine
-                array.push(lns, line.new(xb, (pT + pB) / 2, xb + pocExtend, (pT + pB) / 2,
-                     color = colPOCc, width = 1, style = line.style_solid))
-            if showVA and showVALines
-                array.push(lns, line.new(xa, lo + (vaH + 1) * bs, xb, lo + (vaH + 1) * bs,
-                     color = colVAc, style = line.style_dashed))
-                array.push(lns, line.new(xa, lo + vaL * bs, xb, lo + vaL * bs,
-                     color = colVAc, style = line.style_dashed))
-    [bxs, lns, pT, pB]
+        if showPocLine
+            y = lo + (poc + 0.5) * bs
+            array.push(dLines, line.new(xb, y, xb + pocExtend, y, color = colPOCc, width = 1))
+        if showVA and showVALines
+            array.push(dLines, line.new(xa, lo + (vaH + 1) * bs, xb, lo + (vaH + 1) * bs,
+                 color = colVAc, style = line.style_dashed))
+            array.push(dLines, line.new(xa, lo + vaL * bs, xb, lo + vaL * bs,
+                 color = colVAc, style = line.style_dashed))
 
-// Chiude il bucket: disegna, registra il POC per gli alert, applica FIFO, svuota.
+// --- LIVELLO B: sagoma piena in polyline + box del solo POC -------------------
+drawOutline(vols, hi, lo, xa, xb) =>
+    nb = array.size(vols)
+    bs = (hi - lo) / nb
+    [poc, vaL, vaH, mx] = profileStats(vols)
+    wMax  = math.max(1, int(math.round(math.max(1, xb - xa + 1) * widthPct / 100.0)))
+    xBase = anchorLeft ? xa : xb
+    if mx > 0
+        pts = array.new<chart.point>()
+        array.push(pts, chart.point.from_index(xBase, lo))
+        for i = 0 to nb - 1
+            w = int(math.round(wMax * array.get(vols, i) / mx))
+            x = anchorLeft ? xBase + w : xBase - w
+            array.push(pts, chart.point.from_index(x, lo + i * bs))
+            array.push(pts, chart.point.from_index(x, lo + (i + 1) * bs))
+        array.push(pts, chart.point.from_index(xBase, hi))
+        array.push(dPolys, polyline.new(pts, curved = false, closed = true,
+             xloc = xloc.bar_index, line_color = colEdge, fill_color = colFill, line_width = 1))
+        wp = math.max(1, int(math.round(wMax * array.get(vols, poc) / mx)))
+        lp = anchorLeft ? xBase : xBase - wp
+        rp = anchorLeft ? xBase + wp : xBase
+        array.push(dBoxes, box.new(lp, lo + (poc + 1) * bs, rp, lo + poc * bs,
+             border_color = color.new(color.white, 100), border_width = 0, bgcolor = colPOCc))
+
+// --- LIVELLO C: solo la linea del POC sull'ampiezza del bucket ----------------
+drawLevels(vols, hi, lo, xa, xb) =>
+    nb = array.size(vols)
+    bs = (hi - lo) / nb
+    [poc, vaL, vaH, mx] = profileStats(vols)
+    if mx > 0
+        y = lo + (poc + 0.5) * bs
+        array.push(dLines, line.new(xa, y, xb + 1, y, color = colHist, width = 2))
+        if showVA and showVALines
+            array.push(dLines, line.new(xa, lo + (vaH + 1) * bs, xb + 1, lo + (vaH + 1) * bs,
+                 color = colVAc, style = line.style_dotted))
+            array.push(dLines, line.new(xa, lo + vaL * bs, xb + 1, lo + vaL * bs,
+                 color = colVAc, style = line.style_dotted))
+
+// Chiude il bucket: salva il profilo nello storico, aggiorna i POC per gli alert.
 commitProfile(xa, xb) =>
     [vols, hi, lo] = buildProfile(bH, bL, bC, bV, bins, useRange)
     if not na(hi)
-        [bxs, lns, pT, pB] = drawProfile(vols, hi, lo, xa, xb, false)
-        if array.size(bxs) > 0
-            for i = 0 to array.size(bxs) - 1
-                array.push(hBoxes, array.get(bxs, i))
-        if array.size(lns) > 0
-            for i = 0 to array.size(lns) - 1
-                array.push(hLines, array.get(lns, i))
-        array.push(hSizes,  array.size(bxs))
-        array.push(hLSizes, array.size(lns))
-        array.push(pocTop, pT)
-        array.push(pocBot, pB)
-        while array.size(pocTop) > pocLookback
-            array.shift(pocTop)
-            array.shift(pocBot)
-        while array.size(hSizes) > effMax
-            n = array.shift(hSizes)
-            if n > 0
-                for i = 1 to n
-                    box.delete(array.shift(hBoxes))
-            m = array.shift(hLSizes)
-            if m > 0
-                for i = 1 to m
-                    line.delete(array.shift(hLines))
+        matrix.add_row(mVol, matrix.rows(mVol), vols)
+        array.push(bkHi, hi)
+        array.push(bkLo, lo)
+        array.push(bkXa, xa)
+        array.push(bkXb, xb)
+        while matrix.rows(mVol) > keepMax
+            matrix.remove_row(mVol, 0)
+            array.shift(bkHi)
+            array.shift(bkLo)
+            array.shift(bkXa)
+            array.shift(bkXb)
+        [poc, vaL, vaH, mx] = profileStats(vols)
+        bs = (hi - lo) / bins
+        array.push(pocT, lo + (poc + 1) * bs)
+        array.push(pocB, lo + poc * bs)
+        while array.size(pocT) > pocLookback
+            array.shift(pocT)
+            array.shift(pocB)
     array.clear(bH)
     array.clear(bL)
     array.clear(bC)
     array.clear(bV)
 
+// Ricostruzione completa dello storico disegnato.
+redrawAll() =>
+    if array.size(dBoxes) > 0
+        for i = 1 to array.size(dBoxes)
+            box.delete(array.shift(dBoxes))
+    if array.size(dLines) > 0
+        for i = 1 to array.size(dLines)
+            line.delete(array.shift(dLines))
+    if array.size(dPolys) > 0
+        for i = 1 to array.size(dPolys)
+            polyline.delete(array.shift(dPolys))
+    n = matrix.rows(mVol)
+    if n > 0
+        last = math.min(n, drawMax)
+        for age = 0 to last - 1
+            idx  = n - 1 - age
+            vols = matrix.row(mVol, idx)
+            hi   = array.get(bkHi, idx)
+            lo   = array.get(bkLo, idx)
+            xa   = array.get(bkXa, idx)
+            xb   = array.get(bkXb, idx)
+            if age < fullEff
+                drawFull(vols, hi, lo, xa, xb, dBoxes)
+            else if age < fullEff + outlineEff
+                drawOutline(vols, hi, lo, xa, xb)
+            else
+                drawLevels(vols, hi, lo, xa, xb)
+
 // ------------------------------ MOTORE ---------------------------------------
 if tfOk and barstate.isconfirmed
-    // 1) bucket precedente chiuso ma non ancora disegnato (gap / cambio sessione)
+    bool committed = false
+    // bucket precedente chiuso ma non ancora registrato (gap / cambio sessione)
     if array.size(bH) > 0 and htfTime != nz(htfTime[1], htfTime)
         commitProfile(startIdx, bar_index - 1)
-    // 2) accumulo la barra corrente
+        committed := true
     if array.size(bH) == 0
         startIdx := bar_index
     array.push(bH, high)
     array.push(bL, low)
     array.push(bC, close)
     array.push(bV, volume)
-    // 3) questa barra chiude il bucket -> disegno immediato, senza ritardo
+    // questa barra chiude il bucket -> registrazione immediata, senza ritardo
     if time_close >= bucketEnd
         commitProfile(startIdx, bar_index)
+        committed := true
+    if committed
+        dirty := true
+
+if tfOk and barstate.islast and dirty
+    redrawAll()
+    dirty := false
 
 // ------------------------------ LIVE -----------------------------------------
 if tfOk and barstate.islast
-    if array.size(liveBox) > 0
-        for i = 1 to array.size(liveBox)
-            box.delete(array.shift(liveBox))
+    if array.size(liveBx) > 0
+        for i = 1 to array.size(liveBx)
+            box.delete(array.shift(liveBx))
     if liveUpdate
         lh = array.copy(bH)
         ll = array.copy(bL)
@@ -250,16 +365,13 @@ if tfOk and barstate.islast
             xa = array.size(bH) == 0 ? bar_index : startIdx
             [vols, hi, lo] = buildProfile(lh, ll, lc, lv, bins, useRange)
             if not na(hi)
-                [bxs, lns, pT, pB] = drawProfile(vols, hi, lo, xa, bar_index, true)
-                if array.size(bxs) > 0
-                    for i = 0 to array.size(bxs) - 1
-                        array.push(liveBox, array.get(bxs, i))
+                drawFull(vols, hi, lo, xa, bar_index, liveBx)
 
 // ------------------------------ ALERT ----------------------------------------
 inPoc = false
-if alertOn and array.size(pocTop) > 0
-    for i = 0 to array.size(pocTop) - 1
-        if close <= array.get(pocTop, i) and close >= array.get(pocBot, i)
+if alertOn and array.size(pocT) > 0
+    for i = 0 to array.size(pocT) - 1
+        if close <= array.get(pocT, i) and close >= array.get(pocB, i)
             inPoc := true
             break
 
@@ -272,17 +384,35 @@ if pocEntry and barstate.isconfirmed
 
 alertcondition(pocEntry, "Rientro POC", "Prezzo rientrato nel POC di un bucket precedente")
 
-// ------------------------------ WARNING TF -----------------------------------
-var label warn = na
+// --------------------------- INFO / WARNING ----------------------------------
 if barstate.islast
     if not tfOk
         txt = "⚠ TF chart (" + timeframe.period + ") >= bucket (" + bucketTf + ")\nProfilo disattivato: scendi di timeframe."
-        if na(warn)
-            warn := label.new(bar_index, high, txt, style = label.style_label_left,
-                 color = color.new(color.red, 10), textcolor = color.white, size = size.normal)
+        if na(warnLbl)
+            warnLbl := label.new(bar_index, high, txt, style = label.style_label_left,
+                 color = color.new(color.red, 10), textcolor = color.white)
         else
-            label.set_xy(warn, bar_index, high)
-            label.set_text(warn, txt)
-    else if not na(warn)
-        label.delete(warn)
-        warn := na
+            label.set_xy(warnLbl, bar_index, high)
+            label.set_text(warnLbl, txt)
+    else if not na(warnLbl)
+        label.delete(warnLbl)
+        warnLbl := na
+
+    if showInfo and tfOk
+        avail = matrix.rows(mVol)
+        shown = math.min(avail, drawMax)
+        info  = "VP/Candle · bucket " + bucketTf + " · bin " + str.tostring(bins) +
+             "\nresa: " + str.tostring(math.min(avail, fullEff)) + " box / " +
+             str.tostring(math.max(0, math.min(avail, fullEff + outlineEff) - fullEff)) + " sagoma / " +
+             str.tostring(math.max(0, shown - math.min(avail, fullEff + outlineEff))) + " POC" +
+             "\nbucket mostrati: " + str.tostring(shown) + " di " + str.tostring(lookback) + " richiesti" +
+             (avail < drawMax ? "\n⚠ storico chart insufficiente (" + str.tostring(avail) + " bucket disponibili)" : "")
+        if na(infoLbl)
+            infoLbl := label.new(bar_index, high, info, style = label.style_label_left,
+                 color = color.new(color.gray, 25), textcolor = color.white, size = size.small)
+        else
+            label.set_xy(infoLbl, bar_index, high)
+            label.set_text(infoLbl, info)
+    else if not na(infoLbl)
+        label.delete(infoLbl)
+        infoLbl := na
