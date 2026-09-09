@@ -55,13 +55,13 @@ indicator("VP per Candela", "VP/Candle", overlay = true,
 gB = "1 · Bucket"
 bucketTf = input.timeframe("5", "Timeframe bucket", group = gB,
      tooltip = "Timeframe della candela di cui costruire il profilo. Deve essere maggiore del TF del chart.")
-bins     = input.int(24, "Bin per profilo", minval = 4, maxval = 60, group = gB)
+bins     = input.int(60, "Bin per profilo", minval = 4, maxval = 120, group = gB)
 distMode = input.string("Range H/L", "Distribuzione volume", options = ["Range H/L", "Close"], group = gB)
 
 gH = "2 · Storico"
 lookback = input.int(200, "Bucket storici totali", minval = 1, maxval = 500, group = gH,
      tooltip = "Quante candele indietro mostrare. Viene clampato ai budget di Pine.")
-fullN    = input.int(10, "· di cui a box (dettaglio pieno)", minval = 0, maxval = 40, group = gH,
+fullN    = input.int(6, "· di cui a box (dettaglio pieno)", minval = 0, maxval = 40, group = gH,
      tooltip = "I piu' recenti, disegnati bin per bin con POC e Value Area colorati. Il resto diventa sagoma.")
 packPoly = input.bool(true, "Impacchetta sagome (necessario oltre 100 profili)", group = gH,
      tooltip = "Cuce piu' sagome in una sola polyline con corridoi ad area nulla. Disattivalo se vedi artefatti di riempimento: il limite torna a 100 sagome.")
@@ -70,12 +70,12 @@ showPocHist = input.bool(true, "Linea POC sui profili storici", group = gH)
 gD = "3 · Disegno"
 widthPct  = input.float(90, "Larghezza profilo (% del bucket)", minval = 10, maxval = 200, step = 5, group = gD)
 anchorStr = input.string("Sinistra", "Ancoraggio", options = ["Sinistra", "Destra"], group = gD)
-colBin    = input.color(color.new(#2962FF, 78), "Bin", group = gD, inline = "c1")
-colVAc    = input.color(color.new(#00BCD4, 62), "VA",  group = gD, inline = "c1")
-colPOCc   = input.color(color.new(#FF9800, 25), "POC", group = gD, inline = "c1")
-colFill   = input.color(color.new(#2962FF, 88), "Sagoma",    group = gD, inline = "c2")
-colEdge   = input.color(color.new(#2962FF, 55), "Bordo",     group = gD, inline = "c2")
-colHist   = input.color(color.new(#FF9800, 45), "POC stor.", group = gD, inline = "c2")
+colBin    = input.color(color.new(#000000, 55), "Bin", group = gD, inline = "c1")
+colVAc    = input.color(color.new(#000000, 25), "VA",  group = gD, inline = "c1")
+colPOCc   = input.color(color.new(#FF0000, 0),  "POC", group = gD, inline = "c1")
+colFill   = input.color(color.new(#000000, 55), "Sagoma",    group = gD, inline = "c2")
+colEdge   = input.color(color.new(#000000, 25), "Bordo",     group = gD, inline = "c2")
+colHist   = input.color(color.new(#FF0000, 15), "POC stor.", group = gD, inline = "c2")
 
 gV = "4 · Value Area / POC"
 showVA      = input.bool(true,  "Mostra Value Area", group = gV)
