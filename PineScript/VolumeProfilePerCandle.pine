@@ -9,15 +9,24 @@
 //  request.security(..., time, lookahead_on), quindi funziona identico a
 //  1s / 5s / 15s / 30s / 1m; cambia solo il numero di barre aggregate.
 //
-//  STORICO ESTESO (>= 200 candele) — Pine ammette al massimo 500 box, quindi
-//  200 profili pieni sono fisicamente impossibili. Soluzione: tre livelli di
-//  dettaglio decrescente in base all'eta' del profilo.
-//    Livello A (recenti)  : profilo a box, un box per bin, POC e VA colorati.
-//    Livello B (medi)     : sagoma piena in polyline (1 oggetto per profilo,
-//                           max 100 in Pine) + box del solo POC.
-//    Livello C (vecchi)   : solo la linea del POC sull'ampiezza del bucket.
-//  I conteggi vengono clampati automaticamente ai budget di Pine e il totale
-//  effettivo e' scritto nell'etichetta informativa in alto a destra.
+//  STORICO ESTESO (>= 200 candele) — budget di disegno di Pine: 500 box,
+//  500 linee, 100 polyline. 200 profili a box (24 bin) ne richiederebbero
+//  4800: impossibile. Tre livelli di dettaglio decrescente per eta':
+//    Livello A (recenti) : profilo a box, un box per bin, POC e VA colorati.
+//    Livello B (storico) : sagoma piena del profilo in polyline + linea POC.
+//    Livello C (residuo) : solo la linea del POC sull'ampiezza del bucket.
+//
+//  IMPACCHETTAMENTO POLYLINE — Pine limita a 100 le polyline, ma non i punti
+//  che ciascuna contiene (10.000). Piu' sagome vengono quindi cucite in una
+//  sola polyline: il percorso entra in ogni sagoma, la chiude sulla propria
+//  baseline e prosegue verso la successiva; alla fine ripercorre a ritroso
+//  gli stessi segmenti di collegamento. Andata e ritorno coincidono, quindi
+//  i corridoi hanno area nulla e non producono riempimento; il bordo viene
+//  reso trasparente in modalita' impacchettata per non disegnarli. Con 24 bin
+//  entrano ~180 sagome per polyline: il tetto pratico diventa il numero di
+//  bucket che il chart possiede, non il limite di Pine.
+//  Se il renderer dovesse mostrare artefatti, disattivare "Impacchetta
+//  sagome" riporta al comportamento 1 sagoma = 1 polyline (max 100).
 //
 //  Il disegno storico avviene solo sull'ultima barra e viene ricostruito solo
 //  quando un bucket si chiude (flag varip), non a ogni tick.
@@ -52,8 +61,11 @@ distMode = input.string("Range H/L", "Distribuzione volume", options = ["Range H
 gH = "2 · Storico"
 lookback = input.int(200, "Bucket storici totali", minval = 1, maxval = 500, group = gH,
      tooltip = "Quante candele indietro mostrare. Viene clampato ai budget di Pine.")
-fullN    = input.int(10, "· di cui a box (dettaglio pieno)", minval = 0, maxval = 40, group = gH)
-outlineN = input.int(90, "· di cui a sagoma (polyline)",     minval = 0, maxval = 100, group = gH)
+fullN    = input.int(10, "· di cui a box (dettaglio pieno)", minval = 0, maxval = 40, group = gH,
+     tooltip = "I piu' recenti, disegnati bin per bin con POC e Value Area colorati. Il resto diventa sagoma.")
+packPoly = input.bool(true, "Impacchetta sagome (necessario oltre 100 profili)", group = gH,
+     tooltip = "Cuce piu' sagome in una sola polyline con corridoi ad area nulla. Disattivalo se vedi artefatti di riempimento: il limite torna a 100 sagome.")
+showPocHist = input.bool(true, "Linea POC sui profili storici", group = gH)
 
 gD = "3 · Disegno"
 widthPct  = input.float(90, "Larghezza profilo (% del bucket)", minval = 10, maxval = 200, step = 5, group = gD)
@@ -130,15 +142,28 @@ boxCap  = 480
 lineCap = 480
 polyCap = 100
 
-outlineEff   = math.min(outlineN, polyCap)
-maxFullByBox = int(math.floor((boxCap - outlineEff - bins) / bins))
+// Livello A: box. Un box per bin, piu' i bin del profilo live.
+maxFullByBox = int(math.floor((boxCap - bins) / bins))
 fullEff      = math.max(0, math.min(fullN, maxFullByBox))
 linesPerFull = (showPocLine ? 1 : 0) + (showVA and showVALines ? 2 : 0)
-linesPerLvl  = 1 + (showVA and showVALines ? 2 : 0)
-levelsCap    = int(math.floor((lineCap - fullEff * linesPerFull) / linesPerLvl))
-levelsEff    = math.max(0, math.min(lookback - fullEff - outlineEff, levelsCap))
-drawMax      = fullEff + outlineEff + levelsEff
-keepMax      = math.max(drawMax, pocLookback)
+linesUsedA   = fullEff * linesPerFull
+
+// Livello B: sagome in polyline, impacchettate. Punti per sagoma = 2 per bin
+// (gradino) + baseline + ancoraggio del corridoio.
+needB     = math.max(0, lookback - fullEff)
+ptsProf   = 2 * bins + 4
+maxPerPly = math.max(1, int(math.floor(9500.0 / ptsProf)))
+perPoly   = packPoly ? math.min(maxPerPly, math.max(1, int(math.ceil(needB / 100.0)))) : 1
+capB      = polyCap * perPoly
+linePerB  = showPocHist ? 1 : 0
+capBline  = linePerB > 0 ? int(math.floor((lineCap - linesUsedA) / linePerB)) : 100000
+outlineEff = math.max(0, math.min(needB, math.min(capB, capBline)))
+
+// Livello C: solo POC, con le linee che restano.
+capC       = math.max(0, lineCap - linesUsedA - outlineEff * linePerB)
+levelsEff  = math.max(0, math.min(lookback - fullEff - outlineEff, capC))
+drawMax    = fullEff + outlineEff + levelsEff
+keepMax    = math.max(drawMax, pocLookback)
 
 // ------------------------------ FUNZIONI -------------------------------------
 binIndex(p, lo, bs, nb) =>
@@ -239,44 +264,54 @@ drawFull(vols, hi, lo, xa, xb, sink) =>
             array.push(dLines, line.new(xa, lo + vaL * bs, xb, lo + vaL * bs,
                  xloc = xloc.bar_time, color = colVAc, style = line.style_dashed))
 
-// --- LIVELLO B: sagoma piena in polyline + box del solo POC -------------------
-drawOutline(vols, hi, lo, xa, xb) =>
+// --- LIVELLO B: sagoma piena, accodata a una polyline condivisa -------------
+// Accoda alla polyline in costruzione il percorso della sagoma: parte dalla
+// baseline sul minimo del bucket, sale a gradini seguendo il volume di ogni
+// bin, torna sulla baseline sul massimo e si richiude in basso. Il punto di
+// partenza viene registrato in `anchors` per poter ripercorrere a ritroso i
+// corridoi di collegamento al momento della chiusura della polyline.
+appendSilhouette(pts, anchors, vols, hi, lo, xa, xb) =>
     nb = array.size(vols)
     bs = (hi - lo) / nb
-    [poc, vaL, vaH, mx] = profileStats(vols)
-    wMax  = math.max(chartMs, int((xb - xa) * widthPct / 100.0))
-    xBase = anchorLeft ? xa : xb
+    mx = array.max(vols)
     if mx > 0
-        pts = array.new<chart.point>()
-        array.push(pts, chart.point.from_time(xBase, lo))
+        wMax  = math.max(chartMs, int((xb - xa) * widthPct / 100.0))
+        xBase = anchorLeft ? xa : xb
+        base  = chart.point.from_time(xBase, lo)
+        array.push(anchors, base)
+        array.push(pts, base)
         for i = 0 to nb - 1
             w = int(wMax * array.get(vols, i) / mx)
             x = anchorLeft ? xBase + w : xBase - w
             array.push(pts, chart.point.from_time(x, lo + i * bs))
             array.push(pts, chart.point.from_time(x, lo + (i + 1) * bs))
         array.push(pts, chart.point.from_time(xBase, hi))
-        array.push(dPolys, polyline.new(pts, curved = false, closed = true,
-             xloc = xloc.bar_time, line_color = colEdge, fill_color = colFill, line_width = 1))
-        wp = math.max(chartMs, int(wMax * array.get(vols, poc) / mx))
-        lp = anchorLeft ? xBase : xBase - wp
-        rp = anchorLeft ? xBase + wp : xBase
-        array.push(dBoxes, box.new(lp, lo + (poc + 1) * bs, rp, lo + poc * bs,
-             xloc = xloc.bar_time, border_color = color.new(color.white, 100),
-             border_width = 0, bgcolor = colPOCc))
+        array.push(pts, base)
+    mx > 0
 
-// --- LIVELLO C: solo la linea del POC sull'ampiezza del bucket ----------------
-drawLevels(vols, hi, lo, xa, xb) =>
+// Chiude il pacchetto: ripercorre a ritroso i corridoi (area nulla) e crea la
+// polyline. Con piu' di una sagoma il bordo e' trasparente, altrimenti i
+// segmenti di collegamento sarebbero visibili.
+flushPoly(pts, anchors) =>
+    k = array.size(anchors)
+    if k > 1
+        for j = k - 2 to 0
+            array.push(pts, array.get(anchors, j))
+    if array.size(pts) > 2
+        array.push(dPolys, polyline.new(pts, curved = false, closed = true,
+             xloc = xloc.bar_time, line_color = k > 1 ? color.new(colEdge, 100) : colEdge,
+             fill_color = colFill, line_width = 1))
+
+// --- LIVELLO B/C: linea del POC sull'ampiezza del bucket ---------------------
+drawPoc(vols, hi, lo, xa, xb) =>
     nb = array.size(vols)
     bs = (hi - lo) / nb
     [poc, vaL, vaH, mx] = profileStats(vols)
     if mx > 0
+        // Una sola linea per profilo: il budget delle linee e' calcolato su
+        // questa base, le VAH/VAL restano appannaggio del livello a box.
         y = lo + (poc + 0.5) * bs
         array.push(dLines, line.new(xa, y, xb, y, xloc = xloc.bar_time, color = colHist, width = 2))
-        if showVA and showVALines
-            array.push(dLines, line.new(xa, lo + (vaH + 1) * bs, xb, lo + (vaH + 1) * bs,
-                 xloc = xloc.bar_time, color = colVAc, style = line.style_dotted))
-            array.push(dLines, line.new(xa, lo + vaL * bs, xb, lo + vaL * bs,
-                 xloc = xloc.bar_time, color = colVAc, style = line.style_dotted))
 
 // Chiude il bucket: salva il profilo nello storico, aggiorna i POC per gli alert.
 commitProfile(xa, xb) =>
@@ -319,19 +354,38 @@ redrawAll() =>
     n = matrix.rows(mVol)
     if n > 0
         last = math.min(n, drawMax)
-        for age = 0 to last - 1
-            idx  = n - 1 - age
-            vols = matrix.row(mVol, idx)
-            hi   = array.get(bkHi, idx)
-            lo   = array.get(bkLo, idx)
-            xa   = array.get(bkXa, idx)
-            xb   = array.get(bkXb, idx)
-            if age < fullEff
-                drawFull(vols, hi, lo, xa, xb, dBoxes)
-            else if age < fullEff + outlineEff
-                drawOutline(vols, hi, lo, xa, xb)
-            else
-                drawLevels(vols, hi, lo, xa, xb)
+        aN   = math.min(last, fullEff)
+        // Livello A
+        if aN > 0
+            for age = 0 to aN - 1
+                idx = n - 1 - age
+                drawFull(matrix.row(mVol, idx), array.get(bkHi, idx), array.get(bkLo, idx),
+                     array.get(bkXa, idx), array.get(bkXb, idx), dBoxes)
+        // Livello B: sagome impacchettate
+        bEnd = math.min(last, aN + outlineEff)
+        if bEnd > aN
+            pts     = array.new<chart.point>()
+            anchors = array.new<chart.point>()
+            for age = aN to bEnd - 1
+                idx  = n - 1 - age
+                vols = matrix.row(mVol, idx)
+                hi   = array.get(bkHi, idx)
+                lo   = array.get(bkLo, idx)
+                xa   = array.get(bkXa, idx)
+                xb   = array.get(bkXb, idx)
+                appendSilhouette(pts, anchors, vols, hi, lo, xa, xb)
+                if showPocHist
+                    drawPoc(vols, hi, lo, xa, xb)
+                if array.size(anchors) >= perPoly or age == bEnd - 1
+                    flushPoly(pts, anchors)
+                    pts     := array.new<chart.point>()
+                    anchors := array.new<chart.point>()
+        // Livello C: solo POC
+        if last > bEnd
+            for age = bEnd to last - 1
+                idx = n - 1 - age
+                drawPoc(matrix.row(mVol, idx), array.get(bkHi, idx), array.get(bkLo, idx),
+                     array.get(bkXa, idx), array.get(bkXb, idx))
 
 // ------------------------------ MOTORE ---------------------------------------
 if tfOk and barstate.isconfirmed
@@ -413,12 +467,16 @@ if barstate.islast
     if showInfo and tfOk
         avail = matrix.rows(mVol)
         shown = math.min(avail, drawMax)
+        nA    = math.min(avail, fullEff)
+        nB    = math.max(0, math.min(avail, fullEff + outlineEff) - fullEff)
+        nC    = math.max(0, shown - math.min(avail, fullEff + outlineEff))
         info  = "VP/Candle · bucket " + bucketTf + " · bin " + str.tostring(bins) +
-             "\nresa: " + str.tostring(math.min(avail, fullEff)) + " box / " +
-             str.tostring(math.max(0, math.min(avail, fullEff + outlineEff) - fullEff)) + " sagoma / " +
-             str.tostring(math.max(0, shown - math.min(avail, fullEff + outlineEff))) + " POC" +
+             "\nresa: " + str.tostring(nA) + " box / " + str.tostring(nB) + " sagome / " +
+             str.tostring(nC) + " POC" +
+             (perPoly > 1 ? "  (" + str.tostring(perPoly) + " sagome per polyline)" : "") +
              "\nbucket mostrati: " + str.tostring(shown) + " di " + str.tostring(lookback) + " richiesti" +
-             (avail < drawMax ? "\n⚠ storico chart insufficiente (" + str.tostring(avail) + " bucket disponibili)" : "")
+             (avail < drawMax ? "\n⚠ storico chart insufficiente: " + str.tostring(avail) + " bucket disponibili" : "") +
+             (drawMax < lookback ? "\n⚠ budget Pine: tetto a " + str.tostring(drawMax) + " profili" : "")
         if na(infoLbl)
             infoLbl := label.new(bar_index, high, info, style = label.style_label_left,
                  color = color.new(color.gray, 25), textcolor = color.white, size = size.small)
