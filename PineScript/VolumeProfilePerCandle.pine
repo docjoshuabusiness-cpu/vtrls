@@ -87,7 +87,8 @@ showPocLine = input.bool(true,  "Linea POC estesa (solo livello a box)", group =
 pocExtend   = input.int(20, "Estensione linea POC (barre)", minval = 1, maxval = 500, group = gV)
 
 gL = "5 · Live"
-liveUpdate = input.bool(true, "Profilo live sul bucket in formazione", group = gL)
+liveUpdate = input.bool(false, "Profilo live sul bucket in formazione", group = gL,
+     tooltip = "Disattivo: si vedono solo i bucket chiusi. Il profilo della candela in corso compare alla sua chiusura.")
 liveTick   = input.bool(false, "Aggiorna a ogni tick (piu' pesante)", group = gL,
      tooltip = "Disattivo: il profilo live si aggiorna alla chiusura di ogni barra del chart. Su 5s/15s la differenza visiva e' trascurabile, il carico si riduce di un ordine di grandezza.")
 
@@ -156,8 +157,8 @@ boxCap  = 480
 lineCap = 480
 polyCap = 100
 
-// Livello A: box. Un box per bin, piu' i bin del profilo live.
-maxFullByBox = int(math.floor((boxCap - bins) / bins))
+// Livello A: box. Un box per bin, piu' i bin del profilo live se attivo.
+maxFullByBox = int(math.floor((boxCap - (liveUpdate ? bins : 0)) / bins))
 fullEff      = math.max(0, math.min(fullN, maxFullByBox))
 linesPerFull = (showPocLine ? 1 : 0) + (showVA and showVALines ? 2 : 0)
 linesUsedA   = fullEff * linesPerFull
