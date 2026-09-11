@@ -41,7 +41,7 @@
 //     gia' avvenuto. Non filtra nulla, misura.
 // =============================================================================
 
-indicator("MTF Volatility State", shorttitle="VSI-MTF", overlay=false, max_bars_back=5000, max_labels_count=500)
+indicator("MTF Volatility State", shorttitle="VSI-MTF", overlay=false, max_bars_back=2000, max_labels_count=500)
 
 // ------------------------------------------------------------- 1 · MOTORE ----
 var string gC = "1 · Motore volatilita'"
@@ -172,22 +172,37 @@ f_htf(simple int pctLen, simple bool shift) =>
     [shift ? vs[1] : vs, shift ? pr[1] : pr, shift ? zz[1] : zz, nz(mu[1], mu), nz(sd[1], sd), nz(atrv[1], atrv), nz(mv[1], mv), vs[1], shift ? trn[1] : trn]
 
 // -----------------------------------------------------------------------------
-//  MODO C · tutto sulle barre del grafico, finestre moltiplicate per k.
-//  Nessun request.security, nessun ritardo, nessun timeframe superiore.
+//  MODO C · tutto sulle barre del grafico, finestra dello stimatore = atrLen*k.
+//  Nessun ritardo, nessun timeframe superiore.
+//
+//  Qui NON c'e' ta.percentrank. La sua finestra in modo C sarebbe len*k: su un
+//  grafico a 5 secondi con una sezione a 4h sono 288.000 barre, e percentrank
+//  costa O(finestra) PER BARRA. Cinque sezioni cosi' fanno saltare il limite di
+//  calcolo di TradingView ("Calculation timed out").
+//  Il percentile viene invece calcolato sotto, con f_rank, su un campione
+//  SOTTOCAMPIONATO (un valore ogni k barre) e tenuto ordinato: costo O(log n)
+//  per barra. Non e' un ripiego: barre del grafico adiacenti sono quasi
+//  perfettamente autocorrelate, quindi len*k barre sovrapposte contengono circa
+//  la stessa informazione di len osservazioni distanti k. Stesso contenuto
+//  statistico, costo diviso per k.
 // -----------------------------------------------------------------------------
-f_chart(simple int aLen, simple int pLen) =>
+f_chart(simple int aLen) =>
     float tr   = ta.tr(true)
     float atrv = ta.rma(tr, aLen)
     float ev   = f_estVar(open, high, low, close)
     float mv   = ta.rma(ev, aLen)
     float vc   = f_comp(atrv, close, mv)
     float vs   = ta.ema(vc, emaSm)
-    float pr   = ta.percentrank(vs, pLen)
-    float mu   = ta.sma(vs, pLen)
-    float sd   = ta.stdev(vs, pLen)
-    float zz   = sd > 0 ? (vs - mu) / sd : 0.0
     float trn  = atrv > 0 ? tr / atrv : 0.0
-    [vs, pr, zz, trn]
+    [vs, trn]
+
+// tiene il valore e lo aggiorna una volta ogni k barre: e' il campionamento che
+// rende il percentile del modo C calcolabile in tempo costante
+f_hold(bool act, float v, simple int kk) =>
+    var float h = na
+    if act and bar_index % kk == 0
+        h := v
+    h
 
 // -----------------------------------------------------------------------------
 //  Ricostruzione della candela HTF in formazione, interamente lato grafico.
@@ -242,11 +257,20 @@ f_cntLt(array<float> srt, float v) =>
         c := q < 0 ? 0 : q >= sz ? sz : (array.get(srt, q) < v ? q + 1 : q)
     c
 
-f_rank(float vClosed, float vLive, simple int n) =>
+//  Restituisce anche media e deviazione standard del campione, mantenute con
+//  somma e somma dei quadrati aggiornate a ogni push/evict: cosi' il modo C non
+//  ha bisogno di ta.sma / ta.stdev su finestre enormi.
+//  'act' spegne completamente il lavoro quando la modalita' non e' quella
+//  attiva: senza, lo script pagherebbe SEMPRE il costo di entrambi i modi.
+f_rank(bool act, float vClosed, float vLive, simple int n) =>
     var array<float> raw = array.new_float()
     var array<float> srt = array.new_float()
-    if not na(vClosed) and (na(vClosed[1]) or vClosed != vClosed[1])
+    var float sum = 0.0
+    var float ssq = 0.0
+    if act and not na(vClosed) and (na(vClosed[1]) or vClosed != vClosed[1])
         array.push(raw, vClosed)
+        sum += vClosed
+        ssq += vClosed * vClosed
         int ip = f_cntLt(srt, vClosed)
         if ip >= array.size(srt)
             array.push(srt, vClosed)
@@ -254,12 +278,16 @@ f_rank(float vClosed, float vLive, simple int n) =>
             array.insert(srt, ip, vClosed)
         if array.size(raw) > n
             float outv = array.shift(raw)
+            sum -= outv
+            ssq -= outv * outv
             int rp = array.binary_search(srt, outv)
             if rp >= 0
                 array.remove(srt, rp)
     int sz = array.size(srt)
+    float mu = sz > 0 ? sum / sz : na
+    float sd = sz > 1 ? math.sqrt(math.max(0.0, (ssq / sz - mu * mu)) * sz / (sz - 1)) : na
     float pr = sz > 0 and not na(vLive) ? 100.0 * f_cntLt(srt, vLive) / sz : na
-    [pr, sz]
+    [pr, sz, mu, sd]
 
 // =============================================================================
 //  CALCOLO PER SEZIONE
@@ -281,26 +309,46 @@ k3 = int(math.max(1, math.round(sc3 / float(chartSec))))
 k4 = int(math.max(1, math.round(sc4 / float(chartSec))))
 k5 = int(math.max(1, math.round(sc5 / float(chartSec))))
 
-// Tetto delle finestre del modo C. ta.percentrank costa O(finestra) per barra:
-// senza tetto, una sezione 4h su grafico 1m chiederebbe 24000 barre per sezione
-// e TradingView interrompe il calcolo. Quando il tetto scatta la sezione guarda
-// MENO storia di quella richiesta: il cruscotto lo segnala, non e' un dettaglio.
-CAPW = 2000
-aC1 = int(math.min(CAPW, atrLen * k1))
-aC2 = int(math.min(CAPW, atrLen * k2))
-aC3 = int(math.min(CAPW, atrLen * k3))
-aC4 = int(math.min(CAPW, atrLen * k4))
-aC5 = int(math.min(CAPW, atrLen * k5))
-pC1 = int(math.min(CAPW, ln1 * k1))
-pC2 = int(math.min(CAPW, ln2 * k2))
-pC3 = int(math.min(CAPW, ln3 * k3))
-pC4 = int(math.min(CAPW, ln4 * k4))
-pC5 = int(math.min(CAPW, ln5 * k5))
-cap1 = modeC and ln1 * k1 > CAPW
-cap2 = modeC and ln2 * k2 > CAPW
-cap3 = modeC and ln3 * k3 > CAPW
-cap4 = modeC and ln4 * k4 > CAPW
-cap5 = modeC and ln5 * k5 > CAPW
+// Tetto della finestra dello stimatore in modo C. ta.rma si appoggia a una SMA
+// di innesco, quindi una finestra enorme costa memoria e tempo di avvio. Sopra
+// il tetto la sezione misura un orizzonte PIU' CORTO di quello richiesto: il
+// cruscotto lo segnala con ⚠, non e' un dettaglio estetico.
+//   Su grafico 5s una sezione 4h chiederebbe 14*2880 = 40320 barre. Se vedi il
+//   flag su tutte le sezioni lente, il modo C non e' lo strumento giusto per
+//   quella combinazione: usa il modo A, o abbassa i timeframe delle sezioni.
+CAPW = 1000
+aW1 = int(math.min(CAPW, atrLen * k1))
+aW2 = int(math.min(CAPW, atrLen * k2))
+aW3 = int(math.min(CAPW, atrLen * k3))
+aW4 = int(math.min(CAPW, atrLen * k4))
+aW5 = int(math.min(CAPW, atrLen * k5))
+cap1 = modeC and atrLen * k1 > CAPW
+cap2 = modeC and atrLen * k2 > CAPW
+cap3 = modeC and atrLen * k3 > CAPW
+cap4 = modeC and atrLen * k4 > CAPW
+cap5 = modeC and atrLen * k5 > CAPW
+
+// COSTO: Pine valuta TUTTO, anche il ramo della modalita' non attiva. Senza
+// collassare le lunghezze, lo script pagherebbe sempre il conto di entrambi i
+// modi ed e' esattamente cosi' che si arriva al timeout.
+//   in modo C le cinque request.security puntano al timeframe DEL GRAFICO
+//   (nessun ricampionamento HTF) e con finestra minima;
+//   in modo A le cinque serie del grafico girano con finestra 5.
+tS1 = modeA ? tf1 : timeframe.period
+tS2 = modeA ? tf2 : timeframe.period
+tS3 = modeA ? tf3 : timeframe.period
+tS4 = modeA ? tf4 : timeframe.period
+tS5 = modeA ? tf5 : timeframe.period
+lS1 = modeA ? ln1 : 20
+lS2 = modeA ? ln2 : 20
+lS3 = modeA ? ln3 : 20
+lS4 = modeA ? ln4 : 20
+lS5 = modeA ? ln5 : 20
+cW1 = modeC ? aW1 : 5
+cW2 = modeC ? aW2 : 5
+cW3 = modeC ? aW3 : 5
+cW4 = modeC ? aW4 : 5
+cW5 = modeC ? aW5 : 5
 
 sh1 = (liveMode or confirmed) and sc1 > chartSec
 sh2 = (liveMode or confirmed) and sc2 > chartSec
@@ -308,17 +356,17 @@ sh3 = (liveMode or confirmed) and sc3 > chartSec
 sh4 = (liveMode or confirmed) and sc4 > chartSec
 sh5 = (liveMode or confirmed) and sc5 > chartSec
 
-[vN1, pN1, zN1, mu1, sd1, atC1, mvC1, vCl1, tN1] = request.security(syminfo.tickerid, tf1, f_htf(ln1, sh1), lookahead = barmerge.lookahead_off)
-[vN2, pN2, zN2, mu2, sd2, atC2, mvC2, vCl2, tN2] = request.security(syminfo.tickerid, tf2, f_htf(ln2, sh2), lookahead = barmerge.lookahead_off)
-[vN3, pN3, zN3, mu3, sd3, atC3, mvC3, vCl3, tN3] = request.security(syminfo.tickerid, tf3, f_htf(ln3, sh3), lookahead = barmerge.lookahead_off)
-[vN4, pN4, zN4, mu4, sd4, atC4, mvC4, vCl4, tN4] = request.security(syminfo.tickerid, tf4, f_htf(ln4, sh4), lookahead = barmerge.lookahead_off)
-[vN5, pN5, zN5, mu5, sd5, atC5, mvC5, vCl5, tN5] = request.security(syminfo.tickerid, tf5, f_htf(ln5, sh5), lookahead = barmerge.lookahead_off)
+[vN1, pN1, zN1, mu1, sd1, atC1, mvC1, vCl1, tN1] = request.security(syminfo.tickerid, tS1, f_htf(lS1, sh1), lookahead = barmerge.lookahead_off)
+[vN2, pN2, zN2, mu2, sd2, atC2, mvC2, vCl2, tN2] = request.security(syminfo.tickerid, tS2, f_htf(lS2, sh2), lookahead = barmerge.lookahead_off)
+[vN3, pN3, zN3, mu3, sd3, atC3, mvC3, vCl3, tN3] = request.security(syminfo.tickerid, tS3, f_htf(lS3, sh3), lookahead = barmerge.lookahead_off)
+[vN4, pN4, zN4, mu4, sd4, atC4, mvC4, vCl4, tN4] = request.security(syminfo.tickerid, tS4, f_htf(lS4, sh4), lookahead = barmerge.lookahead_off)
+[vN5, pN5, zN5, mu5, sd5, atC5, mvC5, vCl5, tN5] = request.security(syminfo.tickerid, tS5, f_htf(lS5, sh5), lookahead = barmerge.lookahead_off)
 
-[vX1, pX1, zX1, tX1] = f_chart(aC1, pC1)
-[vX2, pX2, zX2, tX2] = f_chart(aC2, pC2)
-[vX3, pX3, zX3, tX3] = f_chart(aC3, pC3)
-[vX4, pX4, zX4, tX4] = f_chart(aC4, pC4)
-[vX5, pX5, zX5, tX5] = f_chart(aC5, pC5)
+[vX1, tX1] = f_chart(cW1)
+[vX2, tX2] = f_chart(cW2)
+[vX3, tX3] = f_chart(cW3)
+[vX4, tX4] = f_chart(cW4)
+[vX5, tX5] = f_chart(cW5)
 
 [trF1, evF1, pg1, op1] = f_form(sc1)
 [trF2, evF2, pg2, op2] = f_form(sc2)
@@ -353,11 +401,20 @@ volA3 = liveOn ? vL3 : vN3
 volA4 = liveOn ? vL4 : vN4
 volA5 = liveOn ? vL5 : vN5
 
-[pLv1, nS1] = f_rank(vCl1, volA1, ln1)
-[pLv2, nS2] = f_rank(vCl2, volA2, ln2)
-[pLv3, nS3] = f_rank(vCl3, volA3, ln3)
-[pLv4, nS4] = f_rank(vCl4, volA4, ln4)
-[pLv5, nS5] = f_rank(vCl5, volA5, ln5)
+// campione del percentile: in modo A sono le candele HTF chiuse, in modo C e'
+// la serie del grafico sottocampionata ogni k barre. Un solo motore per due modi.
+hd1 = f_hold(modeC, vX1, k1)
+hd2 = f_hold(modeC, vX2, k2)
+hd3 = f_hold(modeC, vX3, k3)
+hd4 = f_hold(modeC, vX4, k4)
+hd5 = f_hold(modeC, vX5, k5)
+
+rkOn = modeC or liveOn
+[pR1, nS1, muR1, sdR1] = f_rank(rkOn, modeC ? hd1 : vCl1, modeC ? vX1 : volA1, ln1)
+[pR2, nS2, muR2, sdR2] = f_rank(rkOn, modeC ? hd2 : vCl2, modeC ? vX2 : volA2, ln2)
+[pR3, nS3, muR3, sdR3] = f_rank(rkOn, modeC ? hd3 : vCl3, modeC ? vX3 : volA3, ln3)
+[pR4, nS4, muR4, sdR4] = f_rank(rkOn, modeC ? hd4 : vCl4, modeC ? vX4 : volA4, ln4)
+[pR5, nS5, muR5, sdR5] = f_rank(rkOn, modeC ? hd5 : vCl5, modeC ? vX5 : volA5, ln5)
 
 vol1 = modeC ? vX1 : volA1
 vol2 = modeC ? vX2 : volA2
@@ -365,17 +422,17 @@ vol3 = modeC ? vX3 : volA3
 vol4 = modeC ? vX4 : volA4
 vol5 = modeC ? vX5 : volA5
 
-pct1 = modeC ? pX1 : liveOn ? nz(pLv1, pN1) : pN1
-pct2 = modeC ? pX2 : liveOn ? nz(pLv2, pN2) : pN2
-pct3 = modeC ? pX3 : liveOn ? nz(pLv3, pN3) : pN3
-pct4 = modeC ? pX4 : liveOn ? nz(pLv4, pN4) : pN4
-pct5 = modeC ? pX5 : liveOn ? nz(pLv5, pN5) : pN5
+pct1 = modeC ? pR1 : liveOn ? nz(pR1, pN1) : pN1
+pct2 = modeC ? pR2 : liveOn ? nz(pR2, pN2) : pN2
+pct3 = modeC ? pR3 : liveOn ? nz(pR3, pN3) : pN3
+pct4 = modeC ? pR4 : liveOn ? nz(pR4, pN4) : pN4
+pct5 = modeC ? pR5 : liveOn ? nz(pR5, pN5) : pN5
 
-z1 = modeC ? zX1 : liveOn and sd1 > 0 ? (volA1 - mu1) / sd1 : zN1
-z2 = modeC ? zX2 : liveOn and sd2 > 0 ? (volA2 - mu2) / sd2 : zN2
-z3 = modeC ? zX3 : liveOn and sd3 > 0 ? (volA3 - mu3) / sd3 : zN3
-z4 = modeC ? zX4 : liveOn and sd4 > 0 ? (volA4 - mu4) / sd4 : zN4
-z5 = modeC ? zX5 : liveOn and sd5 > 0 ? (volA5 - mu5) / sd5 : zN5
+z1 = modeC ? (nz(sdR1) > 0 ? (vX1 - muR1) / sdR1 : 0.0) : liveOn and sd1 > 0 ? (volA1 - mu1) / sd1 : zN1
+z2 = modeC ? (nz(sdR2) > 0 ? (vX2 - muR2) / sdR2 : 0.0) : liveOn and sd2 > 0 ? (volA2 - mu2) / sd2 : zN2
+z3 = modeC ? (nz(sdR3) > 0 ? (vX3 - muR3) / sdR3 : 0.0) : liveOn and sd3 > 0 ? (volA3 - mu3) / sd3 : zN3
+z4 = modeC ? (nz(sdR4) > 0 ? (vX4 - muR4) / sdR4 : 0.0) : liveOn and sd4 > 0 ? (volA4 - mu4) / sd4 : zN4
+z5 = modeC ? (nz(sdR5) > 0 ? (vX5 - muR5) / sdR5 : 0.0) : liveOn and sd5 > 0 ? (volA5 - mu5) / sd5 : zN5
 
 // TR/ATR della sezione. In A e' la candela HTF (in formazione se live), in C e'
 // la barra del grafico contro l'ATR a orizzonte equivalente: misure diverse.
@@ -385,12 +442,14 @@ trA3 = modeC ? tX3 : liveOn ? rL3 : tN3
 trA4 = modeC ? tX4 : liveOn ? rL4 : tN4
 trA5 = modeC ? tX5 : liveOn ? rL5 : tN5
 
-// campione effettivo dichiarato dalla sezione
-ne1 = modeC ? pC1 : nS1
-ne2 = modeC ? pC2 : nS2
-ne3 = modeC ? pC3 : nS3
-ne4 = modeC ? pC4 : nS4
-ne5 = modeC ? pC5 : nS5
+// Campione effettivo dichiarato dalla sezione, stesso significato nei due modi.
+// Quando il motore ad array e' spento (modo A con LIVE off) il percentile viene
+// da ta.percentrank dentro il contesto HTF: la finestra e' quella nominale.
+ne1 = rkOn ? nS1 : ln1
+ne2 = rkOn ? nS2 : ln2
+ne3 = rkOn ? nS3 : ln3
+ne4 = rkOn ? nS4 : ln4
+ne5 = rkOn ? nS5 : ln5
 
 // ----------------------------------------- sezione piu' veloce / piu' lenta ---
 BIG = 1e12
@@ -596,7 +655,7 @@ if showTab and barstate.islast
         p    = array.get(pcs, i)
         bad  = act and array.get(scs, i) < chartSec
         capd = act and array.get(cps, i)
-        thin = act and modeA and array.get(nes, i) < array.get(lns, i)
+        thin = act and array.get(nes, i) < array.get(lns, i)
         col  = not act ? color.new(color.gray, 60) : bad ? color.new(color.red, 25) : p >= thExt ? color.new(color.red, 55) : p >= thHi ? color.new(color.orange, 60) : p < thLo ? color.new(color.blue, 65) : color.new(color.gray, 85)
         table.cell(dash, 0, i + 1, "S" + str.tostring(i + 1) + " " + (act ? (bad ? "⚠<graf" : array.get(tfs, i)) : "off"), text_size=szD, text_color=act ? array.get(cls, i) : color.gray, bgcolor=col)
         table.cell(dash, 1, i + 1, act ? f_n2(array.get(vls, i)) : "–", text_size=szD, text_color=color.white, bgcolor=col)
