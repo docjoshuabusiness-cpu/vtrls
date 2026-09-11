@@ -1,0 +1,729 @@
+//@version=6
+// =============================================================================
+//  MTF Volatility State   v2.0
+//  Evoluzione multi-timeframe di "Volatility State Indicator [Ferro]"
+//  ---------------------------------------------------------------------------
+//  COSA CAMBIA RISPETTO ALLA v1 (e perche')
+//
+//  1. STIMATORE COERENTE
+//     Nella v1 l'ATR usava RMA e Parkinson una SMA: due memorie diverse mediate
+//     insieme. Qui entrambe le componenti passano per RMA della stessa lunghezza,
+//     quindi il blend e' omogeneo e l'aggiornamento live e' esatto per costruzione.
+//
+//  2. GARMAN-KLASS
+//     Parkinson vede solo high/low: sottostima quando la candela ha drift interno
+//     o apre in gap. Garman-Klass aggiunge open e close ed e' ~7x piu' efficiente
+//     del close-to-close. Disponibile come stimatore selezionabile.
+//
+//  3. MULTI-TIMEFRAME REALE + RICOSTRUZIONE LIVE
+//     Cinque sezioni indipendenti. Ogni sezione calcola la propria volatilita'
+//     sulle CANDELE DEL PROPRIO TIMEFRAME. Con LIVE acceso, la candela HTF in
+//     formazione viene ricostruita sulle barre del grafico (non chiesta a
+//     request.security, che su storico restituirebbe estremi gia' finali) e usata
+//     per aggiornare ATR e varianza con la formula ricorsiva esatta:
+//         ATR_live = ATR_chiuso + (TR_in_formazione - ATR_chiuso) / atrLen
+//     Nessun dato futuro, nessun repaint dello storico.
+//
+//  4. PERCENTILE LIVE
+//     Il percentile non si puo' ricostruire con ta.percentrank quando il valore
+//     corrente e' esterno al campione. Qui ogni sezione mantiene un array degli
+//     ultimi N valori di volatilita' delle sue candele CHIUSE e calcola il rango
+//     del valore live contro quel campione. E' il percentile che la sezione
+//     avrebbe se la sua candela chiudesse adesso.
+//
+//  5. STRUTTURA A TERMINE (la vera informazione)
+//     slope = percentile della sezione piu' VELOCE meno quello della piu' LENTA.
+//       slope >> 0  espansione NASCENTE: parte dal corto, il lungo non l'ha vista
+//       slope << 0  espansione ESAURITA: il lungo e' alto, il corto sta gia' rientrando
+//     Un singolo percentile alto non distingue i due casi. E' l'unica lettura di
+//     volatilita' che cambia la decisione.
+//
+//  6. MISURA DEL MOVIMENTO SUCCESSIVO, CON BASELINE
+//     Dopo ogni segnale misura l'escursione massima nelle N barre successive, in
+//     ATR, e la confronta con la stessa statistica misurata su barre QUALSIASI
+//     (campione non sovrapposto). Il rapporto segnale/baseline e' l'unico numero
+//     che dice se il regime ha valore predittivo. Se e' ~1.0 l'indicatore sta
+//     descrivendo, non prevedendo.
+//
+//  7. CANDELE DI ESPANSIONE su pannello E grafico prezzi, in giallo.
+// =============================================================================
+
+indicator("MTF Volatility State", shorttitle="VSI-MTF", overlay=false, max_bars_back=5000, max_labels_count=500)
+
+// ------------------------------------------------------------- 1 · MOTORE ----
+var string gC = "1 · Motore volatilita'"
+estMode  = input.string("Blend (ATR% + Garman-Klass)", "Stimatore",
+     options=["ATR %","Parkinson","Garman-Klass","Blend (ATR% + Parkinson)","Blend (ATR% + Garman-Klass)"], group=gC,
+     tooltip="ATR %: escursione vera media in percentuale del prezzo. Include i gap, e' l'unica componente che li vede.\n\nPARKINSON: usa solo high/low. Circa 5x piu' efficiente del close-to-close a parita' di campione, ma CIECO ai gap e al drift interno alla candela: sottostima proprio quando il mercato salta.\n\nGARMAN-KLASS: aggiunge open e close, ~7x piu' efficiente. Corregge il drift intrabar che Parkinson ignora. Resta cieco ai gap fra candele.\n\nBLEND (default): media di ATR% e stimatore di range. L'ATR porta l'informazione sui gap, il range estimator porta l'efficienza statistica. Sono errori non correlati, quindi la media e' piu' stabile di entrambi.")
+atrLen   = input.int(14, "Finestra dello stimatore (candele)", minval=2, maxval=200, group=gC,
+     tooltip="Numero di candele del TF della sezione su cui mediare TR e varianza di range. Vale per TUTTE le sezioni: e' la stessa MISURA applicata a orizzonti diversi, non cinque misure diverse.")
+emaSm    = input.int(3, "Smoothing EMA", minval=1, maxval=50, group=gC)
+liveMode = input.bool(true, "Ricostruzione LIVE della candela in formazione", group=gC,
+     tooltip="ACCESO (consigliato): la candela HTF in formazione viene ricostruita sulle barre del grafico e usata per aggiornare ATR e varianza con la formula ricorsiva esatta. Percentile e z si muovono a ogni barra del grafico.\n\nSPENTO: ogni sezione mostra il valore dell'ultima candela HTF chiusa. Curva a gradini, aggiornamento una volta ogni candela HTF: su una sezione 4h da un grafico 1m il valore resta fermo 240 barre.\n\nLa ricostruzione e' interamente lato grafico: non passa da request.security, che su storico restituirebbe gli estremi FINALI della candela contenente la barra, cioe' valori che in quel momento non esistevano ancora.")
+confirmed= input.bool(true, "Solo candele HTF chiuse per centro e scala (no repaint)", group=gC,
+     tooltip="Media, deviazione standard e campione del percentile vengono sempre dalle candele HTF CHIUSE. Con il LIVE acceso non costa nulla in reattivita', perche' il numeratore e' gia' il valore in formazione, e garantisce che lo storico non ripinga.")
+
+// ------------------------------------------------------- 2 · SEZIONI / TF ----
+var string gT = "2 · Sezioni (timeframe)"
+use1 = input.bool(true, "S1", inline="s1", group=gT)
+tf1  = input.timeframe("1",  "", inline="s1", group=gT)
+ln1  = input.int(100, "Len", minval=20, maxval=500, inline="s1", group=gT)
+cc1  = input.color(color.new(#42a5f5, 0), "", inline="s1", group=gT)
+
+use2 = input.bool(true, "S2", inline="s2", group=gT)
+tf2  = input.timeframe("5",  "", inline="s2", group=gT)
+ln2  = input.int(100, "Len", minval=20, maxval=500, inline="s2", group=gT)
+cc2  = input.color(color.new(#7e57c2, 0), "", inline="s2", group=gT)
+
+use3 = input.bool(true, "S3", inline="s3", group=gT)
+tf3  = input.timeframe("15", "", inline="s3", group=gT)
+ln3  = input.int(100, "Len", minval=20, maxval=500, inline="s3", group=gT)
+cc3  = input.color(color.new(#ffa726, 0), "", inline="s3", group=gT)
+
+use4 = input.bool(true, "S4", inline="s4", group=gT)
+tf4  = input.timeframe("60", "", inline="s4", group=gT)
+ln4  = input.int(100, "Len", minval=20, maxval=500, inline="s4", group=gT)
+cc4  = input.color(color.new(#ec407a, 0), "", inline="s4", group=gT)
+
+use5 = input.bool(true, "S5", inline="s5", group=gT)
+tf5  = input.timeframe("240","", inline="s5", group=gT)
+ln5  = input.int(100, "Len", minval=20, maxval=500, inline="s5", group=gT)
+cc5  = input.color(color.new(#bdbdbd, 0), "", inline="s5", group=gT)
+
+// -------------------------------------------------------- 3 · SOGLIE ---------
+var string gL = "3 · Soglie di regime (percentile)"
+thExt = input.int(90, "EXTREME", minval=50, maxval=100, group=gL)
+thHi  = input.int(70, "HIGH",    minval=50, maxval=100, group=gL)
+thLo  = input.int(30, "LOW",     minval=0,  maxval=50,  group=gL)
+thSq  = input.int(10, "SQUEEZE", minval=0,  maxval=50,  group=gL,
+     tooltip="Compressione estrema. Non e' un segnale di direzione: e' la condizione in cui il rapporto fra movimento atteso e stop necessario e' migliore, perche' lo stop strutturale si stringe insieme al range. E' il momento in cui si COSTRUISCE la posizione, non quello in cui si insegue.")
+
+// ------------------------------------------------- 4 · LOGICA DI SEGNALE -----
+var string gS = "4 · Logica segnale"
+enExt  = input.bool(true,  "Stream A · EXTREME", inline="a", group=gS)
+trgExt = input.float(80,   "trigger", step=1, inline="a", group=gS)
+enHi   = input.bool(false, "Stream B · HIGH",    inline="b", group=gS)
+trgHi  = input.float(60,   "trigger", step=1, inline="b", group=gS)
+enLo   = input.bool(false, "Stream C · LOW",     inline="c", group=gS)
+trgLo  = input.float(40,   "trigger", step=1, inline="c", group=gS)
+enSq   = input.bool(true,  "Stream D · SQUEEZE", inline="d", group=gS)
+trgSq  = input.float(20,   "trigger", step=1, inline="d", group=gS)
+
+trigMode = input.string("Primo tocco della soglia", "Modalita' trigger",
+     options=["Primo tocco della soglia","Rientro (normalizzazione)"], group=gS,
+     tooltip="PRIMO TOCCO: la sezione piu' veloce buca la soglia. Cattura l'INIZIO dell'espansione o della compressione. E' la modalita' giusta per i setup di continuazione e per i breakout da squeeze.\n\nRIENTRO: la sezione piu' veloce riattraversa il livello di trigger tornando verso il centro. Cattura la NORMALIZZAZIONE dopo lo spike: e' il momento in cui i modelli di mean-reversion sul prezzo hanno la loro finestra, perche' la volatilita' che si comprime dopo un estremo e' il segnale piu' affidabile che l'impulso e' finito.")
+reqSec   = input.int(0, "Sezioni richieste in soglia (0 = tutte)", minval=0, maxval=5, group=gS,
+     tooltip="Quante sezioni ATTIVE devono essere in soglia perche' il setup si armi.\n\n0 = tutte. Severa e fragile: le sezioni lente dettano il ritmo e su TF alti il percentile si muove pochissimo.\n\nK < sezioni attive = confluenza parziale. Confrontando K=2,3,4 e guardando la riga 'move' del cruscotto vedi quanto vale davvero ogni sezione in piu'. Se il rapporto con il baseline non migliora, la sezione in piu' non porta informazione.")
+lookback = input.int(50, "Finestra di confluenza (barre del grafico)", minval=1, maxval=2000, group=gS)
+autoLb   = input.bool(true, "Finestra automatica (2 barre della sezione piu' lenta)", group=gS)
+strictBar= input.bool(false, "Emetti solo a barra del grafico CHIUSA", group=gS)
+repMode  = input.string("Uno per escursione", "Ripetizione dei segnali",
+     options=["Uno per escursione","Uno per armamento","Tutti"], group=gS)
+cooldown = input.int(10, "Cooldown fra segnali (barre)", minval=0, maxval=500, group=gS)
+showSeq  = input.bool(true, "Numera i segnali dentro l'armamento", group=gS)
+
+// ------------------------------------------- 5 · CANDELE DI ESPANSIONE -------
+var string gE = "5 · Candela di espansione / compressione"
+expSrc   = input.string("Barra del grafico", "Misurata su",
+     options=["Barra del grafico","S1","S2","S3","S4","S5"], group=gE,
+     tooltip="BARRA DEL GRAFICO: TR della barra corrente diviso ATR del grafico. Come nella v1.\n\nSEZIONE Sx: TR della candela HTF IN FORMAZIONE diviso ATR di quel timeframe. Marca l'espansione MENTRE la candela superiore si sta allargando, non a candela chiusa. E' anticipatorio, ed e' il caso d'uso interessante: quando la candela 15m ha gia' fatto 1.8 ATR e le restano 9 minuti, il movimento e' in corso adesso.")
+expTh    = input.float(1.8, "Soglia espansione (TR/ATR)", minval=1.0, maxval=10.0, step=0.1, group=gE)
+cmpTh    = input.float(0.5, "Soglia compressione (TR/ATR)", minval=0.05, maxval=1.0, step=0.05, group=gE)
+expPane  = input.bool(true, "Marker nel pannello", inline="ep", group=gE)
+expChart = input.bool(true, "Marker sul grafico prezzi", inline="ep", group=gE)
+cmpShow  = input.bool(true, "Mostra anche la compressione", group=gE)
+cExp     = input.color(color.new(#FFEB3B, 0), "Colore espansione", inline="ec", group=gE)
+cCmp     = input.color(color.new(#26C6DA, 0), "compressione", inline="ec", group=gE)
+
+// ------------------------------------------------------- 6 · VALIDAZIONE -----
+var string gM = "6 · Validazione empirica"
+useMv    = input.bool(true, "Misura il movimento dopo il segnale", group=gM,
+     tooltip="Dopo ogni segnale misura l'escursione massima (in ATR del grafico) nelle N barre successive, e la confronta con la stessa misura presa su barre qualsiasi, con campione NON sovrapposto.\n\nIl numero che conta e' il RAPPORTO nella riga 'move' del cruscotto:\n  ~1.0  il segnale non aggiunge nulla: stai descrivendo la volatilita', non prevedendola\n  >1.3  il regime anticipa davvero un'escursione maggiore\n  <0.8  il segnale arriva a movimento gia' finito: inverti la modalita' del trigger\n\nNon filtra niente, misura soltanto. E' l'unica riga del cruscotto che puo' dirti di buttare via la configurazione.")
+mvLen    = input.int(30, "   orizzonte (barre)", minval=3, maxval=500, group=gM)
+atrChLen = input.int(14, "   ATR del grafico per normalizzare", minval=2, maxval=200, group=gM)
+
+// ---------------------------------------------------------- 7 · GRAFICA ------
+var string gV = "7 · Grafica"
+showCur  = input.bool(true, "Curve percentile nel pannello", group=gV)
+curStyle = input.string("Linea", "Stile delle curve", options=["Linea","Colonne (solo la piu' veloce)"], group=gV)
+showZ    = input.bool(false, "Curva z-score della sezione piu' lenta (scalata)", group=gV)
+showLv   = input.bool(true, "Linee di soglia", group=gV)
+showArm  = input.bool(true, "Sfondo colorato quando un setup e' armato", group=gV)
+showTab  = input.bool(true, "Mostra cruscotto", group=gV)
+showTags = input.bool(true, "Etichette del periodo a destra delle curve", group=gV)
+tagOff   = input.int(4, "   distanza (barre)", minval=1, maxval=50, group=gV)
+dashSz   = input.string("Piccolo", "Dimensione testo cruscotto", options=["Minimo","Piccolo","Normale","Grande"], group=gV)
+markSz   = input.string("Piccolo", "Dimensione marker", options=["Minimo","Piccolo","Normale","Grande"], group=gV)
+markWhere= input.string("Entrambi", "Posizione marker dei segnali", options=["Pannello","Grafico prezzi","Entrambi"], group=gV)
+cUpS     = input.color(color.new(#ef5350, 0), "Colore EXPANSION", inline="col", group=gV)
+cDnS     = input.color(color.new(#1B5E20, 0), "SQUEEZE", inline="col", group=gV)
+
+// =============================================================================
+//  STIMATORI
+// =============================================================================
+
+// Varianza logaritmica per candela. Parkinson vede solo l'escursione, Garman-Klass
+// corregge il drift fra apertura e chiusura: e' la differenza fra una candela che
+// oscilla e una che percorre lo stesso range in linea retta.
+f_estVar(float o, float h, float l, float c) =>
+    float lnHL = h > 0 and l > 0 ? math.log(h / l) : 0.0
+    float lnCO = c > 0 and o > 0 ? math.log(c / o) : 0.0
+    float park = lnHL * lnHL / (4.0 * math.log(2.0))
+    float gk   = 0.5 * lnHL * lnHL - (2.0 * math.log(2.0) - 1.0) * lnCO * lnCO
+    str.contains(estMode, "Garman") ? math.max(gk, 0.0) : park
+
+// Composito a partire dalle due componenti gia' mediate.
+f_comp(float atrv, float px, float meanVar) =>
+    float vA = px > 0 ? atrv / px * 100.0 : 0.0
+    float vR = math.sqrt(math.max(meanVar, 0.0)) * 100.0
+    estMode == "ATR %" ? vA : (estMode == "Parkinson" or estMode == "Garman-Klass") ? vR : (vA + vR) / 2.0
+
+// -----------------------------------------------------------------------------
+//  Eseguita DENTRO il contesto del timeframe della sezione.
+//  Restituisce, nell'ordine:
+//    vNat  volatilita' smussata, nativa (shiftata se 'confirmed')
+//    pNat  percentile nativo
+//    zNat  z-score nativo
+//    mu    media del campione, sempre dalla candela CHIUSA
+//    sd    deviazione standard, sempre dalla candela CHIUSA
+//    atrC  ATR alla chiusura dell'ultima candela  -> base dell'aggiornamento live
+//    mvC   varianza media alla chiusura           -> base dell'aggiornamento live
+//    vC    volatilita' smussata alla chiusura     -> base dell'EMA live e campione
+//    trN   TR/ATR nativo dell'ultima candela
+// -----------------------------------------------------------------------------
+f_htf(simple int pctLen, simple bool shift) =>
+    float tr   = ta.tr(true)
+    float atrv = ta.rma(tr, atrLen)
+    float ev   = f_estVar(open, high, low, close)
+    float mv   = ta.rma(ev, atrLen)
+    float vc   = f_comp(atrv, close, mv)
+    float vs   = ta.ema(vc, emaSm)
+    float pr   = ta.percentrank(vs, pctLen)
+    float mu   = ta.sma(vs, pctLen)
+    float sd   = ta.stdev(vs, pctLen)
+    float zz   = sd > 0 ? (vs - mu) / sd : 0.0
+    float trn  = atrv > 0 ? tr / atrv : 0.0
+    [shift ? vs[1] : vs, shift ? pr[1] : pr, shift ? zz[1] : zz, nz(mu[1], mu), nz(sd[1], sd), nz(atrv[1], atrv), nz(mv[1], mv), vs[1], shift ? trn[1] : trn]
+
+// -----------------------------------------------------------------------------
+//  Ricostruzione della candela HTF in formazione, interamente lato grafico.
+//  NON passa da request.security: quella, su storico, restituirebbe massimo e
+//  minimo FINALI della candela che contiene la barra, cioe' valori che in quel
+//  momento non esistevano ancora. Un filtro costruito su quei dati sembra
+//  profetico in backtest e inutile in tempo reale.
+//
+//  Limite: i confini sono blocchi di durata pari al timeframe. Esatto per i TF
+//  che dividono l'ora (15S, 30S, 1, 2, 5, 15, 30, 60); su TF che attraversano le
+//  interruzioni di sessione i blocchi possono non coincidere con quelli di
+//  TradingView.
+// -----------------------------------------------------------------------------
+f_form(simple int secTf) =>
+    var float fO = na
+    var float fH = na
+    var float fL = na
+    var float pc = na
+    var int   fT = 0
+    float bk = math.floor(time / (secTf * 1000.0))
+    bool isNew = na(bk[1]) or bk != bk[1]
+    if isNew
+        pc := nz(close[1], open)
+        fO := open
+        fH := high
+        fL := low
+        fT := time
+    else
+        fH := math.max(fH, high)
+        fL := math.min(fL, low)
+    float trF = math.max(fH - fL, math.max(math.abs(fH - pc), math.abs(pc - fL)))
+    float evF = f_estVar(fO, fH, fL, close)
+    float pg  = math.min(1.0, math.max(0.0, (time - fT) / (secTf * 1000.0)))
+    [trF, evF, pg]
+
+// -----------------------------------------------------------------------------
+//  Percentile LIVE. ta.percentrank non serve: il valore corrente e' ESTERNO al
+//  campione. Ogni sezione tiene l'array degli ultimi N valori di volatilita'
+//  delle sue candele CHIUSE e calcola direttamente il rango del valore live.
+//  Il push avviene quando il valore di chiusura CAMBIA, non su un contatore di
+//  tempo: e' auto-sincronizzato con l'aggiornamento di request.security e non
+//  dipende da come TradingView allinea storico e realtime.
+// -----------------------------------------------------------------------------
+f_rank(float vClosed, float vLive, simple int n) =>
+    var array<float> a = array.new_float()
+    if not na(vClosed) and (na(vClosed[1]) or vClosed != vClosed[1])
+        array.push(a, vClosed)
+        if array.size(a) > n
+            array.shift(a)
+    int sz = array.size(a)
+    float cnt = 0.0
+    if sz > 0 and not na(vLive)
+        for j = 0 to sz - 1
+            if array.get(a, j) < vLive
+                cnt += 1.0
+    [sz > 0 ? 100.0 * cnt / sz : na, sz]
+
+// =============================================================================
+//  CALCOLO PER SEZIONE
+// =============================================================================
+chartSec = timeframe.in_seconds()
+sc1 = timeframe.in_seconds(tf1)
+sc2 = timeframe.in_seconds(tf2)
+sc3 = timeframe.in_seconds(tf3)
+sc4 = timeframe.in_seconds(tf4)
+sc5 = timeframe.in_seconds(tf5)
+
+sh1 = (liveMode or confirmed) and sc1 > chartSec
+sh2 = (liveMode or confirmed) and sc2 > chartSec
+sh3 = (liveMode or confirmed) and sc3 > chartSec
+sh4 = (liveMode or confirmed) and sc4 > chartSec
+sh5 = (liveMode or confirmed) and sc5 > chartSec
+
+[vN1, pN1, zN1, mu1, sd1, aC1, mC1, vC1, tN1] = request.security(syminfo.tickerid, tf1, f_htf(ln1, sh1), lookahead = barmerge.lookahead_off)
+[vN2, pN2, zN2, mu2, sd2, aC2, mC2, vC2, tN2] = request.security(syminfo.tickerid, tf2, f_htf(ln2, sh2), lookahead = barmerge.lookahead_off)
+[vN3, pN3, zN3, mu3, sd3, aC3, mC3, vC3, tN3] = request.security(syminfo.tickerid, tf3, f_htf(ln3, sh3), lookahead = barmerge.lookahead_off)
+[vN4, pN4, zN4, mu4, sd4, aC4, mC4, vC4, tN4] = request.security(syminfo.tickerid, tf4, f_htf(ln4, sh4), lookahead = barmerge.lookahead_off)
+[vN5, pN5, zN5, mu5, sd5, aC5, mC5, vC5, tN5] = request.security(syminfo.tickerid, tf5, f_htf(ln5, sh5), lookahead = barmerge.lookahead_off)
+
+[tf1F, ev1F, pg1] = f_form(sc1)
+[tf2F, ev2F, pg2] = f_form(sc2)
+[tf3F, ev3F, pg3] = f_form(sc3)
+[tf4F, ev4F, pg4] = f_form(sc4)
+[tf5F, ev5F, pg5] = f_form(sc5)
+
+// Aggiornamento ricorsivo esatto: la candela in formazione entra nella media con
+// il peso 1/atrLen che le spetta, esattamente come fara' alla chiusura.
+f_live(float atrC, float mvC, float vSC, float trF, float evF, bool on) =>
+    bool  ok = on and not na(atrC) and not na(vSC) and atrC > 0
+    float aL = ok ? atrC + (trF - atrC) / atrLen : nz(atrC)
+    float mL = ok ? mvC  + (evF - mvC)  / atrLen : nz(mvC)
+    float cL = ok ? f_comp(aL, close, mL) : na
+    float sL = ok ? vSC + (cL - vSC) * 2.0 / (emaSm + 1.0) : nz(vSC)
+    float rr = aL > 0 ? trF / aL : 0.0
+    [sL, aL, rr]
+
+liveOn = liveMode
+[v1, a1, r1] = f_live(aC1, mC1, vC1, tf1F, ev1F, liveOn)
+[v2, a2, r2] = f_live(aC2, mC2, vC2, tf2F, ev2F, liveOn)
+[v3, a3, r3] = f_live(aC3, mC3, vC3, tf3F, ev3F, liveOn)
+[v4, a4, r4] = f_live(aC4, mC4, vC4, tf4F, ev4F, liveOn)
+[v5, a5, r5] = f_live(aC5, mC5, vC5, tf5F, ev5F, liveOn)
+
+vol1 = liveOn ? v1 : vN1
+vol2 = liveOn ? v2 : vN2
+vol3 = liveOn ? v3 : vN3
+vol4 = liveOn ? v4 : vN4
+vol5 = liveOn ? v5 : vN5
+
+[pL1, nS1] = f_rank(vC1, vol1, ln1)
+[pL2, nS2] = f_rank(vC2, vol2, ln2)
+[pL3, nS3] = f_rank(vC3, vol3, ln3)
+[pL4, nS4] = f_rank(vC4, vol4, ln4)
+[pL5, nS5] = f_rank(vC5, vol5, ln5)
+
+pct1 = liveOn ? nz(pL1, pN1) : pN1
+pct2 = liveOn ? nz(pL2, pN2) : pN2
+pct3 = liveOn ? nz(pL3, pN3) : pN3
+pct4 = liveOn ? nz(pL4, pN4) : pN4
+pct5 = liveOn ? nz(pL5, pN5) : pN5
+
+z1 = liveOn and sd1 > 0 ? (vol1 - mu1) / sd1 : zN1
+z2 = liveOn and sd2 > 0 ? (vol2 - mu2) / sd2 : zN2
+z3 = liveOn and sd3 > 0 ? (vol3 - mu3) / sd3 : zN3
+z4 = liveOn and sd4 > 0 ? (vol4 - mu4) / sd4 : zN4
+z5 = liveOn and sd5 > 0 ? (vol5 - mu5) / sd5 : zN5
+
+trA1 = liveOn ? r1 : tN1
+trA2 = liveOn ? r2 : tN2
+trA3 = liveOn ? r3 : tN3
+trA4 = liveOn ? r4 : tN4
+trA5 = liveOn ? r5 : tN5
+
+// ----------------------------------------- sezione piu' veloce / piu' lenta ---
+BIG = 1e12
+m1 = use1 ? sc1 : BIG
+m2 = use2 ? sc2 : BIG
+m3 = use3 ? sc3 : BIG
+m4 = use4 ? sc4 : BIG
+m5 = use5 ? sc5 : BIG
+minSec = math.min(math.min(math.min(math.min(m1, m2), m3), m4), m5)
+x1 = use1 ? sc1 : 0
+x2 = use2 ? sc2 : 0
+x3 = use3 ? sc3 : 0
+x4 = use4 ? sc4 : 0
+x5 = use5 ? sc5 : 0
+maxSec = math.max(math.max(math.max(math.max(x1, x2), x3), x4), x5)
+
+nAct = (use1 ? 1 : 0) + (use2 ? 1 : 0) + (use3 ? 1 : 0) + (use4 ? 1 : 0) + (use5 ? 1 : 0)
+anyAct = nAct > 0
+
+pFast  = m1 == minSec ? pct1 : m2 == minSec ? pct2 : m3 == minSec ? pct3 : m4 == minSec ? pct4 : m5 == minSec ? pct5 : na
+tfFast = m1 == minSec ? tf1  : m2 == minSec ? tf2  : m3 == minSec ? tf3  : m4 == minSec ? tf4  : m5 == minSec ? tf5  : "-"
+pSlow  = maxSec == 0 ? na : x5 == maxSec ? pct5 : x4 == maxSec ? pct4 : x3 == maxSec ? pct3 : x2 == maxSec ? pct2 : pct1
+zSlow  = maxSec == 0 ? na : x5 == maxSec ? z5   : x4 == maxSec ? z4   : x3 == maxSec ? z3   : x2 == maxSec ? z2   : z1
+tfSlow = maxSec == 0 ? "-" : x5 == maxSec ? tf5 : x4 == maxSec ? tf4 : x3 == maxSec ? tf3 : x2 == maxSec ? tf2 : tf1
+pPrev  = nz(pFast[1], pFast)
+
+// STRUTTURA A TERMINE: e' questo il numero che distingue un'espansione nascente
+// da una gia' finita. Un percentile alto da solo non lo dice.
+slope = na(pFast) or na(pSlow) ? na : pFast - pSlow
+
+// VOL-OF-VOL: dispersione del percentile della sezione piu' veloce. Alta = il
+// regime sta cambiando; bassa = regime stabile, i segnali di soglia sono rumore
+// intorno a un livello fermo.
+vov = ta.stdev(nz(pFast), 20)
+
+// =============================================================================
+//  CANDELE DI ESPANSIONE / COMPRESSIONE
+// =============================================================================
+atrCh  = math.max(ta.atr(atrChLen), syminfo.mintick)
+trCh   = ta.tr(true)
+trAtrC = trCh / atrCh
+
+trAtrE = expSrc == "S1" ? trA1 : expSrc == "S2" ? trA2 : expSrc == "S3" ? trA3 : expSrc == "S4" ? trA4 : expSrc == "S5" ? trA5 : trAtrC
+// frazione della candela HTF gia' consumata: un'espansione al 95% della vita
+// della candela non lascia tempo a nulla, e' gia' finita
+pgE    = expSrc == "S1" ? pg1 : expSrc == "S2" ? pg2 : expSrc == "S3" ? pg3 : expSrc == "S4" ? pg4 : expSrc == "S5" ? pg5 : 1.0
+isExp  = not na(trAtrE) and trAtrE > expTh
+isCmp  = not na(trAtrE) and trAtrE < cmpTh
+
+// direzione della candela di espansione: stessa informazione del colore della
+// barra, ma leggibile nel pannello dove le barre non ci sono
+expUp = isExp and close >= open
+expDn = isExp and close <  open
+
+// su una sezione HTF l'espansione resta vera per tutte le barre in cui la
+// candela superiore e' larga: marcare solo la PRIMA evita una fila di triangoli
+expNew = isExp and not nz(isExp[1], false)
+cmpNew = isCmp and not nz(isCmp[1], false)
+expMk  = expSrc == "Barra del grafico" ? isExp : expNew
+cmpMk  = expSrc == "Barra del grafico" ? isCmp : cmpNew
+
+// =============================================================================
+//  CONFLUENZA E STREAM
+// =============================================================================
+k1 = int(math.max(1, math.round(sc1 / float(chartSec))))
+k2 = int(math.max(1, math.round(sc2 / float(chartSec))))
+k3 = int(math.max(1, math.round(sc3 / float(chartSec))))
+k4 = int(math.max(1, math.round(sc4 / float(chartSec))))
+k5 = int(math.max(1, math.round(sc5 / float(chartSec))))
+kMax  = math.max(math.max(math.max(math.max(use1 ? k1 : 1, use2 ? k2 : 1), use3 ? k3 : 1), use4 ? k4 : 1), use5 ? k5 : 1)
+lbEff = autoLb ? int(math.max(lookback, 2 * kMax)) : lookback
+
+hi1 = ta.highest(nz(pct1), lbEff)
+lo1 = ta.lowest(nz(pct1, 100), lbEff)
+hi2 = ta.highest(nz(pct2), lbEff)
+lo2 = ta.lowest(nz(pct2, 100), lbEff)
+hi3 = ta.highest(nz(pct3), lbEff)
+lo3 = ta.lowest(nz(pct3, 100), lbEff)
+hi4 = ta.highest(nz(pct4), lbEff)
+lo4 = ta.lowest(nz(pct4, 100), lbEff)
+hi5 = ta.highest(nz(pct5), lbEff)
+lo5 = ta.lowest(nz(pct5, 100), lbEff)
+
+f_arm(float thr, bool isUp) =>
+    int okN = 0
+    if use1 and (isUp ? hi1 >= thr : lo1 <= thr)
+        okN += 1
+    if use2 and (isUp ? hi2 >= thr : lo2 <= thr)
+        okN += 1
+    if use3 and (isUp ? hi3 >= thr : lo3 <= thr)
+        okN += 1
+    if use4 and (isUp ? hi4 >= thr : lo4 <= thr)
+        okN += 1
+    if use5 and (isUp ? hi5 >= thr : lo5 <= thr)
+        okN += 1
+    int need = reqSec <= 0 ? nAct : int(math.min(reqSec, nAct))
+    [anyAct and okN >= need, okN, need]
+
+f_armOk(float thr, bool isUp) =>
+    [a, _o, _n] = f_arm(thr, isUp)
+    a
+
+f_cu(float now, float prev, float lvl) => now < lvl and prev >= lvl
+f_co(float now, float prev, float lvl) => now > lvl and prev <= lvl
+
+f_stream(bool en, float thr, float trg, bool isUp) =>
+    var bool fired   = false
+    var int  lastSig = -100000
+    var int  seq     = 0
+    bool armed = en and f_armOk(thr, isUp)
+    bool reEnter = isUp ? nz(pFast) >= thr : nz(pFast, 100) <= thr
+    if not armed
+        fired := false
+        seq   := 0
+    else if repMode == "Tutti" or (repMode == "Uno per escursione" and reEnter)
+        fired := false
+    bool trig = false
+    if trigMode == "Primo tocco della soglia"
+        trig := isUp ? f_co(pFast, pPrev, thr) : f_cu(pFast, pPrev, thr)
+    else
+        trig := isUp ? f_cu(pFast, pPrev, trg) : f_co(pFast, pPrev, trg)
+    bool okBar = not strictBar or barstate.isconfirmed
+    bool fire = armed and not fired and trig and okBar and not na(pFast) and (bar_index - lastSig >= cooldown)
+    if fire
+        fired   := true
+        lastSig := bar_index
+        seq     += 1
+    [fire, armed, seq, trig]
+
+[sigA, armA, seqA, trgA] = f_stream(enExt, float(thExt), trgExt, true)
+[sigB, armB, seqB, trgB] = f_stream(enHi,  float(thHi),  trgHi,  true)
+[sigC, armC, seqC, trgC] = f_stream(enLo,  float(thLo),  trgLo,  false)
+[sigD, armD, seqD, trgD] = f_stream(enSq,  float(thSq),  trgSq,  false)
+
+anySig = sigA or sigB or sigC or sigD
+
+// =============================================================================
+//  VALIDAZIONE: movimento dopo il segnale contro baseline non condizionato
+// =============================================================================
+var array<float> mvSig  = array.new_float()
+var array<float> mvBase = array.new_float()
+var bool  trk    = false
+var float trkPx  = 0.0
+var float trkAtr = 1.0
+var float trkMax = 0.0
+var int   trkBar = 0
+
+if useMv and trk
+    trkBar += 1
+    trkMax := math.max(trkMax, math.max(high - trkPx, trkPx - low))
+    if trkBar >= mvLen
+        array.push(mvSig, trkMax / trkAtr)
+        if array.size(mvSig) > 500
+            array.shift(mvSig)
+        trk := false
+
+if useMv and anySig and not trk
+    trk    := true
+    trkPx  := close
+    trkAtr := atrCh
+    trkMax := 0.0
+    trkBar := 0
+
+// baseline: stessa statistica su barre qualsiasi, campionata ogni mvLen barre
+// cosi' le finestre non si sovrappongono e le osservazioni restano indipendenti
+baseFwd = (math.max(ta.highest(high, mvLen) - close[mvLen], close[mvLen] - ta.lowest(low, mvLen))) / math.max(nz(atrCh[mvLen], atrCh), syminfo.mintick)
+if useMv and bar_index > mvLen and bar_index % mvLen == 0 and not na(baseFwd)
+    array.push(mvBase, baseFwd)
+    if array.size(mvBase) > 500
+        array.shift(mvBase)
+
+nSig  = array.size(mvSig)
+nBase = array.size(mvBase)
+mvSigMed  = nSig  >= 5 ? array.percentile_nearest_rank(mvSig, 50) : na
+mvBaseMed = nBase >= 5 ? array.percentile_nearest_rank(mvBase, 50) : na
+mvRatio   = na(mvSigMed) or na(mvBaseMed) or mvBaseMed <= 0 ? na : mvSigMed / mvBaseMed
+
+// =============================================================================
+//  PLOT
+// =============================================================================
+f_regCol(float p) =>
+    na(p) ? color.gray : p >= thExt ? color.red : p >= thHi ? color.orange : p >= thLo ? color.gray : p <= thSq ? color.aqua : color.blue
+
+colFast = f_regCol(pFast)
+asCols  = curStyle == "Colonne (solo la piu' veloce)"
+
+plot(showCur and asCols ? pFast : na, "percentile piu' veloce", color=colFast, style=plot.style_columns, linewidth=1)
+plot(showCur and not asCols and use1 ? pct1 : na, "pct S1", color=cc1, linewidth=1)
+plot(showCur and not asCols and use2 ? pct2 : na, "pct S2", color=cc2, linewidth=1)
+plot(showCur and not asCols and use3 ? pct3 : na, "pct S3", color=cc3, linewidth=1)
+plot(showCur and not asCols and use4 ? pct4 : na, "pct S4", color=cc4, linewidth=1)
+plot(showCur and not asCols and use5 ? pct5 : na, "pct S5", color=cc5, linewidth=2)
+plot(showZ ? zSlow * 10 + 50 : na, "z sezione lenta (scalato)", color=color.new(color.white, 55), linewidth=1)
+
+hline(50, "mediana", color=color.new(color.gray, 70), linestyle=hline.style_dotted)
+plot(showLv ? thExt : na, "EXTREME", color=color.new(color.red, 30),    style=plot.style_linebr)
+plot(showLv ? thHi  : na, "HIGH",    color=color.new(color.orange, 40), style=plot.style_linebr)
+plot(showLv ? thLo  : na, "LOW",     color=color.new(color.blue, 40),   style=plot.style_linebr)
+plot(showLv ? thSq  : na, "SQUEEZE", color=color.new(color.aqua, 30),   style=plot.style_linebr)
+
+// ---- candele di espansione: GIALLO, pannello e grafico prezzi ---------------
+plotshape(expPane and expMk and expUp, "Espansione ▲ (pannello)", style=shape.triangleup,   location=location.bottom, color=cExp, size=size.tiny)
+plotshape(expPane and expMk and expDn, "Espansione ▼ (pannello)", style=shape.triangledown, location=location.bottom, color=cExp, size=size.tiny)
+plotshape(expChart and expMk and expUp, "Espansione ▲ (grafico)", style=shape.triangleup,   location=location.belowbar, color=cExp, size=size.tiny, force_overlay=true)
+plotshape(expChart and expMk and expDn, "Espansione ▼ (grafico)", style=shape.triangledown, location=location.abovebar, color=cExp, size=size.tiny, force_overlay=true)
+plotshape(cmpShow and expPane and cmpMk,  "Compressione (pannello)", style=shape.diamond, location=location.top,      color=cCmp, size=size.tiny)
+plotshape(cmpShow and expChart and cmpMk, "Compressione (grafico)",  style=shape.diamond, location=location.abovebar, color=cCmp, size=size.tiny, force_overlay=true)
+
+bgcolor(not showArm ? na : (armA or armB) ? color.new(cUpS, 92) : (armC or armD) ? color.new(cDnS, 92) : na, title="Sfondo armamento")
+
+// ---- marker dei segnali -----------------------------------------------------
+f_size(string o) => o == "Minimo" ? size.tiny : o == "Piccolo" ? size.small : o == "Normale" ? size.normal : size.large
+szD = f_size(dashSz)
+szM = f_size(markSz)
+inPane  = markWhere != "Grafico prezzi"
+onChart = markWhere != "Pannello"
+
+f_seqTxt(int n) => showSeq and n > 1 ? str.tostring(n) : ""
+
+f_tip(string tag, int n, bool isUp) =>
+    (isUp ? "EXPANSION " : "SQUEEZE ") + tag + " #" + str.tostring(n) + "  |  pct " + tfFast + " " + str.tostring(pFast, "#.0") + "  |  slope " + str.tostring(slope, "#.0") + "  |  volvol " + str.tostring(vov, "#.0") + "  |  TR/ATR " + str.tostring(trAtrE, "#.00") + "  |  ATR " + str.tostring(atrCh, format.mintick)
+
+f_mark(bool fire, float y, bool isUp, string tag, int n, color c) =>
+    if fire
+        if inPane
+            label.new(bar_index, y, (isUp ? "▲" : "▼") + tag + f_seqTxt(n), style=label.style_none, textcolor=c, size=szM, textalign=text.align_center, tooltip=f_tip(tag, n, isUp))
+        if onChart
+            label.new(bar_index, na, "", yloc=isUp ? yloc.abovebar : yloc.belowbar, style=isUp ? label.style_label_down : label.style_label_up, color=c, textcolor=c, size=szM, tooltip=f_tip(tag, n, isUp), force_overlay=true)
+
+f_mark(sigA, 104, true,  "A", seqA, cUpS)
+f_mark(sigB, 98,  true,  "B", seqB, color.new(cUpS, 35))
+f_mark(sigC, 2,   false, "C", seqC, color.new(cDnS, 35))
+f_mark(sigD, -4,  false, "D", seqD, cDnS)
+
+// ---- etichette del periodo --------------------------------------------------
+f_tag(bool use, string tf, float y, color c) =>
+    var label lb = label.new(bar_index, 0.0, "", style=label.style_none, size=size.tiny, textalign=text.align_left)
+    if barstate.islast
+        label.set_xy(lb, bar_index + tagOff, nz(y))
+        label.set_text(lb, showCur and showTags and use and not asCols ? tf : "")
+        label.set_textcolor(lb, c)
+    lb
+
+f_tag(use1, tf1, pct1, cc1)
+f_tag(use2, tf2, pct2, cc2)
+f_tag(use3, tf3, pct3, cc3)
+f_tag(use4, tf4, pct4, cc4)
+f_tag(use5, tf5, pct5, cc5)
+
+// =============================================================================
+//  CRUSCOTTO
+// =============================================================================
+f_cnt(bool c) =>
+    var int n = 0
+    if c
+        n += 1
+    n
+
+cHit1 = f_cnt(use1 and pct1 >= thExt and nz(pct1[1], 0) < thExt)
+cHit2 = f_cnt(use2 and pct2 >= thExt and nz(pct2[1], 0) < thExt)
+cHit3 = f_cnt(use3 and pct3 >= thExt and nz(pct3[1], 0) < thExt)
+cHit4 = f_cnt(use4 and pct4 >= thExt and nz(pct4[1], 0) < thExt)
+cHit5 = f_cnt(use5 and pct5 >= thExt and nz(pct5[1], 0) < thExt)
+cExpN = f_cnt(expMk)
+cCmpN = f_cnt(cmpMk)
+cArmA = f_cnt(armA)
+cArmB = f_cnt(armB)
+cArmC = f_cnt(armC)
+cArmD = f_cnt(armD)
+cSigA = f_cnt(sigA)
+cSigB = f_cnt(sigB)
+cSigC = f_cnt(sigC)
+cSigD = f_cnt(sigD)
+
+f_n1(float v) => na(v) ? "n/a" : str.tostring(v, "#.0")
+f_n2(float v) => na(v) ? "n/a" : str.tostring(v, "#.00")
+
+f_reg(float p) => na(p) ? "n/a" : p >= thExt ? "EXTREME" : p >= thHi ? "HIGH" : p >= thLo ? "NORMAL" : p <= thSq ? "SQUEEZE" : "LOW"
+
+var table dash = table.new(position.top_right, 7, 12, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+if showTab and barstate.islast
+    hdr = color.new(color.gray, 70)
+    table.cell(dash, 0, 0, "TF",      bgcolor=hdr, text_color=color.white, text_size=szD)
+    table.cell(dash, 1, 0, "vol %",   bgcolor=hdr, text_color=color.white, text_size=szD)
+    table.cell(dash, 2, 0, "pct",     bgcolor=hdr, text_color=color.white, text_size=szD)
+    table.cell(dash, 3, 0, "z",       bgcolor=hdr, text_color=color.white, text_size=szD)
+    table.cell(dash, 4, 0, "TR/ATR",  bgcolor=hdr, text_color=color.white, text_size=szD)
+    table.cell(dash, 5, 0, "n · hit", bgcolor=hdr, text_color=color.white, text_size=szD)
+    table.cell(dash, 6, 0, "regime",  bgcolor=hdr, text_color=color.white, text_size=szD)
+
+    tfs = array.from(tf1, tf2, tf3, tf4, tf5)
+    scs = array.from(sc1, sc2, sc3, sc4, sc5)
+    vls = array.from(vol1, vol2, vol3, vol4, vol5)
+    pcs = array.from(pct1, pct2, pct3, pct4, pct5)
+    zzs = array.from(z1, z2, z3, z4, z5)
+    trs = array.from(trA1, trA2, trA3, trA4, trA5)
+    nss = array.from(nS1, nS2, nS3, nS4, nS5)
+    hts = array.from(cHit1, cHit2, cHit3, cHit4, cHit5)
+    uss = array.from(use1, use2, use3, use4, use5)
+    cls = array.from(cc1, cc2, cc3, cc4, cc5)
+    lns = array.from(ln1, ln2, ln3, ln4, ln5)
+
+    for i = 0 to 4
+        act = array.get(uss, i)
+        p   = array.get(pcs, i)
+        bad = act and array.get(scs, i) < chartSec
+        thin= act and array.get(nss, i) < array.get(lns, i)
+        col = not act ? color.new(color.gray, 60) : bad ? color.new(color.red, 25) : p >= thExt ? color.new(color.red, 55) : p >= thHi ? color.new(color.orange, 60) : p <= thSq ? color.new(color.aqua, 60) : color.new(color.gray, 85)
+        table.cell(dash, 0, i + 1, "S" + str.tostring(i + 1) + " " + (act ? (bad ? "⚠<graf" : array.get(tfs, i)) : "off"), text_size=szD, text_color=act ? array.get(cls, i) : color.gray, bgcolor=col)
+        table.cell(dash, 1, i + 1, act ? f_n2(array.get(vls, i)) : "–", text_size=szD, text_color=color.white, bgcolor=col)
+        table.cell(dash, 2, i + 1, act ? f_n1(p) : "–", text_size=szD, text_color=color.white, bgcolor=col)
+        table.cell(dash, 3, i + 1, act ? f_n2(array.get(zzs, i)) : "–", text_size=szD, text_color=color.white, bgcolor=col)
+        table.cell(dash, 4, i + 1, act ? f_n2(array.get(trs, i)) : "–", text_size=szD, text_color=act and array.get(trs, i) > expTh ? cExp : color.white, bgcolor=col)
+        table.cell(dash, 5, i + 1, act ? str.tostring(array.get(nss, i)) + " · " + str.tostring(array.get(hts, i)) : "–", text_size=szD, text_color=thin ? color.orange : color.white, bgcolor=col)
+        table.cell(dash, 6, i + 1, act ? f_reg(p) : "–", text_size=szD, text_color=color.white, bgcolor=col)
+
+    // --- struttura a termine: la riga da leggere per prima -------------------
+    sCol = na(slope) ? hdr : slope >= 20 ? color.new(color.lime, 45) : slope <= -20 ? color.new(color.red, 45) : color.new(color.gray, 80)
+    sTxt = na(slope) ? "n/a" : slope >= 20 ? "NASCENTE" : slope <= -20 ? "ESAURITA" : "piatta"
+    table.cell(dash, 0, 6, "term",  text_size=szD, text_color=color.white, bgcolor=hdr)
+    table.cell(dash, 1, 6, tfFast + "→" + tfSlow, text_size=szD, text_color=color.silver, bgcolor=hdr)
+    table.cell(dash, 2, 6, f_n1(slope), text_size=szD, text_color=color.white, bgcolor=sCol)
+    table.cell(dash, 3, 6, sTxt, text_size=szD, text_color=color.white, bgcolor=sCol)
+    table.cell(dash, 4, 6, "volvol " + f_n1(vov), text_size=szD, text_color=vov < 5 ? color.orange : color.white, bgcolor=hdr)
+    table.cell(dash, 5, 6, liveOn ? "LIVE" : "step", text_size=szD, text_color=liveOn ? color.aqua : color.silver, bgcolor=hdr)
+    table.cell(dash, 6, 6, strictBar ? "close" : "intrabar", text_size=szD, text_color=strictBar ? color.silver : color.yellow, bgcolor=hdr)
+
+    // --- espansione ----------------------------------------------------------
+    ebg = color.new(color.gray, 88)
+    table.cell(dash, 0, 7, "espans.", text_size=szD, text_color=color.white, bgcolor=ebg)
+    table.cell(dash, 1, 7, expSrc == "Barra del grafico" ? "grafico" : expSrc, text_size=szD, text_color=color.silver, bgcolor=ebg)
+    table.cell(dash, 2, 7, f_n2(trAtrE), text_size=szD, text_color=isExp ? cExp : isCmp ? cCmp : color.white, bgcolor=ebg)
+    table.cell(dash, 3, 7, expSrc == "Barra del grafico" ? "th " + str.tostring(expTh, "#.0") : "t " + f_n2(pgE), text_size=szD, text_color=expSrc != "Barra del grafico" and pgE > 0.8 ? color.orange : color.silver, bgcolor=ebg)
+    table.cell(dash, 4, 7, "exp " + str.tostring(cExpN), text_size=szD, text_color=cExp, bgcolor=ebg)
+    table.cell(dash, 5, 7, "cmp " + str.tostring(cCmpN), text_size=szD, text_color=cCmp, bgcolor=ebg)
+    table.cell(dash, 6, 7, isExp ? "ESPANSIONE" : isCmp ? "compressa" : "–", text_size=szD, text_color=isExp ? cExp : isCmp ? cCmp : color.gray, bgcolor=ebg)
+
+    // --- armamenti e segnali -------------------------------------------------
+    ac = array.from(cArmA, cArmB, cArmC, cArmD)
+    sg = array.from(cSigA, cSigB, cSigC, cSigD)
+    en = array.from(enExt, enHi, enLo, enSq)
+    th = array.from(float(thExt), float(thHi), float(thLo), float(thSq))
+    nm = array.from("A ext", "B hi", "C lo", "D sq")
+    abg = color.new(color.gray, 85)
+    table.cell(dash, 0, 8,  "K " + str.tostring(reqSec <= 0 ? nAct : int(math.min(reqSec, nAct))) + "/" + str.tostring(nAct), text_size=szD, text_color=reqSec > 0 and reqSec < nAct ? color.yellow : color.white, bgcolor=hdr)
+    table.cell(dash, 0, 9,  "armate",  text_size=szD, text_color=color.silver, bgcolor=abg)
+    table.cell(dash, 0, 10, "segnali", text_size=szD, text_color=color.silver, bgcolor=abg)
+    for j = 0 to 3
+        on = array.get(en, j)
+        av = array.get(ac, j)
+        sv = array.get(sg, j)
+        table.cell(dash, j + 1, 8, array.get(nm, j) + " " + str.tostring(array.get(th, j), "#"), text_size=szD, text_color=on ? (j < 2 ? cUpS : cDnS) : color.gray, bgcolor=hdr)
+        table.cell(dash, j + 1, 9, on ? str.tostring(av) : "–", text_size=szD, text_color=not on ? color.gray : av == 0 ? color.red : color.silver, bgcolor=abg)
+        table.cell(dash, j + 1, 10, on ? str.tostring(sv) : "–", text_size=szD, text_color=not on ? color.gray : sv == 0 and av > 0 ? color.orange : sv == 0 ? color.red : color.lime, bgcolor=abg)
+    armTxt = (armA ? "A " : "") + (armB ? "B " : "") + (armC ? "C " : "") + (armD ? "D " : "")
+    table.cell(dash, 5, 8,  "stato",  text_size=szD, text_color=color.gray, bgcolor=hdr)
+    table.cell(dash, 6, 8,  armTxt == "" ? "–" : armTxt, text_size=szD, text_color=color.white, bgcolor=armTxt == "" ? hdr : color.new(color.orange, 40))
+    table.cell(dash, 5, 9,  "ATR graf", text_size=szD, text_color=color.gray, bgcolor=abg)
+    table.cell(dash, 6, 9,  str.tostring(atrCh, format.mintick) + " pt", text_size=szD, text_color=color.white, bgcolor=abg)
+    table.cell(dash, 5, 10, "tick", text_size=szD, text_color=color.gray, bgcolor=abg)
+    table.cell(dash, 6, 10, str.tostring(math.round(atrCh / syminfo.mintick)) + " t", text_size=szD, text_color=color.white, bgcolor=abg)
+
+    // --- validazione: l'unica riga che puo' dirti di buttare la configurazione
+    mbg = color.new(color.gray, 88)
+    rCol = na(mvRatio) ? color.gray : mvRatio >= 1.3 ? color.lime : mvRatio >= 1.05 ? color.silver : mvRatio >= 0.8 ? color.orange : color.red
+    rTxt = na(mvRatio) ? "campione" : mvRatio >= 1.3 ? "anticipa" : mvRatio >= 1.05 ? "debole" : mvRatio >= 0.8 ? "nullo" : "in ritardo"
+    table.cell(dash, 0, 11, "move " + str.tostring(mvLen) + "b", text_size=szD, text_color=color.white, bgcolor=mbg)
+    table.cell(dash, 1, 11, "sig " + f_n2(mvSigMed), text_size=szD, text_color=color.white, bgcolor=mbg)
+    table.cell(dash, 2, 11, "base " + f_n2(mvBaseMed), text_size=szD, text_color=color.silver, bgcolor=mbg)
+    table.cell(dash, 3, 11, "x" + f_n2(mvRatio), text_size=szD, text_color=rCol, bgcolor=mbg)
+    table.cell(dash, 4, 11, rTxt, text_size=szD, text_color=rCol, bgcolor=mbg)
+    table.cell(dash, 5, 11, "n " + str.tostring(nSig), text_size=szD, text_color=nSig < 30 ? color.orange : color.silver, bgcolor=mbg)
+    table.cell(dash, 6, 11, "nb " + str.tostring(nBase), text_size=szD, text_color=nBase < 30 ? color.orange : color.silver, bgcolor=mbg)
+
+// =============================================================================
+//  ALERT
+// =============================================================================
+alertcondition(expMk, "VSI · Candela in espansione", "Espansione TR/ATR su {{ticker}} {{interval}}")
+alertcondition(cmpMk, "VSI · Candela compressa",     "Compressione TR/ATR su {{ticker}} {{interval}}")
+alertcondition(sigA,  "VSI · EXTREME (A)",           "VSI EXTREME · confluenza su {{ticker}} {{interval}}")
+alertcondition(sigB,  "VSI · HIGH (B)",              "VSI HIGH · confluenza su {{ticker}} {{interval}}")
+alertcondition(sigC,  "VSI · LOW (C)",               "VSI LOW · confluenza su {{ticker}} {{interval}}")
+alertcondition(sigD,  "VSI · SQUEEZE (D)",           "VSI SQUEEZE · confluenza su {{ticker}} {{interval}}")
+alertcondition(sigA or sigB, "VSI · Espansione (qualsiasi)", "VSI espansione di volatilita' su {{ticker}} {{interval}}")
+alertcondition(sigC or sigD, "VSI · Compressione (qualsiasi)", "VSI compressione di volatilita' su {{ticker}} {{interval}}")
+
+if anySig
+    tag = sigA ? "A" : sigB ? "B" : sigC ? "C" : "D"
+    dir = (sigA or sigB) ? "EXPANSION" : "SQUEEZE"
+    nth = sigA ? seqA : sigB ? seqB : sigC ? seqC : seqD
+    alert("VSI-MTF " + dir + " [" + tag + "#" + str.tostring(nth) + "] " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | pct " + tfFast + "=" + f_n1(pFast) + " | slope=" + f_n1(slope) + " | volvol=" + f_n1(vov) + " | TR/ATR=" + f_n2(trAtrE) + " | ATR=" + str.tostring(atrCh, format.mintick) + "pt/" + str.tostring(math.round(atrCh / syminfo.mintick)) + "t", alert.freq_once_per_bar_close)
