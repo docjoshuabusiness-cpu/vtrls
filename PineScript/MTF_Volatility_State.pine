@@ -237,7 +237,7 @@ f_form(simple int secTf) =>
     float trF = math.max(fH - fL, math.max(math.abs(fH - pc), math.abs(pc - fL)))
     float evF = f_estVar(fO, fH, fL, close)
     float pg  = math.min(1.0, math.max(0.0, (time - fT) / (secTf * 1000.0)))
-    [trF, evF, pg]
+    [trF, evF, pg, fO]
 
 // -----------------------------------------------------------------------------
 //  Percentile LIVE. ta.percentrank non serve: il valore corrente e' ESTERNO al
@@ -247,19 +247,41 @@ f_form(simple int secTf) =>
 //  tempo: e' auto-sincronizzato con l'aggiornamento di request.security e non
 //  dipende da come TradingView allinea storico e realtime.
 // -----------------------------------------------------------------------------
+//  Costo: il campione viene tenuto ORDINATO, quindi il rango e' una ricerca
+//  binaria O(log n) per barra invece di una scansione O(n). Con 5 sezioni e
+//  len=500 la differenza e' fra ~45 e ~2500 operazioni per barra: la seconda
+//  fa interrompere il calcolo a TradingView su storico lungo.
+//  L'inserimento ordinato costa O(n) ma avviene una volta per candela HTF.
+//
+//  f_cntLt: numero di elementi STRETTAMENTE minori di v. La formula e' scritta
+//  per essere corretta con entrambe le convenzioni di binary_search_leftmost
+//  (indice del valore trovato, oppure punto di inserimento).
+f_cntLt(array<float> srt, float v) =>
+    int sz = array.size(srt)
+    int c  = 0
+    if sz > 0
+        int q = array.binary_search_leftmost(srt, v)
+        c := q < 0 ? 0 : q >= sz ? sz : (array.get(srt, q) < v ? q + 1 : q)
+    c
+
 f_rank(float vClosed, float vLive, simple int n) =>
-    var array<float> a = array.new_float()
+    var array<float> raw = array.new_float()
+    var array<float> srt = array.new_float()
     if not na(vClosed) and (na(vClosed[1]) or vClosed != vClosed[1])
-        array.push(a, vClosed)
-        if array.size(a) > n
-            array.shift(a)
-    int sz = array.size(a)
-    float cnt = 0.0
-    if sz > 0 and not na(vLive)
-        for j = 0 to sz - 1
-            if array.get(a, j) < vLive
-                cnt += 1.0
-    [sz > 0 ? 100.0 * cnt / sz : na, sz]
+        array.push(raw, vClosed)
+        int ip = f_cntLt(srt, vClosed)
+        if ip >= array.size(srt)
+            array.push(srt, vClosed)
+        else
+            array.insert(srt, ip, vClosed)
+        if array.size(raw) > n
+            float outv = array.shift(raw)
+            int rp = array.binary_search(srt, outv)
+            if rp >= 0
+                array.remove(srt, rp)
+    int sz = array.size(srt)
+    float pr = sz > 0 and not na(vLive) ? 100.0 * f_cntLt(srt, vLive) / sz : na
+    [pr, sz]
 
 // =============================================================================
 //  CALCOLO PER SEZIONE
@@ -283,11 +305,11 @@ sh5 = (liveMode or confirmed) and sc5 > chartSec
 [vN4, pN4, zN4, mu4, sd4, aC4, mC4, vC4, tN4] = request.security(syminfo.tickerid, tf4, f_htf(ln4, sh4), lookahead = barmerge.lookahead_off)
 [vN5, pN5, zN5, mu5, sd5, aC5, mC5, vC5, tN5] = request.security(syminfo.tickerid, tf5, f_htf(ln5, sh5), lookahead = barmerge.lookahead_off)
 
-[tf1F, ev1F, pg1] = f_form(sc1)
-[tf2F, ev2F, pg2] = f_form(sc2)
-[tf3F, ev3F, pg3] = f_form(sc3)
-[tf4F, ev4F, pg4] = f_form(sc4)
-[tf5F, ev5F, pg5] = f_form(sc5)
+[tf1F, ev1F, pg1, op1] = f_form(sc1)
+[tf2F, ev2F, pg2, op2] = f_form(sc2)
+[tf3F, ev3F, pg3, op3] = f_form(sc3)
+[tf4F, ev4F, pg4, op4] = f_form(sc4)
+[tf5F, ev5F, pg5, op5] = f_form(sc5)
 
 // Aggiornamento ricorsivo esatto: la candela in formazione entra nella media con
 // il peso 1/atrLen che le spetta, esattamente come fara' alla chiusura.
@@ -369,7 +391,7 @@ slope = na(pFast) or na(pSlow) ? na : pFast - pSlow
 // VOL-OF-VOL: dispersione del percentile della sezione piu' veloce. Alta = il
 // regime sta cambiando; bassa = regime stabile, i segnali di soglia sono rumore
 // intorno a un livello fermo.
-vov = ta.stdev(nz(pFast), 20)
+vov = ta.stdev(pFast, 20)
 
 // =============================================================================
 //  CANDELE DI ESPANSIONE / COMPRESSIONE
@@ -385,10 +407,12 @@ pgE    = expSrc == "S1" ? pg1 : expSrc == "S2" ? pg2 : expSrc == "S3" ? pg3 : ex
 isExp  = not na(trAtrE) and trAtrE > expTh
 isCmp  = not na(trAtrE) and trAtrE < cmpTh
 
-// direzione della candela di espansione: stessa informazione del colore della
-// barra, ma leggibile nel pannello dove le barre non ci sono
-expUp = isExp and close >= open
-expDn = isExp and close <  open
+// Direzione della candela in espansione. Su una sezione HTF va confrontata con
+// l'apertura della CANDELA SUPERIORE in formazione, non con quella della barra
+// del grafico: sono due cose diverse e la seconda e' rumore.
+opE   = expSrc == "S1" ? op1 : expSrc == "S2" ? op2 : expSrc == "S3" ? op3 : expSrc == "S4" ? op4 : expSrc == "S5" ? op5 : open
+expUp = isExp and close >= opE
+expDn = isExp and close <  opE
 
 // su una sezione HTF l'espansione resta vera per tutte le barre in cui la
 // candela superiore e' larga: marcare solo la PRIMA evita una fila di triangoli
@@ -412,7 +436,11 @@ k3 = int(math.max(1, math.round(sc3 / float(chartSec))))
 k4 = int(math.max(1, math.round(sc4 / float(chartSec))))
 k5 = int(math.max(1, math.round(sc5 / float(chartSec))))
 kMax  = math.max(math.max(math.max(math.max(use1 ? k1 : 1, use2 ? k2 : 1), use3 ? k3 : 1), use4 ? k4 : 1), use5 ? k5 : 1)
-lbEff = autoLb ? int(math.max(lookback, 2 * kMax)) : lookback
+// tetto a 4000: oltre max_bars_back ta.highest/ta.lowest non possono guardare.
+// Se scatta, la finestra non contiene 2 candele della sezione piu' lenta e
+// l'armamento su quella sezione diventa inaffidabile: il cruscotto lo segnala.
+lbEff  = int(math.min(4000, autoLb ? math.max(lookback, 2 * kMax) : lookback))
+lbCapd = autoLb and 2 * kMax > 4000
 
 hi1 = ta.highest(nz(pct1), lbEff)
 lo1 = ta.lowest(nz(pct1, 100), lbEff)
@@ -666,7 +694,7 @@ if showTab and barstate.islast
     table.cell(dash, 2, 6, f_n1(slope), text_size=szD, text_color=color.white, bgcolor=sCol)
     table.cell(dash, 3, 6, sTxt, text_size=szD, text_color=color.white, bgcolor=sCol)
     table.cell(dash, 4, 6, "volvol " + f_n1(vov), text_size=szD, text_color=vov < 5 ? color.orange : color.white, bgcolor=hdr)
-    table.cell(dash, 5, 6, liveOn ? "LIVE" : "step", text_size=szD, text_color=liveOn ? color.aqua : color.silver, bgcolor=hdr)
+    table.cell(dash, 5, 6, (liveOn ? "LIVE" : "step") + (lbCapd ? " ⚠lb" : ""), text_size=szD, text_color=lbCapd ? color.red : liveOn ? color.aqua : color.silver, bgcolor=hdr)
     table.cell(dash, 6, 6, strictBar ? "close" : "intrabar", text_size=szD, text_color=strictBar ? color.silver : color.yellow, bgcolor=hdr)
 
     // --- espansione ----------------------------------------------------------
