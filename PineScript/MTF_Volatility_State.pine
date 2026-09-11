@@ -392,8 +392,14 @@ expDn = isExp and close <  open
 
 // su una sezione HTF l'espansione resta vera per tutte le barre in cui la
 // candela superiore e' larga: marcare solo la PRIMA evita una fila di triangoli
-expNew = isExp and not nz(isExp[1], false)
-cmpNew = isCmp and not nz(isCmp[1], false)
+// nz() non ha overload booleano: lo stato precedente lo tengo esplicito, cosi'
+// alla prima barra vale false invece di na
+var bool expPrev = false
+var bool cmpPrev = false
+expNew = isExp and not expPrev
+cmpNew = isCmp and not cmpPrev
+expPrev := isExp
+cmpPrev := isCmp
 expMk  = expSrc == "Barra del grafico" ? isExp : expNew
 cmpMk  = expSrc == "Barra del grafico" ? isCmp : cmpNew
 
