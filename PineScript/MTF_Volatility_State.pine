@@ -97,10 +97,13 @@ var string gE = "4 · Candela di espansione"
 expSrc   = input.string("Barra del grafico", "Misurata su",
      options=["Barra del grafico","S1","S2","S3","S4","S5"], group=gE,
      tooltip="BARRA DEL GRAFICO: TR della barra corrente diviso ATR del grafico su atrLen barre. Come nella v1, indipendente dal modo.\n\nSEZIONE Sx, MODO A: TR della candela HTF IN FORMAZIONE diviso ATR di quel timeframe. Marca l'espansione MENTRE la candela superiore si allarga, non a candela chiusa. Quando la candela da 15m ha gia' fatto 1.8 ATR e le restano 9 minuti, il movimento e' in corso ADESSO: la colonna 't' del cruscotto dice quanto tempo resta.\n\nSEZIONE Sx, MODO C: TR della barra del grafico diviso ATR calcolato su atrLen*k barre del grafico. Non misura una candela superiore, misura se QUESTA barra e' anomala rispetto alla volatilita' di quell'orizzonte. Aggiornamento a ogni barra.")
+expEval  = input.string("A chiusura della candela HTF", "Valutazione",
+     options=["A chiusura della candela HTF","In formazione (live)"], group=gE,
+     tooltip="A CHIUSURA DELLA CANDELA HTF (default)\nLa candela della sezione viene valutata UNA VOLTA, quando si chiude, con il suo true range DEFINITIVO contro l'ATR delle candele precedenti di quel timeframe. Il marker compare sulla prima barra del grafico dopo la chiusura: e' la barra piu' vicina in cui quell'informazione esiste davvero.\nUn marker per candela della sezione, nessun repaint, e la freccia resta ancorata a quella barra. Se guardi S1 = 1m da un grafico a 15 secondi, il marker esce alla chiusura del minuto, non prima.\nATR e true range sono ricostruiti sulle barre del grafico, NON chiesti a request.security: quella, fra storico e tempo reale, non restituisce la stessa candela, e il marker cadrebbe con uno o due minuti di ritardo variabile.\n\nIN FORMAZIONE (live)\nLa candela viene valutata a ogni barra del grafico mentre si allarga: il marker esce nell'istante in cui supera la soglia, anche a meta' candela. Anticipatorio, ed e' l'unica modalita' in cui la colonna 't' del cruscotto ha senso: ti dice quanto tempo resta alla candela per ribaltarsi.\nIl prezzo e' che la condizione puo' formarsi e disfarsi dentro la barra in corso finche' questa non chiude.\n\nIn modo C e con sorgente 'Barra del grafico' non esiste nessuna candela superiore: 'a chiusura' significa allora alla chiusura della BARRA DEL GRAFICO.")
 expTh    = input.float(1.8, "Soglia espansione (TR/ATR)", minval=1.0, maxval=10.0, step=0.1, group=gE,
      tooltip="Sopra 1.0 la candela e' piu' ampia della media recente. 1.8 e' circa il 90esimo percentile su FX liquido, ma dipende dallo strumento: guarda la colonna TR/ATR del cruscotto e il contatore 'exp' per tararla su quello che operi. Una soglia che produce zero marker su mille barre e' inutile quanto una che ne produce cento.")
-expOne   = input.bool(true, "Un solo marker per episodio", group=gE,
-     tooltip="ACCESO: marca solo la barra in cui la condizione DIVENTA vera. Su una sezione HTF l'espansione resta vera per tutte le barre in cui la candela superiore e' larga: senza questo avresti una fila di triangoli sullo stesso identico evento, e il contatore conterebbe barre invece di episodi.\n\nSPENTO: marca ogni barra in cui la condizione e' vera.")
+expOne   = input.bool(true, "Un solo marker per episodio (solo lettura in formazione)", group=gE,
+     tooltip="Rilevante solo con valutazione IN FORMAZIONE. A chiusura di candela il problema non esiste: c'e' una valutazione per candela per costruzione, e due candele di espansione consecutive danno correttamente due marker.\n\nACCESO: marca solo la barra in cui la condizione DIVENTA vera. Mentre la candela superiore resta larga la condizione resta vera per tutte le barre del grafico che la compongono: senza questo avresti una fila di triangoli sullo stesso identico evento, e il contatore conterebbe barre invece di episodi.\n\nSPENTO: marca ogni barra in cui la condizione e' vera.")
 expPane  = input.bool(true, "Marker nel pannello",    inline="ep", group=gE)
 expChart = input.bool(true, "Marker sul grafico prezzi", inline="ep", group=gE)
 expDir   = input.bool(true, "Forma secondo la direzione della candela", group=gE,
@@ -211,15 +214,35 @@ f_hold(bool act, float v, simple int kk) =>
 //  interruzioni di sessione i blocchi possono non coincidere con quelli di
 //  TradingView.
 // -----------------------------------------------------------------------------
+//  Restituisce due letture distinte della stessa sezione:
+//    IN FORMAZIONE  trF/evF/pg  -> la candela mentre si allarga
+//    A CHIUSURA     dR/dU       -> la candela appena CHIUSA, valutata una volta
+//  dR e' il true range definitivo della candela chiusa diviso l'ATR delle
+//  candele PRECEDENTI di quel timeframe (l'ATR viene aggiornato dopo, non
+//  prima: includere la candela nel proprio metro di misura la diluirebbe).
+//  Anche l'ATR della sezione e' ricostruito qui, non chiesto a request.security:
+//  quella, fra storico e tempo reale, non restituisce la stessa candela, e il
+//  marker cadrebbe con un ritardo variabile di una o due candele.
 f_form(simple int secTf) =>
     var float fO = na
     var float fH = na
     var float fL = na
     var float pc = na
     var int   fT = 0
+    var float dR = na
+    var bool  dU = false
+    var float dA = na
+    var int   dN = 0
     float bk = math.floor(time / (secTf * 1000.0))
     bool isNew = na(bk[1]) or bk != bk[1]
     if isNew
+        if not na(fO) and not na(fH) and not na(fL)
+            float ref = nz(pc, fO)
+            float dTR = math.max(fH - fL, math.max(math.abs(fH - ref), math.abs(ref - fL)))
+            dR := na(dA) or dA <= 0 ? na : dTR / dA
+            dU := nz(close[1], fO) >= fO
+            dN += 1
+            dA := dN == 1 ? dTR : dA + (dTR - dA) / math.min(dN, atrLen)
         pc := nz(close[1], open)
         fO := open
         fH := high
@@ -231,7 +254,7 @@ f_form(simple int secTf) =>
     float trF = math.max(fH - fL, math.max(math.abs(fH - pc), math.abs(pc - fL)))
     float evF = f_estVar(fO, fH, fL, close)
     float pg  = math.min(1.0, math.max(0.0, (time - fT) / (secTf * 1000.0)))
-    [trF, evF, pg, fO]
+    [trF, evF, pg, fO, dR, isNew, dU]
 
 // -----------------------------------------------------------------------------
 //  Percentile LIVE (modo A). ta.percentrank non serve: il valore corrente e'
@@ -368,11 +391,11 @@ sh5 = (liveMode or confirmed) and sc5 > chartSec
 [vX4, tX4] = f_chart(cW4)
 [vX5, tX5] = f_chart(cW5)
 
-[trF1, evF1, pg1, op1] = f_form(sc1)
-[trF2, evF2, pg2, op2] = f_form(sc2)
-[trF3, evF3, pg3, op3] = f_form(sc3)
-[trF4, evF4, pg4, op4] = f_form(sc4)
-[trF5, evF5, pg5, op5] = f_form(sc5)
+[trF1, evF1, pg1, op1, dR1, nw1, du1] = f_form(sc1)
+[trF2, evF2, pg2, op2, dR2, nw2, du2] = f_form(sc2)
+[trF3, evF3, pg3, op3, dR3, nw3, du3] = f_form(sc3)
+[trF4, evF4, pg4, op4, dR4, nw4, du4] = f_form(sc4)
+[trF5, evF5, pg5, op5, dR5, nw5, du5] = f_form(sc5)
 
 // Aggiornamento ricorsivo esatto: la candela in formazione entra nella media con
 // il peso 1/atrLen che le spetta, esattamente come fara' alla chiusura.
@@ -489,29 +512,52 @@ atrCh  = math.max(ta.atr(atrChLen), syminfo.mintick)
 trAtrC = ta.tr(true) / atrCh
 
 isSec  = expSrc != "Barra del grafico"
-trAtrE = expSrc == "S1" ? trA1 : expSrc == "S2" ? trA2 : expSrc == "S3" ? trA3 : expSrc == "S4" ? trA4 : expSrc == "S5" ? trA5 : trAtrC
 
-// Frazione della candela HTF gia' consumata. Significativa solo in modo A: in C
-// non esiste nessuna candela superiore in formazione.
-pgE = not (isSec and modeA) ? na : expSrc == "S1" ? pg1 : expSrc == "S2" ? pg2 : expSrc == "S3" ? pg3 : expSrc == "S4" ? pg4 : pg5
+// La valutazione a chiusura di candela esiste solo se una candela superiore
+// esiste: serve una sezione E il modo A. Con sorgente 'Barra del grafico', o in
+// modo C, la candela superiore non c'e' e 'a chiusura' vuol dire alla chiusura
+// della barra del grafico.
+evalCl  = expEval == "A chiusura della candela HTF"
+secCl   = isSec and modeA and evalCl
 
-// Direzione. In modo A va confrontata con l'apertura della CANDELA SUPERIORE in
-// formazione, non con quella della barra del grafico: sono due cose diverse e la
-// seconda sarebbe rumore. In modo C la candela superiore non esiste, quindi il
-// riferimento e' giustamente l'apertura della barra.
-opE = not (isSec and modeA) ? open : expSrc == "S1" ? op1 : expSrc == "S2" ? op2 : expSrc == "S3" ? op3 : expSrc == "S4" ? op4 : op5
+// -- lettura IN FORMAZIONE (o barra del grafico) ------------------------------
+trLive = expSrc == "S1" ? trA1 : expSrc == "S2" ? trA2 : expSrc == "S3" ? trA3 : expSrc == "S4" ? trA4 : expSrc == "S5" ? trA5 : trAtrC
+
+// -- lettura A CHIUSURA: rapporto congelato della candela appena chiusa -------
+dRsel = not isSec ? na : expSrc == "S1" ? dR1 : expSrc == "S2" ? dR2 : expSrc == "S3" ? dR3 : expSrc == "S4" ? dR4 : dR5
+nwSel = not isSec ? false : expSrc == "S1" ? nw1 : expSrc == "S2" ? nw2 : expSrc == "S3" ? nw3 : expSrc == "S4" ? nw4 : nw5
+duSel = not isSec ? true  : expSrc == "S1" ? du1 : expSrc == "S2" ? du2 : expSrc == "S3" ? du3 : expSrc == "S4" ? du4 : du5
+
+trAtrE = secCl ? dRsel : trLive
+
+// Frazione della candela HTF gia' consumata. Ha senso solo nella lettura in
+// formazione: a chiusura la candela e' finita per definizione.
+pgE = not (isSec and modeA) or secCl ? na : expSrc == "S1" ? pg1 : expSrc == "S2" ? pg2 : expSrc == "S3" ? pg3 : expSrc == "S4" ? pg4 : pg5
+
+// Direzione. In lettura a chiusura e' chiusura contro apertura della CANDELA
+// SUPERIORE. In formazione e' il prezzo corrente contro l'apertura di quella
+// stessa candela, non contro l'apertura della barra del grafico: sono due cose
+// diverse e la seconda sarebbe rumore.
+opE   = not (isSec and modeA) ? open : expSrc == "S1" ? op1 : expSrc == "S2" ? op2 : expSrc == "S3" ? op3 : expSrc == "S4" ? op4 : op5
+dirUp = secCl ? duSel : close >= opE
 
 isExp = not na(trAtrE) and trAtrE > expTh
 
 // nz() non ha overload booleano: lo stato precedente lo tengo esplicito, cosi'
 // alla prima barra vale false invece di na
 var bool expPrev = false
-expNew  = isExp and not expPrev
+expEdge  = isExp and not expPrev
 expPrev := isExp
-expMk   = expOne ? expNew : isExp
 
-expUp  = expMk and expDir and close >= opE
-expDn  = expMk and expDir and close <  opE
+// A CHIUSURA il cancello e' la chiusura della candela: una valutazione per
+// candela, quindi due candele di espansione consecutive danno due marker.
+// IN FORMAZIONE il cancello e' il fronte di salita, altrimenti avresti un
+// marker per ogni barra in cui la candela resta larga.
+expGate = secCl ? nwSel : evalCl ? barstate.isconfirmed : true
+expMk   = secCl ? (expGate and isExp) : (expGate and (expOne ? expEdge : isExp))
+
+expUp  = expMk and expDir and dirUp
+expDn  = expMk and expDir and not dirUp
 expNeu = expMk and not expDir
 
 // =============================================================================
@@ -682,7 +728,7 @@ if showTab and barstate.islast
     table.cell(dash, 0, 7, "espans.", text_size=szD, text_color=color.white, bgcolor=isExp ? color.new(color.yellow, 55) : ebg)
     table.cell(dash, 1, 7, isSec ? expSrc + " " + (expSrc == "S1" ? tf1 : expSrc == "S2" ? tf2 : expSrc == "S3" ? tf3 : expSrc == "S4" ? tf4 : tf5) : "grafico", text_size=szD, text_color=color.silver, bgcolor=ebg)
     table.cell(dash, 2, 7, f_n2(trAtrE), text_size=szD, text_color=isExp ? cExp : color.white, bgcolor=ebg)
-    table.cell(dash, 3, 7, "th " + str.tostring(expTh, "#.0"), text_size=szD, text_color=color.silver, bgcolor=ebg)
+    table.cell(dash, 3, 7, (secCl ? "close " : evalCl ? "bar " : "live ") + str.tostring(expTh, "#.0"), text_size=szD, text_color=secCl ? color.lime : evalCl ? color.silver : color.yellow, bgcolor=ebg)
     table.cell(dash, 4, 7, na(pgE) ? "t –" : "t " + f_n2(pgE), text_size=szD, text_color=na(pgE) ? color.gray : pgE > 0.8 ? color.orange : color.lime, bgcolor=ebg)
     table.cell(dash, 5, 7, "exp " + str.tostring(cExpN), text_size=szD, text_color=cExpN == 0 ? color.red : cExp, bgcolor=ebg)
     table.cell(dash, 6, 7, isExp ? "ESPANSIONE" : "–", text_size=szD, text_color=isExp ? cExp : color.gray, bgcolor=ebg)
