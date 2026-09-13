@@ -184,6 +184,13 @@ pre5 = input.bool(false, "S5", inline="p5", group=gP)
 preL5= input.int(20, "barre", minval=1, maxval=5000, inline="p5", group=gP)
 preT5= input.float(2.0, "|z|", minval=0.1, maxval=10.0, step=0.1, inline="p5", group=gP)
 
+preBack = input.bool(false, "   richiedi il RIENTRO della sezione di riferimento", group=gP,
+     tooltip="LA CONDIZIONE CHE SEPARA DAVVERO L'ULTIMO SEGNALE DAI PRIMI.\n\nLa sola memoria ('c'e' gia' stato') e' vera per tutto il grappolo di segnali: il primo e l'ultimo la soddisfano allo stesso modo, quindi non li distingue. Quello che distingue l'ultimo e' che quando arriva, la sezione lenta ha GIA' FATTO l'escursione ED E' GIA' GIRATA.\n\nACCESO: per un BUY la sezione di riferimento deve essere gia' risalita sopra -livello, per un SELL gia' ridiscesa sotto +livello. I segnali che nascono mentre la sezione lenta e' ancora in caduta libera vengono scartati.\n\nLa sezione di riferimento e' quella DOMINANTE fra le spuntate qui sopra, cioe' quella con il TF piu' alto, sempre, anche con la dominanza spenta.\n\nCosto: il rientro e' informazione che arriva DOPO. Stai comprando piu' tardi e piu' in alto in cambio di meno segnali prematuri. Confronta i percentili MAE, e' l'unico modo per sapere se lo scambio conviene.")
+preBackLvl = input.float(2.0, "      livello di rientro |z|", minval=0.0, maxval=10.0, step=0.1, group=gP,
+     tooltip="Quanto deve essere rientrata la sezione di riferimento perche' il segnale passi.\n\nUguale alla soglia della sezione (2.0 con soglia 2.0): basta che non sia piu' oltre l'estremo. Rientro minimo, segnale piu' presto.\n\nPiu' basso (1.0, 0.5): pretende una reversione gia' avviata sul TF alto. Molti meno segnali, entrata piu' tardi e piu' lontana dal minimo. A 0 pretende che la sezione abbia gia' riattraversato la media: a quel punto il grosso della reversione e' andato.")
+preOne  = input.bool(false, "   un solo segnale per escursione della sezione di riferimento", group=gP,
+     tooltip="Il latch standard (gruppo 3, 'Uno per escursione') conta le escursioni della serie del TRIGGER, che e' la piu' VELOCE: dentro una sola discesa della 5m la 15S entra ed esce da -2 quattro o cinque volte, e ogni rientro e' un segnale nuovo. E' cosi' che nasce il grappolo.\n\nACCESO: conta le escursioni della sezione di RIFERIMENTO (TF piu' alto fra le spuntate). Una discesa della 5m sotto -2 = UN solo segnale, poi silenzio finche' la 5m non rientra e ci ritorna.\n\nAVVERTENZA ONESTA: questo tiene il PRIMO segnale dell'escursione, non l'ultimo. 'L'ultimo' e' una categoria che esiste solo a cose fatte: in tempo reale l'ultimo di un grappolo e' indistinguibile dal primo. Se vuoi che il sopravvissuto sia quello TARDI, accendi anche il rientro qui sopra: il primo segnale dopo che la sezione lenta ha girato e' il piu' vicino a quello che hai cerchiato.")
+
 var string gL = "4 · Soglie (stream indipendenti)"
 enP2  = input.bool(true,  "Soglia A", inline="a", group=gL)
 thrP2 = input.float(2.0,  "liv", step=0.1, inline="a", group=gL)
@@ -501,6 +508,32 @@ preDomTf= pMaxSec == 0 ? "-" : pDomI == 4 ? tf5 : pDomI == 3 ? tf4 : pDomI == 2 
 // segnala in dashboard, invece di azzerare i segnali senza dire perche'
 preIdle = usePre and pOnN == 0
 
+// Serie di RIFERIMENTO per rientro ed escursioni: sempre la sezione dominante
+// fra quelle spuntate (TF piu' alto), anche con la dominanza spenta. Senza
+// nessuna sezione spuntata resta na e le due opzioni si disattivano da sole.
+zRef = pDomI == 4 ? z5 : pDomI == 3 ? z4 : pDomI == 2 ? z3 : pDomI == 1 ? z2 : pDomI == 0 ? z1 : na
+tRef = pDomI == 4 ? preT5 : pDomI == 3 ? preT4 : pDomI == 2 ? preT3 : pDomI == 1 ? preT2 : pDomI == 0 ? preT1 : 0.0
+
+// Contatore di ESCURSIONI della sezione di riferimento: sale di uno ogni volta
+// che quella sezione ENTRA oltre la sua soglia. E' l'unita' di misura giusta
+// per "un segnale per movimento": il latch del gruppo 3 conta invece le
+// escursioni del trigger, che e' la serie piu' veloce, ed e' per questo che
+// dentro una sola discesa della sezione lenta escono quattro segnali.
+inLoRef = not na(zRef) and zRef <= -tRef
+inHiRef = not na(zRef) and zRef >=  tRef
+var int excBuy  = 0
+var int excSell = 0
+if inLoRef and not inLoRef[1]
+    excBuy += 1
+if inHiRef and not inHiRef[1]
+    excSell += 1
+
+// Rientro: la sezione di riferimento deve essere gia' tornata dentro la banda.
+// E' la sola condizione CAUSALE che distingue un segnale nato mentre il TF alto
+// sta ancora scendendo da uno nato dopo che ha girato.
+f_preBackOk(bool isSell) =>
+    not usePre or not preBack or na(zRef) ? true : isSell ? zRef <= preBackLvl : zRef >= -preBackLvl
+
 f_preOk(bool isSell) =>
     o1 = isSell ? pS1s : pS1b
     o2 = isSell ? pS2s : pS2b
@@ -665,6 +698,7 @@ f_stream(bool en, float thr, float trg, bool isUp) =>
     var bool fired   = false
     var int  lastSig = -100000
     var int  seq     = 0
+    var int  lastExc = -1
     armed = en and f_armOk(thr, isUp)
     reEnter = isUp ? zFast >= thr : zFast <= thr
     if not armed
@@ -681,10 +715,15 @@ f_stream(bool en, float thr, float trg, bool isUp) =>
     // il bias e la pre-condizione filtrano l'EMISSIONE, non l'armamento: cosi'
     // 'armate' resta il conteggio dei setup validi e il rapporto con 'segnali'
     // misura il costo. La pre-condizione e' il PRIMO filtro della catena.
-    fire = armed and not fired and trig and okBar and not na(zFast) and f_preOk(isUp) and f_riskOk(isUp) and f_biasOk(isUp) and (bar_index - lastSig >= cooldown)
+    // un solo segnale per escursione della sezione di riferimento: il latch
+    // non guarda piu' la serie veloce, guarda il movimento del TF alto
+    excNow = isUp ? excSell : excBuy
+    okOne  = not (usePre and preOne) or na(zRef) or excNow != lastExc
+    fire = armed and not fired and trig and okBar and not na(zFast) and f_preOk(isUp) and f_preBackOk(isUp) and okOne and f_riskOk(isUp) and f_biasOk(isUp) and (bar_index - lastSig >= cooldown)
     if fire
         fired   := true
         lastSig := bar_index
+        lastExc := excNow
         seq     += 1
     [fire, armed, seq, trig]
 
@@ -905,7 +944,7 @@ f_stat(bool use, string tf, int sec, float z, float h, float l, float ne, float 
      use ? str.tostring(int(math.round(ne))) + " · " + (isLive ? "—" : str.tostring(cap, "#.0")) : "–",
      bad, dead]
 
-var table dash = table.new(position.top_right, 6, 15, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+var table dash = table.new(position.top_right, 6, 16, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
 if showTab and barstate.islast
     hdrBg = color.new(color.gray, 70)
     modeTag = (modeA ? "A nativo" : modeB ? "B grafico/HTF" : "C orizz.equiv.") + (liveOn ? " · LIVE" : modeC ? "" : " · step")
@@ -1029,7 +1068,7 @@ if showTab and barstate.islast
     //    azzurro = e' la sezione dominante (TF piu' alto), le altre non contano
     prbg  = color.new(color.gray, 88)
     pmTxt = not usePre ? "off" : preIdle ? "⚠ nessuna" : preDom ? "dom " + preDomTf : preMode == "Almeno una (OR)" ? "OR" : "AND"
-    table.cell(dash, 0, 14, "pre " + pmTxt, text_size=szDash, text_color=not usePre ? color.gray : preIdle ? color.orange : color.white, bgcolor=usePre and not preIdle ? color.new(color.blue, 55) : prbg)
+    table.cell(dash, 0, 14, "pre " + pmTxt + (preBack ? " ↩" : "") + (preOne ? " 1x" : ""), text_size=szDash, text_color=not usePre ? color.gray : preIdle ? color.orange : color.white, bgcolor=usePre and not preIdle ? color.new(color.blue, 55) : prbg)
     pOns = array.from(pre1, pre2, pre3, pre4, pre5)
     pSls = array.from(pS1s, pS2s, pS3s, pS4s, pS5s)
     pBys = array.from(pS1b, pS2b, pS3b, pS4b, pS5b)
@@ -1042,6 +1081,19 @@ if showTab and barstate.islast
         ptx = not pon ? "–" : "S" + str.tostring(p + 1) + " " + str.tostring(array.get(pEls, p)) + (pos ? "▼" : "") + (pob ? "▲" : "") + (not pos and not pob ? "×" : "")
         pcl = not usePre or not pon ? color.gray : pdm ? color.aqua : (pos or pob) ? color.lime : color.red
         table.cell(dash, p + 1, 14, ptx, text_size=szDash, text_color=pcl, bgcolor=prbg)
+
+    // -- sezione di riferimento: perche' un segnale e' stato tagliato --------
+    //    ↩ dice se il rientro e' gia' avvenuto, esc conta le escursioni del TF
+    //    alto (con '1x' acceso, una escursione = un segnale)
+    rfbg = color.new(color.gray, 88)
+    bkB  = na(zRef) ? false : zRef >= -preBackLvl
+    bkS  = na(zRef) ? false : zRef <=  preBackLvl
+    table.cell(dash, 0, 15, "rif " + (pDomI < 0 ? "–" : preDomTf), text_size=szDash, text_color=not usePre or pDomI < 0 ? color.gray : color.aqua, bgcolor=rfbg)
+    table.cell(dash, 1, 15, "z " + f_n2(zRef), text_size=szDash, text_color=na(zRef) ? color.gray : inLoRef ? cDn : inHiRef ? cUp : color.white, bgcolor=rfbg)
+    table.cell(dash, 2, 15, not preBack ? "↩ off" : "↩ B" + (bkB ? "✓" : "✗") + " S" + (bkS ? "✓" : "✗"), text_size=szDash, text_color=not preBack ? color.gray : (bkB or bkS) ? color.lime : color.red, bgcolor=rfbg)
+    table.cell(dash, 3, 15, "escB " + str.tostring(excBuy), text_size=szDash, text_color=color.silver, bgcolor=rfbg)
+    table.cell(dash, 4, 15, "escS " + str.tostring(excSell), text_size=szDash, text_color=color.silver, bgcolor=rfbg)
+    table.cell(dash, 5, 15, preOne ? "1 per esc." : "latch trigger", text_size=szDash, text_color=preOne ? color.aqua : color.gray, bgcolor=rfbg)
 
 // ================================================================= ALERT ======
 alertcondition(sigA, "MTF-Z · SELL soglia A", "MTF-Z SELL A · confluenza")
