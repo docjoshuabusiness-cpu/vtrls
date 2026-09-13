@@ -105,7 +105,8 @@ f_detect() =>
     lvl = sig == 1 ? loW : sig == -1 ? hiW : na
     [sig, lvl, atrv]
 
-// Pacchetto sfasato di 1 barra: si legge SOLO la barra chiusa -> no repaint
+// Pacchetto sfasato di 1 barra HTF: si legge SOLO la barra HTF gia' chiusa.
+// Va abbinato a lookahead_on (vedi request.security piu' sotto).
 f_pack() =>
     [s, l, a] = f_detect()
     [s[1], l[1], a[1], time[1]]
@@ -117,8 +118,16 @@ tfUse  = tfIn
 isSame = timeframe.in_seconds(tfUse) == timeframe.in_seconds(timeframe.period)
 
 [sigL, lvlL, atrL] = f_detect()
+// lookahead_on + offset [1] dentro f_pack() e' l'idioma NON ripingente
+// raccomandato da TradingView, e sembra il contrario di quello che e':
+//   - lookahead_on SENZA offset = look-ahead bias vero, legge il futuro;
+//   - lookahead_on CON offset [1] = valore DEFINITIVO della barra HTF
+//     precedente, identico su storico e real time.
+// Con lookahead_off invece lo storico restituisce gia' l'ultima barra HTF
+// chiusa: sommato all'offset [1] faceva arretrare di DUE barre HTF, da cui
+// il segnale in ritardo di un'intera barra HTF (= molte candele sui TF bassi).
 [sH, lH, aH, tH]   = request.security(syminfo.tickerid, tfUse, f_pack(),
-                                      lookahead = barmerge.lookahead_off)
+                                      lookahead = barmerge.lookahead_on)
 
 // TF del grafico  -> segnale della barra appena chiusa (freccia spostata su quella barra)
 // TF superiore    -> valore della barra HTF chiusa, sulla prima candela che lo conferma
