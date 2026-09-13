@@ -162,26 +162,32 @@ preMode = input.string("Tutte (AND)", "   combinazione fra le sezioni attive",
      tooltip="TUTTE (AND): ogni sezione spuntata deve avere l'estremo in memoria. Severo, e con TF vicini quasi ridondante: sono z dello stesso prezzo, se la 15S e' stata a +2 spesso ci e' stata anche la 30S.\n\nALMENO UNA (OR): basta una sezione. Usa questa se ti interessa 'c'e' stata un'estensione da qualche parte', non 'su tutti gli orizzonti'.\n\nIgnorato se e' acceso l'interruttore di dominanza qui sotto.")
 preDom  = input.bool(false, "   decide SOLO la sezione con il TF piu' grande", group=gP,
      tooltip="ACCESO: fra le sezioni spuntate qui sopra conta unicamente quella con il timeframe piu' alto, le altre vengono ignorate (restano visibili in dashboard per confronto). E' l'ipotesi 'l'estremo che pesa e' quello dell'orizzonte piu' lungo'.\n\nSPENTO: vale la combinazione AND/OR scelta sopra.\n\nIn dominanza questo diventa un gate di CONTESTO e si sovrappone in parte al bias (3b), che pero' guarda il livello ATTUALE e non un estremo passato. Accendere entrambi senza confrontare i percentili MAE a parita' di campione e' fede, non misura.")
+preEval = input.string("Nativo (chiusura candela della sezione)", "   lettura",
+     options=["Nativo (chiusura candela della sezione)","Live (barra del grafico)"], group=gP,
+     tooltip="NATIVO (default, ed e' la lettura giusta per una memoria)\nUsa lo z della candela CHIUSA della sezione: con S5 su 5m chiede 'una candela da 5 minuti ha CHIUSO sotto -2'. Il valore si aggiorna una volta per candela HTF, e la memoria diventa un conteggio di candele vere.\n\nE' anche cio' che rende questo filtro NON RIDONDANTE con l'armamento del gruppo 3: quello lavora sulle curve LIVE, questo sulle chiusure HTF. Sono due informazioni diverse, quindi il filtro toglie davvero qualcosa. Con la lettura live e la stessa soglia e finestra, invece, chiede esattamente la stessa cosa e non taglia nulla.\n\nLIVE\nUsa la curva del pannello: numeratore = prezzo corrente. Basta che il prezzo abbia SFIORATO -2 per tre secondi dentro una candela da 5 minuti e la memoria e' valida. Molto piu' permissiva e molto piu' rumorosa.\n\nNota: la lettura nativa e' la stessa serie del bias, quindi rispetta 'Solo barre HTF chiuse' del gruppo 1. Con quello e il LIVE entrambi spenti legge la candela in formazione e ripinge.")
+preUnit = input.string("Candele della sezione", "   memoria misurata in",
+     options=["Candele della sezione","Barre del grafico"], group=gP,
+     tooltip="CANDELE DELLA SEZIONE (default): il numero nella riga e' quante candele DELLA SEZIONE guardare indietro. Con S5 su 5m e memoria 12 sono le ultime 12 candele da 5 minuti, cioe' un'ora, indipendentemente dal TF del grafico. E' l'unita' in cui ragioni davvero ('in tot candele prima').\n\nBARRE DEL GRAFICO: il numero e' in barre del grafico. Devi riconvertirlo a mano ogni volta che cambi il TF del grafico, ed e' la fonte piu' comune di taratura sbagliata.")
 preAuto = input.bool(true, "   finestra minima automatica (2 candele della sezione)", group=gP,
      tooltip="Alza la memoria di ogni sezione ad almeno 2 * (TF della sezione / TF del grafico) barre del grafico.\n\nSenza questo, una memoria di 20 barre su un grafico a 5s per la sezione 5m copre 100 secondi, cioe' un terzo di una sola candela: la sezione non ha materialmente il tempo di produrre un estremo e il filtro azzera i segnali. E' l'errore di taratura piu' probabile di questo gruppo.")
 pre1 = input.bool(false, "S1", inline="p1", group=gP)
-preL1= input.int(20, "barre", minval=1, maxval=5000, inline="p1", group=gP)
+preL1= input.int(12, "mem", minval=1, maxval=5000, inline="p1", group=gP)
 preT1= input.float(2.0, "|z|", minval=0.1, maxval=10.0, step=0.1, inline="p1", group=gP)
 
 pre2 = input.bool(false, "S2", inline="p2", group=gP)
-preL2= input.int(20, "barre", minval=1, maxval=5000, inline="p2", group=gP)
+preL2= input.int(12, "mem", minval=1, maxval=5000, inline="p2", group=gP)
 preT2= input.float(2.0, "|z|", minval=0.1, maxval=10.0, step=0.1, inline="p2", group=gP)
 
 pre3 = input.bool(false, "S3", inline="p3", group=gP)
-preL3= input.int(20, "barre", minval=1, maxval=5000, inline="p3", group=gP)
+preL3= input.int(12, "mem", minval=1, maxval=5000, inline="p3", group=gP)
 preT3= input.float(2.0, "|z|", minval=0.1, maxval=10.0, step=0.1, inline="p3", group=gP)
 
 pre4 = input.bool(false, "S4", inline="p4", group=gP)
-preL4= input.int(20, "barre", minval=1, maxval=5000, inline="p4", group=gP)
+preL4= input.int(12, "mem", minval=1, maxval=5000, inline="p4", group=gP)
 preT4= input.float(2.0, "|z|", minval=0.1, maxval=10.0, step=0.1, inline="p4", group=gP)
 
 pre5 = input.bool(false, "S5", inline="p5", group=gP)
-preL5= input.int(20, "barre", minval=1, maxval=5000, inline="p5", group=gP)
+preL5= input.int(12, "mem", minval=1, maxval=5000, inline="p5", group=gP)
 preT5= input.float(2.0, "|z|", minval=0.1, maxval=10.0, step=0.1, inline="p5", group=gP)
 
 preBack = input.bool(false, "   richiedi il RIENTRO della sezione di riferimento", group=gP,
@@ -465,22 +471,36 @@ lo5 = ta.lowest(z5, lbEff)
 //  chiedere "questa sezione era gia' stata la'", non "le sezioni sono la'
 //  adesso". Le lunghezze sono simple int (input + k), quindi ta.highest le
 //  accetta; il calcolo e' incondizionato, l'interruttore agisce dopo.
-preE1 = preAuto ? int(math.max(preL1, 2 * k1)) : preL1
-preE2 = preAuto ? int(math.max(preL2, 2 * k2)) : preL2
-preE3 = preAuto ? int(math.max(preL3, 2 * k3)) : preL3
-preE4 = preAuto ? int(math.max(preL4, 2 * k4)) : preL4
-preE5 = preAuto ? int(math.max(preL5, 2 * k5)) : preL5
+//  Lettura: NATIVA (z della candela CHIUSA della sezione, gia' calcolato per il
+//  bias, quindi costo zero) oppure LIVE (la curva del pannello). E' la scelta
+//  che rende il filtro indipendente dall'armamento, che lavora sulle live.
+preNat = preEval == "Nativo (chiusura candela della sezione)"
+zP1 = preNat ? zN1 : z1
+zP2 = preNat ? zN2 : z2
+zP3 = preNat ? zN3 : z3
+zP4 = preNat ? zN4 : z4
+zP5 = preNat ? zN5 : z5
 
-preHi1 = ta.highest(z1, preE1)
-preLo1 = ta.lowest(z1, preE1)
-preHi2 = ta.highest(z2, preE2)
-preLo2 = ta.lowest(z2, preE2)
-preHi3 = ta.highest(z3, preE3)
-preLo3 = ta.lowest(z3, preE3)
-preHi4 = ta.highest(z4, preE4)
-preLo4 = ta.lowest(z4, preE4)
-preHi5 = ta.highest(z5, preE5)
-preLo5 = ta.lowest(z5, preE5)
+//  Finestra: in candele della sezione (memoria * k) o in barre del grafico.
+//  Cap a 4000 barre per non superare max_bars_back.
+preCnd = preUnit == "Candele della sezione"
+preMin = preAuto ? 2 : 1
+preE1 = int(math.min(4000, preCnd ? math.max(preL1, preMin) * k1 : (preAuto ? math.max(preL1, 2 * k1) : preL1)))
+preE2 = int(math.min(4000, preCnd ? math.max(preL2, preMin) * k2 : (preAuto ? math.max(preL2, 2 * k2) : preL2)))
+preE3 = int(math.min(4000, preCnd ? math.max(preL3, preMin) * k3 : (preAuto ? math.max(preL3, 2 * k3) : preL3)))
+preE4 = int(math.min(4000, preCnd ? math.max(preL4, preMin) * k4 : (preAuto ? math.max(preL4, 2 * k4) : preL4)))
+preE5 = int(math.min(4000, preCnd ? math.max(preL5, preMin) * k5 : (preAuto ? math.max(preL5, 2 * k5) : preL5)))
+
+preHi1 = ta.highest(zP1, preE1)
+preLo1 = ta.lowest(zP1, preE1)
+preHi2 = ta.highest(zP2, preE2)
+preLo2 = ta.lowest(zP2, preE2)
+preHi3 = ta.highest(zP3, preE3)
+preLo3 = ta.lowest(zP3, preE3)
+preHi4 = ta.highest(zP4, preE4)
+preLo4 = ta.lowest(zP4, preE4)
+preHi5 = ta.highest(zP5, preE5)
+preLo5 = ta.lowest(zP5, preE5)
 
 // s = memoria valida per un SELL (era sopra +soglia), b = per un BUY (sotto -)
 pS1s = preHi1 >=  preT1
@@ -511,7 +531,7 @@ preIdle = usePre and pOnN == 0
 // Serie di RIFERIMENTO per rientro ed escursioni: sempre la sezione dominante
 // fra quelle spuntate (TF piu' alto), anche con la dominanza spenta. Senza
 // nessuna sezione spuntata resta na e le due opzioni si disattivano da sole.
-zRef = pDomI == 4 ? z5 : pDomI == 3 ? z4 : pDomI == 2 ? z3 : pDomI == 1 ? z2 : pDomI == 0 ? z1 : na
+zRef = pDomI == 4 ? zP5 : pDomI == 3 ? zP4 : pDomI == 2 ? zP3 : pDomI == 1 ? zP2 : pDomI == 0 ? zP1 : na
 tRef = pDomI == 4 ? preT5 : pDomI == 3 ? preT4 : pDomI == 2 ? preT3 : pDomI == 1 ? preT2 : pDomI == 0 ? preT1 : 0.0
 
 // Contatore di ESCURSIONI della sezione di riferimento: sale di uno ogni volta
@@ -1067,18 +1087,19 @@ if showTab and barstate.islast
     //    × = nessuna delle due: quella sezione sta bloccando
     //    azzurro = e' la sezione dominante (TF piu' alto), le altre non contano
     prbg  = color.new(color.gray, 88)
-    pmTxt = not usePre ? "off" : preIdle ? "⚠ nessuna" : preDom ? "dom " + preDomTf : preMode == "Almeno una (OR)" ? "OR" : "AND"
+    pmTxt = not usePre ? "off" : preIdle ? "⚠ nessuna" : (preNat ? "nat " : "live ") + (preDom ? "dom " + preDomTf : preMode == "Almeno una (OR)" ? "OR" : "AND")
     table.cell(dash, 0, 14, "pre " + pmTxt + (preBack ? " ↩" : "") + (preOne ? " 1x" : ""), text_size=szDash, text_color=not usePre ? color.gray : preIdle ? color.orange : color.white, bgcolor=usePre and not preIdle ? color.new(color.blue, 55) : prbg)
     pOns = array.from(pre1, pre2, pre3, pre4, pre5)
     pSls = array.from(pS1s, pS2s, pS3s, pS4s, pS5s)
     pBys = array.from(pS1b, pS2b, pS3b, pS4b, pS5b)
     pEls = array.from(preE1, preE2, preE3, preE4, preE5)
+    pMem = array.from(math.max(preL1, preMin), math.max(preL2, preMin), math.max(preL3, preMin), math.max(preL4, preMin), math.max(preL5, preMin))
     for p = 0 to 4
         pon = array.get(pOns, p)
         pos = array.get(pSls, p)
         pob = array.get(pBys, p)
         pdm = preDom and pDomI == p
-        ptx = not pon ? "–" : "S" + str.tostring(p + 1) + " " + str.tostring(array.get(pEls, p)) + (pos ? "▼" : "") + (pob ? "▲" : "") + (not pos and not pob ? "×" : "")
+        ptx = not pon ? "–" : "S" + str.tostring(p + 1) + " " + (preCnd ? str.tostring(array.get(pMem, p)) + "c" : str.tostring(array.get(pEls, p)) + "b") + (pos ? "▼" : "") + (pob ? "▲" : "") + (not pos and not pob ? "×" : "")
         pcl = not usePre or not pon ? color.gray : pdm ? color.aqua : (pos or pob) ? color.lime : color.red
         table.cell(dash, p + 1, 14, ptx, text_size=szDash, text_color=pcl, bgcolor=prbg)
 
@@ -1088,7 +1109,7 @@ if showTab and barstate.islast
     rfbg = color.new(color.gray, 88)
     bkB  = na(zRef) ? false : zRef >= -preBackLvl
     bkS  = na(zRef) ? false : zRef <=  preBackLvl
-    table.cell(dash, 0, 15, "rif " + (pDomI < 0 ? "–" : preDomTf), text_size=szDash, text_color=not usePre or pDomI < 0 ? color.gray : color.aqua, bgcolor=rfbg)
+    table.cell(dash, 0, 15, "rif " + (pDomI < 0 ? "–" : preDomTf + (preNat ? " nat" : " live")), text_size=szDash, text_color=not usePre or pDomI < 0 ? color.gray : color.aqua, bgcolor=rfbg)
     table.cell(dash, 1, 15, "z " + f_n2(zRef), text_size=szDash, text_color=na(zRef) ? color.gray : inLoRef ? cDn : inHiRef ? cUp : color.white, bgcolor=rfbg)
     table.cell(dash, 2, 15, not preBack ? "↩ off" : "↩ B" + (bkB ? "✓" : "✗") + " S" + (bkS ? "✓" : "✗"), text_size=szDash, text_color=not preBack ? color.gray : (bkB or bkS) ? color.lime : color.red, bgcolor=rfbg)
     table.cell(dash, 3, 15, "escB " + str.tostring(excBuy), text_size=szDash, text_color=color.silver, bgcolor=rfbg)
