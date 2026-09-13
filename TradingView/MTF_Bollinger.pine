@@ -1,0 +1,353 @@
+//@version=6
+// =============================================================================
+//  MTF Bollinger sul grafico  v1.1
+//  ---------------------------------------------------------------------------
+//  Bande di Bollinger di uno o piu' timeframe SUPERIORI, disegnate direttamente
+//  sulle candele del grafico che stai guardando. Serve a vedere come la banda
+//  di un timeframe lento si posiziona sul prezzo osservato veloce: la 5m sul
+//  grafico a 5 secondi, la 15m sul grafico a 1 minuto, e cosi' via.
+//
+//  ------------------------------------------------------------------ v1.1 ---
+//  SEGNALE SULLA CHIUSURA OLTRE LA MEDIA (gruppo 4)
+//  Un segnale quando una candela del timeframe scelto CHIUDE sopra o sotto la
+//  propria media di Bollinger.
+//
+//  TRE COSE CHE LO RENDONO CORRETTO, E CHE NON SONO OVVIE:
+//
+//  1) IL CONFRONTO E' NATIVO, SEMPRE. Chiusura e media vengono confrontate
+//     DENTRO il contesto del timeframe scelto, sulla sua candela, e il valore
+//     usato e' sempre quello della candela CHIUSA (shift di 1). Confrontare il
+//     prezzo del grafico con una media HTF sarebbe un'altra cosa, e darebbe
+//     segnali dentro la candela invece che alla sua chiusura.
+//     Conseguenza: il segnale NON dipende dal modo A/B, che governa solo il
+//     disegno. In modo B la banda che vedi non e' quella che spara: per questo
+//     esiste l'interruttore che disegna la media NATIVA della sezione scelta.
+//     Quello che spara deve essere visibile.
+//
+//  2) NESSUN REPAINT, E UN RITARDO DICHIARATO. Il segnale compare sulla prima
+//     barra del grafico dopo la chiusura della candela HTF. Non puo' essere
+//     piu' tempestivo di cosi': prima che quella candela chiuda, "ha chiuso
+//     oltre la media" non e' un fatto. Su grafico 5s con sezione 5m il marker
+//     cade fino a 5 minuti dopo il punto in cui il prezzo ha attraversato.
+//
+//  3) INCROCIO oppure OGNI CANDELA. In un trend la chiusura resta dallo stesso
+//     lato della media per decine di candele: "ogni candela chiusa" produce
+//     decine di segnali che sono un solo evento. Il default e' il CAMBIO DI
+//     LATO, cioe' la prima chiusura oltre la media dopo una serie dall'altra
+//     parte. E' un evento, non uno stato.
+//
+//  AVVERTENZA SULLA POLARITA'. Chiudere sopra la media e' un segnale di
+//  CONTINUAZIONE, non di reversione: e' la polarita' opposta ai motori a
+//  z-score e StochRSI costruiti sugli estremi. Non e' un difetto, ma va saputo:
+//  combinarli senza accorgersene significa avere due sistemi che si
+//  contraddicono per costruzione.
+//
+//  ---------------------------------------------------------------------------
+//  DUE MODI DI CALCOLO. E' la scelta che decide tutto il risultato visivo.
+//
+//  A · NATIVO (a gradini)
+//     La banda e' quella letterale del timeframe superiore, presa dall'ultima
+//     candela CHIUSA. Su un grafico piu' veloce resta ferma per k barre e poi
+//     salta: e' una scala. E' esattamente cio' che vedresti aprendo quel
+//     timeframe, niente di piu' e niente di meno. Il salto non e' un difetto
+//     del codice, e' il fatto che quella banda si aggiorna una volta ogni
+//     candela del suo timeframe.
+//
+//  B · CONTINUO (finestra equivalente)   <- default
+//     La banda viene calcolata sulla STESSA FINESTRA TEMPORALE ma usando le
+//     candele del grafico: 20 candele da 5m sono 100 minuti, cioe' 1200 barre
+//     da 5 secondi. La curva e' continua e si aggiorna a ogni barra.
+//
+//     PERCHE' E' LEGITTIMO, E NON UN ABBELLIMENTO. La banda dipende da media e
+//     deviazione standard dei LIVELLI di prezzo sulla finestra. Sono entrambe
+//     proprieta' della distribuzione del prezzo in quell'intervallo, non del
+//     percorso seguito per attraversarlo: campionare piu' fitto non le cambia,
+//     le stima meglio. Il modo B usa 60 volte piu' osservazioni per misurare la
+//     stessa quantita'.
+//     (Attenzione: per l'RSI questa stessa operazione NON e' neutra, perche'
+//     l'RSI dipende dalla lunghezza del percorso, che cresce con la frequenza
+//     di campionamento. Le Bollinger no.)
+//
+//     Non e' identica alla banda nativa: la 5m usa 20 chiusure prese ogni 5
+//     minuti, il modo B ne usa 1200. Il centro coincide quasi sempre, la
+//     larghezza puo' differire perche' 20 campioni sono una stima rumorosa
+//     della stessa dispersione. Se ti serve la banda LETTERALE, usa il modo A.
+//
+//  REPAINT. Nel modo A la banda dell'ultima candela HTF in formazione si
+//  muove finche' quella candela non chiude: e' cio' che fa davvero, non un
+//  errore. L'interruttore "solo candele chiuse" la congela al valore
+//  dell'ultima candela completata, al prezzo di un ritardo di k barre.
+//  Il modo B non ha questo problema: e' calcolato sulle barre del grafico.
+//  Il SEGNALE del gruppo 4 e' immune a entrambe le cose: usa sempre e comunque
+//  la candela HTF chiusa.
+// =============================================================================
+
+indicator("MTF Bollinger sul grafico", shorttitle="MTF-BB", overlay=true, max_bars_back=5000, max_labels_count=500)
+
+// ------------------------------------------------------------------- MOTORE --
+var string gA = "1 · Bande"
+srcMode = input.string("Close", "Sorgente", options=["Close","HLC3"], group=gA)
+mode    = input.string("B · Continuo (finestra equivalente)", "Modo di calcolo",
+     options=["A · Nativo (a gradini)","B · Continuo (finestra equivalente)"], group=gA,
+     tooltip="A: la banda letterale del timeframe superiore, presa dall'ultima candela chiusa. Sul grafico veloce e' una scala che salta a ogni chiusura di quella candela.\n\nB: stessa finestra temporale, calcolata sulle candele del grafico. Curva continua, aggiornata a ogni barra, stessa quantita' statistica misurata con molti piu' dati.\n\nLa differenza fra le due dice quanto la banda nativa sia una stima rumorosa: se coincidono, 20 campioni bastavano; se il modo A e' sistematicamente piu' largo, quella banda sta reagendo al rumore di poche chiusure.\n\nQuesta scelta governa SOLO il disegno: il segnale del gruppo 4 e' sempre nativo.")
+confirm = input.bool(false, "Modo A: solo candele HTF chiuse (niente movimento intra-candela)", group=gA,
+     tooltip="Nel modo A la banda dell'ultima candela in formazione si muove finche' quella candela non chiude. E' il comportamento reale di quella banda, non un difetto.\n\nAcceso, la banda viene congelata all'ultima candela COMPLETATA: nessun movimento, ma un ritardo pari a una intera candela del timeframe della sezione.\n\nIrrilevante nel modo B, e irrilevante per il segnale, che usa comunque la candela chiusa.")
+devK    = input.float(2.0, "Deviazioni standard", minval=0.5, maxval=5.0, step=0.1, group=gA)
+
+// ---------------------------------------------------------------- SEZIONI ----
+//  Di default e' attiva solo la prima: sovrapporre piu' coppie di bande rende
+//  il grafico illeggibile molto in fretta. Le altre restano pronte all'uso.
+var string gB = "2 · Sezioni"
+use1 = input.bool(true,  "S1", inline="s1", group=gB)
+tf1  = input.timeframe("5", "", inline="s1", group=gB)
+len1 = input.int(20, "Len", minval=3, maxval=500, inline="s1", group=gB)
+c1   = input.color(color.new(#42a5f5, 0), "", inline="s1", group=gB)
+f1   = input.color(color.new(#42a5f5, 93), "riemp.", inline="s1", group=gB)
+
+use2 = input.bool(false, "S2", inline="s2", group=gB)
+tf2  = input.timeframe("15", "", inline="s2", group=gB)
+len2 = input.int(20, "Len", minval=3, maxval=500, inline="s2", group=gB)
+c2   = input.color(color.new(#7e57c2, 0), "", inline="s2", group=gB)
+f2   = input.color(color.new(#7e57c2, 93), "riemp.", inline="s2", group=gB)
+
+use3 = input.bool(false, "S3", inline="s3", group=gB)
+tf3  = input.timeframe("60", "", inline="s3", group=gB)
+len3 = input.int(20, "Len", minval=3, maxval=500, inline="s3", group=gB)
+c3   = input.color(color.new(#ffa726, 0), "", inline="s3", group=gB)
+f3   = input.color(color.new(#ffa726, 93), "riemp.", inline="s3", group=gB)
+
+// ----------------------------------------------------------------- GRAFICA ---
+var string gD = "3 · Grafica"
+shBasis = input.bool(true, "Disegna la media", group=gD)
+shFill  = input.bool(false, "Riempimento fra le bande", group=gD,
+     tooltip="Il colore e la trasparenza del riempimento si impostano nel selettore accanto a ogni sezione, non qui: cosi' ogni banda puo' avere la propria sfumatura, indipendente dal colore della linea.")
+lw      = input.int(1, "Spessore linea", minval=1, maxval=4, group=gD)
+shTags  = input.bool(true, "Etichetta del timeframe a destra", group=gD)
+tagOff  = input.int(3, "   distanza (barre)", minval=1, maxval=50, group=gD)
+shTab   = input.bool(true, "Tabellina", group=gD)
+txtSz   = input.string("Piccolo", "Dimensione testo", options=["Minimo","Piccolo","Normale","Grande"], group=gD)
+
+// ------------------------------------- SEGNALE SULLA CHIUSURA OLTRE LA MEDIA -
+var string gE = "4 · Segnale: chiusura HTF oltre la media"
+sigOn   = input.bool(false, "Attiva", group=gE,
+     tooltip="Emette un segnale quando una candela del timeframe scelto CHIUDE oltre la propria media di Bollinger.\n\nIl confronto e' fatto dentro il contesto di quel timeframe, fra la sua chiusura e la sua media, e usa sempre la candela CHIUSA: niente repaint, ma il marker compare sulla prima barra del grafico DOPO quella chiusura. Su grafico 5s con sezione 5m sono fino a 5 minuti di ritardo, ed e' irriducibile: prima che la candela chiuda, 'ha chiuso oltre la media' non e' un fatto.\n\nPOLARITA': chiudere sopra la media e' CONTINUAZIONE, non reversione. E' la polarita' opposta a un motore a z-score costruito sugli estremi: usarli insieme senza saperlo significa avere due sistemi che si contraddicono.")
+sigRef  = input.string("S1", "   sezione di riferimento", options=["S1","S2","S3"], group=gE,
+     tooltip="Quale sezione fornisce timeframe, lunghezza e media del confronto. Funziona anche se quella sezione e' disattivata nel gruppo 2: il calcolo viene fatto comunque.")
+sigEvt  = input.string("Cambio di lato (incrocio)", "   quando",
+     options=["Cambio di lato (incrocio)","Ogni candela chiusa"], group=gE,
+     tooltip="CAMBIO DI LATO (default): solo la PRIMA chiusura oltre la media dopo una serie di chiusure dall'altra parte. E' un evento.\n\nOGNI CANDELA CHIUSA: un segnale per ogni candela che chiude oltre la media. In un trend la chiusura resta dallo stesso lato per decine di candele, quindi ottieni decine di segnali che descrivono un solo movimento. Serve a contare quanto tempo il prezzo passa da un lato, non a operare.")
+sigDist = input.float(0.0, "   distanza minima dalla media (%B)", minval=0.0, maxval=50.0, step=1.0, group=gE,
+     tooltip="Quanto la chiusura deve essere oltre la media, misurata in punti di %B (0 = banda inferiore, 50 = media, 100 = banda superiore).\n\n0 = basta il segno: qualunque chiusura oltre la media conta, comprese quelle a un tick di distanza, che sono rumore e si ribaltano alla candela dopo.\n\n10 = la chiusura deve stare oltre il 60%B (o sotto il 40%B), cioe' aver percorso almeno un quinto della semibanda. Meno segnali, ognuno con una separazione reale dalla media.")
+sigBas  = input.bool(true, "   disegna la media NATIVA della sezione scelta", group=gE,
+     tooltip="In modo B la banda disegnata NON e' quella nativa: e' calcolata sulle barre del grafico. Il segnale invece confronta sempre la chiusura nativa con la media nativa, quindi senza questa linea vedresti il marker scattare rispetto a una media che non e' quella a schermo.\n\nLa linea e' a gradini per costruzione: e' la media dell'ultima candela HTF chiusa, che si aggiorna una volta per candela. Quel gradino e' esattamente il valore contro cui il confronto viene fatto.")
+cSigUp  = input.color(color.new(#1B5E20, 0), "sopra la media", inline="sg", group=gE)
+cSigDn  = input.color(color.new(#ef5350, 0), "sotto",          inline="sg", group=gE)
+cBasN   = input.color(color.new(#26a69a, 20), "media nativa",  inline="sg", group=gE)
+
+// ================================================================== CALCOLO ===
+f_src() => srcMode == "Close" ? close : hlc3
+
+// Eseguita DENTRO il contesto del timeframe richiesto.
+//  Restituisce due gruppi di valori con regole di shift DIVERSE, e la
+//  distinzione e' il punto:
+//    - media e deviazione per il DISEGNO, che seguono l'interruttore 'confirm'
+//    - chiusura, lato e %B della candela CHIUSA per il SEGNALE, sempre con
+//      shift di 1, qualunque cosa dicano gli interruttori del disegno
+//  Il tempo della candela chiusa serve a riconoscere sul grafico l'istante in
+//  cui una nuova candela HTF si e' chiusa.
+f_htf(simple int len, simple bool shift) =>
+    s  = f_src()
+    ba = ta.sma(s, len)
+    sd = ta.stdev(s, len)
+    up = ba + devK * sd
+    dn = ba - devK * sd
+    sideR = s > ba ? 1 : s < ba ? -1 : 0
+    pbR   = up > dn ? 100.0 * (s - dn) / (up - dn) : 50.0
+    [shift ? ba[1] : ba, shift ? sd[1] : sd, sideR[1], pbR[1], ba[1], s[1], time[1]]
+
+chartSec = timeframe.in_seconds()
+sc1 = timeframe.in_seconds(tf1)
+sc2 = timeframe.in_seconds(tf2)
+sc3 = timeframe.in_seconds(tf3)
+
+// k = quante barre del grafico entrano in una barra della sezione
+k1 = int(math.max(1, math.round(sc1 / float(chartSec))))
+k2 = int(math.max(1, math.round(sc2 / float(chartSec))))
+k3 = int(math.max(1, math.round(sc3 / float(chartSec))))
+
+// finestra equivalente del modo B, in barre del grafico
+e1 = int(math.min(4000, len1 * k1))
+e2 = int(math.min(4000, len2 * k2))
+e3 = int(math.min(4000, len3 * k3))
+
+modeA = mode == "A · Nativo (a gradini)"
+shf   = confirm
+
+[hb1, hs1, sd1s, pb1n, bb1n, cl1n, tm1n] = request.security(syminfo.tickerid, tf1, f_htf(len1, shf), lookahead = barmerge.lookahead_off)
+[hb2, hs2, sd2s, pb2n, bb2n, cl2n, tm2n] = request.security(syminfo.tickerid, tf2, f_htf(len2, shf), lookahead = barmerge.lookahead_off)
+[hb3, hs3, sd3s, pb3n, bb3n, cl3n, tm3n] = request.security(syminfo.tickerid, tf3, f_htf(len3, shf), lookahead = barmerge.lookahead_off)
+
+srcC = f_src()
+cb1 = ta.sma(srcC, e1)
+cs1 = ta.stdev(srcC, e1)
+cb2 = ta.sma(srcC, e2)
+cs2 = ta.stdev(srcC, e2)
+cb3 = ta.sma(srcC, e3)
+cs3 = ta.stdev(srcC, e3)
+
+ba1 = modeA ? hb1 : cb1
+sd1 = modeA ? hs1 : cs1
+ba2 = modeA ? hb2 : cb2
+sd2 = modeA ? hs2 : cs2
+ba3 = modeA ? hb3 : cb3
+sd3 = modeA ? hs3 : cs3
+
+up1 = ba1 + devK * sd1
+dn1 = ba1 - devK * sd1
+up2 = ba2 + devK * sd2
+dn2 = ba2 - devK * sd2
+up3 = ba3 + devK * sd3
+dn3 = ba3 - devK * sd3
+
+// posizione del prezzo dentro le bande: 100 = superiore, 50 = media, 0 = inferiore
+f_pb(float p, float u, float d) => u > d ? 100.0 * (p - d) / (u - d) : 50.0
+pb1 = f_pb(close, up1, dn1)
+pb2 = f_pb(close, up2, dn2)
+pb3 = f_pb(close, up3, dn3)
+
+// larghezza in % della media: distingue il tocco in compressione da quello reale
+f_bw(float u, float d, float b) => b != 0 ? 100.0 * (u - d) / b : 0.0
+bw1 = f_bw(up1, dn1, ba1)
+bw2 = f_bw(up2, dn2, ba2)
+bw3 = f_bw(up3, dn3, ba3)
+
+// =================================================================== SEGNALE ==
+//  Tutto quanto segue lavora su valori gia' calcolati nel contesto HTF e gia'
+//  riferiti alla candela CHIUSA. Sul grafico resta solo da riconoscere QUANDO
+//  quel valore cambia, cioe' quando una nuova candela HTF si e' chiusa.
+sgSide = sigRef == "S2" ? sd2s : sigRef == "S3" ? sd3s : sd1s
+sgPb   = sigRef == "S2" ? pb2n : sigRef == "S3" ? pb3n : pb1n
+sgBas  = sigRef == "S2" ? bb2n : sigRef == "S3" ? bb3n : bb1n
+sgCls  = sigRef == "S2" ? cl2n : sigRef == "S3" ? cl3n : cl1n
+sgTm   = sigRef == "S2" ? tm2n : sigRef == "S3" ? tm3n : tm1n
+sgTf   = sigRef == "S2" ? tf2  : sigRef == "S3" ? tf3  : tf1
+sgSec  = sigRef == "S2" ? sc2  : sigRef == "S3" ? sc3  : sc1
+sgK    = sigRef == "S2" ? k2   : sigRef == "S3" ? k3   : k1
+
+// una nuova candela HTF si e' chiusa: il tempo della candela chiusa e' cambiato
+sgNew  = not na(sgTm) and sgTm != nz(sgTm[1], sgTm)
+// il lato e' cambiato rispetto alla candela chiusa precedente
+sgChg  = not na(sgSide) and sgSide != nz(sgSide[1], sgSide)
+sgFar  = sigDist <= 0.0 or (not na(sgPb) and math.abs(sgPb - 50.0) >= sigDist)
+sgCrs  = sigEvt == "Cambio di lato (incrocio)"
+
+sigUp = sigOn and sgFar and sgSide ==  1 and (sgCrs ? sgChg : sgNew)
+sigDn = sigOn and sgFar and sgSide == -1 and (sgCrs ? sgChg : sgNew)
+
+// ==================================================================== PLOT ====
+pu1 = plot(use1 ? up1 : na, "S1 sup", color = color.new(c1, 0),  linewidth = lw)
+pd1 = plot(use1 ? dn1 : na, "S1 inf", color = color.new(c1, 0),  linewidth = lw)
+pu2 = plot(use2 ? up2 : na, "S2 sup", color = color.new(c2, 0),  linewidth = lw)
+pd2 = plot(use2 ? dn2 : na, "S2 inf", color = color.new(c2, 0),  linewidth = lw)
+pu3 = plot(use3 ? up3 : na, "S3 sup", color = color.new(c3, 0),  linewidth = lw)
+pd3 = plot(use3 ? dn3 : na, "S3 inf", color = color.new(c3, 0),  linewidth = lw)
+
+plot(use1 and shBasis ? ba1 : na, "S1 media", color = color.new(c1, 45), linewidth = 1)
+plot(use2 and shBasis ? ba2 : na, "S2 media", color = color.new(c2, 45), linewidth = 1)
+plot(use3 and shBasis ? ba3 : na, "S3 media", color = color.new(c3, 45), linewidth = 1)
+
+// media NATIVA della sezione che genera il segnale: e' il livello contro cui
+// il confronto viene fatto davvero. A gradini per costruzione.
+plot(sigOn and sigBas ? sgBas : na, "media nativa (segnale)", color = cBasN, linewidth = 2, style = plot.style_stepline)
+
+fill(pu1, pd1, color = shFill and use1 ? f1 : na, title = "S1")
+fill(pu2, pd2, color = shFill and use2 ? f2 : na, title = "S2")
+fill(pu3, pd3, color = shFill and use3 ? f3 : na, title = "S3")
+
+f_size(string o) => o == "Minimo" ? size.tiny : o == "Piccolo" ? size.small : o == "Normale" ? size.normal : size.large
+sz = f_size(txtSz)
+
+// Etichetta del timeframe in fondo alla banda superiore: con piu' sezioni
+// attive e' l'unico modo di sapere quale banda e' quale.
+f_tag(bool use, string tf, float y, color c) =>
+    var label lb = label.new(bar_index, 0.0, "", style = label.style_none, size = size.tiny, textalign = text.align_left)
+    if barstate.islast
+        label.set_xy(lb, bar_index + tagOff, y)
+        label.set_text(lb, shTags and use and not na(y) ? tf : "")
+        label.set_textcolor(lb, c)
+        label.set_size(lb, sz)
+    lb
+
+f_tag(use1, tf1, up1, c1)
+f_tag(use2, tf2, up2, c2)
+f_tag(use3, tf3, up3, c3)
+
+// ---- marker del segnale ------------------------------------------------------
+//  Il tooltip porta i valori NATIVI del confronto: chiusura, media e %B della
+//  candela HTF che ha generato il segnale. Sono quelli che devi controllare se
+//  il marker ti sembra fuori posto rispetto alla banda disegnata.
+f_sigTip(bool up) =>
+    (up ? "Chiusura SOPRA la media  " : "Chiusura SOTTO la media  ") + sgTf +
+     "\nchiusura " + str.tostring(sgCls, format.mintick) + "   media " + str.tostring(sgBas, format.mintick) +
+     "\n%B " + str.tostring(sgPb, "#.0") + "   (soglia " + str.tostring(sigDist, "#.0") + ")" +
+     "\ncandela chiusa · marker alla prima barra successiva"
+
+if sigUp
+    label.new(bar_index, low, "▲", yloc = yloc.belowbar, style = label.style_none, textcolor = cSigUp, size = sz, textalign = text.align_center, tooltip = f_sigTip(true))
+if sigDn
+    label.new(bar_index, high, "▼", yloc = yloc.abovebar, style = label.style_none, textcolor = cSigDn, size = sz, textalign = text.align_center, tooltip = f_sigTip(false))
+
+// =================================================================== TABELLA ==
+f_v(float v) => na(v) ? "–" : str.tostring(v, "#.0")
+
+f_cnt(bool c) =>
+    var int n = 0
+    if c
+        n += 1
+    n
+nSigUp = f_cnt(sigUp)
+nSigDn = f_cnt(sigDn)
+
+var table t = table.new(position.top_right, 4, 5, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
+
+f_row(int i, bool use, string tf, float sec, float pb, float bw, int eff, color c) =>
+    bad = use and sec < chartSec
+    bg  = not use ? color.new(color.gray, 70) : bad ? color.new(color.orange, 40) : pb >= 100 ? color.new(color.red, 55) : pb <= 0 ? color.new(color.green, 55) : color.new(color.gray, 82)
+    // nel modo B mostra anche su quante barre del grafico e' calcolata la banda
+    lbl = use ? (bad ? "⚠ " + tf : tf + (modeA ? "" : " · " + str.tostring(eff) + "b")) : "off"
+    table.cell(t, 0, i, "S" + str.tostring(i) + " " + lbl, text_size = sz, text_color = use ? c : color.gray, bgcolor = bg)
+    table.cell(t, 1, i, use ? f_v(pb) + "%B" : "–", text_size = sz, text_color = color.white, bgcolor = bg)
+    table.cell(t, 2, i, use ? str.tostring(bw, "#.00") + "%" : "–", text_size = sz, text_color = color.silver, bgcolor = bg)
+    table.cell(t, 3, i, use ? str.tostring(devK, "#.#") + "σ" : "–", text_size = sz, text_color = color.silver, bgcolor = bg)
+
+if shTab and barstate.islast
+    hb = color.new(color.gray, 65)
+    table.cell(t, 0, 0, modeA ? "A gradini" : "B continuo", text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 1, 0, "pos",   text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 2, 0, "largh", text_size = sz, text_color = color.white, bgcolor = hb)
+    table.cell(t, 3, 0, "dev",   text_size = sz, text_color = color.white, bgcolor = hb)
+    f_row(1, use1, tf1, sc1, pb1, bw1, e1, c1)
+    f_row(2, use2, tf2, sc2, pb2, bw2, e2, c2)
+    f_row(3, use3, tf3, sc3, pb3, bw3, e3, c3)
+
+    // -- riga del segnale: lato della chiusura, %B nativo, conteggi ----------
+    //    'lato' e' lo stato dell'ultima candela CHIUSA, non del prezzo ora
+    sbg  = color.new(color.gray, 82)
+    sTx  = not sigOn ? "off" : "sgn " + sgTf + (sgCrs ? " incr." : " ogni")
+    lTx  = not sigOn or na(sgSide) ? "–" : sgSide > 0 ? "▲ sopra" : sgSide < 0 ? "▼ sotto" : "= media"
+    lCl  = not sigOn or na(sgSide) ? color.gray : sgSide > 0 ? cSigUp : sgSide < 0 ? cSigDn : color.silver
+    table.cell(t, 0, 4, sTx, text_size = sz, text_color = sigOn ? color.white : color.gray, bgcolor = sigOn ? color.new(color.blue, 55) : sbg,
+         tooltip = "Il segnale confronta la CHIUSURA nativa con la media nativa del timeframe scelto, sempre sulla candela chiusa. Il modo A/B governa solo il disegno.\nRitardo strutturale: fino a " + str.tostring(sgK) + " barre del grafico, cioe' una candela di " + sgTf + ".")
+    table.cell(t, 1, 4, lTx, text_size = sz, text_color = lCl, bgcolor = sbg)
+    table.cell(t, 2, 4, not sigOn or na(sgPb) ? "–" : f_v(sgPb) + "%B", text_size = sz, text_color = sgFar ? color.lime : color.orange, bgcolor = sbg)
+    table.cell(t, 3, 4, not sigOn ? "–" : "▲" + str.tostring(nSigUp) + " ▼" + str.tostring(nSigDn), text_size = sz, text_color = color.silver, bgcolor = sbg)
+
+// ==================================================================== ALERT ===
+alertcondition(sigUp, "MTF-BB · chiusura SOPRA la media", "MTF-BB: candela HTF chiusa sopra la media di Bollinger")
+alertcondition(sigDn, "MTF-BB · chiusura SOTTO la media", "MTF-BB: candela HTF chiusa sotto la media di Bollinger")
+
+if sigUp or sigDn
+    alert("MTF-BB " + (sigUp ? "SOPRA" : "SOTTO") + " la media · " + sgTf + " " + syminfo.ticker +
+         " | chiusura " + str.tostring(sgCls, format.mintick) + " media " + str.tostring(sgBas, format.mintick) +
+         " | %B " + str.tostring(sgPb, "#.0") + " | prezzo ora " + str.tostring(close, format.mintick),
+         alert.freq_once_per_bar_close)
