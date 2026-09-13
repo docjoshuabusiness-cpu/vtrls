@@ -1,0 +1,147 @@
+//@version=5
+// =====================================================================
+//  Liquidity Sweep Reversal [MTF]
+//  Pattern: la candela segnale spazza il minimo/massimo delle N candele
+//  precedenti e CHIUDE di rientro oltre un riferimento della candela
+//  precedente (open / close / estremo della finestra).
+//    BUY  -> buca il minimo, chiude sopra il riferimento
+//    SELL -> buca il massimo, chiude sotto il riferimento
+//  Ogni condizione di chiusura e' attivabile singolarmente; le attive si
+//  combinano in ANY (basta una) o ALL (tutte).
+//
+//  MULTI-TIMEFRAME: il pattern si cerca sul TF scelto in input e il
+//  segnale compare sul grafico corrente, in overlay (nessuna subfinestra).
+//  NON RIPINGE: si valutano solo barre chiuse.
+// =====================================================================
+indicator("Liquidity Sweep Reversal [MTF]", overlay = true,
+          max_lines_count = 500, max_labels_count = 500)
+
+// ------------------------------ PATTERN ------------------------------
+g_pat = "PATTERN"
+tfIn     = input.timeframe("", "TF del pattern (vuoto = TF del grafico)", group = g_pat)
+lookback = input.int(1, "N candele della finestra spazzata", minval = 1, maxval = 50, group = g_pat)
+backIn   = input.bool(true, "La chiusura deve rientrare oltre il livello spazzato", group = g_pat)
+
+// ------------------- CONDIZIONI DI CHIUSURA (on/off) -----------------
+g_cond = "CONDIZIONI DI CHIUSURA"
+usePrevOpen    = input.bool(true,  "BUY: close > OPEN prec.   | SELL: close < OPEN prec.", group = g_cond)
+usePrevClose   = input.bool(false, "BUY: close > CLOSE prec.  | SELL: close < CLOSE prec.", group = g_cond)
+usePrevExtreme = input.bool(false, "BUY: close > HIGH fin.    | SELL: close < LOW fin.", group = g_cond)
+condLogic      = input.string("ANY", "Combinazione condizioni attive", options = ["ANY", "ALL"], group = g_cond)
+
+// ------------------------- FILTRI OPZIONALI --------------------------
+g_flt = "FILTRI OPZIONALI"
+bodyDir     = input.bool(true, "Candela segnale rialzista (buy) / ribassista (sell)", group = g_flt)
+minSweepATR = input.float(0.0, "Penetrazione minima oltre il livello (in ATR)", minval = 0, step = 0.05, group = g_flt)
+minClosePos = input.float(0.0, "Chiusura nel top/bottom X% del range candela", minval = 0, maxval = 100, step = 5, group = g_flt)
+atrLen      = input.int(14, "Periodo ATR", minval = 1, group = g_flt)
+
+// --------------------------- VISUALIZZAZIONE -------------------------
+g_vis = "VISUALIZZAZIONE"
+showLevel = input.bool(true, "Disegna il livello spazzato", group = g_vis)
+lvlBars   = input.int(6, "Lunghezza del livello (barre)", minval = 1, maxval = 100, group = g_vis)
+buyCol    = input.color(#2196F3, "Colore BUY",  group = g_vis)
+sellCol   = input.color(#F44336, "Colore SELL", group = g_vis)
+
+// =====================================================================
+//  Rilevazione del pattern (eseguita nel contesto del TF richiesto)
+//  ritorna: sig (+1 buy / -1 sell / 0), livello spazzato, atr
+// =====================================================================
+f_detect() =>
+    loW  = ta.lowest(low, lookback)[1]      // minimo delle N candele precedenti
+    hiW  = ta.highest(high, lookback)[1]    // massimo delle N candele precedenti
+    po   = open[1]                          // open candela immediatamente precedente
+    pc   = close[1]                         // close candela immediatamente precedente
+    rng  = high - low
+    atrv = ta.atr(atrLen)
+
+    minPen = minSweepATR > 0 and not na(atrv) ? minSweepATR * atrv : 0.0
+    posLim = minClosePos / 100.0
+
+    nAct = (usePrevOpen ? 1 : 0) + (usePrevClose ? 1 : 0) + (usePrevExtreme ? 1 : 0)
+
+    // ----------------------------- BUY -------------------------------
+    nOkB  = (usePrevOpen and close > po ? 1 : 0) + (usePrevClose and close > pc ? 1 : 0) + (usePrevExtreme and close > hiW ? 1 : 0)
+    condB = condLogic == "ALL" ? (nAct > 0 and nOkB == nAct) : nOkB > 0
+    okBuy = rng > 0 and (loW - low) > minPen
+    okBuy := okBuy and (not backIn  or close > loW)
+    okBuy := okBuy and (not bodyDir or close > open)
+    okBuy := okBuy and (posLim <= 0 or (close - low) / rng >= posLim)
+    okBuy := okBuy and condB
+
+    // ----------------------------- SELL ------------------------------
+    nOkS   = (usePrevOpen and close < po ? 1 : 0) + (usePrevClose and close < pc ? 1 : 0) + (usePrevExtreme and close < loW ? 1 : 0)
+    condS  = condLogic == "ALL" ? (nAct > 0 and nOkS == nAct) : nOkS > 0
+    okSell = rng > 0 and (high - hiW) > minPen
+    okSell := okSell and (not backIn  or close < hiW)
+    okSell := okSell and (not bodyDir or close < open)
+    okSell := okSell and (posLim <= 0 or (high - close) / rng >= posLim)
+    okSell := okSell and condS
+
+    // candela che spazza entrambi i lati e soddisfa entrambe le logiche:
+    // segnale ambiguo, scartato
+    sig = okBuy and not okSell ? 1 : okSell and not okBuy ? -1 : 0
+    lvl = sig == 1 ? loW : sig == -1 ? hiW : na
+    [sig, lvl, atrv]
+
+// Pacchetto sfasato di 1 barra: si legge SOLO la barra chiusa -> no repaint
+f_pack() =>
+    [s, l, a] = f_detect()
+    [s[1], l[1], a[1], time[1]]
+
+// =====================================================================
+//  Lettura locale + lettura MTF
+// =====================================================================
+tfUse  = tfIn == "" ? timeframe.period : tfIn
+isSame = tfIn == "" or timeframe.in_seconds(tfUse) == timeframe.in_seconds(timeframe.period)
+
+[sigL, lvlL, atrL] = f_detect()
+[sH, lH, aH, tH]   = request.security(syminfo.tickerid, tfUse, f_pack(),
+                                      lookahead = barmerge.lookahead_off)
+
+// TF del grafico  -> segnale della barra appena chiusa (freccia spostata su quella barra)
+// TF superiore    -> valore della barra HTF chiusa, sulla prima candela che lo conferma
+sig  = isSame ? sigL[1] : sH
+lvl  = isSame ? lvlL[1] : lH
+atrv = isSame ? atrL[1] : aH
+isNew = isSame ? true : tH != tH[1]
+
+buySig  = sig ==  1 and isNew
+sellSig = sig == -1 and isNew
+
+// =====================================================================
+//  Output sul GRAFICO (overlay, nessuna subfinestra)
+// =====================================================================
+// TF del grafico: la freccia va sulla candela segnale stessa (offset -1)
+plotshape(isSame and buySig,  title = "BUY",  style = shape.triangleup,
+          location = location.belowbar, color = buyCol,  size = size.small, offset = -1)
+plotshape(isSame and sellSig, title = "SELL", style = shape.triangledown,
+          location = location.abovebar, color = sellCol, size = size.small, offset = -1)
+
+// TF superiore: la freccia va sulla prima candela del grafico che conferma
+plotshape(not isSame and buySig,  title = "BUY MTF",  style = shape.triangleup,
+          location = location.belowbar, color = buyCol,  size = size.small)
+plotshape(not isSame and sellSig, title = "SELL MTF", style = shape.triangledown,
+          location = location.abovebar, color = sellCol, size = size.small)
+
+// Livello spazzato: riferimento diretto per lo stop loss
+if showLevel and (buySig or sellSig) and not na(lvl)
+    line.new(x1 = bar_index - (isSame ? 1 : 0), y1 = lvl,
+             x2 = bar_index + lvlBars,          y2 = lvl,
+             xloc = xloc.bar_index, extend = extend.none,
+             color = buySig ? buyCol : sellCol, style = line.style_dotted, width = 1)
+
+// Serie esposte per strategie/alert esterni (invisibili, restano in overlay)
+plot(sig, title = "Signal",     display = display.data_window)
+plot(lvl, title = "SweptLevel", display = display.data_window)
+
+// =====================================================================
+//  Alert
+// =====================================================================
+if buySig
+    alert("SWEEP BUY " + syminfo.ticker + " " + tfUse + " | livello " + str.tostring(lvl, format.mintick), alert.freq_once_per_bar)
+if sellSig
+    alert("SWEEP SELL " + syminfo.ticker + " " + tfUse + " | livello " + str.tostring(lvl, format.mintick), alert.freq_once_per_bar)
+
+alertcondition(buySig,  title = "Sweep BUY",  message = "Sweep Reversal BUY")
+alertcondition(sellSig, title = "Sweep SELL", message = "Sweep Reversal SELL")
