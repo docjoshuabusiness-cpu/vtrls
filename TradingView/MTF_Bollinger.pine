@@ -1,6 +1,6 @@
 //@version=6
 // =============================================================================
-//  MTF Bollinger sul grafico  v1.1
+//  MTF Bollinger sul grafico  v1.2
 //  ---------------------------------------------------------------------------
 //  Bande di Bollinger di uno o piu' timeframe SUPERIORI, disegnate direttamente
 //  sulle candele del grafico che stai guardando. Serve a vedere come la banda
@@ -24,11 +24,23 @@
 //     esiste l'interruttore che disegna la media NATIVA della sezione scelta.
 //     Quello che spara deve essere visibile.
 //
-//  2) NESSUN REPAINT, E UN RITARDO DICHIARATO. Il segnale compare sulla prima
-//     barra del grafico dopo la chiusura della candela HTF. Non puo' essere
-//     piu' tempestivo di cosi': prima che quella candela chiuda, "ha chiuso
-//     oltre la media" non e' un fatto. Su grafico 5s con sezione 5m il marker
-//     cade fino a 5 minuti dopo il punto in cui il prezzo ha attraversato.
+//  2) NESSUN REPAINT, E UN SOLO RITARDO, QUELLO IRRIDUCIBILE. Il segnale
+//     compare sulla PRIMA barra del grafico dopo la chiusura della candela HTF.
+//     Prima di quel momento "ha chiuso oltre la media" non e' un fatto, quindi
+//     quel ritardo non si puo' togliere. Il marker cade quindi fino a una
+//     candela HTF dopo il punto in cui il prezzo ha attraversato la linea
+//     dentro la candela: e' la differenza fra un attraversamento e una
+//     chiusura, non un difetto.
+//
+//     v1.2 — CORREZIONE DI UN RITARDO CHE INVECE ERA UN DIFETTO. La v1.1
+//     leggeva il timeframe superiore con lookahead_off e offset [1]: quella
+//     coppia restituisce la candela PRECEDENTE all'ultima chiusa, cioe' una
+//     candela HTF intera di ritardo in piu' (su 1m con grafico 15s, quattro
+//     barre). Ora la lettura del segnale usa lookahead_on con offset [1], che
+//     e' la coppia canonica: si legge la candela j-1 mentre e' in corso la j,
+//     cioe' un valore gia' definitivo, identico su storico e in tempo reale.
+//     Nessun dato futuro. Il marker arriva una candela HTF prima di quanto
+//     arrivasse nella v1.1.
 //
 //  3) INCROCIO oppure OGNI CANDELA. In un trend la chiusura resta dallo stesso
 //     lato della media per decine di candele: "ogni candela chiusa" produce
@@ -140,6 +152,8 @@ sigDist = input.float(0.0, "   distanza minima dalla media (%B)", minval=0.0, ma
      tooltip="Quanto la chiusura deve essere oltre la media, misurata in punti di %B (0 = banda inferiore, 50 = media, 100 = banda superiore).\n\n0 = basta il segno: qualunque chiusura oltre la media conta, comprese quelle a un tick di distanza, che sono rumore e si ribaltano alla candela dopo.\n\n10 = la chiusura deve stare oltre il 60%B (o sotto il 40%B), cioe' aver percorso almeno un quinto della semibanda. Meno segnali, ognuno con una separazione reale dalla media.")
 sigBas  = input.bool(true, "   disegna la media NATIVA della sezione scelta", group=gE,
      tooltip="In modo B la banda disegnata NON e' quella nativa: e' calcolata sulle barre del grafico. Il segnale invece confronta sempre la chiusura nativa con la media nativa, quindi senza questa linea vedresti il marker scattare rispetto a una media che non e' quella a schermo.\n\nLa linea e' a gradini per costruzione: e' la media dell'ultima candela HTF chiusa, che si aggiorna una volta per candela. Quel gradino e' esattamente il valore contro cui il confronto viene fatto.")
+sigBack = input.bool(false, "   ancora il marker alla candela HTF che ha chiuso", group=gE,
+     tooltip="SPENTO (default): il marker sta sulla barra in cui l'informazione diventa disponibile, cioe' la prima dopo la chiusura della candela HTF. E' il punto in cui avresti potuto agire.\n\nACCESO: il marker viene disegnato una barra indietro, sulla barra la cui chiusura COINCIDE con la chiusura della candela HTF. Il grafico si legge meglio, perche' il segno cade sulla candela che ha davvero chiuso oltre la media, ma attenzione: quel punto NON era operabile in tempo reale. Non e' repaint (il disegno avviene sempre dopo), e' un'etichetta messa nel passato.\n\nUsalo per studiare, non per misurare l'entrata.")
 cSigUp  = input.color(color.new(#1B5E20, 0), "sopra la media", inline="sg", group=gE)
 cSigDn  = input.color(color.new(#ef5350, 0), "sotto",          inline="sg", group=gE)
 cBasN   = input.color(color.new(#26a69a, 20), "media nativa",  inline="sg", group=gE)
@@ -161,9 +175,33 @@ f_htf(simple int len, simple bool shift) =>
     sd = ta.stdev(s, len)
     up = ba + devK * sd
     dn = ba - devK * sd
+    [shift ? ba[1] : ba, shift ? sd[1] : sd]
+
+// Funzione del SEGNALE. Restituisce SOLO valori della candela HTF gia' CHIUSA
+// (ogni espressione ha offset [1]), ed e' chiamata con lookahead_on.
+//
+// PERCHE' lookahead_on E NON off. Non e' una scorciatoia, e' l'unica coppia
+// che da' il valore giusto al momento giusto:
+//   lookahead_off allinea il risultato di una candela HTF alla PRIMA barra del
+//   grafico successiva alla sua chiusura. Aggiungendo [1] dentro, si ottiene la
+//   candela ANCORA PRECEDENTE: una candela HTF intera di ritardo in piu', che
+//   su 1m con grafico 15s sono quattro barre buttate.
+//   lookahead_on allinea il risultato della candela j alle barre dentro la
+//   candela j; con [1] si legge la candela j-1, che a quel punto e' CHIUSA e
+//   definitiva. Nessun dato futuro: e' il valore finale di una candela gia'
+//   terminata, identico su storico e in tempo reale.
+// E' la coppia canonica per leggere un timeframe superiore senza repaint e
+// senza ritardo inventato. lookahead_on SENZA l'offset [1] sarebbe invece una
+// lettura del futuro, ed e' il motivo per cui ha cattiva fama.
+f_sig(simple int len) =>
+    s  = f_src()
+    ba = ta.sma(s, len)
+    sd = ta.stdev(s, len)
+    up = ba + devK * sd
+    dn = ba - devK * sd
     sideR = s > ba ? 1 : s < ba ? -1 : 0
     pbR   = up > dn ? 100.0 * (s - dn) / (up - dn) : 50.0
-    [shift ? ba[1] : ba, shift ? sd[1] : sd, sideR[1], pbR[1], ba[1], s[1], time[1]]
+    [sideR[1], pbR[1], ba[1], s[1], time[1]]
 
 chartSec = timeframe.in_seconds()
 sc1 = timeframe.in_seconds(tf1)
@@ -183,9 +221,9 @@ e3 = int(math.min(4000, len3 * k3))
 modeA = mode == "A · Nativo (a gradini)"
 shf   = confirm
 
-[hb1, hs1, sd1s, pb1n, bb1n, cl1n, tm1n] = request.security(syminfo.tickerid, tf1, f_htf(len1, shf), lookahead = barmerge.lookahead_off)
-[hb2, hs2, sd2s, pb2n, bb2n, cl2n, tm2n] = request.security(syminfo.tickerid, tf2, f_htf(len2, shf), lookahead = barmerge.lookahead_off)
-[hb3, hs3, sd3s, pb3n, bb3n, cl3n, tm3n] = request.security(syminfo.tickerid, tf3, f_htf(len3, shf), lookahead = barmerge.lookahead_off)
+[hb1, hs1] = request.security(syminfo.tickerid, tf1, f_htf(len1, shf), lookahead = barmerge.lookahead_off)
+[hb2, hs2] = request.security(syminfo.tickerid, tf2, f_htf(len2, shf), lookahead = barmerge.lookahead_off)
+[hb3, hs3] = request.security(syminfo.tickerid, tf3, f_htf(len3, shf), lookahead = barmerge.lookahead_off)
 
 srcC = f_src()
 cb1 = ta.sma(srcC, e1)
@@ -225,14 +263,13 @@ bw3 = f_bw(up3, dn3, ba3)
 //  Tutto quanto segue lavora su valori gia' calcolati nel contesto HTF e gia'
 //  riferiti alla candela CHIUSA. Sul grafico resta solo da riconoscere QUANDO
 //  quel valore cambia, cioe' quando una nuova candela HTF si e' chiusa.
-sgSide = sigRef == "S2" ? sd2s : sigRef == "S3" ? sd3s : sd1s
-sgPb   = sigRef == "S2" ? pb2n : sigRef == "S3" ? pb3n : pb1n
-sgBas  = sigRef == "S2" ? bb2n : sigRef == "S3" ? bb3n : bb1n
-sgCls  = sigRef == "S2" ? cl2n : sigRef == "S3" ? cl3n : cl1n
-sgTm   = sigRef == "S2" ? tm2n : sigRef == "S3" ? tm3n : tm1n
+// Timeframe e lunghezza della sezione scelta: restano simple, quindi possono
+// pilotare una request.security dedicata. Una sola chiamata, non tre.
 sgTf   = sigRef == "S2" ? tf2  : sigRef == "S3" ? tf3  : tf1
+sgLen  = sigRef == "S2" ? len2 : sigRef == "S3" ? len3 : len1
 sgSec  = sigRef == "S2" ? sc2  : sigRef == "S3" ? sc3  : sc1
 sgK    = sigRef == "S2" ? k2   : sigRef == "S3" ? k3   : k1
+[sgSide, sgPb, sgBas, sgCls, sgTm] = request.security(syminfo.tickerid, sgTf, f_sig(sgLen), lookahead = barmerge.lookahead_on)
 
 // una nuova candela HTF si e' chiusa: il tempo della candela chiusa e' cambiato
 sgNew  = not na(sgTm) and sgTm != nz(sgTm[1], sgTm)
@@ -290,12 +327,13 @@ f_sigTip(bool up) =>
     (up ? "Chiusura SOPRA la media  " : "Chiusura SOTTO la media  ") + sgTf +
      "\nchiusura " + str.tostring(sgCls, format.mintick) + "   media " + str.tostring(sgBas, format.mintick) +
      "\n%B " + str.tostring(sgPb, "#.0") + "   (soglia " + str.tostring(sigDist, "#.0") + ")" +
-     "\ncandela chiusa · marker alla prima barra successiva"
+     "\ncandela chiusa · marker " + (sigBack ? "sulla barra di chiusura HTF" : "alla prima barra successiva")
 
+sgOff = sigBack ? 1 : 0
 if sigUp
-    label.new(bar_index, low, "▲", yloc = yloc.belowbar, style = label.style_none, textcolor = cSigUp, size = sz, textalign = text.align_center, tooltip = f_sigTip(true))
+    label.new(bar_index - sgOff, low, "▲", yloc = yloc.belowbar, style = label.style_none, textcolor = cSigUp, size = sz, textalign = text.align_center, tooltip = f_sigTip(true))
 if sigDn
-    label.new(bar_index, high, "▼", yloc = yloc.abovebar, style = label.style_none, textcolor = cSigDn, size = sz, textalign = text.align_center, tooltip = f_sigTip(false))
+    label.new(bar_index - sgOff, high, "▼", yloc = yloc.abovebar, style = label.style_none, textcolor = cSigDn, size = sz, textalign = text.align_center, tooltip = f_sigTip(false))
 
 // =================================================================== TABELLA ==
 f_v(float v) => na(v) ? "–" : str.tostring(v, "#.0")
