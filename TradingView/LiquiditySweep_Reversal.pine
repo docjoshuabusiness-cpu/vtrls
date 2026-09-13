@@ -16,9 +16,34 @@
 indicator("Liquidity Sweep Reversal [MTF]", overlay = true,
           max_lines_count = 500, max_labels_count = 500)
 
+// ================ TIMEFRAME DA OSSERVARE (in cima a tutto) ===========
+// Tendina esplicita: e' il TF su cui viene CERCATO il pattern.
+// Il segnale esce comunque sul grafico che stai guardando.
+tfChoice = input.string("Grafico corrente", "TIMEFRAME DA OSSERVARE",
+     options = ["Grafico corrente", "1 minuto", "3 minuti", "5 minuti", "15 minuti",
+                "30 minuti", "1 ora", "2 ore", "4 ore", "Giornaliero",
+                "Settimanale", "Mensile"])
+tfCustom = input.timeframe("", "TF personalizzato (se valorizzato, ha la precedenza)")
+
+f_tf(c) =>
+    switch c
+        "1 minuto"    => "1"
+        "3 minuti"    => "3"
+        "5 minuti"    => "5"
+        "15 minuti"   => "15"
+        "30 minuti"   => "30"
+        "1 ora"       => "60"
+        "2 ore"       => "120"
+        "4 ore"       => "240"
+        "Giornaliero" => "D"
+        "Settimanale" => "W"
+        "Mensile"     => "M"
+        => timeframe.period
+
+tfIn = tfCustom != "" ? tfCustom : f_tf(tfChoice)
+
 // ------------------------------ PATTERN ------------------------------
 g_pat = "PATTERN"
-tfIn     = input.timeframe("", "TF del pattern (vuoto = TF del grafico)", group = g_pat)
 lookback = input.int(1, "N candele della finestra spazzata", minval = 1, maxval = 50, group = g_pat)
 backIn   = input.bool(true, "La chiusura deve rientrare oltre il livello spazzato", group = g_pat)
 
@@ -92,8 +117,8 @@ f_pack() =>
 // =====================================================================
 //  Lettura locale + lettura MTF
 // =====================================================================
-tfUse  = tfIn == "" ? timeframe.period : tfIn
-isSame = tfIn == "" or timeframe.in_seconds(tfUse) == timeframe.in_seconds(timeframe.period)
+tfUse  = tfIn
+isSame = timeframe.in_seconds(tfUse) == timeframe.in_seconds(timeframe.period)
 
 [sigL, lvlL, atrL] = f_detect()
 [sH, lH, aH, tH]   = request.security(syminfo.tickerid, tfUse, f_pack(),
