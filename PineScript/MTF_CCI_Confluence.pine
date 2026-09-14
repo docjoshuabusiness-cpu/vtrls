@@ -1,0 +1,1235 @@
+//@version=6
+// =============================================================================
+//  MTF CCI Confluence — STALLO / COMPRESSIONE + ESTREMI      v1.0
+//  ---------------------------------------------------------------------------
+//  COSA MISURA, E COSA NON MISURA — leggere prima di usarlo.
+//
+//  CCI = (P - centro) / (0.015 * deviazione media assoluta). Il 21 e' assente,
+//  il 0.015 e' una costante di comodo scelta da Lambert perche' con dati quasi
+//  normali circa il 70-80% delle letture cada dentro +/-100. Non e' una
+//  probabilita', e' una taratura empirica su una distribuzione che i prezzi non
+//  hanno (code spesse, volatilita' a grappoli).
+//
+//  Conseguenza diretta: |CCI| <= 50 NON E' UN EVENTO RARO. Sta dentro quella
+//  banda circa meta' del tempo. Cinque sezioni dentro la banda insieme lo e'
+//  molto meno, ma sono CCI dello STESSO prezzo su finestre diverse: fortemente
+//  collineari. La "conferma di 5 TF" e' in buona parte la stessa conferma
+//  contata cinque volte, e va trattata come tale.
+//
+//  Per questo la banda DA SOLA non e' accumulazione: dice solo che il prezzo e'
+//  vicino alla propria media rispetto alla dispersione recente. L'accumulazione
+//  ha una firma metrica diversa e verificabile: il RANGE si contrae piu' in
+//  fretta di quanto farebbe una passeggiata casuale.
+//        coil = (max - min dell'episodio) / (ATR * sqrt(barre dell'episodio))
+//  Per un random walk questo rapporto sta intorno a 1.3-1.6. Sotto 1.0 la
+//  compressione e' reale, non apparente. Il modulo stallo calcola questo numero
+//  e lo espone: senza, il filtro e' decorazione.
+//
+//  ---------------------------------------------------------------------------
+//  DUE LETTURE, COME RICHIESTO
+//
+//  NATIVA (chiusura candela della sezione): CCI della candela CHIUSA del TF
+//  della sezione. Con S3 su 5m e' (hlc3_5m - sma_5m) / (0.015 * dev_5m),
+//  calcolato una volta per candela e CONGELATO fino alla successiva. Curva a
+//  gradini. Ritardo strutturale fino a una candela intera: e' il prezzo della
+//  stabilita'. E' la lettura giusta per dire "la 5m ha CHIUSO in stallo".
+//
+//  LIVE (barra del grafico): centro e scala dalle candele HTF CHIUSE,
+//  numeratore dal prezzo CORRENTE:
+//        cci_live = (P_ora - centro_htf) / (0.015 * dev_htf)
+//  E' il CCI che quella sezione avrebbe se la sua candela chiudesse adesso.
+//  Nessun dato futuro, nessun repaint dello storico. Reattivo, ma dentro una
+//  candela da 5 minuti entra ed esce dalla banda piu' volte.
+//
+//  Le due letture sono selezionabili SEPARATAMENTE per il modulo stallo, per il
+//  bias e per la pre-condizione: sono domande diverse e meritano risposte
+//  diverse. La scelta globale del gruppo 1 governa le curve del pannello.
+//
+//  ---------------------------------------------------------------------------
+//  ARCHITETTURA (portata dal motore z-score, adattata alle misure CCI)
+//   1  motore CCI: nativo / ricostruzione live / base A-B-C, robusto opzionale
+//   2  cinque sezioni multi-timeframe
+//   3  STALLO: banda +/-X per sezione, K su N, persistenza, coil ratio
+//   4  BREAKOUT: l'evento operativo. Lo stallo e' il contesto, non il segnale
+//   5  ESTREMI: quattro stream indipendenti (+/-100, +/-200) con rientro/tocco
+//   6  bias direzionale di regime
+//   7  pre-condizione di estremo (memoria per sezione)
+//   8  rischio: stop strutturale / bordo dello stallo / MAE p80, filtri
+//   9  grafica e cruscotto
+//
+//  MODULO NON PORTATO: la pin bar in formazione. E' una geometria di
+//  ESAURIMENTO, pensata per entrare contro una spinta. Su un motore di
+//  compressione-rottura chiederebbe la condizione opposta a quella che il
+//  breakout cerca. Al suo posto c'e' l'efficienza di Kaufman alla rottura, che
+//  e' la misura giusta per "sta uscendo davvero".
+//
+//  NOTE OPERATIVE
+//  - Grafico sul TF PIU' PICCOLO che vuoi osservare; tutti i TF delle sezioni
+//    devono essere >= al TF del grafico.
+//  - Il tetto algebrico del CCI e' |CCI| <= 100*n/3 (n = campione): a n=20 e'
+//    667, quindi non vincola mai nulla, al contrario del tetto sqrt(n-1) dello
+//    z-score. La colonna 'cap' resta per confronto ma sara' quasi sempre verde.
+// =============================================================================
+
+indicator("MTF CCI Confluence", shorttitle="MTF-CCI", overlay=false, max_bars_back=5000, max_labels_count=500)
+
+// ------------------------------------------------------------------ MOTORE ---
+var string g1 = "1 · Motore CCI"
+srcMode  = input.string("HLC3", "Sorgente", options=["HLC3","Close","OHLC4"], group=g1,
+     tooltip="HLC3 e' la sorgente canonica del CCI. Close rende la lettura piu' nervosa. OHLC4 e' la piu' liscia e comprime le letture estreme.")
+maMode   = input.string("SMA", "Centro", options=["SMA","EMA"], group=g1,
+     tooltip="SMA = CCI classico.\n\nEMA: il centro diventa esponenziale, la SCALA resta la deviazione media assoluta attorno alla SMA. Non e' un'incoerenza: la scala e' uno stimatore di dispersione e non richiede lo stesso centro. L'alternativa esatta costa un ciclo O(len) per barra per ogni sezione, cioe' un indicatore che va in timeout su grafici a secondi. Lo scarto e' di pochi punti di CCI.")
+robust   = input.bool(false, "Stimatore robusto (mediana / MAD)", group=g1,
+     tooltip="Centro = mediana, scala = MAD.\n\nLa MAD vale 0.6745*sigma su dati normali, la deviazione media assoluta 0.7979*sigma: la scala robusta viene quindi moltiplicata per 1.1829, cosi' le letture restano sulla taratura del CCI classico e +/-100 continua a significare la stessa cosa. Senza quella costante il CCI robusto leggerebbe il 18% piu' alto e ogni soglia andrebbe ritarata.\n\nUtile quando un singolo spike gonfia la dispersione e SOPPRIME il CCI proprio quando servirebbe alto.")
+liveMode = input.bool(true, "Allineamento alla candela del grafico (LIVE)", group=g1,
+     tooltip="ACCESO: centro e scala di OGNI sezione vengono dalle candele HTF chiuse, il numeratore dal prezzo corrente della barra del grafico.\n   cci_live = (P_ora - centro_htf) / (0.015 * dev_htf)\nE' il CCI che quella sezione avrebbe se la sua candela chiudesse adesso. Nessun dato futuro, nessun repaint dello storico.\n\nSPENTO: ogni sezione mostra il valore dell'ultima candela HTF chiusa. Curva a gradini, aggiornamento una volta per candela HTF, segnale fino a k-1 barre in ritardo (k = TF sezione / TF grafico).")
+confirmed= input.bool(true, "Solo barre HTF chiuse (no repaint)", group=g1,
+     tooltip="Prende sempre l'ultima candela HTF CHIUSA per centro e scala. Da lasciare acceso: con il LIVE attivo non costa reattivita', perche' il numeratore e' gia' il prezzo corrente.\n\nGoverna ANCHE le letture native di stallo, bias e pre-condizione: con questo e LIVE entrambi spenti, quelle letture prendono la candela IN FORMAZIONE e ripingono.")
+cBasis   = input.string("A · TF nativo", "Base di calcolo del CCI",
+     options=["A · TF nativo","B · Barre grafico (serie HTF)","C · Barre grafico (orizzonte equivalente)"], group=g1,
+     tooltip="A · TF NATIVO (consigliato)\nOgni sezione usa le candele del PROPRIO timeframe per centro e deviazione. E' l'unica modalita' in cui la sezione 5m misura davvero la distribuzione delle candele da 5 minuti.\n\nB · BARRE GRAFICO (serie HTF)\nCentro e deviazione sulla serie HTF mappata sulle barre del grafico: la serie e' a gradini, il campione effettivo e' len/k, non len.\n\nC · BARRE GRAFICO (orizzonte equivalente)\nI timeframe superiori NON ESISTONO: CCI sulle candele DEL GRAFICO con finestra len*k. Nessun ritardo, nessun contenuto multi-timeframe. Le letture NATIVE (stallo, bias, pre) restano HTF vere anche qui perche' passano da request.security.")
+
+// ------------------------------------------------------------ SEZIONI / TF ---
+var string g2 = "2 · Sezioni (timeframe)"
+use1 = input.bool(true, "S1", inline="s1", group=g2)
+tf1  = input.timeframe("1", "", inline="s1", group=g2)
+len1 = input.int(20, "Len", minval=3, maxval=5000, inline="s1", group=g2)
+cc1c = input.color(color.new(#42a5f5, 0), "", inline="s1", group=g2)
+
+use2 = input.bool(true, "S2", inline="s2", group=g2)
+tf2  = input.timeframe("3", "", inline="s2", group=g2)
+len2 = input.int(20, "Len", minval=3, maxval=5000, inline="s2", group=g2)
+cc2c = input.color(color.new(#7e57c2, 0), "", inline="s2", group=g2)
+
+use3 = input.bool(true, "S3", inline="s3", group=g2)
+tf3  = input.timeframe("5", "", inline="s3", group=g2)
+len3 = input.int(20, "Len", minval=3, maxval=5000, inline="s3", group=g2)
+cc3c = input.color(color.new(#ffa726, 0), "", inline="s3", group=g2)
+
+use4 = input.bool(true, "S4", inline="s4", group=g2)
+tf4  = input.timeframe("15", "", inline="s4", group=g2)
+len4 = input.int(20, "Len", minval=3, maxval=5000, inline="s4", group=g2)
+cc4c = input.color(color.new(#ec407a, 0), "", inline="s4", group=g2)
+
+use5 = input.bool(true, "S5", inline="s5", group=g2)
+tf5  = input.timeframe("30", "", inline="s5", group=g2)
+len5 = input.int(20, "Len", minval=3, maxval=5000, inline="s5", group=g2)
+cc5c = input.color(color.new(#bdbdbd, 0), "", inline="s5", group=g2)
+ccFc = input.color(color.new(#ffffff, 25), "curva del trigger", inline="tfz", group=g2)
+
+// --------------------------------------------------------------- STALLO ------
+var string g3 = "3 · Stallo (prezzo dentro la banda)"
+stOn   = input.bool(true, "Attiva modulo stallo", group=g3,
+     tooltip="Marca il contesto in cui le sezioni spuntate hanno il CCI DENTRO la loro banda: prezzo vicino alla propria media su piu' orizzonti contemporaneamente.\n\nNON e' un segnale operativo ed e' esposto come tale: lo stallo e' il CONTESTO, la rottura (gruppo 4) e' l'evento. Chi entra 'dentro lo stallo' compra un movimento che per definizione non c'e'.")
+stEval = input.string("Nativo (chiusura candela della sezione)", "   lettura",
+     options=["Nativo (chiusura candela della sezione)","Live (barra del grafico)"], group=g3,
+     tooltip="NATIVO: usa il CCI della candela CHIUSA della sezione. 'La 5m ha CHIUSO dentro +/-50'. Un aggiornamento per candela HTF, stato stabile, e' la lettura corretta per un contesto.\n\nLIVE: usa la curva del pannello, numeratore = prezzo corrente. Lo stato entra ed esce dalla banda piu' volte dentro la stessa candela HTF: la persistenza misurata diventa rumore e il conteggio degli episodi si moltiplica.\n\nSe non sai quale scegliere: NATIVO per decidere, LIVE per guardare.")
+stReq  = input.int(0, "   sezioni richieste dentro la banda (0 = tutte le spuntate)", minval=0, maxval=5, group=g3,
+     tooltip="Quante delle sezioni spuntate qui sotto devono essere dentro la loro banda.\n\n0 = tutte. Confrontare K=2,3,4,5 e' il modo per misurare quanto vale davvero ogni TF in piu': se i risultati non cambiano fra K=3 e K=5, le due sezioni in piu' non contengono informazione indipendente e stai solo riducendo il campione.")
+stHold = input.int(1, "   persistenza minima", minval=0, maxval=500, group=g3,
+     tooltip="Da quante unita' la condizione deve reggere perche' lo stallo sia considerato valido. Con 0 basta una barra, e allora qualunque attraversamento della banda conta come 'stallo'.")
+stUnit = input.string("Candele della sezione dominante", "   persistenza misurata in",
+     options=["Candele della sezione dominante","Barre del grafico"], group=g3,
+     tooltip="CANDELE DELLA SEZIONE DOMINANTE (default): l'unita' e' la candela del TF piu' alto fra quelli spuntati. Con S5 su 30m e persistenza 2 sono 60 minuti di stallo, indipendentemente dal TF del grafico.\n\nBARRE DEL GRAFICO: numero assoluto di barre, da riconvertire a mano ogni volta che cambi TF. E' la fonte piu' comune di taratura sbagliata.")
+useCoil= input.bool(true, "   richiedi compressione reale del range (coil)", group=g3,
+     tooltip="LA CONDIZIONE CHE SEPARA L'ACCUMULAZIONE DALLA SEMPLICE VICINANZA ALLA MEDIA.\n\n  coil = (max - min dell'episodio) / (ATR * sqrt(barre dell'episodio))\n\nSotto radice perche' il range di una passeggiata casuale cresce come sqrt(t): il rapporto e' quindi adimensionale e confrontabile fra episodi di durata diversa. Per un random walk sta intorno a 1.3-1.6.\n\n  coil < 1.0  -> il prezzo si e' mosso MENO di quanto il caso gli permetterebbe: compressione vera\n  coil > 1.5  -> non e' compressione, e' un movimento che passa per la media\n\nIl CCI dentro la banda e' compatibile con entrambe: e' un rapporto, e si azzera anche mentre il prezzo corre, se corre insieme alla sua media.")
+coilMax= input.float(1.0, "   coil massimo", minval=0.2, maxval=5.0, step=0.05, group=g3)
+stBg   = input.bool(true, "   sfondo durante lo stallo", group=g3)
+stMark = input.bool(true, "   marca l'inizio di ogni episodio", group=g3)
+
+st1 = input.bool(true, "S1", inline="b1", group=g3)
+bd1 = input.float(50, "banda |CCI|", minval=5, maxval=400, step=5, inline="b1", group=g3)
+st2 = input.bool(true, "S2", inline="b2", group=g3)
+bd2 = input.float(50, "banda |CCI|", minval=5, maxval=400, step=5, inline="b2", group=g3)
+st3 = input.bool(true, "S3", inline="b3", group=g3)
+bd3 = input.float(50, "banda |CCI|", minval=5, maxval=400, step=5, inline="b3", group=g3)
+st4 = input.bool(true, "S4", inline="b4", group=g3)
+bd4 = input.float(50, "banda |CCI|", minval=5, maxval=400, step=5, inline="b4", group=g3)
+st5 = input.bool(true, "S5", inline="b5", group=g3)
+bd5 = input.float(50, "banda |CCI|", minval=5, maxval=400, step=5, inline="b5", group=g3)
+
+// -------------------------------------------------------------- BREAKOUT -----
+var string g4 = "4 · Rottura dello stallo (evento operativo)"
+brkOn  = input.bool(true, "Attiva segnali di rottura", group=g4,
+     tooltip="Il segnale nasce quando la serie di rottura ESCE dalla banda oltre il livello indicato, mentre lo stallo e' ancora valido o si e' appena chiuso.\n\nE' l'unico punto del modulo stallo in cui c'e' qualcosa da eseguire: lo stallo e' il contesto, la rottura e' l'evento.")
+brkSrc = input.string("Sezione attiva piu' veloce", "   serie che rompe",
+     options=["Sezione attiva piu' veloce","Sezione dominante (TF piu' alto)","Serie dedicata"], group=g4,
+     tooltip="PIU' VELOCE: la rottura si vede prima, con piu' falsi. E' anche la curva che stai gia' guardando, quindi quello che vedi e' quello che spara.\n\nDOMINANTE: chiede che sia il TF alto a uscire dalla banda. Molti meno segnali, molto piu' tardi, e su un TF alto la meta' del movimento e' gia' avvenuta quando il CCI supera 100.\n\nDEDICATA: serie propria, sempre calcolata in modo nativo. Serve a replicare un setup esterno: la rottura puo' cadere dove nessuna curva visibile sta rompendo nulla.")
+brkTf  = input.timeframe("1", "   timeframe della serie dedicata", group=g4)
+brkLen = input.int(20, "   len della serie dedicata", minval=3, maxval=5000, group=g4)
+brkLvl = input.float(100, "   livello di rottura |CCI|", minval=10, maxval=400, step=5, group=g4,
+     tooltip="Distanza fra la banda dello stallo e il livello che valida l'uscita. Con banda 50 e rottura 100 pretendi che il CCI percorra 50 punti oltre il bordo: filtra le uscite di un tick, costa la parte iniziale del movimento.\n\nCon rottura = banda il segnale arriva sul bordo esatto: massimo anticipo, massimo numero di finte.")
+brkDir = input.string("Continuazione (rottura)", "   direzione",
+     options=["Continuazione (rottura)","Reversione (falso breakout)"], group=g4,
+     tooltip="CONTINUAZIONE: rottura verso l'alto = BUY. E' l'ipotesi standard sulla compressione: volatilita' a grappoli, quindi una contrazione tende a essere seguita da un'espansione, e la direzione dell'uscita e' il miglior stimatore disponibile della direzione dell'espansione.\n\nREVERSIONE: rottura verso l'alto = SELL. E' l'ipotesi 'le rotture da compressione sono trappole di liquidita''. Su indici e forex intraday e' spesso l'ipotesi vincente nelle ore morte e perdente in apertura. Non e' una scelta di gusto: si misura, confrontando i percentili MAE sulle due varianti A PARITA' DI CAMPIONE.")
+brkGrace= input.int(3, "   barre di grazia dopo la fine dello stallo", minval=0, maxval=200, group=g4,
+     tooltip="Quando la serie rompe, la condizione di stallo e' quasi sempre gia' falsa: e' proprio la rottura ad averla rotta. Senza grazia il segnale si autoannullerebbe.\n\nTroppo alta e la grazia diventa una finestra in cui qualunque cosa succeda viene attribuita a uno stallo ormai finito.")
+brkOne = input.bool(true, "   un solo segnale per episodio di stallo", group=g4,
+     tooltip="Un episodio di compressione produce UNA rottura. Spento, la stessa compressione genera un grappolo di segnali mentre il CCI oscilla attorno al livello di rottura, e il campione si riempie di duplicati che sembrano conferme.")
+useEff = input.bool(true, "   richiedi efficienza minima alla rottura", group=g4,
+     tooltip="Efficienza di Kaufman: spostamento netto diviso lunghezza del percorso (somma dei true range).\n  E = 1 -> linea retta\n  E = 0 -> tornato al punto di partenza\n\nE' la misura giusta per 'sta uscendo davvero': una rottura con E basso e' il prezzo che vibra attorno al livello, non un'espansione.")
+effLen = input.int(10, "   barre per l'efficienza", minval=2, maxval=200, group=g4)
+effMin = input.float(0.45, "   efficienza minima (0-1)", minval=0.0, maxval=1.0, step=0.05, group=g4)
+brkCd  = input.int(10, "   cooldown fra rotture (barre)", minval=0, maxval=500, group=g4)
+
+// ------------------------------------------------- ESTREMI: LOGICA SEGNALE ---
+var string g5 = "5 · Estremi (logica segnale)"
+extOn    = input.bool(true, "Attiva i segnali di estremo", group=g5,
+     tooltip="Motore indipendente dallo stallo: confluenza multi-TF oltre soglia e rientro. E' il classico setto di reversione sul CCI, portato dal motore z-score.\n\nPuoi tenere acceso solo lo stallo, solo gli estremi, o entrambi: sono due ipotesi diverse sullo stesso prezzo e i loro campioni vanno valutati separatamente, mai sommati.")
+lookback = input.int(60, "Finestra di confluenza (barre del grafico)", minval=1, maxval=1000, group=g5,
+     tooltip="Tutte le sezioni richieste devono aver superato la soglia almeno una volta entro queste N barre.\n\nREGOLA: la finestra deve contenere almeno 2 barre della sezione piu' LENTA.\n  minimo = 2 * (TF piu' lento / TF del grafico)\nCon valori troppo bassi la confluenza non si arma MAI: controlla il contatore 'armate' nel cruscotto.")
+autoLb   = input.bool(true, "Finestra automatica (2 barre della sezione piu' lenta)", group=g5)
+trigOwn  = input.bool(false, "Serie dedicata per il trigger", group=g5,
+     tooltip="SPENTO: il trigger e' la sezione ATTIVA PIU' VELOCE, cioe' una curva che stai gia' guardando.\n\nACCESO: serie propria, sempre nativa. Il segnale puo' cadere dove nessuna curva visibile attraversa nulla.")
+trigTf   = input.timeframe("1", "   timeframe del trigger", group=g5)
+trigLen  = input.int(20, "   len del trigger", minval=3, maxval=5000, group=g5)
+trigMode = input.string("Rientro (reversione)", "Modalita' trigger",
+     options=["Rientro (reversione)","Primo tocco della soglia"], group=g5,
+     tooltip="Rientro: la serie riattraversa il livello tornando verso lo zero (esaurimento). Primo tocco: la serie buca la soglia (continuazione).")
+strictBar= input.bool(false, "Emetti solo a barra del grafico CHIUSA", group=g5,
+     tooltip="Con il LIVE acceso la condizione puo' formarsi e disfarsi dentro la barra in corso. ACCESO: il marker resta ancorato alla stessa candela ma viene disegnato alla sua chiusura.")
+reqSec   = input.int(0, "Sezioni richieste in soglia (0 = tutte)", minval=0, maxval=5, group=g5)
+repMode  = input.string("Uno per escursione", "Ripetizione dei segnali",
+     options=["Uno per escursione","Uno per armamento","Tutti"], group=g5)
+showSeq  = input.bool(true, "   numera i segnali dentro l'armamento", group=g5)
+cooldown = input.int(10, "Cooldown fra segnali (barre)", minval=0, maxval=500, group=g5)
+
+var string g5b = "5b · Soglie degli estremi (stream indipendenti)"
+enP2  = input.bool(true,  "Soglia A", inline="a", group=g5b)
+thrP2 = input.float(200,  "liv", step=5, inline="a", group=g5b)
+trgP2 = input.float(100,  "trigger", step=5, inline="a", group=g5b)
+enP1  = input.bool(false, "Soglia B", inline="b", group=g5b)
+thrP1 = input.float(100,  "liv", step=5, inline="b", group=g5b)
+trgP1 = input.float(0,    "trigger", step=5, inline="b", group=g5b)
+enM1  = input.bool(false, "Soglia C", inline="c", group=g5b)
+thrM1 = input.float(-100, "liv", step=5, inline="c", group=g5b)
+trgM1 = input.float(0,    "trigger", step=5, inline="c", group=g5b)
+enM2  = input.bool(true,  "Soglia D", inline="d", group=g5b)
+thrM2 = input.float(-200, "liv", step=5, inline="d", group=g5b)
+trgM2 = input.float(-100, "trigger", step=5, inline="d", group=g5b)
+
+// ---------------------------------------------------------- BIAS DI REGIME ---
+var string g6 = "6 · Bias direzionale (filtro di regime)"
+useBias = input.bool(false, "Attiva filtro di regime", group=g6,
+     tooltip="BUY ammessi solo con la serie di riferimento SOPRA +liv, SELL solo SOTTO -liv.\n\nAVVERTENZA: le sezioni sono CCI dello STESSO prezzo, quindi collineari. Con un riferimento vicino al trigger il filtro e' auto-contraddittorio (il SELL nasce da CCI alto e il filtro pretende CCI basso). Serve un riferimento MOLTO piu' lento.\n\nFiltra l'EMISSIONE, non l'armamento: il rapporto armate/segnali misura esattamente quanto ti toglie.")
+biasRef = input.string("Sezione piu' lenta attiva", "   serie di riferimento",
+     options=["Sezione piu' lenta attiva","S1","S2","S3","S4","S5","Trigger"], group=g6)
+biasEval= input.string("Nativo (chiusura candela HTF)", "   valutazione",
+     options=["Nativo (chiusura candela HTF)","Live (barra del grafico)"], group=g6,
+     tooltip="NATIVO: CCI della candela HTF CHIUSA, congelato fino alla successiva. Un regime che cambia una volta per candela.\n\nLIVE: la curva del pannello. Il regime si ribalta piu' volte dentro la stessa candela: come filtro di regime e' rumore.")
+biasLvl = input.float(0.0, "   soglia (BUY se cci_rif >= +liv, SELL se <= -liv)", minval=0.0, maxval=400.0, step=5, group=g6,
+     tooltip="0 = basta il segno. 50 = banda neutra in cui nessun segnale passa: meno operazioni, regime piu' netto, ma i migliori punti di ingresso di una reversione stanno spesso proprio dentro quella banda.")
+biasInv = input.bool(false, "   inverti (BUY sotto -liv, SELL sopra +liv)", group=g6)
+
+// ------------------------------------------- PRE-CONDIZIONE DI ESTREMO -------
+var string g7 = "7 · Pre-condizione di estremo (memoria per sezione)"
+usePre  = input.bool(false, "Attiva", group=g7,
+     tooltip="Il segnale passa solo se la sezione scelta era GIA' STATA oltre la sua soglia entro le N unita' precedenti:\n  SELL -> sopra +soglia,  BUY -> sotto -soglia\nLa finestra include la barra corrente.\n\nAVVERTENZA: e' la stessa forma logica dell'ARMAMENTO del gruppo 5. Con stessa sezione, stessa finestra, stessa soglia e lettura LIVE non toglie NULLA. Ha senso con lettura NATIVA (chiusure HTF, informazione diversa dalle curve live), con memoria piu' lunga, o puntata su una sezione piu' lenta di quelle che armano.")
+preMode = input.string("Tutte (AND)", "   combinazione", options=["Tutte (AND)","Almeno una (OR)"], group=g7)
+preDom  = input.bool(false, "   decide SOLO la sezione con il TF piu' grande", group=g7)
+preEval = input.string("Nativo (chiusura candela della sezione)", "   lettura",
+     options=["Nativo (chiusura candela della sezione)","Live (barra del grafico)"], group=g7)
+preUnit = input.string("Candele della sezione", "   memoria misurata in",
+     options=["Candele della sezione","Barre del grafico"], group=g7)
+preAuto = input.bool(true, "   finestra minima automatica (2 candele della sezione)", group=g7)
+pre1 = input.bool(false, "S1", inline="p1", group=g7)
+preL1= input.int(12, "mem", minval=1, maxval=5000, inline="p1", group=g7)
+preT1= input.float(100, "|CCI|", minval=5, maxval=600, step=5, inline="p1", group=g7)
+pre2 = input.bool(false, "S2", inline="p2", group=g7)
+preL2= input.int(12, "mem", minval=1, maxval=5000, inline="p2", group=g7)
+preT2= input.float(100, "|CCI|", minval=5, maxval=600, step=5, inline="p2", group=g7)
+pre3 = input.bool(false, "S3", inline="p3", group=g7)
+preL3= input.int(12, "mem", minval=1, maxval=5000, inline="p3", group=g7)
+preT3= input.float(100, "|CCI|", minval=5, maxval=600, step=5, inline="p3", group=g7)
+pre4 = input.bool(false, "S4", inline="p4", group=g7)
+preL4= input.int(12, "mem", minval=1, maxval=5000, inline="p4", group=g7)
+preT4= input.float(100, "|CCI|", minval=5, maxval=600, step=5, inline="p4", group=g7)
+pre5 = input.bool(false, "S5", inline="p5", group=g7)
+preL5= input.int(12, "mem", minval=1, maxval=5000, inline="p5", group=g7)
+preT5= input.float(100, "|CCI|", minval=5, maxval=600, step=5, inline="p5", group=g7)
+preBack = input.bool(false, "   richiedi il RIENTRO della sezione di riferimento", group=g7,
+     tooltip="La sola memoria ('c'e' gia' stato') e' vera per tutto il grappolo: il primo e l'ultimo segnale la soddisfano allo stesso modo. Cio' che distingue l'ultimo e' che la sezione lenta ha gia' fatto l'escursione ED E' GIA' GIRATA.\n\nACCESO: per un BUY la sezione di riferimento deve essere gia' risalita sopra -livello. Compri piu' tardi e piu' in alto in cambio di meno segnali prematuri: confronta i percentili MAE.")
+preBackLvl = input.float(100, "      livello di rientro |CCI|", minval=0.0, maxval=600, step=5, group=g7)
+preOne  = input.bool(false, "   un solo segnale per escursione della sezione di riferimento", group=g7,
+     tooltip="Il latch standard conta le escursioni del TRIGGER, che e' la serie piu' VELOCE: dentro una sola discesa della 5m la 1m entra ed esce da -200 quattro volte. Acceso, conta le escursioni della sezione di RIFERIMENTO.\n\nTiene il PRIMO segnale dell'escursione, non l'ultimo: 'l'ultimo' esiste solo a cose fatte. Per avvicinarti a quello, accendi anche il rientro.")
+
+// ------------------------------------------------------------------ RISCHIO --
+var string g8 = "8a · Stop strutturale (sempre attivo)"
+atrLenR  = input.int(14, "ATR di riferimento", minval=2, group=g8)
+swingLen = input.int(10, "Barre per lo stop strutturale", minval=2, maxval=200, group=g8,
+     tooltip="Stop oltre l'estremo delle ultime N barre piu' un buffer. La sua DISTANZA e' il rischio del trade: e' questa la quantita' da minimizzare, non il drawdown, che non dipende da te.")
+stopBuf  = input.float(0.15, "   buffer oltre l'estremo (x ATR)", minval=0.0, maxval=2.0, step=0.05, group=g8)
+stopPol  = input.string("Il maggiore dei due", "Stop da usare",
+     options=["Strutturale","MAE p80","Bordo dello stallo","Il maggiore dei due"], group=g8,
+     tooltip="STRUTTURALE: oltre l'estremo delle ultime N barre.\n\nMAE p80: distanza che l'80% dei segnali passati NON ha superato. Banda di rumore misurata, serve almeno 5 osservazioni.\n\nBORDO DELLO STALLO: il lato opposto della compressione. E' lo stop naturale di una rottura — se il prezzo rientra dall'altra parte del coil, la rottura e' falsa per costruzione, non per opinione. Ricade sullo strutturale quando non c'e' un episodio.\n\nIL MAGGIORE DEI DUE: rispetta struttura e rumore misurato.")
+showRisk = input.bool(true, "Scrivi il rischio accanto al marker", group=g8)
+riskUnit = input.string("Punti", "   unita'", options=["Punti","Tick","Entrambi"], group=g8)
+
+var string g8b = "8b · Filtro STOP STRETTO"
+useRisk  = input.bool(false, "Attiva", group=g8b,
+     tooltip="Scarta i segnali con stop piu' lontano della soglia.\n\nATTENZIONE: uno stop piu' stretto NON riduce la MAE, riduce la frazione di trade che le sopravvive. Confronta sempre la soglia con i percentili MAE.")
+maxStopU = input.string("Punti", "   unita' del limite", options=["Punti","x ATR"], group=g8b)
+maxStopA = input.float(2.0, "   limite (x ATR)", minval=0.1, maxval=10.0, step=0.1, group=g8b)
+maxStopP = input.float(8.0, "   limite (punti)", minval=0.25, step=0.25, group=g8b)
+
+var string g8c = "8c · Filtro COMPRESSIONE alla barra"
+useComp  = input.bool(false, "Attiva", group=g8c,
+     tooltip="Richiede TR/ATR sotto la soglia nelle barre esaminate. Entrare su una barra di espansione significa comprare il massimo del rumore locale.\n\nNota: su una ROTTURA questo filtro lavora contro il segnale, perche' la rottura E' un'espansione. Tienilo per gli estremi, non per i breakout.")
+maxTrAtr = input.float(1.2, "   TR/ATR massimo", minval=0.2, maxval=5.0, step=0.1, group=g8c)
+expLook  = input.int(1, "   barre esaminate", minval=1, maxval=100, group=g8c)
+compBrk  = input.bool(false, "   applica anche alle rotture", group=g8c)
+
+var string g8d = "8d · Filtro ENTROPIA"
+useEnt   = input.bool(false, "Attiva", group=g8d,
+     tooltip="Entropia binaria della direzione delle ultime N barre. H=0 movimento ordinato, H=1 rumore puro.\n\nE' l'analogo binario dell'efficienza di Kaufman, ma cieco all'ampiezza: strettamente meno informativo. Usare entrambi e' ridondante.")
+entLen   = input.int(20, "   barre", minval=5, maxval=200, group=g8d)
+entMin   = input.float(0.0, "   H min", minval=0.0, maxval=1.0, step=0.05, inline="ent", group=g8d)
+entMax   = input.float(1.0, "   H max", minval=0.0, maxval=1.0, step=0.05, inline="ent", group=g8d)
+
+var string g8e = "8e · Misura della MAE"
+useMae   = input.bool(true, "Attiva", group=g8e,
+     tooltip="Dopo ogni segnale misura la massima escursione CONTRARIA nelle N barre successive, in ATR. I percentili sono la risposta empirica a 'quanto stretto puo' stare lo stop'. Non filtra nulla, misura soltanto.")
+maeLen   = input.int(30, "   orizzonte (barre)", minval=3, maxval=500, group=g8e)
+maeSplit = input.bool(true, "   distingui rotture da estremi", group=g8e,
+     tooltip="Tiene due distribuzioni separate. Sommarle e' l'errore piu' costoso di questo cruscotto: sono due ipotesi diverse, con MAE tipicamente diverse, e la media delle due non descrive nessuna delle due.")
+
+// ------------------------------------------------------------------ GRAFICA --
+var string g9 = "9 · Grafica"
+markShape= input.string("Freccia ▼▲", "Forma del marker",
+     options=["Freccia ▼▲","Freccia vuota ▽△","Freccia sottile ↓↑","Pallino ●","Cerchio ○","Quadrato ■","Rombo ◆","Stella ★","Croce ✖","Freccia (forma)","Triangolo (forma)","Cerchio (forma)","Quadrato (forma)","Rombo (forma)","Croce × (forma)","Croce + (forma)","Bandiera (forma)","Etichetta (forma)"], group=g9,
+     tooltip="GLIFO TESTUALE: e' testo, larghezza in pixel indipendente dallo zoom, ma puo' portare lettera, sequenza e rischio.\n\nFORMA NATIVA: disegno della label, resta incollata alla candela a qualsiasi zoom, non ospita testo (finisce nel tooltip).")
+showC    = input.bool(true,  "Curve CCI nel pannello", group=g9)
+showLv   = input.bool(true,  "Linee di soglia e di trigger", group=g9)
+showBand = input.bool(true,  "Banda dello stallo (sezione dominante)", group=g9)
+showArmBg= input.bool(true,  "Sfondo quando un estremo e' armato", group=g9)
+showTab  = input.bool(true,  "Mostra cruscotto", group=g9)
+dashSz   = input.string("Piccolo", "Dimensione testo cruscotto", options=["Minimo","Piccolo","Normale","Grande"], group=g9)
+tagSz    = input.string("Piccolo", "Dimensione etichette periodo", options=["Minimo","Piccolo","Normale","Grande"], group=g9)
+markSz   = input.string("Normale", "Dimensione marker", options=["Minimo","Piccolo","Normale","Grande"], group=g9)
+cLvlS    = input.color(color.new(#000000,  0), "Colore linee soglia", inline="lv", group=g9)
+cLvlT    = input.color(color.new(#000000, 45), "trigger",             inline="lv", group=g9)
+cLvl0    = input.color(color.new(#000000, 55), "zero",                inline="lv", group=g9)
+cBand    = input.color(color.new(#26a69a, 82), "banda",               inline="lv", group=g9)
+markWhere= input.string("Entrambi", "Posizione marker", options=["Pannello","Grafico prezzi","Entrambi"], group=g9)
+markLvl  = input.float(280, "   livello marker nel pannello (CCI)", step=10, minval=50, group=g9)
+chartMark= input.string("Freccia sola", "   contenuto del marker sul grafico prezzi",
+     options=["Freccia sola","Freccia + lettera","Completo (freccia, lettera, rischio)"], group=g9,
+     tooltip="Il testo della label e' disegnato in pixel a dimensione costante ed e' centrato sull'ancora: a zoom out una stringa lunga sembra staccata dalla candela. Non e' l'ancoraggio, e' la larghezza del testo. FRECCIA SOLA resta incollata a qualsiasi zoom; il resto e' nel tooltip.")
+showMiss = input.bool(false, "Marker dei SETUP MANCATI", group=g9)
+showTags = input.bool(true, "Etichette del periodo a destra delle curve", group=g9)
+tagOff   = input.int(4, "   distanza (barre)", minval=1, maxval=50, group=g9)
+cUp      = input.color(color.new(#ef5350, 0), "Colore SELL", inline="col", group=g9)
+cDn      = input.color(color.new(#1B5E20, 0), "Colore BUY",  inline="col", group=g9)
+cBrk     = input.color(color.new(#00bcd4, 0), "Colore rottura", inline="col", group=g9)
+
+// ============================================================== CALCOLO CCI ===
+//  Costante di ricalibrazione della scala robusta:
+//  MAD = 0.6745*sigma, deviazione media assoluta = 0.7979*sigma  ->  1.1829
+MADK = 1.1829
+
+f_src() =>
+    srcMode == "Close" ? close : srcMode == "OHLC4" ? ohlc4 : hlc3
+
+// CCI di una serie qualsiasi nel contesto corrente (modo C).
+f_cser(float s, simple int len) =>
+    bSma = ta.sma(s, len)
+    bEma = ta.ema(s, len)
+    b    = maMode == "EMA" ? bEma : bSma
+    d    = ta.dev(s, len)
+    float v = d > 0 ? (s - b) / (0.015 * d) : 0.0
+    if robust
+        med = ta.median(s, len)
+        mad = ta.median(math.abs(s - med), len)
+        v := mad > 0 ? (s - med) / (0.015 * mad * MADK) : 0.0
+    v
+
+// Eseguita DENTRO il contesto del TF richiesto. Restituisce:
+//   v  = CCI nativo della sezione, valore di chiusura  <- letture native
+//   s  = sorgente HTF grezza (modo B)
+//   c  = CENTRO (media o mediana)
+//   sc = SCALA gia' moltiplicata per 0.015, cosi' che (x - c)/sc sia un CCI
+f_htf(simple int len, simple bool shift) =>
+    s   = f_src()
+    bSm = ta.sma(s, len)
+    bEm = ta.ema(s, len)
+    b   = maMode == "EMA" ? bEm : bSm
+    d   = ta.dev(s, len)
+    float cn = b
+    float sc = 0.015 * d
+    if robust
+        med = ta.median(s, len)
+        mad = ta.median(math.abs(s - med), len)
+        cn := med
+        sc := 0.015 * mad * MADK
+    float v = sc > 0 ? (s - cn) / sc : 0.0
+    [shift ? v[1] : v, shift ? s[1] : s, shift ? cn[1] : cn, shift ? sc[1] : sc]
+
+chartSec = timeframe.in_seconds()
+sec1 = timeframe.in_seconds(tf1)
+sec2 = timeframe.in_seconds(tf2)
+sec3 = timeframe.in_seconds(tf3)
+sec4 = timeframe.in_seconds(tf4)
+sec5 = timeframe.in_seconds(tf5)
+secT = timeframe.in_seconds(trigTf)
+secK = timeframe.in_seconds(brkTf)
+
+k1 = int(math.max(1, math.round(sec1 / float(chartSec))))
+k2 = int(math.max(1, math.round(sec2 / float(chartSec))))
+k3 = int(math.max(1, math.round(sec3 / float(chartSec))))
+k4 = int(math.max(1, math.round(sec4 / float(chartSec))))
+k5 = int(math.max(1, math.round(sec5 / float(chartSec))))
+
+modeA = cBasis == "A · TF nativo"
+modeB = cBasis == "B · Barre grafico (serie HTF)"
+modeC = not modeA and not modeB
+liveOn = liveMode and not modeC
+
+BIG = 1e12
+m1 = use1 ? sec1 : BIG
+m2 = use2 ? sec2 : BIG
+m3 = use3 ? sec3 : BIG
+m4 = use4 ? sec4 : BIG
+m5 = use5 ? sec5 : BIG
+minSec    = math.min(math.min(math.min(math.min(m1, m2), m3), m4), m5)
+anyActive = use1 or use2 or use3 or use4 or use5
+nActive   = (use1 ? 1 : 0) + (use2 ? 1 : 0) + (use3 ? 1 : 0) + (use4 ? 1 : 0) + (use5 ? 1 : 0)
+
+// cN* = CCI NATIVO di chiusura della sezione: e' la serie delle letture native
+// (stallo, bias, pre-condizione). Calcolato SEMPRE, anche in modo C.
+[cN1, sH1, ct1, sl1] = request.security(syminfo.tickerid, tf1, f_htf(len1, (liveMode or confirmed) and sec1 > chartSec), lookahead = barmerge.lookahead_off)
+[cN2, sH2, ct2, sl2] = request.security(syminfo.tickerid, tf2, f_htf(len2, (liveMode or confirmed) and sec2 > chartSec), lookahead = barmerge.lookahead_off)
+[cN3, sH3, ct3, sl3] = request.security(syminfo.tickerid, tf3, f_htf(len3, (liveMode or confirmed) and sec3 > chartSec), lookahead = barmerge.lookahead_off)
+[cN4, sH4, ct4, sl4] = request.security(syminfo.tickerid, tf4, f_htf(len4, (liveMode or confirmed) and sec4 > chartSec), lookahead = barmerge.lookahead_off)
+[cN5, sH5, ct5, sl5] = request.security(syminfo.tickerid, tf5, f_htf(len5, (liveMode or confirmed) and sec5 > chartSec), lookahead = barmerge.lookahead_off)
+[cNT, sHT, ctT, slT] = request.security(syminfo.tickerid, trigTf, f_htf(trigLen, (liveMode or confirmed) and secT > chartSec), lookahead = barmerge.lookahead_off)
+[cNK, sHK, ctK, slK] = request.security(syminfo.tickerid, brkTf,  f_htf(brkLen,  (liveMode or confirmed) and secK > chartSec), lookahead = barmerge.lookahead_off)
+
+lenC1 = int(math.min(4000, len1 * k1))
+lenC2 = int(math.min(4000, len2 * k2))
+lenC3 = int(math.min(4000, len3 * k3))
+lenC4 = int(math.min(4000, len4 * k4))
+lenC5 = int(math.min(4000, len5 * k5))
+
+srcC = f_src()
+
+// --- RICOSTRUZIONE LIVE ------------------------------------------------------
+f_cA(float v0, float c, float sc, bool can) =>
+    can and sc > 0 ? (srcC - c) / sc : v0
+
+f_cB(float sHtf, simple int len, bool can) =>
+    num  = can ? srcC : sHtf
+    bSm  = ta.sma(sHtf, len)
+    bEm  = ta.ema(sHtf, len)
+    b    = maMode == "EMA" ? bEm : bSm
+    d    = ta.dev(sHtf, len)
+    float v = d > 0 ? (num - b) / (0.015 * d) : 0.0
+    if robust
+        med = ta.median(sHtf, len)
+        mad = ta.median(math.abs(sHtf - med), len)
+        v := mad > 0 ? (num - med) / (0.015 * mad * MADK) : 0.0
+    v
+
+lv1 = liveOn and sec1 > chartSec
+lv2 = liveOn and sec2 > chartSec
+lv3 = liveOn and sec3 > chartSec
+lv4 = liveOn and sec4 > chartSec
+lv5 = liveOn and sec5 > chartSec
+lvT = liveOn and secT > chartSec
+lvK = liveOn and secK > chartSec
+
+c1 = modeA ? f_cA(cN1, ct1, sl1, lv1) : modeB ? f_cB(sH1, len1, lv1) : f_cser(srcC, lenC1)
+c2 = modeA ? f_cA(cN2, ct2, sl2, lv2) : modeB ? f_cB(sH2, len2, lv2) : f_cser(srcC, lenC2)
+c3 = modeA ? f_cA(cN3, ct3, sl3, lv3) : modeB ? f_cB(sH3, len3, lv3) : f_cser(srcC, lenC3)
+c4 = modeA ? f_cA(cN4, ct4, sl4, lv4) : modeB ? f_cB(sH4, len4, lv4) : f_cser(srcC, lenC4)
+c5 = modeA ? f_cA(cN5, ct5, sl5, lv5) : modeB ? f_cB(sH5, len5, lv5) : f_cser(srcC, lenC5)
+cT = liveOn ? f_cA(cNT, ctT, slT, lvT) : cNT
+cK = liveOn ? f_cA(cNK, ctK, slK, lvK) : cNK
+
+// -- campione effettivo e tetto algebrico  |CCI| <= 100*n/3 -------------------
+ne1 = modeA ? float(len1) : modeB ? math.max(1.0, len1 / float(k1)) : float(lenC1)
+ne2 = modeA ? float(len2) : modeB ? math.max(1.0, len2 / float(k2)) : float(lenC2)
+ne3 = modeA ? float(len3) : modeB ? math.max(1.0, len3 / float(k3)) : float(lenC3)
+ne4 = modeA ? float(len4) : modeB ? math.max(1.0, len4 / float(k4)) : float(lenC4)
+ne5 = modeA ? float(len5) : modeB ? math.max(1.0, len5 / float(k5)) : float(lenC5)
+f_ccap(float ne) => 100.0 * ne / 3.0
+
+winS1 = modeA ? float(len1) * sec1 : modeB ? float(len1) * chartSec : float(lenC1) * chartSec
+winS2 = modeA ? float(len2) * sec2 : modeB ? float(len2) * chartSec : float(lenC2) * chartSec
+winS3 = modeA ? float(len3) * sec3 : modeB ? float(len3) * chartSec : float(lenC3) * chartSec
+winS4 = modeA ? float(len4) * sec4 : modeB ? float(len4) * chartSec : float(lenC4) * chartSec
+winS5 = modeA ? float(len5) * sec5 : modeB ? float(len5) * chartSec : float(lenC5) * chartSec
+
+f_n2(float v) => na(v) ? "n/a" : str.tostring(v, "#.00")
+f_n1(float v) => na(v) ? "n/a" : str.tostring(v, "#.0")
+f_n0(float v) => na(v) ? "n/a" : str.tostring(math.round(v))
+f_wtxt(float sc) =>
+    sc < 60 ? str.tostring(math.round(sc)) + "s" : sc < 3600 ? str.tostring(math.round(sc / 60)) + "m" : str.tostring(math.round(sc / 3600.0, 1)) + "h"
+
+f_cnt(bool c) =>
+    var int n = 0
+    if c
+        n += 1
+    n
+
+atrR = math.max(ta.atr(atrLenR), syminfo.mintick)
+
+// ============================================================ MODULO STALLO ===
+//  Lo stato "dentro la banda" e' letto in modo NATIVO (chiusura candela della
+//  sezione) o LIVE (curva del pannello). Con la lettura nativa lo stato cambia
+//  una volta per candela HTF e la persistenza conta candele vere; con la live
+//  cambia a ogni barra del grafico e conta oscillazioni intracandela.
+stNat = stEval == "Nativo (chiusura candela della sezione)"
+sc1 = stNat ? cN1 : c1
+sc2 = stNat ? cN2 : c2
+sc3 = stNat ? cN3 : c3
+sc4 = stNat ? cN4 : c4
+sc5 = stNat ? cN5 : c5
+
+in1 = st1 and not na(sc1) and math.abs(sc1) <= bd1
+in2 = st2 and not na(sc2) and math.abs(sc2) <= bd2
+in3 = st3 and not na(sc3) and math.abs(sc3) <= bd3
+in4 = st4 and not na(sc4) and math.abs(sc4) <= bd4
+in5 = st5 and not na(sc5) and math.abs(sc5) <= bd5
+
+stOnN = (st1 ? 1 : 0) + (st2 ? 1 : 0) + (st3 ? 1 : 0) + (st4 ? 1 : 0) + (st5 ? 1 : 0)
+inN   = (in1 ? 1 : 0) + (in2 ? 1 : 0) + (in3 ? 1 : 0) + (in4 ? 1 : 0) + (in5 ? 1 : 0)
+stNeed= stReq <= 0 ? stOnN : math.min(stReq, stOnN)
+
+// sezione DOMINANTE fra quelle spuntate: TF piu' alto
+qS1 = st1 ? sec1 : 0
+qS2 = st2 ? sec2 : 0
+qS3 = st3 ? sec3 : 0
+qS4 = st4 ? sec4 : 0
+qS5 = st5 ? sec5 : 0
+stMaxSec = math.max(math.max(math.max(math.max(qS1, qS2), qS3), qS4), qS5)
+stDomI   = stMaxSec == 0 ? -1 : qS5 == stMaxSec ? 4 : qS4 == stMaxSec ? 3 : qS3 == stMaxSec ? 2 : qS2 == stMaxSec ? 1 : 0
+stDomTf  = stDomI == 4 ? tf5 : stDomI == 3 ? tf4 : stDomI == 2 ? tf3 : stDomI == 1 ? tf2 : stDomI == 0 ? tf1 : "-"
+stDomK   = stDomI == 4 ? k5  : stDomI == 3 ? k4  : stDomI == 2 ? k3  : stDomI == 1 ? k2  : stDomI == 0 ? k1  : 1
+bndDom   = stDomI == 4 ? bd5 : stDomI == 3 ? bd4 : stDomI == 2 ? bd3 : stDomI == 1 ? bd2 : stDomI == 0 ? bd1 : na
+stHoldB  = int(math.min(5000, stUnit == "Barre del grafico" ? math.max(0, stHold) : math.max(0, stHold) * math.max(1, stDomK)))
+
+stRaw = stOn and stOnN > 0 and inN >= stNeed and stNeed > 0
+
+// --- episodio: estremi, durata, coil ----------------------------------------
+//  Il range dell'episodio e' tracciato a mano (max/min correnti) invece che con
+//  ta.highest su finestra variabile, che Pine non accetta: qui la finestra E'
+//  l'episodio, quindi non esiste una lunghezza costante da passare.
+var float stHi   = na
+var float stLo   = na
+var int   stLen  = 0
+var int   stEpi  = 0
+var int   stLast = -100000
+newEpi = stRaw and not stRaw[1]
+if newEpi
+    stHi  := high
+    stLo  := low
+    stLen := 1
+    stEpi += 1
+else if stRaw
+    stHi  := math.max(stHi, high)
+    stLo  := math.min(stLo, low)
+    stLen += 1
+
+//  coil = range / (ATR * sqrt(N)).  Il denominatore e' il range che una
+//  passeggiata casuale con quella volatilita' produrrebbe in N barre: il
+//  rapporto e' quindi adimensionale e confrontabile fra episodi di durata
+//  diversa. Random walk ~ 1.3-1.6; sotto 1 la compressione e' reale.
+coilR = na(stHi) or na(stLo) or stLen < 2 ? na : (stHi - stLo) / (atrR * math.sqrt(stLen))
+coilOk = not useCoil or (not na(coilR) and coilR <= coilMax)
+
+stallOn = stRaw and stLen >= stHoldB and coilOk
+if stallOn
+    stLast := bar_index
+stallStart = stallOn and not stallOn[1]
+stallEnd   = not stallOn and stallOn[1]
+
+// durata media degli episodi confermati, in barre del grafico
+var int stSumLen = 0
+var int stSumN   = 0
+if stallEnd
+    stSumLen += nz(stLen[1])
+    stSumN   += 1
+stAvgLen = stSumN > 0 ? stSumLen / float(stSumN) : na
+
+// frazione di barre in cui ogni sezione e' dentro la propria banda: e' il
+// numero che dice se la banda scelta e' selettiva o decorativa
+pin1 = f_cnt(in1)
+pin2 = f_cnt(in2)
+pin3 = f_cnt(in3)
+pin4 = f_cnt(in4)
+pin5 = f_cnt(in5)
+barsTot = bar_index + 1
+f_pct(int n) => 100.0 * n / math.max(1, barsTot)
+
+// ================================================= ARMAMENTO DEGLI ESTREMI ====
+thrMaxAct = math.max(math.max(enP2 ? math.abs(thrP2) : 0.0, enP1 ? math.abs(thrP1) : 0.0), math.max(enM1 ? math.abs(thrM1) : 0.0, enM2 ? math.abs(thrM2) : 0.0))
+kAct1 = use1 ? k1 : 1
+kAct2 = use2 ? k2 : 1
+kAct3 = use3 ? k3 : 1
+kAct4 = use4 ? k4 : 1
+kAct5 = use5 ? k5 : 1
+kMax  = math.max(math.max(math.max(math.max(kAct1, kAct2), kAct3), kAct4), kAct5)
+lbEff = autoLb ? int(math.max(lookback, 2 * kMax)) : lookback
+
+hi1 = ta.highest(c1, lbEff)
+lo1 = ta.lowest(c1, lbEff)
+hi2 = ta.highest(c2, lbEff)
+lo2 = ta.lowest(c2, lbEff)
+hi3 = ta.highest(c3, lbEff)
+lo3 = ta.lowest(c3, lbEff)
+hi4 = ta.highest(c4, lbEff)
+lo4 = ta.lowest(c4, lbEff)
+hi5 = ta.highest(c5, lbEff)
+lo5 = ta.lowest(c5, lbEff)
+
+// ============================== PRE-CONDIZIONE DI ESTREMO (memoria) ==========
+preNat = preEval == "Nativo (chiusura candela della sezione)"
+zP1 = preNat ? cN1 : c1
+zP2 = preNat ? cN2 : c2
+zP3 = preNat ? cN3 : c3
+zP4 = preNat ? cN4 : c4
+zP5 = preNat ? cN5 : c5
+
+preCnd = preUnit == "Candele della sezione"
+preMin = preAuto ? 2 : 1
+preE1 = int(math.min(4000, preCnd ? math.max(preL1, preMin) * k1 : (preAuto ? math.max(preL1, 2 * k1) : preL1)))
+preE2 = int(math.min(4000, preCnd ? math.max(preL2, preMin) * k2 : (preAuto ? math.max(preL2, 2 * k2) : preL2)))
+preE3 = int(math.min(4000, preCnd ? math.max(preL3, preMin) * k3 : (preAuto ? math.max(preL3, 2 * k3) : preL3)))
+preE4 = int(math.min(4000, preCnd ? math.max(preL4, preMin) * k4 : (preAuto ? math.max(preL4, 2 * k4) : preL4)))
+preE5 = int(math.min(4000, preCnd ? math.max(preL5, preMin) * k5 : (preAuto ? math.max(preL5, 2 * k5) : preL5)))
+
+preHi1 = ta.highest(zP1, preE1)
+preLo1 = ta.lowest(zP1, preE1)
+preHi2 = ta.highest(zP2, preE2)
+preLo2 = ta.lowest(zP2, preE2)
+preHi3 = ta.highest(zP3, preE3)
+preLo3 = ta.lowest(zP3, preE3)
+preHi4 = ta.highest(zP4, preE4)
+preLo4 = ta.lowest(zP4, preE4)
+preHi5 = ta.highest(zP5, preE5)
+preLo5 = ta.lowest(zP5, preE5)
+
+pS1s = preHi1 >=  preT1
+pS1b = preLo1 <= -preT1
+pS2s = preHi2 >=  preT2
+pS2b = preLo2 <= -preT2
+pS3s = preHi3 >=  preT3
+pS3b = preLo3 <= -preT3
+pS4s = preHi4 >=  preT4
+pS4b = preLo4 <= -preT4
+pS5s = preHi5 >=  preT5
+pS5b = preLo5 <= -preT5
+
+pOnN = (pre1 ? 1 : 0) + (pre2 ? 1 : 0) + (pre3 ? 1 : 0) + (pre4 ? 1 : 0) + (pre5 ? 1 : 0)
+pQ1  = pre1 ? sec1 : 0
+pQ2  = pre2 ? sec2 : 0
+pQ3  = pre3 ? sec3 : 0
+pQ4  = pre4 ? sec4 : 0
+pQ5  = pre5 ? sec5 : 0
+pMaxSec  = math.max(math.max(math.max(math.max(pQ1, pQ2), pQ3), pQ4), pQ5)
+pDomI    = pMaxSec == 0 ? -1 : pQ5 == pMaxSec ? 4 : pQ4 == pMaxSec ? 3 : pQ3 == pMaxSec ? 2 : pQ2 == pMaxSec ? 1 : 0
+preDomTf = pMaxSec == 0 ? "-" : pDomI == 4 ? tf5 : pDomI == 3 ? tf4 : pDomI == 2 ? tf3 : pDomI == 1 ? tf2 : tf1
+preIdle  = usePre and pOnN == 0
+
+zRef = pDomI == 4 ? zP5 : pDomI == 3 ? zP4 : pDomI == 2 ? zP3 : pDomI == 1 ? zP2 : pDomI == 0 ? zP1 : na
+tRef = pDomI == 4 ? preT5 : pDomI == 3 ? preT4 : pDomI == 2 ? preT3 : pDomI == 1 ? preT2 : pDomI == 0 ? preT1 : 0.0
+
+inLoRef = not na(zRef) and zRef <= -tRef
+inHiRef = not na(zRef) and zRef >=  tRef
+var int excBuy  = 0
+var int excSell = 0
+if inLoRef and not inLoRef[1]
+    excBuy += 1
+if inHiRef and not inHiRef[1]
+    excSell += 1
+
+f_preBackOk(bool isSell) =>
+    not usePre or not preBack or na(zRef) ? true : isSell ? zRef <= preBackLvl : zRef >= -preBackLvl
+
+f_preOk(bool isSell) =>
+    o1 = isSell ? pS1s : pS1b
+    o2 = isSell ? pS2s : pS2b
+    o3 = isSell ? pS3s : pS3b
+    o4 = isSell ? pS4s : pS4b
+    o5 = isSell ? pS5s : pS5b
+    kOk = (pre1 and o1 ? 1 : 0) + (pre2 and o2 ? 1 : 0) + (pre3 and o3 ? 1 : 0) + (pre4 and o4 ? 1 : 0) + (pre5 and o5 ? 1 : 0)
+    dOk = pDomI == 4 ? o5 : pDomI == 3 ? o4 : pDomI == 2 ? o3 : pDomI == 1 ? o2 : pDomI == 0 ? o1 : true
+    not usePre or pOnN == 0 ? true : preDom ? dOk : preMode == "Almeno una (OR)" ? kOk >= 1 : kOk == pOnN
+
+// ------------------------------------------ serie piu' veloce / trigger ------
+cSecFast  = m1 == minSec ? c1 : m2 == minSec ? c2 : m3 == minSec ? c3 : m4 == minSec ? c4 : m5 == minSec ? c5 : na
+cFast     = trigOwn ? cT : cSecFast
+cPrev     = nz(cFast[1], cFast)
+tfSecFast = m1 == minSec ? tf1 : m2 == minSec ? tf2 : m3 == minSec ? tf3 : m4 == minSec ? tf4 : m5 == minSec ? tf5 : "-"
+tfFast    = trigOwn ? trigTf : tfSecFast
+winSecFast= m1 == minSec ? winS1 : m2 == minSec ? winS2 : m3 == minSec ? winS3 : m4 == minSec ? winS4 : m5 == minSec ? winS5 : na
+winFast   = trigOwn ? float(trigLen) * secT : winSecFast
+
+// ------------------------------------------------------- BIAS DIREZIONALE ----
+sA1 = use1 ? sec1 : 0
+sA2 = use2 ? sec2 : 0
+sA3 = use3 ? sec3 : 0
+sA4 = use4 ? sec4 : 0
+sA5 = use5 ? sec5 : 0
+maxSecAct = math.max(math.max(math.max(math.max(sA1, sA2), sA3), sA4), sA5)
+cSlow  = maxSecAct == 0 ? na : sA5 == maxSecAct ? c5  : sA4 == maxSecAct ? c4  : sA3 == maxSecAct ? c3  : sA2 == maxSecAct ? c2  : c1
+cSlowN = maxSecAct == 0 ? na : sA5 == maxSecAct ? cN5 : sA4 == maxSecAct ? cN4 : sA3 == maxSecAct ? cN3 : sA2 == maxSecAct ? cN2 : cN1
+tfSlow = maxSecAct == 0 ? "-" : sA5 == maxSecAct ? tf5 : sA4 == maxSecAct ? tf4 : sA3 == maxSecAct ? tf3 : sA2 == maxSecAct ? tf2 : tf1
+
+cBiasL = biasRef == "S1" ? c1  : biasRef == "S2" ? c2  : biasRef == "S3" ? c3  : biasRef == "S4" ? c4  : biasRef == "S5" ? c5  : biasRef == "Trigger" ? cT  : cSlow
+cBiasN = biasRef == "S1" ? cN1 : biasRef == "S2" ? cN2 : biasRef == "S3" ? cN3 : biasRef == "S4" ? cN4 : biasRef == "S5" ? cN5 : biasRef == "Trigger" ? cNT : cSlowN
+biasNat = biasEval == "Nativo (chiusura candela HTF)"
+cBias   = biasNat ? cBiasN : cBiasL
+tfBias  = biasRef == "S1" ? tf1  : biasRef == "S2" ? tf2  : biasRef == "S3" ? tf3  : biasRef == "S4" ? tf4  : biasRef == "S5" ? tf5  : biasRef == "Trigger" ? trigTf : tfSlow
+secBias = biasRef == "S1" ? sec1 : biasRef == "S2" ? sec2 : biasRef == "S3" ? sec3 : biasRef == "S4" ? sec4 : biasRef == "S5" ? sec5 : biasRef == "Trigger" ? secT : maxSecAct
+biasRp   = useBias and biasNat and secBias > chartSec and not (liveMode or confirmed)
+biasSelf = useBias and tfBias == tfFast
+biasUp = na(cBias) ? false : biasLvl > 0 ? cBias >=  biasLvl : cBias > 0
+biasDn = na(cBias) ? false : biasLvl > 0 ? cBias <= -biasLvl : cBias < 0
+
+f_cu(float now, float prev, float lvl) => now < lvl and prev >= lvl
+f_co(float now, float prev, float lvl) => now > lvl and prev <= lvl
+
+// ====================================================== MAE E RISCHIO ========
+//  Due distribuzioni separate: gli estremi e le rotture sono due ipotesi
+//  diverse, con MAE tipicamente diverse. Sommarle produce un percentile che non
+//  descrive nessuna delle due.
+var array<float> maeX = array.new_float()
+var array<float> maeK = array.new_float()
+maeNx = array.size(maeX)
+maeNk = array.size(maeK)
+maeMedX = maeNx >= 5 ? array.percentile_nearest_rank(maeX, 50) : na
+maeP80X = maeNx >= 5 ? array.percentile_nearest_rank(maeX, 80) : na
+maeP95X = maeNx >= 5 ? array.percentile_nearest_rank(maeX, 95) : na
+maeMedK = maeNk >= 5 ? array.percentile_nearest_rank(maeK, 50) : na
+maeP80K = maeNk >= 5 ? array.percentile_nearest_rank(maeK, 80) : na
+maeP95K = maeNk >= 5 ? array.percentile_nearest_rank(maeK, 95) : na
+p80kEff = maeSplit and not na(maeP80K) ? maeP80K : maeP80X
+
+swHi = ta.highest(high, swingLen)
+swLo = ta.lowest(low,  swingLen)
+rskSellS = (swHi + stopBuf * atrR) - close
+rskBuyS  = close - (swLo - stopBuf * atrR)
+edgeSell = na(stHi) ? na : (stHi + stopBuf * atrR) - close
+edgeBuy  = na(stLo) ? na : close - (stLo - stopBuf * atrR)
+
+f_apply(float base, float p80) =>
+    m = na(p80) ? na : p80 * atrR
+    stopPol == "MAE p80" and not na(m) ? m : stopPol == "Il maggiore dei due" and not na(m) ? math.max(base, m) : base
+
+baseSellK = stopPol == "Bordo dello stallo" and not na(edgeSell) and edgeSell > 0 ? edgeSell : rskSellS
+baseBuyK  = stopPol == "Bordo dello stallo" and not na(edgeBuy)  and edgeBuy  > 0 ? edgeBuy  : rskBuyS
+rskSell  = f_apply(rskSellS, maeP80X)
+rskBuy   = f_apply(rskBuyS,  maeP80X)
+rskSellK = f_apply(baseSellK, p80kEff)
+rskBuyK  = f_apply(baseBuyK,  p80kEff)
+
+trAtr    = ta.tr(true) / atrR
+trAtrMax = ta.highest(trAtr, expLook)
+
+upCnt = math.sum(close > close[1] ? 1.0 : 0.0, entLen)
+pUp   = upCnt / entLen
+entH  = pUp <= 0.0 or pUp >= 1.0 ? 0.0 : -(pUp * math.log(pUp) + (1 - pUp) * math.log(1 - pUp)) / math.log(2)
+
+vDisp = math.abs(close - close[effLen])
+vPath = math.sum(ta.tr(true), effLen)
+vEff  = vPath > 0 ? vDisp / vPath : 0.0
+
+f_biasOk(bool isSell) =>
+    not useBias ? true : isSell ? (biasInv ? biasUp : biasDn) : (biasInv ? biasDn : biasUp)
+
+f_riskOk(bool isSell, bool isBrk) =>
+    r      = isBrk ? (isSell ? rskSellK : rskBuyK) : (isSell ? rskSell : rskBuy)
+    cap    = maxStopU == "Punti" ? maxStopP : maxStopA * atrR
+    okStop = not useRisk or (r > 0 and r <= cap)
+    okComp = not useComp or (isBrk and not compBrk) or trAtrMax <= maxTrAtr
+    okEnt  = not useEnt or (entH >= entMin and entH <= entMax)
+    okStop and okComp and okEnt
+
+// ============================================== STREAM DEGLI ESTREMI =========
+f_arm(float thr, bool isUp) =>
+    int okN = 0
+    if use1 and (isUp ? hi1 >= thr : lo1 <= thr)
+        okN += 1
+    if use2 and (isUp ? hi2 >= thr : lo2 <= thr)
+        okN += 1
+    if use3 and (isUp ? hi3 >= thr : lo3 <= thr)
+        okN += 1
+    if use4 and (isUp ? hi4 >= thr : lo4 <= thr)
+        okN += 1
+    if use5 and (isUp ? hi5 >= thr : lo5 <= thr)
+        okN += 1
+    need = reqSec <= 0 ? nActive : math.min(reqSec, nActive)
+    [anyActive and okN >= need, okN, need]
+
+f_armOk(float thr, bool isUp) =>
+    [a, _o, _n] = f_arm(thr, isUp)
+    a
+
+f_stream(bool en, float thr, float trg, bool isUp) =>
+    var bool fired   = false
+    var int  lastSig = -100000
+    var int  seq     = 0
+    var int  lastExc = -1
+    armed = extOn and en and f_armOk(thr, isUp)
+    reEnter = isUp ? cFast >= thr : cFast <= thr
+    if not armed
+        fired := false
+        seq   := 0
+    else if repMode == "Tutti" or (repMode == "Uno per escursione" and reEnter)
+        fired := false
+    trig = false
+    if trigMode == "Primo tocco della soglia"
+        trig := isUp ? f_co(cFast, cPrev, thr) : f_cu(cFast, cPrev, thr)
+    else
+        trig := isUp ? f_cu(cFast, cPrev, trg) : f_co(cFast, cPrev, trg)
+    okBar = not strictBar or barstate.isconfirmed
+    excNow = isUp ? excSell : excBuy
+    okOne  = not (usePre and preOne) or na(zRef) or excNow != lastExc
+    fire = armed and not fired and trig and okBar and not na(cFast) and f_preOk(isUp) and f_preBackOk(isUp) and okOne and f_riskOk(isUp, false) and f_biasOk(isUp) and (bar_index - lastSig >= cooldown)
+    if fire
+        fired   := true
+        lastSig := bar_index
+        lastExc := excNow
+        seq     += 1
+    [fire, armed, seq, trig]
+
+[sigA, armA, seqA, trgARaw] = f_stream(enP2, thrP2, trgP2, true)
+[sigB, armB, seqB, trgBRaw] = f_stream(enP1, thrP1, trgP1, true)
+[sigC, armC, seqC, trgCRaw] = f_stream(enM1, thrM1, trgM1, false)
+[sigD, armD, seqD, trgDRaw] = f_stream(enM2, thrM2, trgM2, false)
+
+// ================================================ ROTTURA DELLO STALLO =======
+cDom  = stDomI == 4 ? c5 : stDomI == 3 ? c4 : stDomI == 2 ? c3 : stDomI == 1 ? c2 : stDomI == 0 ? c1 : na
+brkS  = brkSrc == "Serie dedicata" ? cK : brkSrc == "Sezione dominante (TF piu' alto)" ? cDom : cFast
+brkP  = nz(brkS[1], brkS)
+brkTfTxt = brkSrc == "Serie dedicata" ? brkTf : brkSrc == "Sezione dominante (TF piu' alto)" ? stDomTf : tfFast
+
+upBrk = not na(brkS) and f_co(brkS, brkP, brkLvl)
+dnBrk = not na(brkS) and f_cu(brkS, brkP, -brkLvl)
+brkCont = brkDir == "Continuazione (rottura)"
+rawBuy  = brkCont ? upBrk : dnBrk
+rawSell = brkCont ? dnBrk : upBrk
+
+var bool brkFired = false
+if newEpi
+    brkFired := false
+inGrace = bar_index - stLast <= brkGrace
+okBarB  = not strictBar or barstate.isconfirmed
+okEffB  = not useEff or vEff >= effMin
+var int lastBrk = -100000
+
+sigKbuy  = brkOn and stOn and inGrace and rawBuy  and okBarB and okEffB and coilOk and (not brkOne or not brkFired) and f_preOk(false) and f_preBackOk(false) and f_riskOk(false, true) and f_biasOk(false) and (bar_index - lastBrk >= brkCd)
+sigKsell = brkOn and stOn and inGrace and rawSell and okBarB and okEffB and coilOk and (not brkOne or not brkFired) and f_preOk(true)  and f_preBackOk(true)  and f_riskOk(true,  true) and f_biasOk(true)  and (bar_index - lastBrk >= brkCd)
+if sigKbuy or sigKsell
+    brkFired := true
+    lastBrk  := bar_index
+
+// ============================================== MISURA DELLA MAE =============
+var bool  trk    = false
+var float trkPx  = 0.0
+var int   trkDir = 0
+var float trkMae = 0.0
+var int   trkBar = 0
+var bool  trkBrk = false
+
+sigSell = sigA or sigB
+sigBuy  = sigC or sigD
+anyExt  = sigSell or sigBuy
+anyBrk  = sigKbuy or sigKsell
+anySig  = anyExt or anyBrk
+
+if useMae and trk
+    trkBar += 1
+    adv = trkDir > 0 ? trkPx - low : high - trkPx
+    trkMae := math.max(trkMae, adv)
+    if trkBar >= maeLen
+        if trkBrk and maeSplit
+            array.push(maeK, trkMae / atrR)
+            if array.size(maeK) > 500
+                array.shift(maeK)
+        else
+            array.push(maeX, trkMae / atrR)
+            if array.size(maeX) > 500
+                array.shift(maeX)
+        trk := false
+
+if useMae and anySig and not trk
+    trk    := true
+    trkPx  := close
+    trkDir := (sigBuy or sigKbuy) ? 1 : -1
+    trkMae := 0.0
+    trkBar := 0
+    trkBrk := anyBrk and not anyExt
+
+// ============================================================ DIAGNOSTICA ====
+f_hit(bool use, float v) =>
+    f_cnt(use and thrMaxAct > 0 and math.abs(v) >= thrMaxAct and math.abs(nz(v[1], v)) < thrMaxAct)
+
+cHit1 = f_hit(use1, c1)
+cHit2 = f_hit(use2, c2)
+cHit3 = f_hit(use3, c3)
+cHit4 = f_hit(use4, c4)
+cHit5 = f_hit(use5, c5)
+
+cArmA = f_cnt(armA)
+cArmB = f_cnt(armB)
+cArmC = f_cnt(armC)
+cArmD = f_cnt(armD)
+cSigA = f_cnt(sigA)
+cSigB = f_cnt(sigB)
+cSigC = f_cnt(sigC)
+cSigD = f_cnt(sigD)
+cStA  = f_cnt(stallStart)
+cBrkB = f_cnt(sigKbuy)
+cBrkS = f_cnt(sigKsell)
+
+// ================================================================== PLOT ======
+plot(showC and use1 ? c1 : na, "CCI S1", color = cc1c, linewidth = 1)
+plot(showC and use2 ? c2 : na, "CCI S2", color = cc2c, linewidth = 1)
+plot(showC and use3 ? c3 : na, "CCI S3", color = cc3c, linewidth = 1)
+plot(showC and use4 ? c4 : na, "CCI S4", color = cc4c, linewidth = 1)
+plot(showC and use5 ? c5 : na, "CCI S5", color = cc5c, linewidth = 2)
+plot(showC and trigOwn ? cT : na, "CCI trigger", color = ccFc, linewidth = 2)
+plot(showC and useBias ? cBias : na, "CCI bias", color = color.new(color.teal, 20), linewidth = 2, style = plot.style_stepline)
+plot(showLv and useBias and biasLvl > 0 ?  biasLvl : na, "bias +", color = color.new(color.teal, 55), style = plot.style_linebr)
+plot(showLv and useBias and biasLvl > 0 ? -biasLvl : na, "bias -", color = color.new(color.teal, 55), style = plot.style_linebr)
+
+// banda dello stallo: quella della sezione DOMINANTE, perche' e' quella che
+// detta il ritmo dell'episodio. Le altre restano leggibili nel cruscotto.
+pBU = plot(showBand and stOn and not na(bndDom) ?  bndDom : na, "banda +", color = color.new(color.teal, 60), style = plot.style_linebr)
+pBL = plot(showBand and stOn and not na(bndDom) ? -bndDom : na, "banda -", color = color.new(color.teal, 60), style = plot.style_linebr)
+fill(pBU, pBL, color = showBand and stOn ? cBand : na, title = "Zona di stallo")
+
+hline(0, "zero", color = cLvl0, linestyle = hline.style_dotted)
+plot(showLv and extOn and enP2 ? thrP2 : na, "soglia A", color = cLvlS, style = plot.style_linebr)
+plot(showLv and extOn and enP1 ? thrP1 : na, "soglia B", color = cLvlS, style = plot.style_linebr)
+plot(showLv and extOn and enM1 ? thrM1 : na, "soglia C", color = cLvlS, style = plot.style_linebr)
+plot(showLv and extOn and enM2 ? thrM2 : na, "soglia D", color = cLvlS, style = plot.style_linebr)
+plot(showLv and extOn and enP2 ? trgP2 : na, "trigger A", color = cLvlT, style = plot.style_cross, linewidth = 1)
+plot(showLv and extOn and enP1 ? trgP1 : na, "trigger B", color = cLvlT, style = plot.style_cross, linewidth = 1)
+plot(showLv and extOn and enM1 ? trgM1 : na, "trigger C", color = cLvlT, style = plot.style_cross, linewidth = 1)
+plot(showLv and extOn and enM2 ? trgM2 : na, "trigger D", color = cLvlT, style = plot.style_cross, linewidth = 1)
+plot(showLv and brkOn and stOn ?  brkLvl : na, "rottura +", color = color.new(cBrk, 40), style = plot.style_linebr)
+plot(showLv and brkOn and stOn ? -brkLvl : na, "rottura -", color = color.new(cBrk, 40), style = plot.style_linebr)
+
+f_size(string opt) =>
+    opt == "Minimo" ? size.tiny : opt == "Piccolo" ? size.small : opt == "Normale" ? size.normal : size.large
+szDash = f_size(dashSz)
+szTag  = f_size(tagSz)
+szMark = f_size(markSz)
+
+f_tag(bool use, string tf, float v, color col) =>
+    var label lb = label.new(bar_index, 0.0, "", style = label.style_none, size = size.tiny, textalign = text.align_left)
+    if barstate.islast
+        label.set_xy(lb, bar_index + tagOff, v)
+        label.set_text(lb, showC and showTags and use ? tf : "")
+        label.set_textcolor(lb, col)
+        label.set_size(lb, szTag)
+    lb
+
+f_tag(use1, tf1, c1, cc1c)
+f_tag(use2, tf2, c2, cc2c)
+f_tag(use3, tf3, c3, cc3c)
+f_tag(use4, tf4, c4, cc4c)
+f_tag(use5, tf5, c5, cc5c)
+
+inPane  = markWhere != "Grafico prezzi"
+onChart = markWhere != "Pannello"
+
+f_mkStyle(bool isSell) =>
+    markShape == "Freccia (forma)"    ? (isSell ? label.style_arrowdown    : label.style_arrowup)    :
+     markShape == "Triangolo (forma)" ? (isSell ? label.style_triangledown : label.style_triangleup) :
+     markShape == "Etichetta (forma)" ? (isSell ? label.style_label_down   : label.style_label_up)   :
+     markShape == "Cerchio (forma)"   ? label.style_circle  :
+     markShape == "Quadrato (forma)"  ? label.style_square  :
+     markShape == "Rombo (forma)"     ? label.style_diamond :
+     markShape == "Croce × (forma)"   ? label.style_xcross  :
+     markShape == "Croce + (forma)"   ? label.style_cross   :
+     markShape == "Bandiera (forma)"  ? label.style_flag    :
+     label.style_none
+
+f_mkGlyph(bool isSell) =>
+    markShape == "Freccia ▼▲"          ? (isSell ? "▼" : "▲") :
+     markShape == "Freccia vuota ▽△"   ? (isSell ? "▽" : "△") :
+     markShape == "Freccia sottile ↓↑" ? (isSell ? "↓" : "↑") :
+     markShape == "Pallino ●"          ? "●" :
+     markShape == "Cerchio ○"          ? "○" :
+     markShape == "Quadrato ■"         ? "■" :
+     markShape == "Rombo ◆"            ? "◆" :
+     markShape == "Stella ★"           ? "★" :
+     markShape == "Croce ✖"            ? "✖" :
+     ""
+
+isShape = str.contains(markShape, "(forma)")
+
+f_markPane(bool fire, float y, bool isSell, string txt, string tip, color col) =>
+    if fire and inPane
+        label.new(bar_index, y, isShape ? "" : txt, style = f_mkStyle(isSell), color = col, textcolor = col, size = szMark, textalign = text.align_center, tooltip = tip)
+
+f_markChart(bool fire, bool isSell, string txt, string tip, color col) =>
+    if fire and onChart
+        label.new(bar_index, na, isShape ? "" : txt, yloc = isSell ? yloc.abovebar : yloc.belowbar, style = f_mkStyle(isSell), color = col, textcolor = col, size = szMark, textalign = text.align_center, tooltip = tip, force_overlay = true)
+
+txSell = f_mkGlyph(true)
+txBuy  = f_mkGlyph(false)
+
+f_missTxt(float thr, bool isUp) =>
+    t = ""
+    if use1 and not (isUp ? hi1 >= thr : lo1 <= thr)
+        t := t + " S1"
+    if use2 and not (isUp ? hi2 >= thr : lo2 <= thr)
+        t := t + " S2"
+    if use3 and not (isUp ? hi3 >= thr : lo3 <= thr)
+        t := t + " S3"
+    if use4 and not (isUp ? hi4 >= thr : lo4 <= thr)
+        t := t + " S4"
+    if use5 and not (isUp ? hi5 >= thr : lo5 <= thr)
+        t := t + " S5"
+    t
+
+f_miss(bool en, bool trig, bool armed, float y, string tag, float thr, bool isUp) =>
+    if showMiss and extOn and en and trig and not armed
+        [_a, okN, need] = f_arm(thr, isUp)
+        label.new(bar_index, y, "×" + tag + " " + str.tostring(okN) + "/" + str.tostring(need) + f_missTxt(thr, isUp), style = label.style_none, textcolor = color.new(color.gray, 25), size = szMark, textalign = text.align_center)
+
+f_seqTxt(int n) => showSeq and n > 1 ? str.tostring(n) : ""
+
+f_rskTxt(float r) =>
+    pt = str.tostring(r, format.mintick) + "pt"
+    tk = str.tostring(math.round(r / syminfo.mintick)) + "t"
+    u  = riskUnit == "Tick" ? tk : riskUnit == "Punti" ? pt : pt + " / " + tk
+    showRisk and r > 0 ? " " + u : ""
+
+f_chartTxt(string arrow, string tag, int n, float r) =>
+    chartMark == "Freccia sola" ? arrow : chartMark == "Freccia + lettera" ? arrow + tag + f_seqTxt(n) : arrow + tag + f_seqTxt(n) + f_rskTxt(r)
+
+preTag = not usePre ? "" : preIdle ? "inerte" : preDom ? "dom " + preDomTf : preMode == "Almeno una (OR)" ? "OR " + str.tostring(pOnN) : "AND " + str.tostring(pOnN)
+
+f_tip(string tag, int n, bool isSell, float r) =>
+    (isSell ? "SELL " : "BUY ") + tag + " #" + str.tostring(n) + "  |  rischio " + str.tostring(r, format.mintick) + " pt / " + str.tostring(math.round(r / syminfo.mintick)) + " t  |  TR/ATR " + f_n1(trAtrMax) + "  |  H " + f_n2(entH) + "  |  eff " + f_n2(vEff) + (stOn ? "  |  stallo " + str.tostring(inN) + "/" + str.tostring(stNeed) + " len " + str.tostring(stLen) + " coil " + f_n2(coilR) : "") + (usePre ? "  |  pre " + preTag : "") + (useBias ? "  |  bias " + (biasNat ? "nat " : "live ") + tfBias + " " + f_n1(cBias) : "")
+
+f_markPane(sigA,  markLvl,       true,  txSell + "A" + f_seqTxt(seqA) + f_rskTxt(rskSell), f_tip("A", seqA, true,  rskSell), cUp)
+f_markPane(sigB,  markLvl - 35,  true,  txSell + "B" + f_seqTxt(seqB) + f_rskTxt(rskSell), f_tip("B", seqB, true,  rskSell), color.new(cUp, 35))
+f_markPane(sigC, -markLvl + 35,  false, txBuy  + "C" + f_seqTxt(seqC) + f_rskTxt(rskBuy),  f_tip("C", seqC, false, rskBuy),  color.new(cDn, 35))
+f_markPane(sigD, -markLvl,       false, txBuy  + "D" + f_seqTxt(seqD) + f_rskTxt(rskBuy),  f_tip("D", seqD, false, rskBuy),  cDn)
+f_markPane(sigKsell, markLvl + 40, true,  txSell + "K" + f_rskTxt(rskSellK), f_tip("K rottura", 1, true,  rskSellK), cBrk)
+f_markPane(sigKbuy, -markLvl - 40, false, txBuy  + "K" + f_rskTxt(rskBuyK),  f_tip("K rottura", 1, false, rskBuyK),  cBrk)
+
+f_markChart(sigA, true,  f_chartTxt(txSell, "A", seqA, rskSell), f_tip("A", seqA, true,  rskSell), cUp)
+f_markChart(sigB, true,  f_chartTxt(txSell, "B", seqB, rskSell), f_tip("B", seqB, true,  rskSell), color.new(cUp, 35))
+f_markChart(sigC, false, f_chartTxt(txBuy,  "C", seqC, rskBuy),  f_tip("C", seqC, false, rskBuy),  color.new(cDn, 35))
+f_markChart(sigD, false, f_chartTxt(txBuy,  "D", seqD, rskBuy),  f_tip("D", seqD, false, rskBuy),  cDn)
+f_markChart(sigKsell, true,  f_chartTxt(txSell, "K", 1, rskSellK), f_tip("K rottura", 1, true,  rskSellK), cBrk)
+f_markChart(sigKbuy,  false, f_chartTxt(txBuy,  "K", 1, rskBuyK),  f_tip("K rottura", 1, false, rskBuyK),  cBrk)
+
+f_miss(enP2, trgARaw, armA,  markLvl,      "A", thrP2, true)
+f_miss(enP1, trgBRaw, armB,  markLvl - 35, "B", thrP1, true)
+f_miss(enM1, trgCRaw, armC, -markLvl + 35, "C", thrM1, false)
+f_miss(enM2, trgDRaw, armD, -markLvl,      "D", thrM2, false)
+
+if stMark and stallStart
+    label.new(bar_index, 0.0, "◇", style = label.style_none, textcolor = color.new(color.teal, 10), size = szMark, textalign = text.align_center, tooltip = "inizio stallo #" + str.tostring(stEpi) + " | dentro " + str.tostring(inN) + "/" + str.tostring(stNeed) + " | persistenza " + str.tostring(stLen) + " barre | coil " + f_n2(coilR) + " | dominante " + stDomTf)
+
+bgcolor(stBg and stallOn ? color.new(color.teal, 90) : not showArmBg ? na : (armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title = "Sfondo stallo / armamento")
+
+// ============================================================== CRUSCOTTO =====
+f_stat(bool use, string tf, int sec, float v, float h, float l, float ne, float win, bool isLive) =>
+    bad  = use and sec < chartSec
+    cap  = f_ccap(ne)
+    dead = use and not isLive and cap < thrMaxAct
+    [use ? (bad ? "⚠ < grafico" : tf + " " + f_wtxt(win)) : "off",
+     use ? f_n1(v) : "–",
+     use ? f_n0(l) + " / " + f_n0(h) : "–",
+     use ? str.tostring(int(math.round(ne))) + " · " + (isLive ? "—" : f_n0(cap)) : "–",
+     bad, dead]
+
+var table dash = table.new(position.top_right, 6, 18, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
+if showTab and barstate.islast
+    hdrBg = color.new(color.gray, 70)
+    modeTag = (modeA ? "A nativo" : modeB ? "B grafico/HTF" : "C orizz.equiv.") + (liveOn ? " · LIVE" : modeC ? "" : " · step")
+    table.cell(dash, 0, 0, "TF", bgcolor = hdrBg, text_color = color.white, text_size = szDash)
+    table.cell(dash, 1, 0, "CCI", bgcolor = hdrBg, text_color = color.white, text_size = szDash)
+    table.cell(dash, 2, 0, "min/max " + str.tostring(lbEff), bgcolor = hdrBg, text_color = color.white, text_size = szDash)
+    table.cell(dash, 3, 0, "n · cap", bgcolor = hdrBg, text_color = color.white, text_size = szDash)
+    table.cell(dash, 4, 0, "hit", bgcolor = hdrBg, text_color = color.white, text_size = szDash)
+    table.cell(dash, 5, 0, "stato", bgcolor = hdrBg, text_color = color.white, text_size = szDash)
+
+    [t1, v1, r1, q1, b1, d1] = f_stat(use1, tf1, sec1, c1, hi1, lo1, ne1, winS1, lv1)
+    [t2, v2, r2, q2, b2, d2] = f_stat(use2, tf2, sec2, c2, hi2, lo2, ne2, winS2, lv2)
+    [t3, v3, r3, q3, b3, d3] = f_stat(use3, tf3, sec3, c3, hi3, lo3, ne3, winS3, lv3)
+    [t4, v4, r4, q4, b4, d4] = f_stat(use4, tf4, sec4, c4, hi4, lo4, ne4, winS4, lv4)
+    [t5, v5, r5, q5, b5, d5] = f_stat(use5, tf5, sec5, c5, hi5, lo5, ne5, winS5, lv5)
+
+    ts = array.from(t1, t2, t3, t4, t5)
+    vs = array.from(v1, v2, v3, v4, v5)
+    rs = array.from(r1, r2, r3, r4, r5)
+    qs = array.from(q1, q2, q3, q4, q5)
+    bs = array.from(b1, b2, b3, b4, b5)
+    ds = array.from(d1, d2, d3, d4, d5)
+    cvs= array.from(c1, c2, c3, c4, c5)
+    us = array.from(use1, use2, use3, use4, use5)
+    hs = array.from(cHit1, cHit2, cHit3, cHit4, cHit5)
+    cls= array.from(cc1c, cc2c, cc3c, cc4c, cc5c)
+    ls = array.from(lv1, lv2, lv3, lv4, lv5)
+    ins= array.from(in1, in2, in3, in4, in5)
+
+    for i = 0 to 4
+        vv   = array.get(cvs, i)
+        act  = array.get(us, i)
+        dead = array.get(ds, i)
+        col  = not act ? color.new(color.gray, 60) : dead ? color.new(color.red, 25) : array.get(bs, i) ? color.new(color.orange, 30) : array.get(ins, i) ? color.new(color.teal, 55) : vv >= 100 ? color.new(cUp, 40) : vv <= -100 ? color.new(cDn, 40) : color.new(color.gray, 80)
+        st   = not act ? "off" : dead ? "cap < soglia" : array.get(ins, i) ? "STALLO" : vv >= 100 ? "estremo +" : vv <= -100 ? "estremo -" : array.get(ls, i) ? "live" : "–"
+        table.cell(dash, 0, i + 1, "S" + str.tostring(i + 1) + " " + array.get(ts, i), text_size = szDash, text_color = act ? array.get(cls, i) : color.gray, bgcolor = col)
+        table.cell(dash, 1, i + 1, array.get(vs, i), text_size = szDash, text_color = color.white, bgcolor = col)
+        table.cell(dash, 2, i + 1, array.get(rs, i), text_size = szDash, text_color = color.white, bgcolor = col)
+        table.cell(dash, 3, i + 1, array.get(qs, i), text_size = szDash, text_color = color.white, bgcolor = col)
+        hitN = array.get(hs, i)
+        table.cell(dash, 4, i + 1, act ? str.tostring(hitN) : "–", text_size = szDash, text_color = act and hitN == 0 ? color.red : color.white, bgcolor = col)
+        table.cell(dash, 5, i + 1, st, text_size = szDash, text_color = color.white, bgcolor = col)
+
+    armTxt = (armA ? "A " : "") + (armB ? "B " : "") + (armC ? "C " : "") + (armD ? "D " : "")
+    mCol = modeC ? color.new(color.orange, 40) : liveOn ? color.new(color.teal, 45) : hdrBg
+    table.cell(dash, 0, 6, "modo", text_size = szDash, text_color = color.white, bgcolor = hdrBg)
+    table.cell(dash, 1, 6, modeTag, text_size = szDash, text_color = color.white, bgcolor = mCol)
+    table.cell(dash, 2, 6, modeC ? "no HTF" : "HTF ok", text_size = szDash, text_color = modeC ? color.orange : color.white, bgcolor = mCol)
+    table.cell(dash, 3, 6, "trg " + tfFast + " " + f_wtxt(winFast), text_size = szDash, text_color = trigOwn ? color.aqua : color.white, bgcolor = hdrBg)
+    table.cell(dash, 4, 6, strictBar ? "close" : "intrabar", text_size = szDash, text_color = strictBar ? color.silver : color.yellow, bgcolor = hdrBg)
+    table.cell(dash, 5, 6, armTxt == "" ? "–" : armTxt, text_size = szDash, text_color = color.white, bgcolor = armTxt == "" ? hdrBg : color.new(color.orange, 40))
+
+    table.cell(dash, 0, 7, "K " + str.tostring(reqSec <= 0 ? nActive : math.min(reqSec, nActive)) + "/" + str.tostring(nActive), text_size = szDash, text_color = reqSec > 0 and reqSec < nActive ? color.yellow : color.white, bgcolor = hdrBg)
+    table.cell(dash, 1, 7, "A " + f_n0(thrP2), text_size = szDash, text_color = extOn and enP2 ? cUp : color.gray, bgcolor = hdrBg)
+    table.cell(dash, 2, 7, "B " + f_n0(thrP1), text_size = szDash, text_color = extOn and enP1 ? cUp : color.gray, bgcolor = hdrBg)
+    table.cell(dash, 3, 7, "C " + f_n0(thrM1), text_size = szDash, text_color = extOn and enM1 ? cDn : color.gray, bgcolor = hdrBg)
+    table.cell(dash, 4, 7, "D " + f_n0(thrM2), text_size = szDash, text_color = extOn and enM2 ? cDn : color.gray, bgcolor = hdrBg)
+    table.cell(dash, 5, 7, useBias ? (biasInv ? "bias inv" : "bias pro") : "", text_size = szDash, text_color = useBias ? color.aqua : color.gray, bgcolor = hdrBg)
+
+    ac = array.from(cArmA, cArmB, cArmC, cArmD)
+    scn= array.from(cSigA, cSigB, cSigC, cSigD)
+    ae = array.from(enP2, enP1, enM1, enM2)
+    table.cell(dash, 0, 8, "armate",  text_size = szDash, text_color = color.silver, bgcolor = color.new(color.gray, 85))
+    table.cell(dash, 0, 9, "segnali", text_size = szDash, text_color = color.silver, bgcolor = color.new(color.gray, 85))
+    for j = 0 to 3
+        av = array.get(ac, j)
+        sv = array.get(scn, j)
+        on = extOn and array.get(ae, j)
+        acol = not on ? color.gray : av == 0 ? color.red : color.silver
+        scol = not on ? color.gray : sv == 0 and av > 0 ? color.orange : sv == 0 ? color.red : color.lime
+        table.cell(dash, j + 1, 8, on ? str.tostring(av) : "–", text_size = szDash, text_color = acol, bgcolor = color.new(color.gray, 85))
+        table.cell(dash, j + 1, 9, on ? str.tostring(sv) : "–", text_size = szDash, text_color = scol, bgcolor = color.new(color.gray, 85))
+    table.cell(dash, 5, 8, "barre", text_size = szDash, text_color = color.gray, bgcolor = color.new(color.gray, 85))
+    table.cell(dash, 5, 9, "tot",   text_size = szDash, text_color = color.gray, bgcolor = color.new(color.gray, 85))
+
+    // -- stallo: una cella per sezione ---------------------------------------
+    //    ● dentro la banda ORA, ○ fuori, e la percentuale di barre passate
+    //    dentro: se una sezione sta dentro l'80% del tempo la sua banda non
+    //    sta filtrando niente, sta solo allargando il campione.
+    sbg = color.new(color.gray, 88)
+    table.cell(dash, 0, 10, "stallo " + (stOn ? (stNat ? "nat" : "live") : "off"), text_size = szDash, text_color = stOn ? color.white : color.gray, bgcolor = stOn ? color.new(color.teal, 55) : sbg)
+    bds = array.from(bd1, bd2, bd3, bd4, bd5)
+    sts = array.from(st1, st2, st3, st4, st5)
+    pcs = array.from(pin1, pin2, pin3, pin4, pin5)
+    for p = 0 to 4
+        son = array.get(sts, p)
+        sin = array.get(ins, p)
+        sdm = stDomI == p
+        stx = not son ? "–" : "S" + str.tostring(p + 1) + " " + f_n0(array.get(bds, p)) + (sin ? " ●" : " ○") + " " + f_n0(f_pct(array.get(pcs, p))) + "%"
+        scl = not stOn or not son ? color.gray : sdm ? color.aqua : sin ? color.lime : color.red
+        table.cell(dash, p + 1, 10, stx, text_size = szDash, text_color = scl, bgcolor = sbg)
+
+    // -- stallo: le metriche che decidono se e' accumulazione o solo media ---
+    coilCol = not stOn or na(coilR) ? color.gray : coilR <= coilMax ? color.lime : coilR > 1.5 ? color.red : color.orange
+    table.cell(dash, 0, 11, "dentro " + str.tostring(inN) + "/" + str.tostring(stNeed), text_size = szDash, text_color = not stOn ? color.gray : stRaw ? color.lime : color.silver, bgcolor = sbg)
+    table.cell(dash, 1, 11, "len " + str.tostring(stLen) + "/" + str.tostring(stHoldB), text_size = szDash, text_color = not stOn ? color.gray : stLen >= stHoldB ? color.lime : color.orange, bgcolor = sbg)
+    table.cell(dash, 2, 11, "coil " + f_n2(coilR), text_size = szDash, text_color = coilCol, bgcolor = sbg)
+    table.cell(dash, 3, 11, "epi " + str.tostring(cStA) + "/" + str.tostring(stEpi), text_size = szDash, text_color = color.silver, bgcolor = sbg, tooltip = "episodi CONFERMATI (persistenza + coil) / episodi grezzi (sole bande). Il rapporto dice quanto del 'dentro la banda' e' compressione vera: se i due numeri coincidono, il coil non sta filtrando niente e la soglia va abbassata.")
+    table.cell(dash, 4, 11, "med " + f_n1(stAvgLen) + "b", text_size = szDash, text_color = color.silver, bgcolor = sbg)
+    table.cell(dash, 5, 11, not stOn ? "off" : stallOn ? "IN STALLO" : inGrace ? "grazia" : "–", text_size = szDash, text_color = stallOn ? color.lime : inGrace ? color.yellow : color.silver, bgcolor = sbg)
+
+    // -- rottura -------------------------------------------------------------
+    kbg = color.new(color.gray, 88)
+    table.cell(dash, 0, 12, "rottura " + (brkOn ? brkTfTxt : "off"), text_size = szDash, text_color = brkOn ? color.white : color.gray, bgcolor = brkOn ? color.new(cBrk, 60) : kbg)
+    table.cell(dash, 1, 12, "liv " + f_n0(brkLvl) + " · " + f_n1(brkS), text_size = szDash, text_color = not brkOn ? color.gray : math.abs(nz(brkS)) >= brkLvl ? color.lime : color.silver, bgcolor = kbg)
+    table.cell(dash, 2, 12, brkCont ? "continu." : "reversione", text_size = szDash, text_color = color.white, bgcolor = kbg)
+    table.cell(dash, 3, 12, "eff " + f_n2(vEff), text_size = szDash, text_color = not useEff ? color.gray : vEff >= effMin ? color.lime : color.red, bgcolor = kbg)
+    table.cell(dash, 4, 12, "▲ " + str.tostring(cBrkB), text_size = szDash, text_color = cDn, bgcolor = kbg)
+    table.cell(dash, 5, 12, "▼ " + str.tostring(cBrkS), text_size = szDash, text_color = cUp, bgcolor = kbg)
+
+    // -- rischio -------------------------------------------------------------
+    rbg = color.new(color.gray, 88)
+    table.cell(dash, 0, 13, "rischio", text_size = szDash, text_color = color.silver, bgcolor = rbg)
+    table.cell(dash, 1, 13, riskUnit == "Tick" ? str.tostring(math.round(rskSell / syminfo.mintick)) + "t" : str.tostring(rskSell, format.mintick) + "pt", text_size = szDash, text_color = cUp, bgcolor = rbg)
+    table.cell(dash, 2, 13, riskUnit == "Tick" ? str.tostring(math.round(rskBuy / syminfo.mintick)) + "t" : str.tostring(rskBuy, format.mintick) + "pt", text_size = szDash, text_color = cDn, bgcolor = rbg)
+    table.cell(dash, 3, 13, "TR/ATR " + f_n1(trAtrMax), text_size = szDash, text_color = not useComp ? color.gray : trAtrMax > maxTrAtr ? color.red : color.lime, bgcolor = rbg)
+    table.cell(dash, 4, 13, "H " + f_n2(entH), text_size = szDash, text_color = not useEnt ? color.gray : (entH < entMin or entH > entMax) ? color.red : color.lime, bgcolor = rbg)
+    bTxt = not useBias ? "bias off" : (biasNat ? "nat " : "live ") + tfBias + " " + f_n1(cBias) + (biasUp ? " ▲" : biasDn ? " ▼" : " ×")
+    bCol = not useBias ? color.gray : biasRp ? color.fuchsia : biasSelf ? color.orange : (biasUp or biasDn) ? color.lime : color.red
+    table.cell(dash, 5, 13, bTxt, text_size = szDash, text_color = bCol, bgcolor = rbg)
+
+    // -- MAE: due distribuzioni separate -------------------------------------
+    mbg = color.new(color.gray, 88)
+    table.cell(dash, 0, 14, "MAE atr", text_size = szDash, text_color = color.silver, bgcolor = mbg, tooltip = "X = estremi, K = rotture.\nX: med " + f_n2(maeMedX) + " p80 " + f_n2(maeP80X) + " p95 " + f_n2(maeP95X) + " su " + str.tostring(maeNx) + "\nK: med " + f_n2(maeMedK) + " p80 " + f_n2(maeP80K) + " p95 " + f_n2(maeP95K) + " su " + str.tostring(maeNk) + "\nSotto le 30 osservazioni un p80 non e' una stima, e' un aneddoto.")
+    table.cell(dash, 1, 14, "X med " + f_n2(maeMedX), text_size = szDash, text_color = color.silver, bgcolor = mbg)
+    table.cell(dash, 2, 14, "X p80 " + f_n2(maeP80X), text_size = szDash, text_color = color.yellow, bgcolor = mbg)
+    table.cell(dash, 3, 14, "X n " + str.tostring(maeNx), text_size = szDash, text_color = maeNx < 30 ? color.orange : color.silver, bgcolor = mbg)
+    table.cell(dash, 4, 14, maeSplit ? "K p80 " + f_n2(maeP80K) : "p95 " + f_n2(maeP95X), text_size = szDash, text_color = color.yellow, bgcolor = mbg)
+    table.cell(dash, 5, 14, maeSplit ? "K n " + str.tostring(maeNk) : "–", text_size = szDash, text_color = maeSplit and maeNk < 30 ? color.orange : color.silver, bgcolor = mbg)
+
+    // -- stop consigliato ----------------------------------------------------
+    stbg  = color.new(color.gray, 88)
+    sSug  = na(maeP80X) ? na : maeP80X * atrR
+    tickV = syminfo.mintick
+    table.cell(dash, 0, 15, "stop cons.", text_size = szDash, text_color = color.white, bgcolor = stbg)
+    table.cell(dash, 1, 15, na(sSug) ? "n/a" : str.tostring(sSug, format.mintick) + " pt", text_size = szDash, text_color = color.white, bgcolor = stbg)
+    table.cell(dash, 2, 15, na(sSug) ? "n/a" : str.tostring(math.round(sSug / tickV)) + " t", text_size = szDash, text_color = color.white, bgcolor = stbg)
+    table.cell(dash, 3, 15, na(sSug) ? "n/a" : "$" + str.tostring(math.round(sSug * syminfo.pointvalue, 2)), text_size = szDash, text_color = color.white, bgcolor = stbg)
+    table.cell(dash, 4, 15, na(sSug) ? "–" : "S " + (rskSellS < sSug ? "stretto" : "ok"), text_size = szDash, text_color = na(sSug) ? color.gray : rskSellS < sSug ? color.red : color.lime, bgcolor = stbg)
+    table.cell(dash, 5, 15, na(sSug) ? "–" : "B " + (rskBuyS < sSug ? "stretto" : "ok"), text_size = szDash, text_color = na(sSug) ? color.gray : rskBuyS < sSug ? color.red : color.lime, bgcolor = stbg)
+
+    // -- pre-condizione ------------------------------------------------------
+    prbg  = color.new(color.gray, 88)
+    pmTxt = not usePre ? "off" : preIdle ? "⚠ nessuna" : (preNat ? "nat " : "live ") + (preDom ? "dom " + preDomTf : preMode == "Almeno una (OR)" ? "OR" : "AND")
+    table.cell(dash, 0, 16, "pre " + pmTxt + (preBack ? " ↩" : "") + (preOne ? " 1x" : ""), text_size = szDash, text_color = not usePre ? color.gray : preIdle ? color.orange : color.white, bgcolor = usePre and not preIdle ? color.new(color.blue, 55) : prbg)
+    pOns = array.from(pre1, pre2, pre3, pre4, pre5)
+    pSls = array.from(pS1s, pS2s, pS3s, pS4s, pS5s)
+    pBys = array.from(pS1b, pS2b, pS3b, pS4b, pS5b)
+    pEls = array.from(preE1, preE2, preE3, preE4, preE5)
+    pMem = array.from(math.max(preL1, preMin), math.max(preL2, preMin), math.max(preL3, preMin), math.max(preL4, preMin), math.max(preL5, preMin))
+    for p2 = 0 to 4
+        pon = array.get(pOns, p2)
+        pos = array.get(pSls, p2)
+        pob = array.get(pBys, p2)
+        pdm = preDom and pDomI == p2
+        ptx = not pon ? "–" : "S" + str.tostring(p2 + 1) + " " + (preCnd ? str.tostring(array.get(pMem, p2)) + "c" : str.tostring(array.get(pEls, p2)) + "b") + (pos ? "▼" : "") + (pob ? "▲" : "") + (not pos and not pob ? "×" : "")
+        pcl = not usePre or not pon ? color.gray : pdm ? color.aqua : (pos or pob) ? color.lime : color.red
+        table.cell(dash, p2 + 1, 16, ptx, text_size = szDash, text_color = pcl, bgcolor = prbg)
+
+    // -- sezione di riferimento della pre-condizione --------------------------
+    rfbg = color.new(color.gray, 88)
+    bkB  = na(zRef) ? false : zRef >= -preBackLvl
+    bkS  = na(zRef) ? false : zRef <=  preBackLvl
+    table.cell(dash, 0, 17, "rif " + (pDomI < 0 ? "–" : preDomTf + (preNat ? " nat" : " live")), text_size = szDash, text_color = not usePre or pDomI < 0 ? color.gray : color.aqua, bgcolor = rfbg)
+    table.cell(dash, 1, 17, "cci " + f_n1(zRef), text_size = szDash, text_color = na(zRef) ? color.gray : inLoRef ? cDn : inHiRef ? cUp : color.white, bgcolor = rfbg)
+    table.cell(dash, 2, 17, not preBack ? "↩ off" : "↩ B" + (bkB ? "✓" : "✗") + " S" + (bkS ? "✓" : "✗"), text_size = szDash, text_color = not preBack ? color.gray : (bkB or bkS) ? color.lime : color.red, bgcolor = rfbg)
+    table.cell(dash, 3, 17, "escB " + str.tostring(excBuy), text_size = szDash, text_color = color.silver, bgcolor = rfbg)
+    table.cell(dash, 4, 17, "escS " + str.tostring(excSell), text_size = szDash, text_color = color.silver, bgcolor = rfbg)
+    table.cell(dash, 5, 17, preOne ? "1 per esc." : "latch trigger", text_size = szDash, text_color = preOne ? color.aqua : color.gray, bgcolor = rfbg)
+
+// ================================================================= ALERT ======
+alertcondition(stallStart, "MTF-CCI · inizio stallo", "MTF-CCI stallo confermato")
+alertcondition(sigKbuy,  "MTF-CCI · rottura BUY",  "MTF-CCI rottura BUY")
+alertcondition(sigKsell, "MTF-CCI · rottura SELL", "MTF-CCI rottura SELL")
+alertcondition(sigA, "MTF-CCI · SELL soglia A", "MTF-CCI SELL A")
+alertcondition(sigB, "MTF-CCI · SELL soglia B", "MTF-CCI SELL B")
+alertcondition(sigC, "MTF-CCI · BUY soglia C",  "MTF-CCI BUY C")
+alertcondition(sigD, "MTF-CCI · BUY soglia D",  "MTF-CCI BUY D")
+alertcondition(sigA or sigB or sigKsell, "MTF-CCI · SELL (qualsiasi)", "MTF-CCI SELL")
+alertcondition(sigC or sigD or sigKbuy,  "MTF-CCI · BUY (qualsiasi)",  "MTF-CCI BUY")
+
+if anySig
+    isS = sigSell or sigKsell
+    dir = isS ? "SELL" : "BUY"
+    tag = anyBrk ? "K" : sigA ? "A" : sigB ? "B" : sigC ? "C" : "D"
+    nth = anyBrk ? 1 : sigA ? seqA : sigB ? seqB : sigC ? seqC : seqD
+    rr  = anyBrk ? (isS ? rskSellK : rskBuyK) : (isS ? rskSell : rskBuy)
+    alert("MTF-CCI " + dir + " [" + tag + "#" + str.tostring(nth) + "] " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | cci=" + f_n1(anyBrk ? brkS : cFast) + (stOn ? " | stallo " + str.tostring(inN) + "/" + str.tostring(stNeed) + " len=" + str.tostring(stLen) + " coil=" + f_n2(coilR) : "") + (usePre ? " | pre " + preTag : "") + (useBias ? " | bias " + (biasNat ? "nat " : "live ") + tfBias + "=" + f_n1(cBias) : "") + " | risk=" + str.tostring(rr, format.mintick) + "pt/" + str.tostring(math.round(rr / syminfo.mintick)) + "t | eff=" + f_n2(vEff), alert.freq_once_per_bar_close)
