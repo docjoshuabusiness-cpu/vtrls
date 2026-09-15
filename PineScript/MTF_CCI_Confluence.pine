@@ -122,6 +122,8 @@ var string g3 = "3 · Zona neutra ±X e contesto multi-TF"
 bandMode = input.string("M1 · Contesto FUORI banda + trigger", "Modalita' del motore a banda",
      options=["M1 · Contesto FUORI banda + trigger","M2 · Rottura dello stallo (tutti DENTRO)"], group=g3,
      tooltip="Due ipotesi OPPOSTE sulla stessa banda. Non sono varianti di taratura: usano lo stesso numero per dire cose contrarie, quindi vanno confrontate come strategie separate, mai fuse.\n\nM1 · CONTESTO FUORI BANDA (default)\nI timeframe alti selezionati devono essere FUORI dalla zona neutra e CONCORDI: sopra +banda per comprare, sotto -banda per vendere. Se sono dentro, il prezzo non si guarda: nessuna direzione decisa, nessun trade. Deciso il contesto, il segnale arriva dal timeframe piu' piccolo selezionato, che rientra nella zona neutra (il respiro) e ne riesce dalla stessa parte del contesto.\nE' una struttura di continuazione con ingresso su ritracciamento: il TF alto dice DOVE, il TF basso dice QUANDO.\n\nM2 · ROTTURA DELLO STALLO\nTutte le sezioni DENTRO la banda (compressione multi-orizzonte), poi si opera l'uscita. Il contesto e' l'assenza di direzione, non la direzione.\n\nGli estremi (gruppo 5) restano un terzo motore indipendente da entrambe.")
+stUseOnly = input.bool(true, "   considera solo le sezioni ATTIVE nel gruppo 2", group=g3,
+     tooltip="ACCESO (da lasciare acceso): una sezione spenta nel gruppo 2 non entra nel motore a banda, anche se e' spuntata qui sotto.\n\nSpento, le due liste sono indipendenti: puoi usare come contesto un timeframe che non stai tracciando nel pannello, ma ti ritrovi un contesto che pretende condizioni su sezioni che nel cruscotto leggi 'off'. E' esattamente il modo in cui un segnale sembra uscire dal nulla.")
 ctxExcl = input.bool(true, "   M1: escludi la sezione di trigger dal contesto", group=g3,
      tooltip="ACCESO (da lasciare acceso): la sezione che genera il segnale non fa parte del contesto.\n\nSpento, il filtro si auto-contraddice: il contesto pretende che quella sezione sia FUORI dalla banda mentre il trigger pretende che ci sia appena rientrata. Le due condizioni non possono essere vere insieme e il conteggio dei segnali crolla a zero senza che nulla nel cruscotto dica perche'. E' lo stesso errore del bias puntato sulla serie del trigger, e nasce dalla stessa causa: sono CCI dello stesso prezzo.")
 stOn   = input.bool(true, "Attiva il motore a banda", group=g3,
@@ -194,8 +196,8 @@ brkCd  = input.int(10, "   cooldown fra rotture (barre)", minval=0, maxval=500, 
 
 // ------------------------------------------------- ESTREMI: LOGICA SEGNALE ---
 var string g5 = "5 · Estremi (logica segnale)"
-extOn    = input.bool(true, "Attiva i segnali di estremo", group=g5,
-     tooltip="Motore indipendente dallo stallo: confluenza multi-TF oltre soglia e rientro. E' il classico setto di reversione sul CCI, portato dal motore z-score.\n\nPuoi tenere acceso solo lo stallo, solo gli estremi, o entrambi: sono due ipotesi diverse sullo stesso prezzo e i loro campioni vanno valutati separatamente, mai sommati.")
+extOn    = input.bool(false, "Attiva i segnali di estremo", group=g5,
+     tooltip="SPENTO DI DEFAULT, e c'e' una ragione: questo e' un motore di REVERSIONE (compra l'esaurimento sotto -200), cioe' l'ipotesi OPPOSTA a M1, che compra la continuazione. Tenendoli accesi insieme il pannello mostra due famiglie di segnali contraddittorie con lo stesso aspetto, e i marker si distinguono solo dalla lettera: A/B/C/D = estremi, M1/M2 = motore a banda.\n\nConfluenza multi-TF oltre soglia e rientro, portato dal motore z-score.\n\nPuoi tenere acceso solo lo stallo, solo gli estremi, o entrambi: sono due ipotesi diverse sullo stesso prezzo e i loro campioni vanno valutati separatamente, mai sommati.")
 lookback = input.int(60, "Finestra di confluenza (barre del grafico)", minval=1, maxval=1000, group=g5,
      tooltip="Tutte le sezioni richieste devono aver superato la soglia almeno una volta entro queste N barre.\n\nREGOLA: la finestra deve contenere almeno 2 barre della sezione piu' LENTA.\n  minimo = 2 * (TF piu' lento / TF del grafico)\nCon valori troppo bassi la confluenza non si arma MAI: controlla il contatore 'armate' nel cruscotto.")
 autoLb   = input.bool(true, "Finestra automatica (2 barre della sezione piu' lenta)", group=g5)
@@ -499,28 +501,35 @@ atrR = math.max(ta.atr(atrLenR), syminfo.mintick)
 //  una volta per candela HTF e la persistenza conta candele vere; con la live
 //  cambia a ogni barra del grafico e conta oscillazioni intracandela.
 stNat = stEval == "Nativo (chiusura candela della sezione)"
+//  checkbox effettive: una sezione spenta nel gruppo 2 non deve poter imporre
+//  condizioni che il cruscotto mostra come "off"
+stA1 = st1 and (not stUseOnly or use1)
+stA2 = st2 and (not stUseOnly or use2)
+stA3 = st3 and (not stUseOnly or use3)
+stA4 = st4 and (not stUseOnly or use4)
+stA5 = st5 and (not stUseOnly or use5)
 sc1 = stNat ? cN1 : c1
 sc2 = stNat ? cN2 : c2
 sc3 = stNat ? cN3 : c3
 sc4 = stNat ? cN4 : c4
 sc5 = stNat ? cN5 : c5
 
-in1 = st1 and not na(sc1) and math.abs(sc1) <= bd1
-in2 = st2 and not na(sc2) and math.abs(sc2) <= bd2
-in3 = st3 and not na(sc3) and math.abs(sc3) <= bd3
-in4 = st4 and not na(sc4) and math.abs(sc4) <= bd4
-in5 = st5 and not na(sc5) and math.abs(sc5) <= bd5
+in1 = stA1 and not na(sc1) and math.abs(sc1) <= bd1
+in2 = stA2 and not na(sc2) and math.abs(sc2) <= bd2
+in3 = stA3 and not na(sc3) and math.abs(sc3) <= bd3
+in4 = stA4 and not na(sc4) and math.abs(sc4) <= bd4
+in5 = stA5 and not na(sc5) and math.abs(sc5) <= bd5
 
-stOnN = (st1 ? 1 : 0) + (st2 ? 1 : 0) + (st3 ? 1 : 0) + (st4 ? 1 : 0) + (st5 ? 1 : 0)
+stOnN = (stA1 ? 1 : 0) + (stA2 ? 1 : 0) + (stA3 ? 1 : 0) + (stA4 ? 1 : 0) + (stA5 ? 1 : 0)
 inN   = (in1 ? 1 : 0) + (in2 ? 1 : 0) + (in3 ? 1 : 0) + (in4 ? 1 : 0) + (in5 ? 1 : 0)
 stNeed= stReq <= 0 ? stOnN : math.min(stReq, stOnN)
 
 // sezione DOMINANTE fra quelle spuntate: TF piu' alto
-qS1 = st1 ? sec1 : 0
-qS2 = st2 ? sec2 : 0
-qS3 = st3 ? sec3 : 0
-qS4 = st4 ? sec4 : 0
-qS5 = st5 ? sec5 : 0
+qS1 = stA1 ? sec1 : 0
+qS2 = stA2 ? sec2 : 0
+qS3 = stA3 ? sec3 : 0
+qS4 = stA4 ? sec4 : 0
+qS5 = stA5 ? sec5 : 0
 stMaxSec = math.max(math.max(math.max(math.max(qS1, qS2), qS3), qS4), qS5)
 stDomI   = stMaxSec == 0 ? -1 : qS5 == stMaxSec ? 4 : qS4 == stMaxSec ? 3 : qS3 == stMaxSec ? 2 : qS2 == stMaxSec ? 1 : 0
 stDomTf  = stDomI == 4 ? tf5 : stDomI == 3 ? tf4 : stDomI == 2 ? tf3 : stDomI == 1 ? tf2 : stDomI == 0 ? tf1 : "-"
@@ -716,11 +725,11 @@ trigI = brkSrc == "S1" ? 0 : brkSrc == "S2" ? 1 : brkSrc == "S3" ? 2 : brkSrc ==
 bndTrig = trigI == 0 ? bd1 : trigI == 1 ? bd2 : trigI == 2 ? bd3 : trigI == 3 ? bd4 : trigI == 4 ? bd5 : brkLvl
 
 //  --- contesto: sezioni FUORI banda e concordi -----------------------------
-ctxOn1 = st1 and not (ctxExcl and trigI == 0)
-ctxOn2 = st2 and not (ctxExcl and trigI == 1)
-ctxOn3 = st3 and not (ctxExcl and trigI == 2)
-ctxOn4 = st4 and not (ctxExcl and trigI == 3)
-ctxOn5 = st5 and not (ctxExcl and trigI == 4)
+ctxOn1 = stA1 and not (ctxExcl and trigI == 0)
+ctxOn2 = stA2 and not (ctxExcl and trigI == 1)
+ctxOn3 = stA3 and not (ctxExcl and trigI == 2)
+ctxOn4 = stA4 and not (ctxExcl and trigI == 3)
+ctxOn5 = stA5 and not (ctxExcl and trigI == 4)
 up1 = ctxOn1 and not na(sc1) and sc1 >=  bd1
 up2 = ctxOn2 and not na(sc2) and sc2 >=  bd2
 up3 = ctxOn3 and not na(sc3) and sc3 >=  bd3
@@ -1145,15 +1154,16 @@ f_markPane(sigA,  markLvl,       true,  txSell + "A" + f_seqTxt(seqA) + f_rskTxt
 f_markPane(sigB,  markLvl - 35,  true,  txSell + "B" + f_seqTxt(seqB) + f_rskTxt(rskSell), f_tip("B", seqB, true,  rskSell), color.new(cUp, 35))
 f_markPane(sigC, -markLvl + 35,  false, txBuy  + "C" + f_seqTxt(seqC) + f_rskTxt(rskBuy),  f_tip("C", seqC, false, rskBuy),  color.new(cDn, 35))
 f_markPane(sigD, -markLvl,       false, txBuy  + "D" + f_seqTxt(seqD) + f_rskTxt(rskBuy),  f_tip("D", seqD, false, rskBuy),  cDn)
-f_markPane(sigKsell, markLvl + 40, true,  txSell + "K" + f_rskTxt(rskSellK), f_tip("K rottura", 1, true,  rskSellK), cBrk)
-f_markPane(sigKbuy, -markLvl - 40, false, txBuy  + "K" + f_rskTxt(rskBuyK),  f_tip("K rottura", 1, false, rskBuyK),  cBrk)
+bndTag = isM1 ? "M1" : "M2"
+f_markPane(sigKsell, markLvl + 40, true,  txSell + bndTag + f_rskTxt(rskSellK), f_tip(bndTag, 1, true,  rskSellK), cBrk)
+f_markPane(sigKbuy, -markLvl - 40, false, txBuy  + bndTag + f_rskTxt(rskBuyK),  f_tip(bndTag, 1, false, rskBuyK),  cBrk)
 
 f_markChart(sigA, true,  f_chartTxt(txSell, "A", seqA, rskSell), f_tip("A", seqA, true,  rskSell), cUp)
 f_markChart(sigB, true,  f_chartTxt(txSell, "B", seqB, rskSell), f_tip("B", seqB, true,  rskSell), color.new(cUp, 35))
 f_markChart(sigC, false, f_chartTxt(txBuy,  "C", seqC, rskBuy),  f_tip("C", seqC, false, rskBuy),  color.new(cDn, 35))
 f_markChart(sigD, false, f_chartTxt(txBuy,  "D", seqD, rskBuy),  f_tip("D", seqD, false, rskBuy),  cDn)
-f_markChart(sigKsell, true,  f_chartTxt(txSell, "K", 1, rskSellK), f_tip("K rottura", 1, true,  rskSellK), cBrk)
-f_markChart(sigKbuy,  false, f_chartTxt(txBuy,  "K", 1, rskBuyK),  f_tip("K rottura", 1, false, rskBuyK),  cBrk)
+f_markChart(sigKsell, true,  f_chartTxt(txSell, bndTag, 1, rskSellK), f_tip(bndTag, 1, true,  rskSellK), cBrk)
+f_markChart(sigKbuy,  false, f_chartTxt(txBuy,  bndTag, 1, rskBuyK),  f_tip(bndTag, 1, false, rskBuyK),  cBrk)
 
 f_miss(enP2, trgARaw, armA,  markLvl,      "A", thrP2, true)
 f_miss(enP1, trgBRaw, armB,  markLvl - 35, "B", thrP1, true)
@@ -1225,8 +1235,8 @@ if showTab and barstate.islast
     table.cell(dash, 0, 6, "modo", text_size = szDash, text_color = color.white, bgcolor = hdrBg)
     table.cell(dash, 1, 6, modeTag, text_size = szDash, text_color = color.white, bgcolor = mCol)
     table.cell(dash, 2, 6, modeC ? "no HTF" : "HTF ok", text_size = szDash, text_color = modeC ? color.orange : color.white, bgcolor = mCol)
-    table.cell(dash, 3, 6, "trg " + tfFast + " " + f_wtxt(winFast), text_size = szDash, text_color = trigOwn ? color.aqua : color.white, bgcolor = hdrBg)
-    table.cell(dash, 4, 6, strictBar ? "close" : "intrabar", text_size = szDash, text_color = strictBar ? color.silver : color.yellow, bgcolor = hdrBg)
+    table.cell(dash, 4, 6, (stOn and brkOn ? (isM1 ? "M1" : "M2") : "") + (extOn ? " ABCD" : "") + ((stOn and brkOn) or extOn ? "" : "nessun motore"), text_size = szDash, text_color = stOn and brkOn and extOn ? color.orange : color.white, bgcolor = hdrBg, tooltip = "Motori che stanno emettendo. M1/M2 = motore a banda, ABCD = estremi (reversione). Arancione = accesi entrambi: due ipotesi opposte nello stesso pannello, i marker si distinguono solo dal tag. 'close'/'intrabar' e' passato nella colonna accanto.")
+    table.cell(dash, 3, 6, (strictBar ? "close · " : "intrabar · ") + "trg " + tfFast, text_size = szDash, text_color = strictBar ? color.silver : color.yellow, bgcolor = hdrBg)
     table.cell(dash, 5, 6, armTxt == "" ? "–" : armTxt, text_size = szDash, text_color = color.white, bgcolor = armTxt == "" ? hdrBg : color.new(color.orange, 40))
 
     table.cell(dash, 0, 7, "K " + str.tostring(reqSec <= 0 ? nActive : math.min(reqSec, nActive)) + "/" + str.tostring(nActive), text_size = szDash, text_color = reqSec > 0 and reqSec < nActive ? color.yellow : color.white, bgcolor = hdrBg)
@@ -1259,7 +1269,7 @@ if showTab and barstate.islast
     sbg = color.new(color.gray, 88)
     table.cell(dash, 0, 10, (isM1 ? "M1 ctx " : "M2 stallo ") + (stOn ? (stNat ? "nat" : "live") : "off"), text_size = szDash, text_color = stOn ? color.white : color.gray, bgcolor = stOn ? color.new(color.teal, 55) : sbg, tooltip = isM1 ? "M1: le sezioni devono stare FUORI dalla banda e concordi. ▲ sopra, ▼ sotto, ● dentro (blocca). 'trg' marca la sezione esclusa perche' fa da trigger." : "M2: le sezioni devono stare DENTRO la banda. ● dentro (valido), ▲▼ fuori. La percentuale e' la frazione di barre passate dentro la banda: sopra il 70% quella banda non sta filtrando nulla.")
     bds = array.from(bd1, bd2, bd3, bd4, bd5)
-    sts = array.from(st1, st2, st3, st4, st5)
+    sts = array.from(stA1, stA2, stA3, stA4, stA5)
     pcs = array.from(pin1, pin2, pin3, pin4, pin5)
     scs = array.from(sc1, sc2, sc3, sc4, sc5)
     for p = 0 to 4
@@ -1366,7 +1376,7 @@ alertcondition(sigC or sigD or sigKbuy,  "MTF-CCI · BUY (qualsiasi)",  "MTF-CCI
 if anySig
     isS = sigSell or sigKsell
     dir = isS ? "SELL" : "BUY"
-    tag = anyBrk ? "K" : sigA ? "A" : sigB ? "B" : sigC ? "C" : "D"
+    tag = anyBrk ? (isM1 ? "M1" : "M2") : sigA ? "A" : sigB ? "B" : sigC ? "C" : "D"
     nth = anyBrk ? 1 : sigA ? seqA : sigB ? seqB : sigC ? seqC : seqD
     rr  = anyBrk ? (isS ? rskSellK : rskBuyK) : (isS ? rskSell : rskBuy)
     alert("MTF-CCI " + dir + " [" + tag + "#" + str.tostring(nth) + "] " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | cci=" + f_n1(anyBrk ? brkS : cFast) + (stOn ? " | stallo " + str.tostring(inN) + "/" + str.tostring(stNeed) + " len=" + str.tostring(stLen) + " coil=" + f_n2(coilR) : "") + (usePre ? " | pre " + preTag : "") + (useBias ? " | bias " + (biasNat ? "nat " : "live ") + tfBias + "=" + f_n1(cBias) : "") + " | risk=" + str.tostring(rr, format.mintick) + "pt/" + str.tostring(math.round(rr / syminfo.mintick)) + "t | eff=" + f_n2(vEff), alert.freq_once_per_bar_close)
