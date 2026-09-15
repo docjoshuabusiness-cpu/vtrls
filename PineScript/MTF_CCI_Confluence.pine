@@ -152,13 +152,20 @@ bd5 = input.float(50, "banda |CCI|", minval=5, maxval=400, step=5, inline="b5", 
 var string g4 = "4 · Rottura dello stallo (evento operativo)"
 brkOn  = input.bool(true, "Attiva segnali di rottura", group=g4,
      tooltip="Il segnale nasce quando la serie di rottura ESCE dalla banda oltre il livello indicato, mentre lo stallo e' ancora valido o si e' appena chiuso.\n\nE' l'unico punto del modulo stallo in cui c'e' qualcosa da eseguire: lo stallo e' il contesto, la rottura e' l'evento.")
-brkSrc = input.string("Sezione attiva piu' veloce", "   serie che rompe",
-     options=["Sezione attiva piu' veloce","Sezione dominante (TF piu' alto)","Serie dedicata"], group=g4,
-     tooltip="PIU' VELOCE: la rottura si vede prima, con piu' falsi. E' anche la curva che stai gia' guardando, quindi quello che vedi e' quello che spara.\n\nDOMINANTE: chiede che sia il TF alto a uscire dalla banda. Molti meno segnali, molto piu' tardi, e su un TF alto la meta' del movimento e' gia' avvenuta quando il CCI supera 100.\n\nDEDICATA: serie propria, sempre calcolata in modo nativo. Serve a replicare un setup esterno: la rottura puo' cadere dove nessuna curva visibile sta rompendo nulla.")
+brkSrc = input.string("S3", "   serie che rompe",
+     options=["S1","S2","S3","S4","S5","Sezione attiva piu' veloce","Sezione dominante (TF piu' alto)","Serie dedicata"], group=g4,
+     tooltip="S1..S5: la sezione che decide. E' la scelta diretta quando sai gia' quale candela vuoi guardare chiudere (per esempio S3 = 5m con i valori di default).\n\nPIU' VELOCE: la rottura si vede prima, con piu' falsi.\n\nDOMINANTE: il TF piu' alto fra quelli spuntati nel gruppo 3. Molti meno segnali e molto piu' tardi.\n\nDEDICATA: serie propria con timeframe e len indipendenti, per replicare un setup esterno.")
+brkEval= input.string("Nativo (chiusura candela della sezione)", "   lettura",
+     options=["Nativo (chiusura candela della sezione)","Live (barra del grafico)"], group=g4,
+     tooltip="NATIVO (default): il livello viene confrontato con il CCI della candela CHIUSA della sezione. Con S3 su 5m il segnale puo' nascere SOLO quando una candela da 5 minuti chiude oltre il livello, e nasce sulla prima barra del grafico successiva a quella chiusura. Una candela = al massimo un attraversamento. Niente segnali che compaiono e spariscono.\n\nLIVE: il livello viene confrontato con la curva ricostruita sul prezzo corrente. Dentro una candela da 5 minuti il CCI puo' superare +50, rientrare e risuperarlo tre volte, e ognuna e' un attraversamento. Con 'Emetti solo a barra CHIUSA' (gruppo 5) il lampeggio sparisce ma restano gli attraversamenti multipli: e' la barra del GRAFICO a essere confermata, non la candela della sezione.\n\nSe hai chiesto 'a chiusura candela m5', la risposta e' NATIVO con S3 su 5m.")
 brkTf  = input.timeframe("1", "   timeframe della serie dedicata", group=g4)
 brkLen = input.int(20, "   len della serie dedicata", minval=3, maxval=5000, group=g4)
-brkLvl = input.float(100, "   livello di rottura |CCI|", minval=10, maxval=400, step=5, group=g4,
-     tooltip="Distanza fra la banda dello stallo e il livello che valida l'uscita. Con banda 50 e rottura 100 pretendi che il CCI percorra 50 punti oltre il bordo: filtra le uscite di un tick, costa la parte iniziale del movimento.\n\nCon rottura = banda il segnale arriva sul bordo esatto: massimo anticipo, massimo numero di finte.")
+brkLvl = input.float(50, "   livello di rottura |CCI|", minval=10, maxval=400, step=5, group=g4,
+     tooltip="Il livello che il CCI deve superare perche' il segnale esca: BUY sopra +liv, SELL sotto -liv.\n\nCon 50 (default) il livello COINCIDE con il bordo della banda di stallo: il segnale e' esattamente 'la candela ha chiuso fuori dalla zona di stallo'. Massimo anticipo, massimo numero di finte.\n\nAlzandolo a 100 pretendi che il CCI percorra altri 50 punti oltre il bordo: molte meno finte, ma la parte iniziale del movimento e' gia' andata.")
+brkFromBand = input.bool(true, "   solo se la candela precedente era DENTRO la banda", group=g4,
+     tooltip="ACCESO (default): il segnale nasce solo se il valore precedente era dentro la banda di stallo. E' la differenza fra 'esce dalla zona di stallo' e 'attraversa +50 mentre sta gia' correndo da -200'. Il secondo caso e' un CCI che passa di li' per caso, non un'uscita da una compressione.\n\nSPENTO: qualunque attraversamento del livello produce un segnale, da qualunque punto arrivi.")
+brkNeedStall = input.bool(false, "   richiedi un episodio di stallo confermato", group=g4,
+     tooltip="SPENTO (default): il segnale e' l'attraversamento puro del livello. Persistenza, coil e conteggio degli episodi restano MISURATI e visibili nel cruscotto, ma non filtrano nulla: e' la configurazione giusta per vedere quanti segnali produce la regola prima di irrigidirla.\n\nACCESO: passa solo l'attraversamento che arriva da un episodio di stallo che ha superato persistenza E coil, entro le barre di grazia. Molti meno segnali, tutti dentro il contesto che il modulo dichiara di cercare. E' la versione da confrontare con quella spenta sui percentili MAE, non da adottare per fede.")
 brkDir = input.string("Continuazione (rottura)", "   direzione",
      options=["Continuazione (rottura)","Reversione (falso breakout)"], group=g4,
      tooltip="CONTINUAZIONE: rottura verso l'alto = BUY. E' l'ipotesi standard sulla compressione: volatilita' a grappoli, quindi una contrazione tende a essere seguita da un'espansione, e la direzione dell'uscita e' il miglior stimatore disponibile della direzione dell'espansione.\n\nREVERSIONE: rottura verso l'alto = SELL. E' l'ipotesi 'le rotture da compressione sono trappole di liquidita''. Su indici e forex intraday e' spesso l'ipotesi vincente nelle ore morte e perdente in apertura. Non e' una scelta di gusto: si misura, confrontando i percentili MAE sulle due varianti A PARITA' DI CAMPIONE.")
@@ -166,7 +173,7 @@ brkGrace= input.int(3, "   barre di grazia dopo la fine dello stallo", minval=0,
      tooltip="Quando la serie rompe, la condizione di stallo e' quasi sempre gia' falsa: e' proprio la rottura ad averla rotta. Senza grazia il segnale si autoannullerebbe.\n\nTroppo alta e la grazia diventa una finestra in cui qualunque cosa succeda viene attribuita a uno stallo ormai finito.")
 brkOne = input.bool(true, "   un solo segnale per episodio di stallo", group=g4,
      tooltip="Un episodio di compressione produce UNA rottura. Spento, la stessa compressione genera un grappolo di segnali mentre il CCI oscilla attorno al livello di rottura, e il campione si riempie di duplicati che sembrano conferme.")
-useEff = input.bool(true, "   richiedi efficienza minima alla rottura", group=g4,
+useEff = input.bool(false, "   richiedi efficienza minima alla rottura", group=g4,
      tooltip="Efficienza di Kaufman: spostamento netto diviso lunghezza del percorso (somma dei true range).\n  E = 1 -> linea retta\n  E = 0 -> tornato al punto di partenza\n\nE' la misura giusta per 'sta uscendo davvero': una rottura con E basso e' il prezzo che vibra attorno al livello, non un'espansione.")
 effLen = input.int(10, "   barre per l'efficienza", minval=2, maxval=200, group=g4)
 effMin = input.float(0.45, "   efficienza minima (0-1)", minval=0.0, maxval=1.0, step=0.05, group=g4)
@@ -800,13 +807,32 @@ f_stream(bool en, float thr, float trg, bool isUp) =>
 [sigD, armD, seqD, trgDRaw] = f_stream(enM2, thrM2, trgM2, false)
 
 // ================================================ ROTTURA DELLO STALLO =======
-cDom  = stDomI == 4 ? c5 : stDomI == 3 ? c4 : stDomI == 2 ? c3 : stDomI == 1 ? c2 : stDomI == 0 ? c1 : na
-brkS  = brkSrc == "Serie dedicata" ? cK : brkSrc == "Sezione dominante (TF piu' alto)" ? cDom : cFast
-brkP  = nz(brkS[1], brkS)
-brkTfTxt = brkSrc == "Serie dedicata" ? brkTf : brkSrc == "Sezione dominante (TF piu' alto)" ? stDomTf : tfFast
+//  Serie che rompe, nelle due letture.
+//  NATIVA: il valore cambia UNA VOLTA per candela della sezione, quindi
+//  l'attraversamento cade sulla prima barra del grafico dopo la chiusura di
+//  quella candela e non puo' ripetersi dentro la stessa candela. E' la
+//  definizione operativa di "segnale a chiusura candela".
+//  LIVE: il valore si muove a ogni barra del grafico, quindi la stessa candela
+//  puo' produrre piu' attraversamenti dello stesso livello.
+cDom   = stDomI == 4 ? c5  : stDomI == 3 ? c4  : stDomI == 2 ? c3  : stDomI == 1 ? c2  : stDomI == 0 ? c1  : na
+cDomN  = stDomI == 4 ? cN5 : stDomI == 3 ? cN4 : stDomI == 2 ? cN3 : stDomI == 1 ? cN2 : stDomI == 0 ? cN1 : na
+cFastN = trigOwn ? cNT : m1 == minSec ? cN1 : m2 == minSec ? cN2 : m3 == minSec ? cN3 : m4 == minSec ? cN4 : m5 == minSec ? cN5 : na
+brkNat = brkEval == "Nativo (chiusura candela della sezione)"
+brkL   = brkSrc == "S1" ? c1  : brkSrc == "S2" ? c2  : brkSrc == "S3" ? c3  : brkSrc == "S4" ? c4  : brkSrc == "S5" ? c5  : brkSrc == "Serie dedicata" ? cK  : brkSrc == "Sezione dominante (TF piu' alto)" ? cDom  : cFast
+brkNv  = brkSrc == "S1" ? cN1 : brkSrc == "S2" ? cN2 : brkSrc == "S3" ? cN3 : brkSrc == "S4" ? cN4 : brkSrc == "S5" ? cN5 : brkSrc == "Serie dedicata" ? cNK : brkSrc == "Sezione dominante (TF piu' alto)" ? cDomN : cFastN
+brkS   = brkNat ? brkNv : brkL
+brkP   = nz(brkS[1], brkS)
+brkTfTxt = brkSrc == "S1" ? tf1 : brkSrc == "S2" ? tf2 : brkSrc == "S3" ? tf3 : brkSrc == "S4" ? tf4 : brkSrc == "S5" ? tf5 : brkSrc == "Serie dedicata" ? brkTf : brkSrc == "Sezione dominante (TF piu' alto)" ? stDomTf : tfFast
+//  banda di riferimento per "veniva da dentro": quella della sezione che rompe,
+//  se e' una sezione; altrimenti quella della dominante, altrimenti il livello
+//  stesso (che rende la condizione inerte invece di azzerare i segnali).
+bndBrk = brkSrc == "S1" ? bd1 : brkSrc == "S2" ? bd2 : brkSrc == "S3" ? bd3 : brkSrc == "S4" ? bd4 : brkSrc == "S5" ? bd5 : na(bndDom) ? brkLvl : bndDom
 
-upBrk = not na(brkS) and f_co(brkS, brkP, brkLvl)
-dnBrk = not na(brkS) and f_cu(brkS, brkP, -brkLvl)
+//  L'attraversamento e' puro (nessuno stato interno): f_co / f_cu confrontano
+//  il valore corrente con il precedente della STESSA serie, quindi in lettura
+//  nativa confrontano due chiusure di candela consecutive.
+upBrk = not na(brkS) and f_co(brkS, brkP, brkLvl) and (not brkFromBand or brkP >= -bndBrk)
+dnBrk = not na(brkS) and f_cu(brkS, brkP, -brkLvl) and (not brkFromBand or brkP <= bndBrk)
 brkCont = brkDir == "Continuazione (rottura)"
 rawBuy  = brkCont ? upBrk : dnBrk
 rawSell = brkCont ? dnBrk : upBrk
@@ -817,10 +843,15 @@ if newEpi
 inGrace = bar_index - stLast <= brkGrace
 okBarB  = not strictBar or barstate.isconfirmed
 okEffB  = not useEff or vEff >= effMin
+//  Contesto di stallo: filtra solo se richiesto. Da spento il modulo continua a
+//  MISURARE episodi, persistenza e coil, cosi' il cruscotto dice quanto
+//  costerebbe accenderlo prima che tu lo accenda.
+okCtx   = not brkNeedStall or (inGrace and coilOk)
+okLatch = not brkOne or not brkNeedStall or not brkFired
 var int lastBrk = -100000
 
-sigKbuy  = brkOn and stOn and inGrace and rawBuy  and okBarB and okEffB and coilOk and (not brkOne or not brkFired) and f_preOk(false) and f_preBackOk(false) and f_riskOk(false, true) and f_biasOk(false) and (bar_index - lastBrk >= brkCd)
-sigKsell = brkOn and stOn and inGrace and rawSell and okBarB and okEffB and coilOk and (not brkOne or not brkFired) and f_preOk(true)  and f_preBackOk(true)  and f_riskOk(true,  true) and f_biasOk(true)  and (bar_index - lastBrk >= brkCd)
+sigKbuy  = brkOn and stOn and okCtx and rawBuy  and okBarB and okEffB and okLatch and f_preOk(false) and f_preBackOk(false) and f_riskOk(false, true) and f_biasOk(false) and (bar_index - lastBrk >= brkCd)
+sigKsell = brkOn and stOn and okCtx and rawSell and okBarB and okEffB and okLatch and f_preOk(true)  and f_preBackOk(true)  and f_riskOk(true,  true) and f_biasOk(true)  and (bar_index - lastBrk >= brkCd)
 if sigKbuy or sigKsell
     brkFired := true
     lastBrk  := bar_index
@@ -1148,9 +1179,9 @@ if showTab and barstate.islast
 
     // -- rottura -------------------------------------------------------------
     kbg = color.new(color.gray, 88)
-    table.cell(dash, 0, 12, "rottura " + (brkOn ? brkTfTxt : "off"), text_size = szDash, text_color = brkOn ? color.white : color.gray, bgcolor = brkOn ? color.new(cBrk, 60) : kbg)
+    table.cell(dash, 0, 12, "rottura " + (brkOn ? brkTfTxt + (brkNat ? " nat" : " live") : "off"), text_size = szDash, text_color = brkOn ? color.white : color.gray, bgcolor = brkOn ? color.new(cBrk, 60) : kbg, tooltip = brkNat ? "lettura NATIVA: il livello e' confrontato con la chiusura della candela della sezione. Un attraversamento per candela, al massimo." : "lettura LIVE: il livello e' confrontato con la curva ricostruita sul prezzo corrente. La stessa candela puo' produrre piu' attraversamenti.")
     table.cell(dash, 1, 12, "liv " + f_n0(brkLvl) + " · " + f_n1(brkS), text_size = szDash, text_color = not brkOn ? color.gray : math.abs(nz(brkS)) >= brkLvl ? color.lime : color.silver, bgcolor = kbg)
-    table.cell(dash, 2, 12, brkCont ? "continu." : "reversione", text_size = szDash, text_color = color.white, bgcolor = kbg)
+    table.cell(dash, 2, 12, (brkCont ? "continu." : "revers.") + (brkNeedStall ? " +ctx" : "") + (brkFromBand ? " ⊂" : ""), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "⊂ = richiesto che il valore precedente fosse dentro la banda. +ctx = richiesto un episodio di stallo confermato (persistenza + coil) entro le barre di grazia.")
     table.cell(dash, 3, 12, "eff " + f_n2(vEff), text_size = szDash, text_color = not useEff ? color.gray : vEff >= effMin ? color.lime : color.red, bgcolor = kbg)
     table.cell(dash, 4, 12, "▲ " + str.tostring(cBrkB), text_size = szDash, text_color = cDn, bgcolor = kbg)
     table.cell(dash, 5, 12, "▼ " + str.tostring(cBrkS), text_size = szDash, text_color = cUp, bgcolor = kbg)

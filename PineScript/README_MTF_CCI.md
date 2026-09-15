@@ -28,8 +28,31 @@ Alza `persistenza` finche' la durata media (cella "med") smette di essere
 dominata da episodi di 2-3 barre. Unita' consigliata: candele della sezione
 dominante.
 
-## 3 · Solo ora il breakout
-`livello di rottura` = banda x 2 come punto di partenza. Confronta, a parita' di
+## 3 · Il segnale: attraversamento a chiusura candela
+
+Configurazione di default, che e' esattamente la regola "BUY quando il CCI
+supera +50 a chiusura candela, SELL quando scende sotto -50":
+
+    serie che rompe = S3        (5m con i timeframe di default)
+    lettura         = Nativo    (chiusura candela della sezione)
+    livello         = 50
+    direzione       = Continuazione
+    solo da dentro la banda = ON
+    episodio di stallo confermato = OFF
+
+In lettura NATIVA il valore della sezione cambia una volta per candela, quindi
+l'attraversamento cade sulla prima barra del grafico dopo la chiusura di quella
+candela e non puo' ripetersi dentro la stessa candela. In lettura LIVE la stessa
+candela puo' produrre tre attraversamenti dello stesso livello: e' l'errore piu'
+costoso di questo gruppo, e nessun "emetti a barra chiusa" lo corregge, perche'
+quella opzione conferma la barra del GRAFICO, non la candela della sezione.
+
+"Solo da dentro la banda" e' cio' che distingue un'uscita dalla zona di stallo
+da un CCI che attraversa +50 mentre sta gia' risalendo da -200.
+
+## 4 · Irrigidire, misurando
+`livello di rottura` = banda (50) significa "la candela ha chiuso fuori dalla zona".
+Alzarlo a 100 pretende altri 50 punti oltre il bordo. Confronta, a parita di
 campione e su almeno 30 osservazioni:
 
 - continuazione vs reversione
@@ -38,7 +61,7 @@ campione e su almeno 30 osservazioni:
 Il criterio non e' "quanti segnali" ma il p80 della MAE nella riga MAE, colonna
 K. Un setup con meta' dei segnali e p80 dimezzato e' strettamente migliore.
 
-## 4 · Stop
+## 5 · Stop
 `Bordo dello stallo` e' lo stop naturale della rottura: se il prezzo rientra dal
 lato opposto del coil, la rottura e' falsa per costruzione. Confrontalo con
 MAE p80 nella riga "stop cons.". Se il bordo e' piu' stretto del p80 stai
