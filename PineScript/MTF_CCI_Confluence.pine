@@ -118,14 +118,19 @@ cc5c = input.color(color.new(#bdbdbd, 0), "", inline="s5", group=g2)
 ccFc = input.color(color.new(#ffffff, 25), "curva del trigger", inline="tfz", group=g2)
 
 // --------------------------------------------------------------- STALLO ------
-var string g3 = "3 · Stallo (prezzo dentro la banda)"
-stOn   = input.bool(true, "Attiva modulo stallo", group=g3,
+var string g3 = "3 · Zona neutra ±X e contesto multi-TF"
+bandMode = input.string("M1 · Contesto FUORI banda + trigger", "Modalita' del motore a banda",
+     options=["M1 · Contesto FUORI banda + trigger","M2 · Rottura dello stallo (tutti DENTRO)"], group=g3,
+     tooltip="Due ipotesi OPPOSTE sulla stessa banda. Non sono varianti di taratura: usano lo stesso numero per dire cose contrarie, quindi vanno confrontate come strategie separate, mai fuse.\n\nM1 · CONTESTO FUORI BANDA (default)\nI timeframe alti selezionati devono essere FUORI dalla zona neutra e CONCORDI: sopra +banda per comprare, sotto -banda per vendere. Se sono dentro, il prezzo non si guarda: nessuna direzione decisa, nessun trade. Deciso il contesto, il segnale arriva dal timeframe piu' piccolo selezionato, che rientra nella zona neutra (il respiro) e ne riesce dalla stessa parte del contesto.\nE' una struttura di continuazione con ingresso su ritracciamento: il TF alto dice DOVE, il TF basso dice QUANDO.\n\nM2 · ROTTURA DELLO STALLO\nTutte le sezioni DENTRO la banda (compressione multi-orizzonte), poi si opera l'uscita. Il contesto e' l'assenza di direzione, non la direzione.\n\nGli estremi (gruppo 5) restano un terzo motore indipendente da entrambe.")
+ctxExcl = input.bool(true, "   M1: escludi la sezione di trigger dal contesto", group=g3,
+     tooltip="ACCESO (da lasciare acceso): la sezione che genera il segnale non fa parte del contesto.\n\nSpento, il filtro si auto-contraddice: il contesto pretende che quella sezione sia FUORI dalla banda mentre il trigger pretende che ci sia appena rientrata. Le due condizioni non possono essere vere insieme e il conteggio dei segnali crolla a zero senza che nulla nel cruscotto dica perche'. E' lo stesso errore del bias puntato sulla serie del trigger, e nasce dalla stessa causa: sono CCI dello stesso prezzo.")
+stOn   = input.bool(true, "Attiva il motore a banda", group=g3,
      tooltip="Marca il contesto in cui le sezioni spuntate hanno il CCI DENTRO la loro banda: prezzo vicino alla propria media su piu' orizzonti contemporaneamente.\n\nNON e' un segnale operativo ed e' esposto come tale: lo stallo e' il CONTESTO, la rottura (gruppo 4) e' l'evento. Chi entra 'dentro lo stallo' compra un movimento che per definizione non c'e'.")
 stEval = input.string("Nativo (chiusura candela della sezione)", "   lettura",
      options=["Nativo (chiusura candela della sezione)","Live (barra del grafico)"], group=g3,
      tooltip="NATIVO: usa il CCI della candela CHIUSA della sezione. 'La 5m ha CHIUSO dentro +/-50'. Un aggiornamento per candela HTF, stato stabile, e' la lettura corretta per un contesto.\n\nLIVE: usa la curva del pannello, numeratore = prezzo corrente. Lo stato entra ed esce dalla banda piu' volte dentro la stessa candela HTF: la persistenza misurata diventa rumore e il conteggio degli episodi si moltiplica.\n\nSe non sai quale scegliere: NATIVO per decidere, LIVE per guardare.")
-stReq  = input.int(0, "   sezioni richieste dentro la banda (0 = tutte le spuntate)", minval=0, maxval=5, group=g3,
-     tooltip="Quante delle sezioni spuntate qui sotto devono essere dentro la loro banda.\n\n0 = tutte. Confrontare K=2,3,4,5 e' il modo per misurare quanto vale davvero ogni TF in piu': se i risultati non cambiano fra K=3 e K=5, le due sezioni in piu' non contengono informazione indipendente e stai solo riducendo il campione.")
+stReq  = input.int(0, "   sezioni richieste (0 = tutte le spuntate)", minval=0, maxval=5, group=g3,
+     tooltip="Quante delle sezioni spuntate devono soddisfare la condizione: in M1 essere FUORI dalla banda e CONCORDI (tutte sopra +banda, oppure tutte sotto -banda), in M2 essere DENTRO.\n\nIn M1 la sezione di trigger, se esclusa, non entra in questo conteggio: con 5 sezioni spuntate e la piu' veloce esclusa, 0 significa 4.\n\n0 = tutte. Confrontare K=2,3,4,5 e' il modo per misurare quanto vale davvero ogni TF in piu': se i risultati non cambiano fra K=3 e K=5, le due sezioni in piu' non contengono informazione indipendente e stai solo riducendo il campione.")
 stHold = input.int(1, "   persistenza minima", minval=0, maxval=500, group=g3,
      tooltip="Da quante unita' la condizione deve reggere perche' lo stallo sia considerato valido. Con 0 basta una barra, e allora qualunque attraversamento della banda conta come 'stallo'.")
 stUnit = input.string("Candele della sezione dominante", "   persistenza misurata in",
@@ -152,7 +157,7 @@ bd5 = input.float(50, "banda |CCI|", minval=5, maxval=400, step=5, inline="b5", 
 var string g4 = "4 · Rottura dello stallo (evento operativo)"
 brkOn  = input.bool(true, "Attiva segnali di rottura", group=g4,
      tooltip="Il segnale nasce quando la serie di rottura ESCE dalla banda oltre il livello indicato, mentre lo stallo e' ancora valido o si e' appena chiuso.\n\nE' l'unico punto del modulo stallo in cui c'e' qualcosa da eseguire: lo stallo e' il contesto, la rottura e' l'evento.")
-brkSrc = input.string("S3", "   serie che rompe",
+brkSrc = input.string("Sezione attiva piu' veloce", "   serie del trigger",
      options=["S1","S2","S3","S4","S5","Sezione attiva piu' veloce","Sezione dominante (TF piu' alto)","Serie dedicata"], group=g4,
      tooltip="S1..S5: la sezione che decide. E' la scelta diretta quando sai gia' quale candela vuoi guardare chiudere (per esempio S3 = 5m con i valori di default).\n\nPIU' VELOCE: la rottura si vede prima, con piu' falsi.\n\nDOMINANTE: il TF piu' alto fra quelli spuntati nel gruppo 3. Molti meno segnali e molto piu' tardi.\n\nDEDICATA: serie propria con timeframe e len indipendenti, per replicare un setup esterno.")
 brkEval= input.string("Nativo (chiusura candela della sezione)", "   lettura",
@@ -171,10 +176,18 @@ brkDir = input.string("Continuazione (rottura)", "   direzione",
      tooltip="CONTINUAZIONE: rottura verso l'alto = BUY. E' l'ipotesi standard sulla compressione: volatilita' a grappoli, quindi una contrazione tende a essere seguita da un'espansione, e la direzione dell'uscita e' il miglior stimatore disponibile della direzione dell'espansione.\n\nREVERSIONE: rottura verso l'alto = SELL. E' l'ipotesi 'le rotture da compressione sono trappole di liquidita''. Su indici e forex intraday e' spesso l'ipotesi vincente nelle ore morte e perdente in apertura. Non e' una scelta di gusto: si misura, confrontando i percentili MAE sulle due varianti A PARITA' DI CAMPIONE.")
 brkGrace= input.int(3, "   barre di grazia dopo la fine dello stallo", minval=0, maxval=200, group=g4,
      tooltip="Quando la serie rompe, la condizione di stallo e' quasi sempre gia' falsa: e' proprio la rottura ad averla rotta. Senza grazia il segnale si autoannullerebbe.\n\nTroppo alta e la grazia diventa una finestra in cui qualunque cosa succeda viene attribuita a uno stallo ormai finito.")
-brkOne = input.bool(true, "   un solo segnale per episodio di stallo", group=g4,
-     tooltip="Un episodio di compressione produce UNA rottura. Spento, la stessa compressione genera un grappolo di segnali mentre il CCI oscilla attorno al livello di rottura, e il campione si riempie di duplicati che sembrano conferme.")
+brkOne = input.bool(true, "   un solo segnale per ritracciamento (M1) o episodio (M2)", group=g4,
+     tooltip="In M1 il latch si riarma quando il trigger RIENTRA nella zona neutra: un ritracciamento = un segnale. In M2 si riarma a ogni nuovo episodio di stallo.\n\nUn episodio di compressione produce UNA rottura. Spento, la stessa compressione genera un grappolo di segnali mentre il CCI oscilla attorno al livello di rottura, e il campione si riempie di duplicati che sembrano conferme.")
 useEff = input.bool(false, "   richiedi efficienza minima alla rottura", group=g4,
      tooltip="Efficienza di Kaufman: spostamento netto diviso lunghezza del percorso (somma dei true range).\n  E = 1 -> linea retta\n  E = 0 -> tornato al punto di partenza\n\nE' la misura giusta per 'sta uscendo davvero': una rottura con E basso e' il prezzo che vibra attorno al livello, non un'espansione.")
+pbOn   = input.bool(true, "   M1: il trigger deve ENTRARE e poi USCIRE dalla zona neutra", group=g4,
+     tooltip="E' l'opzione che hai chiesto, e in M1 e' il cuore del segnale.\n\nACCESA: il timeframe piu' piccolo deve essere rientrato dentro ±banda e poi uscirne oltre il livello, dalla parte del contesto. Compri un ritracciamento finito, non una candela qualunque in trend.\n\nSPENTA: basta l'attraversamento del livello con il contesto concorde. Molti piu' segnali, sparsi ovunque nel trend, la maggior parte in mezzo a un movimento gia' esteso: e' il confronto da fare per sapere quanto vale davvero il ritracciamento.")
+pbSideReq = input.bool(true, "      l'ingresso nella zona deve venire dal lato del contesto", group=g4,
+     tooltip="LA CONDIZIONE CHE DISTINGUE UN RITRACCIAMENTO DA UN'INVERSIONE.\n\nPer arrivare a +50 dal basso il CCI attraversa la zona neutra comunque: senza questa condizione un rimbalzo che viene da -200 e sfonda +50 produce lo stesso BUY di un vero ritracciamento in trend rialzista. Sono due cose diverse.\n\nACCESA: per un BUY il trigger deve essere ENTRATO nella zona scendendo da sopra +banda. Il lato d'ingresso viene registrato nel momento esatto in cui la serie entra nella zona ed e' visibile nel cruscotto (↓ dall'alto, ↑ dal basso).")
+pbMin  = input.int(1, "      permanenza minima nella zona (barre)", minval=1, maxval=500, group=g4,
+     tooltip="Quante barre il trigger deve restare nella zona neutra perche' conti come ritracciamento. Con 1 basta un tocco: in lettura nativa e' una candela intera, in live sono cinque secondi.")
+pbMax  = input.int(0, "      permanenza massima (0 = illimitata)", minval=0, maxval=5000, group=g4,
+     tooltip="Oltre questa permanenza il ritracciamento non e' piu' un respiro dentro un trend: e' un nuovo stallo, e il contesto che lo ha autorizzato e' vecchio. 0 disattiva il vincolo, ed e' il default solo perche' il valore giusto dipende dal simbolo: misuralo sulla cella 'pb' del cruscotto prima di fissarlo.")
 effLen = input.int(10, "   barre per l'efficienza", minval=2, maxval=200, group=g4)
 effMin = input.float(0.45, "   efficienza minima (0-1)", minval=0.0, maxval=1.0, step=0.05, group=g4)
 brkCd  = input.int(10, "   cooldown fra rotture (barre)", minval=0, maxval=500, group=g4)
@@ -672,6 +685,93 @@ tfFast    = trigOwn ? trigTf : tfSecFast
 winSecFast= m1 == minSec ? winS1 : m2 == minSec ? winS2 : m3 == minSec ? winS3 : m4 == minSec ? winS4 : m5 == minSec ? winS5 : na
 winFast   = trigOwn ? float(trigLen) * secT : winSecFast
 
+// ==================== CONTESTO MULTI-TF E TRIGGER (motore a banda) ===========
+//  M1 legge la banda al contrario di M2: il contesto e' valido quando le
+//  sezioni alte sono FUORI e concordi. Dentro la banda non c'e' direzione, e
+//  senza direzione non si guarda il prezzo.
+isM1 = bandMode == "M1 · Contesto FUORI banda + trigger"
+
+//  --- serie che fa da trigger, nelle due letture ---------------------------
+//  NATIVA: il valore cambia una volta per candela della sezione, quindi ogni
+//  transizione (entrata in zona, uscita, attraversamento) cade sulla prima
+//  barra del grafico dopo la chiusura di quella candela e non si ripete dentro
+//  la stessa candela. LIVE: tutto questo puo' accadere piu' volte per candela.
+cDom      = stDomI == 4 ? c5  : stDomI == 3 ? c4  : stDomI == 2 ? c3  : stDomI == 1 ? c2  : stDomI == 0 ? c1  : na
+cDomN     = stDomI == 4 ? cN5 : stDomI == 3 ? cN4 : stDomI == 2 ? cN3 : stDomI == 1 ? cN2 : stDomI == 0 ? cN1 : na
+cSecFastN = m1 == minSec ? cN1 : m2 == minSec ? cN2 : m3 == minSec ? cN3 : m4 == minSec ? cN4 : m5 == minSec ? cN5 : na
+brkNat = brkEval == "Nativo (chiusura candela della sezione)"
+brkL   = brkSrc == "S1" ? c1  : brkSrc == "S2" ? c2  : brkSrc == "S3" ? c3  : brkSrc == "S4" ? c4  : brkSrc == "S5" ? c5  : brkSrc == "Serie dedicata" ? cK  : brkSrc == "Sezione dominante (TF piu' alto)" ? cDom  : cSecFast
+brkNv  = brkSrc == "S1" ? cN1 : brkSrc == "S2" ? cN2 : brkSrc == "S3" ? cN3 : brkSrc == "S4" ? cN4 : brkSrc == "S5" ? cN5 : brkSrc == "Serie dedicata" ? cNK : brkSrc == "Sezione dominante (TF piu' alto)" ? cDomN : cSecFastN
+brkS   = brkNat ? brkNv : brkL
+brkP   = nz(brkS[1], brkS)
+brkTfTxt = brkSrc == "S1" ? tf1 : brkSrc == "S2" ? tf2 : brkSrc == "S3" ? tf3 : brkSrc == "S4" ? tf4 : brkSrc == "S5" ? tf5 : brkSrc == "Serie dedicata" ? brkTf : brkSrc == "Sezione dominante (TF piu' alto)" ? stDomTf : tfSecFast
+
+//  indice della sezione che fa da trigger (-1 = serie dedicata, fuori dalle 5)
+fastI = m1 == minSec ? 0 : m2 == minSec ? 1 : m3 == minSec ? 2 : m4 == minSec ? 3 : m5 == minSec ? 4 : -1
+trigI = brkSrc == "S1" ? 0 : brkSrc == "S2" ? 1 : brkSrc == "S3" ? 2 : brkSrc == "S4" ? 3 : brkSrc == "S5" ? 4 : brkSrc == "Serie dedicata" ? -1 : brkSrc == "Sezione dominante (TF piu' alto)" ? stDomI : fastI
+//  banda che definisce la zona neutra PER IL TRIGGER: quella della sua sezione.
+//  Il livello di USCITA e' brkLvl e puo' essere piu' alto: fra i due c'e' una
+//  fascia in cui il trigger non e' ne' dentro ne' ha ancora rotto, ed e' per
+//  questo che l'armamento del pullback usa una memoria e non il solo stato.
+bndTrig = trigI == 0 ? bd1 : trigI == 1 ? bd2 : trigI == 2 ? bd3 : trigI == 3 ? bd4 : trigI == 4 ? bd5 : brkLvl
+
+//  --- contesto: sezioni FUORI banda e concordi -----------------------------
+ctxOn1 = st1 and not (ctxExcl and trigI == 0)
+ctxOn2 = st2 and not (ctxExcl and trigI == 1)
+ctxOn3 = st3 and not (ctxExcl and trigI == 2)
+ctxOn4 = st4 and not (ctxExcl and trigI == 3)
+ctxOn5 = st5 and not (ctxExcl and trigI == 4)
+up1 = ctxOn1 and not na(sc1) and sc1 >=  bd1
+up2 = ctxOn2 and not na(sc2) and sc2 >=  bd2
+up3 = ctxOn3 and not na(sc3) and sc3 >=  bd3
+up4 = ctxOn4 and not na(sc4) and sc4 >=  bd4
+up5 = ctxOn5 and not na(sc5) and sc5 >=  bd5
+dn1 = ctxOn1 and not na(sc1) and sc1 <= -bd1
+dn2 = ctxOn2 and not na(sc2) and sc2 <= -bd2
+dn3 = ctxOn3 and not na(sc3) and sc3 <= -bd3
+dn4 = ctxOn4 and not na(sc4) and sc4 <= -bd4
+dn5 = ctxOn5 and not na(sc5) and sc5 <= -bd5
+ctxN   = (ctxOn1 ? 1 : 0) + (ctxOn2 ? 1 : 0) + (ctxOn3 ? 1 : 0) + (ctxOn4 ? 1 : 0) + (ctxOn5 ? 1 : 0)
+ctxUpN = (up1 ? 1 : 0) + (up2 ? 1 : 0) + (up3 ? 1 : 0) + (up4 ? 1 : 0) + (up5 ? 1 : 0)
+ctxDnN = (dn1 ? 1 : 0) + (dn2 ? 1 : 0) + (dn3 ? 1 : 0) + (dn4 ? 1 : 0) + (dn5 ? 1 : 0)
+ctxNeed= stReq <= 0 ? ctxN : math.min(stReq, ctxN)
+ctxBuy  = ctxN > 0 and ctxNeed > 0 and ctxUpN >= ctxNeed
+ctxSell = ctxN > 0 and ctxNeed > 0 and ctxDnN >= ctxNeed
+
+//  --- ritracciamento del trigger dentro la zona neutra ---------------------
+//  pbSide registra il LATO da cui la serie e' entrata nella zona, nel momento
+//  esatto dell'ingresso: e' l'unico modo di distinguere un respiro dentro un
+//  trend (entrata dall'alto in contesto rialzista) da un'inversione che
+//  attraversa tutta la banda venendo dal lato opposto.
+tIn = not na(brkS) and math.abs(brkS) <= bndTrig
+var int   pbSide  = 0
+var int   pbLen   = 0
+var float pbHi    = na
+var float pbLo    = na
+var int   pbEnd   = -100000
+var bool  pbFired = false
+if tIn and not tIn[1]
+    pbSide  := brkP >=  bndTrig ? 1 : brkP <= -bndTrig ? -1 : 0
+    pbLen   := 1
+    pbHi    := high
+    pbLo    := low
+    pbFired := false
+else if tIn
+    pbLen += 1
+    pbHi  := math.max(pbHi, high)
+    pbLo  := math.min(pbLo, low)
+if not tIn and tIn[1]
+    pbEnd := bar_index
+//  compressione del ritracciamento, stessa formula dell'episodio di stallo
+pbCoil = na(pbHi) or na(pbLo) or pbLen < 2 ? na : (pbHi - pbLo) / (atrR * math.sqrt(pbLen))
+//  armato finche' e' dentro la zona o ne e' uscito da non piu' di 'grazia'
+//  barre: serve perche' fra il bordo della zona e il livello di uscita c'e'
+//  una fascia che il prezzo attraversa senza essere in nessuno dei due stati.
+pbArmed = tIn[1] or (bar_index - pbEnd <= brkGrace)
+pbDurOk = pbLen >= pbMin and (pbMax <= 0 or pbLen <= pbMax)
+pbOkBuy  = not pbOn or (pbArmed and pbDurOk and (not pbSideReq or pbSide ==  1))
+pbOkSell = not pbOn or (pbArmed and pbDurOk and (not pbSideReq or pbSide == -1))
+
 // ------------------------------------------------------- BIAS DIREZIONALE ----
 sA1 = use1 ? sec1 : 0
 sA2 = use2 ? sec2 : 0
@@ -717,8 +817,11 @@ swHi = ta.highest(high, swingLen)
 swLo = ta.lowest(low,  swingLen)
 rskSellS = (swHi + stopBuf * atrR) - close
 rskBuyS  = close - (swLo - stopBuf * atrR)
-edgeSell = na(stHi) ? na : (stHi + stopBuf * atrR) - close
-edgeBuy  = na(stLo) ? na : close - (stLo - stopBuf * atrR)
+//  "bordo" dipende dalla modalita': in M1 lo stop naturale e' l'estremo del
+//  RITRACCIAMENTO (se il prezzo lo supera, il respiro era un'inversione), in M2
+//  e' il lato opposto della compressione.
+edgeSell = isM1 ? (na(pbHi) ? na : (pbHi + stopBuf * atrR) - close) : (na(stHi) ? na : (stHi + stopBuf * atrR) - close)
+edgeBuy  = isM1 ? (na(pbLo) ? na : close - (pbLo - stopBuf * atrR)) : (na(stLo) ? na : close - (stLo - stopBuf * atrR))
 
 f_apply(float base, float p80) =>
     m = na(p80) ? na : p80 * atrR
@@ -806,36 +909,32 @@ f_stream(bool en, float thr, float trg, bool isUp) =>
 [sigC, armC, seqC, trgCRaw] = f_stream(enM1, thrM1, trgM1, false)
 [sigD, armD, seqD, trgDRaw] = f_stream(enM2, thrM2, trgM2, false)
 
-// ================================================ ROTTURA DELLO STALLO =======
-//  Serie che rompe, nelle due letture.
-//  NATIVA: il valore cambia UNA VOLTA per candela della sezione, quindi
-//  l'attraversamento cade sulla prima barra del grafico dopo la chiusura di
-//  quella candela e non puo' ripetersi dentro la stessa candela. E' la
-//  definizione operativa di "segnale a chiusura candela".
-//  LIVE: il valore si muove a ogni barra del grafico, quindi la stessa candela
-//  puo' produrre piu' attraversamenti dello stesso livello.
-cDom   = stDomI == 4 ? c5  : stDomI == 3 ? c4  : stDomI == 2 ? c3  : stDomI == 1 ? c2  : stDomI == 0 ? c1  : na
-cDomN  = stDomI == 4 ? cN5 : stDomI == 3 ? cN4 : stDomI == 2 ? cN3 : stDomI == 1 ? cN2 : stDomI == 0 ? cN1 : na
-cFastN = trigOwn ? cNT : m1 == minSec ? cN1 : m2 == minSec ? cN2 : m3 == minSec ? cN3 : m4 == minSec ? cN4 : m5 == minSec ? cN5 : na
-brkNat = brkEval == "Nativo (chiusura candela della sezione)"
-brkL   = brkSrc == "S1" ? c1  : brkSrc == "S2" ? c2  : brkSrc == "S3" ? c3  : brkSrc == "S4" ? c4  : brkSrc == "S5" ? c5  : brkSrc == "Serie dedicata" ? cK  : brkSrc == "Sezione dominante (TF piu' alto)" ? cDom  : cFast
-brkNv  = brkSrc == "S1" ? cN1 : brkSrc == "S2" ? cN2 : brkSrc == "S3" ? cN3 : brkSrc == "S4" ? cN4 : brkSrc == "S5" ? cN5 : brkSrc == "Serie dedicata" ? cNK : brkSrc == "Sezione dominante (TF piu' alto)" ? cDomN : cFastN
-brkS   = brkNat ? brkNv : brkL
-brkP   = nz(brkS[1], brkS)
-brkTfTxt = brkSrc == "S1" ? tf1 : brkSrc == "S2" ? tf2 : brkSrc == "S3" ? tf3 : brkSrc == "S4" ? tf4 : brkSrc == "S5" ? tf5 : brkSrc == "Serie dedicata" ? brkTf : brkSrc == "Sezione dominante (TF piu' alto)" ? stDomTf : tfFast
-//  banda di riferimento per "veniva da dentro": quella della sezione che rompe,
-//  se e' una sezione; altrimenti quella della dominante, altrimenti il livello
-//  stesso (che rende la condizione inerte invece di azzerare i segnali).
-bndBrk = brkSrc == "S1" ? bd1 : brkSrc == "S2" ? bd2 : brkSrc == "S3" ? bd3 : brkSrc == "S4" ? bd4 : brkSrc == "S5" ? bd5 : na(bndDom) ? brkLvl : bndDom
-
+// ============================================ SEGNALE DEL MOTORE A BANDA =====
 //  L'attraversamento e' puro (nessuno stato interno): f_co / f_cu confrontano
 //  il valore corrente con il precedente della STESSA serie, quindi in lettura
-//  nativa confrontano due chiusure di candela consecutive.
-upBrk = not na(brkS) and f_co(brkS, brkP, brkLvl) and (not brkFromBand or brkP >= -bndBrk)
-dnBrk = not na(brkS) and f_cu(brkS, brkP, -brkLvl) and (not brkFromBand or brkP <= bndBrk)
+//  nativa confrontano due chiusure di candela consecutive e non possono
+//  ripetersi dentro la stessa candela.
+//  banda usata da M2 per "veniva da dentro"
+bndBrk = trigI >= 0 ? bndTrig : na(bndDom) ? brkLvl : bndDom
+upCross = not na(brkS) and f_co(brkS, brkP,  brkLvl)
+dnCross = not na(brkS) and f_cu(brkS, brkP, -brkLvl)
+
+//  --- M2: rottura dello stallo -------------------------------------------
+upBrk = upCross and (not brkFromBand or brkP >= -bndBrk)
+dnBrk = dnCross and (not brkFromBand or brkP <=  bndBrk)
 brkCont = brkDir == "Continuazione (rottura)"
-rawBuy  = brkCont ? upBrk : dnBrk
-rawSell = brkCont ? dnBrk : upBrk
+rawBuyM2  = brkCont ? upBrk : dnBrk
+rawSellM2 = brkCont ? dnBrk : upBrk
+
+//  --- M1: contesto fuori banda + uscita del trigger dalla zona neutra ------
+//  La direzione la decide il CONTESTO, non l'attraversamento: per questo qui
+//  'Continuazione / Reversione' non viene applicato. Un BUY e' un'uscita verso
+//  l'ALTO dentro un contesto rialzista, punto.
+rawBuyM1  = ctxBuy  and upCross and pbOkBuy
+rawSellM1 = ctxSell and dnCross and pbOkSell
+
+rawBuy  = isM1 ? rawBuyM1  : rawBuyM2
+rawSell = isM1 ? rawSellM1 : rawSellM2
 
 var bool brkFired = false
 if newEpi
@@ -843,17 +942,19 @@ if newEpi
 inGrace = bar_index - stLast <= brkGrace
 okBarB  = not strictBar or barstate.isconfirmed
 okEffB  = not useEff or vEff >= effMin
-//  Contesto di stallo: filtra solo se richiesto. Da spento il modulo continua a
-//  MISURARE episodi, persistenza e coil, cosi' il cruscotto dice quanto
-//  costerebbe accenderlo prima che tu lo accenda.
-okCtx   = not brkNeedStall or (inGrace and coilOk)
-okLatch = not brkOne or not brkNeedStall or not brkFired
+//  Contesto di stallo: vale solo in M2, e filtra solo se richiesto. Da spento
+//  episodi, persistenza e coil restano MISURATI nel cruscotto, cosi' sai quanto
+//  costerebbe accenderlo prima di accenderlo.
+okCtx   = isM1 or not brkNeedStall or (inGrace and coilOk)
+//  latch: in M1 un solo segnale per ritracciamento, in M2 uno per episodio
+okLatch = not brkOne ? true : isM1 ? not pbFired : not brkNeedStall or not brkFired
 var int lastBrk = -100000
 
 sigKbuy  = brkOn and stOn and okCtx and rawBuy  and okBarB and okEffB and okLatch and f_preOk(false) and f_preBackOk(false) and f_riskOk(false, true) and f_biasOk(false) and (bar_index - lastBrk >= brkCd)
 sigKsell = brkOn and stOn and okCtx and rawSell and okBarB and okEffB and okLatch and f_preOk(true)  and f_preBackOk(true)  and f_riskOk(true,  true) and f_biasOk(true)  and (bar_index - lastBrk >= brkCd)
 if sigKbuy or sigKsell
     brkFired := true
+    pbFired  := true
     lastBrk  := bar_index
 
 // ============================================== MISURA DELLA MAE =============
@@ -1156,32 +1257,37 @@ if showTab and barstate.islast
     //    dentro: se una sezione sta dentro l'80% del tempo la sua banda non
     //    sta filtrando niente, sta solo allargando il campione.
     sbg = color.new(color.gray, 88)
-    table.cell(dash, 0, 10, "stallo " + (stOn ? (stNat ? "nat" : "live") : "off"), text_size = szDash, text_color = stOn ? color.white : color.gray, bgcolor = stOn ? color.new(color.teal, 55) : sbg)
+    table.cell(dash, 0, 10, (isM1 ? "M1 ctx " : "M2 stallo ") + (stOn ? (stNat ? "nat" : "live") : "off"), text_size = szDash, text_color = stOn ? color.white : color.gray, bgcolor = stOn ? color.new(color.teal, 55) : sbg, tooltip = isM1 ? "M1: le sezioni devono stare FUORI dalla banda e concordi. ▲ sopra, ▼ sotto, ● dentro (blocca). 'trg' marca la sezione esclusa perche' fa da trigger." : "M2: le sezioni devono stare DENTRO la banda. ● dentro (valido), ▲▼ fuori. La percentuale e' la frazione di barre passate dentro la banda: sopra il 70% quella banda non sta filtrando nulla.")
     bds = array.from(bd1, bd2, bd3, bd4, bd5)
     sts = array.from(st1, st2, st3, st4, st5)
     pcs = array.from(pin1, pin2, pin3, pin4, pin5)
+    scs = array.from(sc1, sc2, sc3, sc4, sc5)
     for p = 0 to 4
         son = array.get(sts, p)
         sin = array.get(ins, p)
-        sdm = stDomI == p
-        stx = not son ? "–" : "S" + str.tostring(p + 1) + " " + f_n0(array.get(bds, p)) + (sin ? " ●" : " ○") + " " + f_n0(f_pct(array.get(pcs, p))) + "%"
-        scl = not stOn or not son ? color.gray : sdm ? color.aqua : sin ? color.lime : color.red
+        svl = array.get(scs, p)
+        sbd = array.get(bds, p)
+        sex = isM1 and ctxExcl and trigI == p
+        sym = sin ? "●" : na(svl) ? "·" : svl >= sbd ? "▲" : "▼"
+        stx = not son ? "–" : "S" + str.tostring(p + 1) + " " + f_n0(sbd) + " " + sym + (sex ? " trg" : " " + f_n0(f_pct(array.get(pcs, p))) + "%")
+        scl = not stOn or not son ? color.gray : sex ? color.aqua : isM1 ? (sin ? color.red : color.lime) : (sin ? color.lime : color.red)
         table.cell(dash, p + 1, 10, stx, text_size = szDash, text_color = scl, bgcolor = sbg)
 
     // -- stallo: le metriche che decidono se e' accumulazione o solo media ---
-    coilCol = not stOn or na(coilR) ? color.gray : coilR <= coilMax ? color.lime : coilR > 1.5 ? color.red : color.orange
-    table.cell(dash, 0, 11, "dentro " + str.tostring(inN) + "/" + str.tostring(stNeed), text_size = szDash, text_color = not stOn ? color.gray : stRaw ? color.lime : color.silver, bgcolor = sbg)
-    table.cell(dash, 1, 11, "len " + str.tostring(stLen) + "/" + str.tostring(stHoldB), text_size = szDash, text_color = not stOn ? color.gray : stLen >= stHoldB ? color.lime : color.orange, bgcolor = sbg)
-    table.cell(dash, 2, 11, "coil " + f_n2(coilR), text_size = szDash, text_color = coilCol, bgcolor = sbg)
-    table.cell(dash, 3, 11, "epi " + str.tostring(cStA) + "/" + str.tostring(stEpi), text_size = szDash, text_color = color.silver, bgcolor = sbg, tooltip = "episodi CONFERMATI (persistenza + coil) / episodi grezzi (sole bande). Il rapporto dice quanto del 'dentro la banda' e' compressione vera: se i due numeri coincidono, il coil non sta filtrando niente e la soglia va abbassata.")
-    table.cell(dash, 4, 11, "med " + f_n1(stAvgLen) + "b", text_size = szDash, text_color = color.silver, bgcolor = sbg)
-    table.cell(dash, 5, 11, not stOn ? "off" : stallOn ? "IN STALLO" : inGrace ? "grazia" : "–", text_size = szDash, text_color = stallOn ? color.lime : inGrace ? color.yellow : color.silver, bgcolor = sbg)
+    cR      = isM1 ? pbCoil : coilR
+    coilCol = not stOn or na(cR) ? color.gray : cR <= coilMax ? color.lime : cR > 1.5 ? color.red : color.orange
+    table.cell(dash, 0, 11, isM1 ? "ctx ▲" + str.tostring(ctxUpN) + " ▼" + str.tostring(ctxDnN) + "/" + str.tostring(ctxNeed) : "dentro " + str.tostring(inN) + "/" + str.tostring(stNeed), text_size = szDash, text_color = not stOn ? color.gray : isM1 ? (ctxBuy ? cDn : ctxSell ? cUp : color.silver) : (stRaw ? color.lime : color.silver), bgcolor = sbg)
+    table.cell(dash, 1, 11, isM1 ? "pb " + str.tostring(pbLen) + (pbSide == 1 ? " ↓" : pbSide == -1 ? " ↑" : " ·") : "len " + str.tostring(stLen) + "/" + str.tostring(stHoldB), text_size = szDash, text_color = not stOn ? color.gray : isM1 ? (pbDurOk ? color.lime : color.orange) : (stLen >= stHoldB ? color.lime : color.orange), bgcolor = sbg, tooltip = isM1 ? "barre passate nella zona neutra e LATO d'ingresso: ↓ entrato dall'alto (ritracciamento in trend rialzista), ↑ dal basso." : "barre di persistenza dell'episodio sul minimo richiesto.")
+    table.cell(dash, 2, 11, "coil " + f_n2(cR), text_size = szDash, text_color = coilCol, bgcolor = sbg)
+    table.cell(dash, 3, 11, isM1 ? "zona " + (tIn ? "IN" : "out") : "epi " + str.tostring(cStA) + "/" + str.tostring(stEpi), text_size = szDash, text_color = color.silver, bgcolor = sbg, tooltip = "episodi CONFERMATI (persistenza + coil) / episodi grezzi (sole bande). Il rapporto dice quanto del 'dentro la banda' e' compressione vera: se i due numeri coincidono, il coil non sta filtrando niente e la soglia va abbassata.")
+    table.cell(dash, 4, 11, isM1 ? "arm " + (pbArmed ? "✓" : "✗") : "med " + f_n1(stAvgLen) + "b", text_size = szDash, text_color = not isM1 ? color.silver : pbArmed ? color.lime : color.silver, bgcolor = sbg)
+    table.cell(dash, 5, 11, not stOn ? "off" : isM1 ? (ctxBuy ? "ctx BUY" : ctxSell ? "ctx SELL" : "nessun ctx") : stallOn ? "IN STALLO" : inGrace ? "grazia" : "–", text_size = szDash, text_color = not stOn ? color.gray : isM1 ? (ctxBuy ? cDn : ctxSell ? cUp : color.silver) : stallOn ? color.lime : inGrace ? color.yellow : color.silver, bgcolor = sbg)
 
     // -- rottura -------------------------------------------------------------
     kbg = color.new(color.gray, 88)
     table.cell(dash, 0, 12, "rottura " + (brkOn ? brkTfTxt + (brkNat ? " nat" : " live") : "off"), text_size = szDash, text_color = brkOn ? color.white : color.gray, bgcolor = brkOn ? color.new(cBrk, 60) : kbg, tooltip = brkNat ? "lettura NATIVA: il livello e' confrontato con la chiusura della candela della sezione. Un attraversamento per candela, al massimo." : "lettura LIVE: il livello e' confrontato con la curva ricostruita sul prezzo corrente. La stessa candela puo' produrre piu' attraversamenti.")
     table.cell(dash, 1, 12, "liv " + f_n0(brkLvl) + " · " + f_n1(brkS), text_size = szDash, text_color = not brkOn ? color.gray : math.abs(nz(brkS)) >= brkLvl ? color.lime : color.silver, bgcolor = kbg)
-    table.cell(dash, 2, 12, (brkCont ? "continu." : "revers.") + (brkNeedStall ? " +ctx" : "") + (brkFromBand ? " ⊂" : ""), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "⊂ = richiesto che il valore precedente fosse dentro la banda. +ctx = richiesto un episodio di stallo confermato (persistenza + coil) entro le barre di grazia.")
+    table.cell(dash, 2, 12, isM1 ? (pbOn ? "pb" + (pbSideReq ? "↩" : "") : "cross") : (brkCont ? "continu." : "revers.") + (brkNeedStall ? " +ctx" : "") + (brkFromBand ? " ⊂" : ""), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "⊂ = richiesto che il valore precedente fosse dentro la banda. +ctx = richiesto un episodio di stallo confermato (persistenza + coil) entro le barre di grazia.")
     table.cell(dash, 3, 12, "eff " + f_n2(vEff), text_size = szDash, text_color = not useEff ? color.gray : vEff >= effMin ? color.lime : color.red, bgcolor = kbg)
     table.cell(dash, 4, 12, "▲ " + str.tostring(cBrkB), text_size = szDash, text_color = cDn, bgcolor = kbg)
     table.cell(dash, 5, 12, "▼ " + str.tostring(cBrkS), text_size = szDash, text_color = cUp, bgcolor = kbg)
