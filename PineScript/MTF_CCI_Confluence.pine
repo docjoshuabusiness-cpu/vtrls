@@ -816,7 +816,7 @@ var int pbArm    = 0
 var int pbArmBar = 0
 if tIn
     pbArm := 0
-else if not na(brkS) and nz(tIn[1], false)
+else if not na(brkS) and tIn[1]
     pbArm    := brkS > 0 ? 1 : -1
     pbArmBar := bar_index
 else if pbArm != 0 and pbWait > 0 and bar_index - pbArmBar > pbWait
