@@ -143,7 +143,7 @@ stUnit = input.string("Candele della sezione dominante", "   persistenza misurat
      tooltip="CANDELE DELLA SEZIONE DOMINANTE (default): l'unita' e' la candela del TF piu' alto fra quelli spuntati. Con S5 su 30m e persistenza 2 sono 60 minuti di stallo, indipendentemente dal TF del grafico.\n\nBARRE DEL GRAFICO: numero assoluto di barre, da riconvertire a mano ogni volta che cambi TF. E' la fonte piu' comune di taratura sbagliata.")
 useCoil= input.bool(true, "   richiedi compressione reale del range (coil)", group=g3,
      tooltip="LA CONDIZIONE CHE SEPARA L'ACCUMULAZIONE DALLA SEMPLICE VICINANZA ALLA MEDIA.\n\n  coil = (max - min dell'episodio) / (ATR * sqrt(barre dell'episodio))\n\nSotto radice perche' il range di una passeggiata casuale cresce come sqrt(t): il rapporto e' quindi adimensionale e confrontabile fra episodi di durata diversa. Per un random walk sta intorno a 1.3-1.6.\n\n  coil < 1.0  -> il prezzo si e' mosso MENO di quanto il caso gli permetterebbe: compressione vera\n  coil > 1.5  -> non e' compressione, e' un movimento che passa per la media\n\nIl CCI dentro la banda e' compatibile con entrambe: e' un rapporto, e si azzera anche mentre il prezzo corre, se corre insieme alla sua media.")
-coilMax= input.float(1.0, "   coil massimo", minval=0.2, maxval=5.0, step=0.05, group=g3)
+coilMax= input.float(1.0, "   coil massimo", minval=0.2, maxval=5.0, step=0.05, group=g3, active=useCoil)
 stBg   = input.bool(true, "   sfondo durante lo stallo", group=g3)
 stMark = input.bool(true, "   marca l'inizio di ogni episodio", group=g3)
 
@@ -168,41 +168,41 @@ brkSrc = input.string("Sezione attiva piu' veloce", "   serie del trigger",
 brkEval= input.string("Nativo (chiusura candela della sezione)", "   lettura",
      options=["Nativo (chiusura candela della sezione)","Live (barra del grafico)"], group=g4,
      tooltip="NATIVO (default): il livello viene confrontato con il CCI della candela CHIUSA della sezione. Con S3 su 5m il segnale puo' nascere SOLO quando una candela da 5 minuti chiude oltre il livello, e nasce sulla prima barra del grafico successiva a quella chiusura. Una candela = al massimo un attraversamento. Niente segnali che compaiono e spariscono.\n\nLIVE: il livello viene confrontato con la curva ricostruita sul prezzo corrente. Dentro una candela da 5 minuti il CCI puo' superare +50, rientrare e risuperarlo tre volte, e ognuna e' un attraversamento. Con 'Emetti solo a barra CHIUSA' (gruppo 5) il lampeggio sparisce ma restano gli attraversamenti multipli: e' la barra del GRAFICO a essere confermata, non la candela della sezione.\n\nSe hai chiesto 'a chiusura candela m5', la risposta e' NATIVO con S3 su 5m.")
-brkTf  = input.timeframe("1", "   timeframe della serie dedicata", group=g4)
-brkLen = input.int(20, "   len della serie dedicata", minval=3, maxval=5000, group=g4)
+brkTf  = input.timeframe("1", "   timeframe della serie dedicata", group=g4, active=brkSrc == "Serie dedicata")
+brkLen = input.int(20, "   len della serie dedicata", minval=3, maxval=5000, group=g4, active=brkSrc == "Serie dedicata")
 brkLvl = input.float(50, "   livello di rottura |CCI|", minval=10, maxval=400, step=5, group=g4,
      tooltip="Il livello che il CCI deve superare perche' il segnale esca: BUY sopra +liv, SELL sotto -liv.\n\nCon 50 (default) il livello COINCIDE con il bordo della banda di stallo: il segnale e' esattamente 'la candela ha chiuso fuori dalla zona di stallo'. Massimo anticipo, massimo numero di finte.\n\nAlzandolo a 100 pretendi che il CCI percorra altri 50 punti oltre il bordo: molte meno finte, ma la parte iniziale del movimento e' gia' andata.")
-brkFromBand = input.bool(true, "   solo se la candela precedente era DENTRO la banda", group=g4,
+brkFromBand = input.bool(true, "   M2: solo se la candela precedente era DENTRO la banda", group=g4, active=not (bandMode == "M1 · Contesto FUORI banda + trigger"),
      tooltip="ACCESO (default): il segnale nasce solo se il valore precedente era dentro la banda di stallo. E' la differenza fra 'esce dalla zona di stallo' e 'attraversa +50 mentre sta gia' correndo da -200'. Il secondo caso e' un CCI che passa di li' per caso, non un'uscita da una compressione.\n\nSPENTO: qualunque attraversamento del livello produce un segnale, da qualunque punto arrivi.")
-pbOn   = input.bool(true, "   M1: il trigger deve ENTRARE e poi USCIRE dalla zona neutra", group=g4,
+pbOn   = input.bool(true, "   M1: il trigger deve ENTRARE e poi USCIRE dalla zona neutra", group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger",
      tooltip="E' l'opzione che hai chiesto, e in M1 e' il cuore del segnale.\n\nACCESA: il timeframe piu' piccolo deve essere rientrato dentro ±banda e poi uscirne oltre il livello, dalla parte del contesto. Compri un ritracciamento finito, non una candela qualunque in trend.\n\nSPENTA: basta l'attraversamento del livello con il contesto concorde. Molti piu' segnali, sparsi ovunque nel trend, la maggior parte in mezzo a un movimento gia' esteso: e' il confronto da fare per sapere quanto vale davvero il ritracciamento.")
-pbSideReq = input.bool(false, "      l'ingresso nella zona deve venire dal lato del contesto", group=g4,
+pbSideReq = input.bool(false, "      l'ingresso nella zona deve venire dal lato del contesto", group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger" and pbOn,
      tooltip="SPENTA DI DEFAULT: il trigger base e' il semplice passaggio dalla zona neutra a fuori, in qualunque modo il prezzo sia arrivato nella zona.\n\nACCESA, distingue un RITRACCIAMENTO da un'INVERSIONE.\n\nPer arrivare a +50 dal basso il CCI attraversa la zona neutra comunque: senza questa condizione un rimbalzo che viene da -200 e sfonda +50 produce lo stesso BUY di un vero ritracciamento in trend rialzista. Sono due cose diverse.\n\nACCESA: per un BUY il trigger deve essere ENTRATO nella zona scendendo da sopra +banda. Il lato d'ingresso viene registrato nel momento esatto in cui la serie entra nella zona ed e' visibile nel cruscotto (↓ dall'alto, ↑ dal basso).")
-pbMin  = input.int(1, "      permanenza minima nella zona (barre)", minval=1, maxval=500, group=g4,
+pbMin  = input.int(1, "      permanenza minima nella zona (barre)", minval=1, maxval=500, group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger" and pbOn,
      tooltip="Quante barre il trigger deve restare nella zona neutra perche' conti come ritracciamento. Con 1 basta un tocco: in lettura nativa e' una candela intera, in live sono cinque secondi.")
-pbMax  = input.int(0, "      permanenza massima (0 = illimitata)", minval=0, maxval=5000, group=g4,
+pbMax  = input.int(0, "      permanenza massima (0 = illimitata)", minval=0, maxval=5000, group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger" and pbOn,
      tooltip="Oltre questa permanenza il ritracciamento non e' piu' un respiro dentro un trend: e' un nuovo stallo, e il contesto che lo ha autorizzato e' vecchio. 0 disattiva il vincolo, ed e' il default solo perche' il valore giusto dipende dal simbolo: misuralo sulla cella 'pb' del cruscotto prima di fissarlo.")
-pbWait = input.int(0, "      attesa massima fra uscita dalla zona e livello (0 = nessun limite)", minval=0, maxval=5000, group=g4,
+pbWait = input.int(0, "      attesa massima fra uscita dalla zona e livello (0 = nessun limite)", minval=0, maxval=5000, group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger" and pbOn,
      tooltip="SERVE QUANDO IL LIVELLO DI ROTTURA E' PIU' ALTO DELLA BANDA.\n\nCon banda 50 e livello 90 il trigger esce dalla zona a 50 e deve percorrere altri 40 punti prima di sparare: in mezzo c'e' una terra di nessuno in cui non e' ne' dentro ne' oltre. L'armamento deve sopravvivere a quel tratto, altrimenti il segnale non arriva mai e il movimento sembra ignorato.\n\n0 (default): l'armamento resta valido finche' il trigger non rientra nella zona. E' la lettura letterale di 'e' passato dalla zona neutra a oltre il livello', senza limiti di tempo arbitrari.\n\nUn valore > 0 scarta le uscite che ci mettono troppo: se dopo N barre il livello non e' stato raggiunto, quella spinta si e' esaurita nella terra di nessuno e non merita l'etichetta di rottura.\n\nCon livello = banda il parametro e' inerte: l'uscita e l'attraversamento coincidono.")
-pbRt   = input.bool(false, "   M1: segnala anche il RETEST del bordo", group=g4,
+pbRt   = input.bool(false, "   M1: segnala anche il RETEST del livello", group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger",
      tooltip="Dopo un segnale, sorveglia il ritorno del trigger sul bordo della zona e la ripartenza: e' il secondo ingresso, quello che molti preferiscono al primo perche' il bordo ha gia' retto una volta.\n\nNon sostituisce il primo segnale, lo AFFIANCA: marker separato con tag R, contatore separato nel cruscotto. Cosi' puoi confrontare i due ingressi sullo stesso movimento invece di sceglierne uno per abitudine.\n\nSEQUENZA per un BUY: segnale, il CCI resta sopra il livello, poi ritorna giu' fino al bordo (o dentro la banda), poi riattraversa il livello verso l'alto. Se nel frattempo scende sotto -banda la sorveglianza si annulla: quella non e' una tenuta del bordo, e' un'inversione.\n\nATTENZIONE alla misura: con il retest acceso la distribuzione MAE della colonna K mescola primi ingressi e retest. Per isolarli, misurali in due passate separate.")
-pbRtWin= input.int(60, "      barre entro cui il retest e' valido", minval=1, maxval=1000, group=g4,
+pbRtWin= input.int(60, "      barre entro cui il retest e' valido", minval=1, maxval=1000, group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger" and pbRt,
      tooltip="Oltre questa distanza dal segnale, il ritorno sul bordo non e' un retest di quel movimento: e' un movimento nuovo, che merita il suo primo segnale e non l'etichetta di conferma.")
-pbRtBack= input.float(50, "      il trigger deve tornare almeno a |CCI|", minval=0, maxval=400, step=5, group=g4,
-     tooltip="PROFONDITA' DEL RETEST, in valore assoluto di CCI. E' l'unico numero che decide cosa conta come retest, e cambia completamente la natura del segnale.\n\nEsempio con banda 50 e livello di rottura 90, dopo un BUY:\n  80  -> basta che il CCI ridiscenda a 80: retest SUPERFICIALE del livello appena rotto. Molti segnali, il movimento non si e' quasi fermato.\n  50  -> deve tornare al bordo della banda: retest PIENO. Meno segnali, ma il bordo ha davvero retto.\n   0  -> deve tornare alla media. A quel punto non e' piu' un retest, e' un secondo ciclo completo.\n\nQuesto valore viene comunque limitato a un punto sotto il livello di rottura: se fosse piu' alto il rientro sarebbe gia' soddisfatto nell'istante del segnale e qualunque oscillazione diventerebbe un retest.\n\nSopravvive solo il rientro che NON attraversa tutta la banda fino all'altro lato: quello e' un'inversione, non un bordo che tiene.")
-brkNeedStall = input.bool(false, "   richiedi un episodio di stallo confermato", group=g4,
+pbRtDepth= input.float(10, "      rientro minimo sotto il livello (punti CCI)", minval=1, maxval=400, step=5, group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger" and pbRt,
+     tooltip="Il retest e' SEMPRE ancorato al livello di rottura che hai scelto: se metti 90, il retest si misura su 90, e se domani lo porti a 120 il retest segue da solo. Qui decidi solo QUANTO deve rientrare sotto quel livello.\n\nCon livello 90:\n  10 (default) -> il CCI deve ridiscendere a 80 e poi risuperare 90. Retest del livello appena rotto.\n  25           -> deve scendere a 65: rientro piu' profondo, meno segnali, bordo piu' provato.\n  40           -> scende fino a 50, cioe' al bordo della zona neutra: retest pieno.\n\nPiu' il numero e' piccolo, piu' il retest e' superficiale, e a un certo punto la differenza fra 'ha ritestato il livello' e 'il prezzo ha oscillato un attimo' smette di esistere.\n\nSopravvive solo il rientro che NON attraversa tutta la zona neutra fino all'altro lato: quello e' un'inversione, non un livello che tiene.")
+brkNeedStall = input.bool(false, "   M2: richiedi un episodio di stallo confermato", group=g4, active=not (bandMode == "M1 · Contesto FUORI banda + trigger"),
      tooltip="SPENTO (default): il segnale e' l'attraversamento puro del livello. Persistenza, coil e conteggio degli episodi restano MISURATI e visibili nel cruscotto, ma non filtrano nulla: e' la configurazione giusta per vedere quanti segnali produce la regola prima di irrigidirla.\n\nACCESO: passa solo l'attraversamento che arriva da un episodio di stallo che ha superato persistenza E coil, entro le barre di grazia. Molti meno segnali, tutti dentro il contesto che il modulo dichiara di cercare. E' la versione da confrontare con quella spenta sui percentili MAE, non da adottare per fede.")
-brkDir = input.string("Continuazione (rottura)", "   direzione",
+brkDir = input.string("Continuazione (rottura)", "   M2: direzione", active=not (bandMode == "M1 · Contesto FUORI banda + trigger"),
      options=["Continuazione (rottura)","Reversione (falso breakout)"], group=g4,
      tooltip="CONTINUAZIONE: rottura verso l'alto = BUY. E' l'ipotesi standard sulla compressione: volatilita' a grappoli, quindi una contrazione tende a essere seguita da un'espansione, e la direzione dell'uscita e' il miglior stimatore disponibile della direzione dell'espansione.\n\nREVERSIONE: rottura verso l'alto = SELL. E' l'ipotesi 'le rotture da compressione sono trappole di liquidita''. Su indici e forex intraday e' spesso l'ipotesi vincente nelle ore morte e perdente in apertura. Non e' una scelta di gusto: si misura, confrontando i percentili MAE sulle due varianti A PARITA' DI CAMPIONE.")
-brkGrace= input.int(3, "   barre di grazia dopo la fine dello stallo", minval=0, maxval=200, group=g4,
+brkGrace= input.int(3, "   M2: barre di grazia dopo la fine dello stallo", minval=0, maxval=200, group=g4, active=not (bandMode == "M1 · Contesto FUORI banda + trigger"),
      tooltip="Quando la serie rompe, la condizione di stallo e' quasi sempre gia' falsa: e' proprio la rottura ad averla rotta. Senza grazia il segnale si autoannullerebbe.\n\nTroppo alta e la grazia diventa una finestra in cui qualunque cosa succeda viene attribuita a uno stallo ormai finito.")
 brkOne = input.bool(true, "   un solo segnale per ritracciamento (M1) o episodio (M2)", group=g4,
      tooltip="In M1 il latch si riarma quando il trigger RIENTRA nella zona neutra: un ritracciamento = un segnale. In M2 si riarma a ogni nuovo episodio di stallo.\n\nUn episodio di compressione produce UNA rottura. Spento, la stessa compressione genera un grappolo di segnali mentre il CCI oscilla attorno al livello di rottura, e il campione si riempie di duplicati che sembrano conferme.")
 useEff = input.bool(false, "   richiedi efficienza minima alla rottura", group=g4,
      tooltip="Efficienza di Kaufman: spostamento netto diviso lunghezza del percorso (somma dei true range).\n  E = 1 -> linea retta\n  E = 0 -> tornato al punto di partenza\n\nE' la misura giusta per 'sta uscendo davvero': una rottura con E basso e' il prezzo che vibra attorno al livello, non un'espansione.")
-effLen = input.int(10, "   barre per l'efficienza", minval=2, maxval=200, group=g4)
-effMin = input.float(0.45, "   efficienza minima (0-1)", minval=0.0, maxval=1.0, step=0.05, group=g4)
+effLen = input.int(10, "   barre per l'efficienza", minval=2, maxval=200, group=g4, active=useEff)
+effMin = input.float(0.45, "   efficienza minima (0-1)", minval=0.0, maxval=1.0, step=0.05, group=g4, active=useEff)
 brkCd  = input.int(10, "   cooldown fra rotture (barre)", minval=0, maxval=500, group=g4)
 
 // ------------------------------------------------- ESTREMI: LOGICA SEGNALE ---
@@ -214,8 +214,8 @@ lookback = input.int(60, "Finestra di confluenza (barre del grafico)", minval=1,
 autoLb   = input.bool(true, "Finestra automatica (2 barre della sezione piu' lenta)", group=g5)
 trigOwn  = input.bool(false, "Serie dedicata per il trigger", group=g5,
      tooltip="SPENTO: il trigger e' la sezione ATTIVA PIU' VELOCE, cioe' una curva che stai gia' guardando.\n\nACCESO: serie propria, sempre nativa. Il segnale puo' cadere dove nessuna curva visibile attraversa nulla.")
-trigTf   = input.timeframe("1", "   timeframe del trigger", group=g5)
-trigLen  = input.int(20, "   len del trigger", minval=3, maxval=5000, group=g5)
+trigTf   = input.timeframe("1", "   timeframe del trigger", group=g5, active=trigOwn)
+trigLen  = input.int(20, "   len del trigger", minval=3, maxval=5000, group=g5, active=trigOwn)
 trigMode = input.string("Rientro (reversione)", "Modalita' trigger",
      options=["Rientro (reversione)","Primo tocco della soglia"], group=g5,
      tooltip="Rientro: la serie riattraversa il livello tornando verso lo zero (esaurimento). Primo tocco: la serie buca la soglia (continuazione).")
@@ -302,8 +302,8 @@ var string g8b = "8b · Filtro STOP STRETTO"
 useRisk  = input.bool(false, "Attiva", group=g8b,
      tooltip="Scarta i segnali con stop piu' lontano della soglia.\n\nATTENZIONE: uno stop piu' stretto NON riduce la MAE, riduce la frazione di trade che le sopravvive. Confronta sempre la soglia con i percentili MAE.")
 maxStopU = input.string("Punti", "   unita' del limite", options=["Punti","x ATR"], group=g8b)
-maxStopA = input.float(2.0, "   limite (x ATR)", minval=0.1, maxval=10.0, step=0.1, group=g8b)
-maxStopP = input.float(8.0, "   limite (punti)", minval=0.25, step=0.25, group=g8b)
+maxStopA = input.float(2.0, "   limite (x ATR)", minval=0.1, maxval=10.0, step=0.1, group=g8b, active=useRisk)
+maxStopP = input.float(8.0, "   limite (punti)", minval=0.25, step=0.25, group=g8b, active=useRisk)
 
 var string g8c = "8c · Filtro COMPRESSIONE alla barra"
 useComp  = input.bool(false, "Attiva", group=g8c,
@@ -315,14 +315,14 @@ compBrk  = input.bool(false, "   applica anche alle rotture", group=g8c)
 var string g8d = "8d · Filtro ENTROPIA"
 useEnt   = input.bool(false, "Attiva", group=g8d,
      tooltip="Entropia binaria della direzione delle ultime N barre. H=0 movimento ordinato, H=1 rumore puro.\n\nE' l'analogo binario dell'efficienza di Kaufman, ma cieco all'ampiezza: strettamente meno informativo. Usare entrambi e' ridondante.")
-entLen   = input.int(20, "   barre", minval=5, maxval=200, group=g8d)
+entLen   = input.int(20, "   barre", minval=5, maxval=200, group=g8d, active=useEnt)
 entMin   = input.float(0.0, "   H min", minval=0.0, maxval=1.0, step=0.05, inline="ent", group=g8d)
 entMax   = input.float(1.0, "   H max", minval=0.0, maxval=1.0, step=0.05, inline="ent", group=g8d)
 
 var string g8e = "8e · Misura della MAE"
 useMae   = input.bool(true, "Attiva", group=g8e,
      tooltip="Dopo ogni segnale misura la massima escursione CONTRARIA nelle N barre successive, in ATR. I percentili sono la risposta empirica a 'quanto stretto puo' stare lo stop'. Non filtra nulla, misura soltanto.")
-maeLen   = input.int(30, "   orizzonte (barre)", minval=3, maxval=500, group=g8e)
+maeLen   = input.int(30, "   orizzonte (barre)", minval=3, maxval=500, group=g8e, active=useMae)
 maeSplit = input.bool(true, "   distingui rotture da estremi", group=g8e,
      tooltip="Tiene due distribuzioni separate. Sommarle e' l'errore piu' costoso di questo cruscotto: sono due ipotesi diverse, con MAE tipicamente diverse, e la media delle due non descrive nessuna delle due.")
 
@@ -1016,7 +1016,7 @@ if sigKbuy or sigKsell
 //  banda dall'altra parte - che non e' una tenuta del bordo ma un'inversione.
 //  profondita' effettiva del rientro: sempre sotto il livello di rottura,
 //  altrimenti il rientro sarebbe gia' vero nell'istante del segnale
-rtBackE = math.min(pbRtBack, brkLvl - 1)
+rtBackE = math.max(brkLvl - pbRtDepth, -bndTrig)
 var int  rtDir   = 0
 var int  rtStart = 0
 var bool rtTouch = false
