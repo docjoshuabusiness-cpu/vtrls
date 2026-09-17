@@ -124,8 +124,11 @@ bandMode = input.string("M1 · Contesto FUORI banda + trigger", "Modalita' del m
      tooltip="Due ipotesi OPPOSTE sulla stessa banda. Non sono varianti di taratura: usano lo stesso numero per dire cose contrarie, quindi vanno confrontate come strategie separate, mai fuse.\n\nM1 · CONTESTO FUORI BANDA (default)\nI timeframe alti selezionati devono essere FUORI dalla zona neutra e CONCORDI: sopra +banda per comprare, sotto -banda per vendere. Se sono dentro, il prezzo non si guarda: nessuna direzione decisa, nessun trade. Deciso il contesto, il segnale arriva dal timeframe piu' piccolo selezionato, che rientra nella zona neutra (il respiro) e ne riesce dalla stessa parte del contesto.\nE' una struttura di continuazione con ingresso su ritracciamento: il TF alto dice DOVE, il TF basso dice QUANDO.\n\nM2 · ROTTURA DELLO STALLO\nTutte le sezioni DENTRO la banda (compressione multi-orizzonte), poi si opera l'uscita. Il contesto e' l'assenza di direzione, non la direzione.\n\nGli estremi (gruppo 5) restano un terzo motore indipendente da entrambe.")
 stUseOnly = input.bool(true, "   considera solo le sezioni ATTIVE nel gruppo 2", group=g3,
      tooltip="ACCESO (da lasciare acceso): una sezione spenta nel gruppo 2 non entra nel motore a banda, anche se e' spuntata qui sotto.\n\nSpento, le due liste sono indipendenti: puoi usare come contesto un timeframe che non stai tracciando nel pannello, ma ti ritrovi un contesto che pretende condizioni su sezioni che nel cruscotto leggi 'off'. E' esattamente il modo in cui un segnale sembra uscire dal nulla.")
-ctxExcl = input.bool(true, "   M1: escludi la sezione di trigger dal contesto", group=g3,
-     tooltip="ACCESO (da lasciare acceso): la sezione che genera il segnale non fa parte del contesto.\n\nSpento, il filtro si auto-contraddice: il contesto pretende che quella sezione sia FUORI dalla banda mentre il trigger pretende che ci sia appena rientrata. Le due condizioni non possono essere vere insieme e il conteggio dei segnali crolla a zero senza che nulla nel cruscotto dica perche'. E' lo stesso errore del bias puntato sulla serie del trigger, e nasce dalla stessa causa: sono CCI dello stesso prezzo.")
+ctxAuto = input.bool(true, "   M1: assegnazione automatica dei ruoli", group=g3,
+     tooltip="ACCESO (default): fra le sezioni accese, la PIU' PICCOLA fa da trigger e le ALTRE fanno da contesto. Non devi spuntare niente a mano: accendi i timeframe che ti interessano e i ruoli si distribuiscono da soli.\n\nECCEZIONE AUTOMATICA: se resta una sola sezione, quella fa ENTRAMBI i ruoli. Non e' un compromesso, e' l'unica lettura possibile con un orizzonte solo: la stessa serie deve essere fuori banda (direzione) e averla appena attraversata (momento), e al bordo le due cose coincidono. Il risultato e' la versione a timeframe singolo: entra nella zona neutra, ne esce, segnale.\n\nL'eccezione scatta da sola anche quando il trigger e' l'unica sezione spuntata fra le altre: meglio degradare a timeframe singolo che restituire zero segnali senza spiegazione.\n\nSPENTO: nessuna esclusione. Il contesto e' esattamente cio' che spunti qui sotto, trigger incluso, e sei tu a doverti assicurare che le condizioni non si contraddicano.")
+ctxScope = input.string("Tutte le altre attive", "      contesto formato da",
+     options=["Tutte le altre attive","Solo la piu' grande"], group=g3,
+     tooltip="TUTTE LE ALTRE ATTIVE (default): ogni sezione accesa che non sia il trigger deve essere fuori banda e concorde. Con 4 sezioni di contesto e' una condizione severa: sono CCI dello stesso prezzo, ma su orizzonti molto diversi si allineano di rado.\n\nSOLO LA PIU' GRANDE: decide unicamente il timeframe piu' alto, le altre restano visibili nel cruscotto ma non filtrano. Molti piu' segnali, e un contesto che e' una sola misura invece di una confluenza.\n\nIl confronto fra le due, a parita' di campione e sui percentili MAE, e' il modo per sapere se le sezioni intermedie aggiungono informazione o solo attesa.")
 stOn   = input.bool(true, "Attiva il motore a banda", group=g3,
      tooltip="Marca il contesto in cui le sezioni spuntate hanno il CCI DENTRO la loro banda: prezzo vicino alla propria media su piu' orizzonti contemporaneamente.\n\nNON e' un segnale operativo ed e' esposto come tale: lo stallo e' il CONTESTO, la rottura (gruppo 4) e' l'evento. Chi entra 'dentro lo stallo' compra un movimento che per definizione non c'e'.")
 stEval = input.string("Nativo (chiusura candela della sezione)", "   lettura",
@@ -725,11 +728,35 @@ trigI = brkSrc == "S1" ? 0 : brkSrc == "S2" ? 1 : brkSrc == "S3" ? 2 : brkSrc ==
 bndTrig = trigI == 0 ? bd1 : trigI == 1 ? bd2 : trigI == 2 ? bd3 : trigI == 3 ? bd4 : trigI == 4 ? bd5 : brkLvl
 
 //  --- contesto: sezioni FUORI banda e concordi -----------------------------
-ctxOn1 = stA1 and not (ctxExcl and trigI == 0)
-ctxOn2 = stA2 and not (ctxExcl and trigI == 1)
-ctxOn3 = stA3 and not (ctxExcl and trigI == 2)
-ctxOn4 = stA4 and not (ctxExcl and trigI == 3)
-ctxOn5 = stA5 and not (ctxExcl and trigI == 4)
+//  Assegnazione dei ruoli. Il trigger e' gia' la sezione piu' piccola attiva
+//  (impostazione predefinita di 'serie del trigger'); qui si decide chi fa da
+//  contesto. L'esclusione del trigger vale solo se RESTA qualcosa: con una
+//  sola sezione accesa quella assume entrambi i ruoli, invece di lasciare il
+//  contesto vuoto e non emettere piu' nulla.
+trigIsSt = trigI == 0 ? stA1 : trigI == 1 ? stA2 : trigI == 2 ? stA3 : trigI == 3 ? stA4 : trigI == 4 ? stA5 : false
+nOther   = stOnN - (trigIsSt ? 1 : 0)
+ctxSolo  = ctxAuto and trigIsSt and nOther <= 0
+ctxExclE = ctxAuto and trigIsSt and nOther > 0
+el1 = stA1 and not (ctxExclE and trigI == 0)
+el2 = stA2 and not (ctxExclE and trigI == 1)
+el3 = stA3 and not (ctxExclE and trigI == 2)
+el4 = stA4 and not (ctxExclE and trigI == 3)
+el5 = stA5 and not (ctxExclE and trigI == 4)
+//  sezione piu' grande fra quelle eleggibili: e' lei a comandare con lo scope
+//  ristretto, e va ricalcolata dopo l'esclusione, non prima
+xq1 = el1 ? sec1 : 0
+xq2 = el2 ? sec2 : 0
+xq3 = el3 ? sec3 : 0
+xq4 = el4 ? sec4 : 0
+xq5 = el5 ? sec5 : 0
+xMax  = math.max(math.max(math.max(math.max(xq1, xq2), xq3), xq4), xq5)
+cxDom = xMax == 0 ? -1 : xq5 == xMax ? 4 : xq4 == xMax ? 3 : xq3 == xMax ? 2 : xq2 == xMax ? 1 : 0
+cxBig = ctxScope == "Solo la piu' grande"
+ctxOn1 = el1 and (not cxBig or cxDom == 0)
+ctxOn2 = el2 and (not cxBig or cxDom == 1)
+ctxOn3 = el3 and (not cxBig or cxDom == 2)
+ctxOn4 = el4 and (not cxBig or cxDom == 3)
+ctxOn5 = el5 and (not cxBig or cxDom == 4)
 up1 = ctxOn1 and not na(sc1) and sc1 >=  bd1
 up2 = ctxOn2 and not na(sc2) and sc2 >=  bd2
 up3 = ctxOn3 and not na(sc3) and sc3 >=  bd3
@@ -1268,20 +1295,23 @@ if showTab and barstate.islast
     //    sta filtrando niente, sta solo allargando il campione.
     sbg = color.new(color.gray, 88)
     ctxDead = isM1 and stOn and ctxN == 0
-    table.cell(dash, 0, 10, ctxDead ? "⚠ M1 senza contesto" : (isM1 ? "M1 ctx " : "M2 stallo ") + (stOn ? (stNat ? "nat" : "live") : "off"), text_size = szDash, text_color = ctxDead ? color.black : stOn ? color.white : color.gray, bgcolor = ctxDead ? color.new(color.orange, 10) : stOn ? color.new(color.teal, 55) : sbg, tooltip = ctxDead ? "NESSUNA SEZIONE DI CONTESTO: M1 non puo' emettere nulla.\n\nSuccede quando l'unica sezione spuntata e' anche quella che fa da trigger, e viene esclusa dal contesto. Una sola sezione non basta: M1 chiede a un orizzonte di dare la direzione e a un altro di dare il momento.\n\nDue soluzioni: attiva almeno una sezione piu' lenta come contesto (e' l'uso previsto), oppure spegni 'escludi la sezione di trigger dal contesto' nel gruppo 3 e ottieni una versione a timeframe singolo, dove la stessa sezione entra nella banda e ne esce." : isM1 ? "M1: le sezioni devono stare FUORI dalla banda e concordi. ▲ sopra, ▼ sotto, ● dentro (blocca). 'trg' marca la sezione esclusa perche' fa da trigger." : "M2: le sezioni devono stare DENTRO la banda. ● dentro (valido), ▲▼ fuori. La percentuale e' la frazione di barre passate dentro la banda: sopra il 70% quella banda non sta filtrando nulla.")
+    table.cell(dash, 0, 10, ctxDead ? "⚠ M1 senza contesto" : (isM1 ? (ctxSolo ? "M1 solo-TF " : "M1 ctx ") : "M2 stallo ") + (stOn ? (stNat ? "nat" : "live") : "off"), text_size = szDash, text_color = ctxDead ? color.black : stOn ? color.white : color.gray, bgcolor = ctxDead ? color.new(color.orange, 10) : stOn ? color.new(color.teal, 55) : sbg, tooltip = ctxDead ? "NESSUNA SEZIONE DI CONTESTO: M1 non puo' emettere nulla.\n\nSuccede quando l'unica sezione spuntata e' anche quella che fa da trigger, e viene esclusa dal contesto. Una sola sezione non basta: M1 chiede a un orizzonte di dare la direzione e a un altro di dare il momento.\n\nDue soluzioni: attiva almeno una sezione piu' lenta come contesto (e' l'uso previsto), oppure spegni 'escludi la sezione di trigger dal contesto' nel gruppo 3 e ottieni una versione a timeframe singolo, dove la stessa sezione entra nella banda e ne esce." : isM1 ? "M1: le sezioni devono stare FUORI dalla banda e concordi. ▲ sopra, ▼ sotto, ● dentro (blocca). 'trg' marca la sezione esclusa perche' fa da trigger." : "M2: le sezioni devono stare DENTRO la banda. ● dentro (valido), ▲▼ fuori. La percentuale e' la frazione di barre passate dentro la banda: sopra il 70% quella banda non sta filtrando nulla.")
     bds = array.from(bd1, bd2, bd3, bd4, bd5)
     sts = array.from(stA1, stA2, stA3, stA4, stA5)
     pcs = array.from(pin1, pin2, pin3, pin4, pin5)
     scs = array.from(sc1, sc2, sc3, sc4, sc5)
+    cxs = array.from(ctxOn1, ctxOn2, ctxOn3, ctxOn4, ctxOn5)
     for p = 0 to 4
         son = array.get(sts, p)
         sin = array.get(ins, p)
         svl = array.get(scs, p)
         sbd = array.get(bds, p)
-        sex = isM1 and ctxExcl and trigI == p
+        sct = array.get(cxs, p)
+        sTrg= isM1 and trigI == p
         sym = sin ? "●" : na(svl) ? "·" : svl >= sbd ? "▲" : "▼"
-        stx = not son ? "–" : "S" + str.tostring(p + 1) + " " + f_n0(sbd) + " " + sym + (sex ? " trg" : " " + f_n0(f_pct(array.get(pcs, p))) + "%")
-        scl = not stOn or not son ? color.gray : sex ? color.aqua : isM1 ? (sin ? color.red : color.lime) : (sin ? color.lime : color.red)
+        rol = not isM1 ? "" : sTrg and sct ? " trg+ctx" : sTrg ? " trg" : sct ? " ctx" : " –"
+        stx = not son ? "–" : "S" + str.tostring(p + 1) + " " + f_n0(sbd) + " " + sym + (isM1 ? rol : " " + f_n0(f_pct(array.get(pcs, p))) + "%")
+        scl = not stOn or not son ? color.gray : sTrg ? color.aqua : isM1 and not sct ? color.new(color.gray, 40) : isM1 ? (sin ? color.red : color.lime) : (sin ? color.lime : color.red)
         table.cell(dash, p + 1, 10, stx, text_size = szDash, text_color = scl, bgcolor = sbg)
 
     // -- stallo: le metriche che decidono se e' accumulazione o solo media ---
