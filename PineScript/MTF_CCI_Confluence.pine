@@ -186,10 +186,10 @@ pbWait = input.int(0, "      attesa massima fra uscita dalla zona e livello (0 =
      tooltip="SERVE QUANDO IL LIVELLO DI ROTTURA E' PIU' ALTO DELLA BANDA.\n\nCon banda 50 e livello 90 il trigger esce dalla zona a 50 e deve percorrere altri 40 punti prima di sparare: in mezzo c'e' una terra di nessuno in cui non e' ne' dentro ne' oltre. L'armamento deve sopravvivere a quel tratto, altrimenti il segnale non arriva mai e il movimento sembra ignorato.\n\n0 (default): l'armamento resta valido finche' il trigger non rientra nella zona. E' la lettura letterale di 'e' passato dalla zona neutra a oltre il livello', senza limiti di tempo arbitrari.\n\nUn valore > 0 scarta le uscite che ci mettono troppo: se dopo N barre il livello non e' stato raggiunto, quella spinta si e' esaurita nella terra di nessuno e non merita l'etichetta di rottura.\n\nCon livello = banda il parametro e' inerte: l'uscita e l'attraversamento coincidono.")
 pbRt   = input.bool(false, "   M1: segnala anche il RETEST del bordo", group=g4,
      tooltip="Dopo un segnale, sorveglia il ritorno del trigger sul bordo della zona e la ripartenza: e' il secondo ingresso, quello che molti preferiscono al primo perche' il bordo ha gia' retto una volta.\n\nNon sostituisce il primo segnale, lo AFFIANCA: marker separato con tag R, contatore separato nel cruscotto. Cosi' puoi confrontare i due ingressi sullo stesso movimento invece di sceglierne uno per abitudine.\n\nSEQUENZA per un BUY: segnale, il CCI resta sopra il livello, poi ritorna giu' fino al bordo (o dentro la banda), poi riattraversa il livello verso l'alto. Se nel frattempo scende sotto -banda la sorveglianza si annulla: quella non e' una tenuta del bordo, e' un'inversione.\n\nATTENZIONE alla misura: con il retest acceso la distribuzione MAE della colonna K mescola primi ingressi e retest. Per isolarli, misurali in due passate separate.")
-pbRtWin= input.int(40, "      barre entro cui il retest e' valido", minval=1, maxval=1000, group=g4,
+pbRtWin= input.int(60, "      barre entro cui il retest e' valido", minval=1, maxval=1000, group=g4,
      tooltip="Oltre questa distanza dal segnale, il ritorno sul bordo non e' un retest di quel movimento: e' un movimento nuovo, che merita il suo primo segnale e non l'etichetta di conferma.")
-pbRtTol= input.float(0, "      tolleranza del rientro (punti CCI)", minval=0, maxval=200, step=5, group=g4,
-     tooltip="0 = il trigger deve rientrare DENTRO la banda perche' il retest conti.\n\nAlzandola accetti un avvicinamento al bordo senza rientro: 20 significa che per un BUY basta che il CCI ridiscenda a 70 con banda 50. Piu' retest, piu' superficiali, e la differenza con 'il prezzo ha esitato un attimo' si assottiglia.")
+pbRtBack= input.float(50, "      il trigger deve tornare almeno a |CCI|", minval=0, maxval=400, step=5, group=g4,
+     tooltip="PROFONDITA' DEL RETEST, in valore assoluto di CCI. E' l'unico numero che decide cosa conta come retest, e cambia completamente la natura del segnale.\n\nEsempio con banda 50 e livello di rottura 90, dopo un BUY:\n  80  -> basta che il CCI ridiscenda a 80: retest SUPERFICIALE del livello appena rotto. Molti segnali, il movimento non si e' quasi fermato.\n  50  -> deve tornare al bordo della banda: retest PIENO. Meno segnali, ma il bordo ha davvero retto.\n   0  -> deve tornare alla media. A quel punto non e' piu' un retest, e' un secondo ciclo completo.\n\nQuesto valore viene comunque limitato a un punto sotto il livello di rottura: se fosse piu' alto il rientro sarebbe gia' soddisfatto nell'istante del segnale e qualunque oscillazione diventerebbe un retest.\n\nSopravvive solo il rientro che NON attraversa tutta la banda fino all'altro lato: quello e' un'inversione, non un bordo che tiene.")
 brkNeedStall = input.bool(false, "   richiedi un episodio di stallo confermato", group=g4,
      tooltip="SPENTO (default): il segnale e' l'attraversamento puro del livello. Persistenza, coil e conteggio degli episodi restano MISURATI e visibili nel cruscotto, ma non filtrano nulla: e' la configurazione giusta per vedere quanti segnali produce la regola prima di irrigidirla.\n\nACCESO: passa solo l'attraversamento che arriva da un episodio di stallo che ha superato persistenza E coil, entro le barre di grazia. Molti meno segnali, tutti dentro il contesto che il modulo dichiara di cercare. E' la versione da confrontare con quella spenta sui percentili MAE, non da adottare per fede.")
 brkDir = input.string("Continuazione (rottura)", "   direzione",
@@ -1014,6 +1014,9 @@ if sigKbuy or sigKsell
 //  Sorveglianza aperta da un segnale e chiusa da una di tre cose: il retest
 //  avvenuto, la scadenza della finestra, o l'attraversamento completo della
 //  banda dall'altra parte - che non e' una tenuta del bordo ma un'inversione.
+//  profondita' effettiva del rientro: sempre sotto il livello di rottura,
+//  altrimenti il rientro sarebbe gia' vero nell'istante del segnale
+rtBackE = math.min(pbRtBack, brkLvl - 1)
 var int  rtDir   = 0
 var int  rtStart = 0
 var bool rtTouch = false
@@ -1031,12 +1034,12 @@ else if rtDir != 0
     else if rtDir == 1
         if brkS <= -bndTrig
             rtDir := 0
-        else if brkS <= bndTrig + pbRtTol
+        else if brkS <= rtBackE
             rtTouch := true
     else
         if brkS >= bndTrig
             rtDir := 0
-        else if brkS >= -bndTrig - pbRtTol
+        else if brkS >= -rtBackE
             rtTouch := true
 
 sigRbuy  = pbRt and brkOn and stOn and rtDir ==  1 and rtTouch and upCross and (not isM1 or ctxBuy)  and okBarB and f_riskOk(false, true) and f_biasOk(false)
@@ -1405,7 +1408,7 @@ if showTab and barstate.islast
     kbg = color.new(color.gray, 88)
     table.cell(dash, 0, 12, "rottura " + (brkOn ? brkTfTxt + (brkNat ? " nat" : " live") : "off"), text_size = szDash, text_color = brkOn ? color.white : color.gray, bgcolor = brkOn ? color.new(cBrk, 60) : kbg, tooltip = brkNat ? "lettura NATIVA: il livello e' confrontato con la chiusura della candela della sezione. Un attraversamento per candela, al massimo." : "lettura LIVE: il livello e' confrontato con la curva ricostruita sul prezzo corrente. La stessa candela puo' produrre piu' attraversamenti.")
     table.cell(dash, 1, 12, "liv " + f_n0(brkLvl) + " · " + f_n1(brkS), text_size = szDash, text_color = not brkOn ? color.gray : math.abs(nz(brkS)) >= brkLvl ? color.lime : color.silver, bgcolor = kbg)
-    table.cell(dash, 2, 12, isM1 ? (pbOn ? "pb" + (pbSideReq ? "↩" : "") : "cross") + (pbRt ? (rtDir != 0 ? (rtTouch ? " R●" : " R○") : " R–") : "") : (brkCont ? "continu." : "revers.") + (brkNeedStall ? " +ctx" : "") + (brkFromBand ? " ⊂" : ""), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "⊂ = richiesto che il valore precedente fosse dentro la banda. +ctx = richiesto un episodio di stallo confermato (persistenza + coil) entro le barre di grazia.")
+    table.cell(dash, 2, 12, isM1 ? (pbOn ? "pb" + (pbSideReq ? "↩" : "") : "cross") + (pbRt ? (rtDir != 0 ? (rtTouch ? " R●" : " R○" + f_n0(rtBackE)) : " R–") : "") : (brkCont ? "continu." : "revers.") + (brkNeedStall ? " +ctx" : "") + (brkFromBand ? " ⊂" : ""), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "⊂ = richiesto che il valore precedente fosse dentro la banda. +ctx = richiesto un episodio di stallo confermato (persistenza + coil) entro le barre di grazia.")
     table.cell(dash, 3, 12, "cross " + str.tostring(cCross), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "Attraversamenti del livello da parte della serie di trigger, e come sono finiti.\n\n✗ctx = contesto non valido o discorde in quel momento.\n✗lato = contesto ok, ma il ritracciamento non rispettava permanenza o LATO d'ingresso (per un BUY serve un ingresso nella zona dall'alto: se il CCI e' risalito da -200 e' un rimbalzo, non un respiro).\n✗altro = tutto ok ma bloccato da latch, cooldown, efficienza, bias o filtri di rischio.\n\nSe ✗lato e' alto e ✗ctx basso, il mercato sta girando invece di ritracciare: spegni 'l'ingresso deve venire dal lato del contesto' e confronta i percentili MAE prima di decidere che era il filtro a sbagliare.\n\neff attuale " + f_n2(vEff))
     table.cell(dash, 4, 12, "✗ctx " + str.tostring(cRejCtx) + " ✗lato " + str.tostring(cRejSide), text_size = szDash, text_color = cRejSide > cRejCtx ? color.orange : color.silver, bgcolor = kbg)
     table.cell(dash, 5, 12, "▲" + str.tostring(cBrkB) + " ▼" + str.tostring(cBrkS) + (pbRt ? " R" + str.tostring(cRtB + cRtS) : "") + (cRejOth > 0 ? " ✗" + str.tostring(cRejOth) : ""), text_size = szDash, text_color = cBrkB + cBrkS > 0 ? color.lime : color.silver, bgcolor = kbg)
