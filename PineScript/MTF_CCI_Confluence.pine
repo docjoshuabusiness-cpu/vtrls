@@ -174,6 +174,20 @@ brkLvl = input.float(50, "   livello di rottura |CCI|", minval=10, maxval=400, s
      tooltip="Il livello che il CCI deve superare perche' il segnale esca: BUY sopra +liv, SELL sotto -liv.\n\nCon 50 (default) il livello COINCIDE con il bordo della banda di stallo: il segnale e' esattamente 'la candela ha chiuso fuori dalla zona di stallo'. Massimo anticipo, massimo numero di finte.\n\nAlzandolo a 100 pretendi che il CCI percorra altri 50 punti oltre il bordo: molte meno finte, ma la parte iniziale del movimento e' gia' andata.")
 brkFromBand = input.bool(true, "   solo se la candela precedente era DENTRO la banda", group=g4,
      tooltip="ACCESO (default): il segnale nasce solo se il valore precedente era dentro la banda di stallo. E' la differenza fra 'esce dalla zona di stallo' e 'attraversa +50 mentre sta gia' correndo da -200'. Il secondo caso e' un CCI che passa di li' per caso, non un'uscita da una compressione.\n\nSPENTO: qualunque attraversamento del livello produce un segnale, da qualunque punto arrivi.")
+pbOn   = input.bool(true, "   M1: il trigger deve ENTRARE e poi USCIRE dalla zona neutra", group=g4,
+     tooltip="E' l'opzione che hai chiesto, e in M1 e' il cuore del segnale.\n\nACCESA: il timeframe piu' piccolo deve essere rientrato dentro ±banda e poi uscirne oltre il livello, dalla parte del contesto. Compri un ritracciamento finito, non una candela qualunque in trend.\n\nSPENTA: basta l'attraversamento del livello con il contesto concorde. Molti piu' segnali, sparsi ovunque nel trend, la maggior parte in mezzo a un movimento gia' esteso: e' il confronto da fare per sapere quanto vale davvero il ritracciamento.")
+pbSideReq = input.bool(false, "      l'ingresso nella zona deve venire dal lato del contesto", group=g4,
+     tooltip="SPENTA DI DEFAULT: il trigger base e' il semplice passaggio dalla zona neutra a fuori, in qualunque modo il prezzo sia arrivato nella zona.\n\nACCESA, distingue un RITRACCIAMENTO da un'INVERSIONE.\n\nPer arrivare a +50 dal basso il CCI attraversa la zona neutra comunque: senza questa condizione un rimbalzo che viene da -200 e sfonda +50 produce lo stesso BUY di un vero ritracciamento in trend rialzista. Sono due cose diverse.\n\nACCESA: per un BUY il trigger deve essere ENTRATO nella zona scendendo da sopra +banda. Il lato d'ingresso viene registrato nel momento esatto in cui la serie entra nella zona ed e' visibile nel cruscotto (↓ dall'alto, ↑ dal basso).")
+pbMin  = input.int(1, "      permanenza minima nella zona (barre)", minval=1, maxval=500, group=g4,
+     tooltip="Quante barre il trigger deve restare nella zona neutra perche' conti come ritracciamento. Con 1 basta un tocco: in lettura nativa e' una candela intera, in live sono cinque secondi.")
+pbMax  = input.int(0, "      permanenza massima (0 = illimitata)", minval=0, maxval=5000, group=g4,
+     tooltip="Oltre questa permanenza il ritracciamento non e' piu' un respiro dentro un trend: e' un nuovo stallo, e il contesto che lo ha autorizzato e' vecchio. 0 disattiva il vincolo, ed e' il default solo perche' il valore giusto dipende dal simbolo: misuralo sulla cella 'pb' del cruscotto prima di fissarlo.")
+pbRt   = input.bool(false, "   M1: segnala anche il RETEST del bordo", group=g4,
+     tooltip="Dopo un segnale, sorveglia il ritorno del trigger sul bordo della zona e la ripartenza: e' il secondo ingresso, quello che molti preferiscono al primo perche' il bordo ha gia' retto una volta.\n\nNon sostituisce il primo segnale, lo AFFIANCA: marker separato con tag R, contatore separato nel cruscotto. Cosi' puoi confrontare i due ingressi sullo stesso movimento invece di sceglierne uno per abitudine.\n\nSEQUENZA per un BUY: segnale, il CCI resta sopra il livello, poi ritorna giu' fino al bordo (o dentro la banda), poi riattraversa il livello verso l'alto. Se nel frattempo scende sotto -banda la sorveglianza si annulla: quella non e' una tenuta del bordo, e' un'inversione.\n\nATTENZIONE alla misura: con il retest acceso la distribuzione MAE della colonna K mescola primi ingressi e retest. Per isolarli, misurali in due passate separate.")
+pbRtWin= input.int(40, "      barre entro cui il retest e' valido", minval=1, maxval=1000, group=g4,
+     tooltip="Oltre questa distanza dal segnale, il ritorno sul bordo non e' un retest di quel movimento: e' un movimento nuovo, che merita il suo primo segnale e non l'etichetta di conferma.")
+pbRtTol= input.float(0, "      tolleranza del rientro (punti CCI)", minval=0, maxval=200, step=5, group=g4,
+     tooltip="0 = il trigger deve rientrare DENTRO la banda perche' il retest conti.\n\nAlzandola accetti un avvicinamento al bordo senza rientro: 20 significa che per un BUY basta che il CCI ridiscenda a 70 con banda 50. Piu' retest, piu' superficiali, e la differenza con 'il prezzo ha esitato un attimo' si assottiglia.")
 brkNeedStall = input.bool(false, "   richiedi un episodio di stallo confermato", group=g4,
      tooltip="SPENTO (default): il segnale e' l'attraversamento puro del livello. Persistenza, coil e conteggio degli episodi restano MISURATI e visibili nel cruscotto, ma non filtrano nulla: e' la configurazione giusta per vedere quanti segnali produce la regola prima di irrigidirla.\n\nACCESO: passa solo l'attraversamento che arriva da un episodio di stallo che ha superato persistenza E coil, entro le barre di grazia. Molti meno segnali, tutti dentro il contesto che il modulo dichiara di cercare. E' la versione da confrontare con quella spenta sui percentili MAE, non da adottare per fede.")
 brkDir = input.string("Continuazione (rottura)", "   direzione",
@@ -185,14 +199,6 @@ brkOne = input.bool(true, "   un solo segnale per ritracciamento (M1) o episodio
      tooltip="In M1 il latch si riarma quando il trigger RIENTRA nella zona neutra: un ritracciamento = un segnale. In M2 si riarma a ogni nuovo episodio di stallo.\n\nUn episodio di compressione produce UNA rottura. Spento, la stessa compressione genera un grappolo di segnali mentre il CCI oscilla attorno al livello di rottura, e il campione si riempie di duplicati che sembrano conferme.")
 useEff = input.bool(false, "   richiedi efficienza minima alla rottura", group=g4,
      tooltip="Efficienza di Kaufman: spostamento netto diviso lunghezza del percorso (somma dei true range).\n  E = 1 -> linea retta\n  E = 0 -> tornato al punto di partenza\n\nE' la misura giusta per 'sta uscendo davvero': una rottura con E basso e' il prezzo che vibra attorno al livello, non un'espansione.")
-pbOn   = input.bool(true, "   M1: il trigger deve ENTRARE e poi USCIRE dalla zona neutra", group=g4,
-     tooltip="E' l'opzione che hai chiesto, e in M1 e' il cuore del segnale.\n\nACCESA: il timeframe piu' piccolo deve essere rientrato dentro ±banda e poi uscirne oltre il livello, dalla parte del contesto. Compri un ritracciamento finito, non una candela qualunque in trend.\n\nSPENTA: basta l'attraversamento del livello con il contesto concorde. Molti piu' segnali, sparsi ovunque nel trend, la maggior parte in mezzo a un movimento gia' esteso: e' il confronto da fare per sapere quanto vale davvero il ritracciamento.")
-pbSideReq = input.bool(true, "      l'ingresso nella zona deve venire dal lato del contesto", group=g4,
-     tooltip="LA CONDIZIONE CHE DISTINGUE UN RITRACCIAMENTO DA UN'INVERSIONE.\n\nPer arrivare a +50 dal basso il CCI attraversa la zona neutra comunque: senza questa condizione un rimbalzo che viene da -200 e sfonda +50 produce lo stesso BUY di un vero ritracciamento in trend rialzista. Sono due cose diverse.\n\nACCESA: per un BUY il trigger deve essere ENTRATO nella zona scendendo da sopra +banda. Il lato d'ingresso viene registrato nel momento esatto in cui la serie entra nella zona ed e' visibile nel cruscotto (↓ dall'alto, ↑ dal basso).")
-pbMin  = input.int(1, "      permanenza minima nella zona (barre)", minval=1, maxval=500, group=g4,
-     tooltip="Quante barre il trigger deve restare nella zona neutra perche' conti come ritracciamento. Con 1 basta un tocco: in lettura nativa e' una candela intera, in live sono cinque secondi.")
-pbMax  = input.int(0, "      permanenza massima (0 = illimitata)", minval=0, maxval=5000, group=g4,
-     tooltip="Oltre questa permanenza il ritracciamento non e' piu' un respiro dentro un trend: e' un nuovo stallo, e il contesto che lo ha autorizzato e' vecchio. 0 disattiva il vincolo, ed e' il default solo perche' il valore giusto dipende dal simbolo: misuralo sulla cella 'pb' del cruscotto prima di fissarlo.")
 effLen = input.int(10, "   barre per l'efficienza", minval=2, maxval=200, group=g4)
 effMin = input.float(0.45, "   efficienza minima (0-1)", minval=0.0, maxval=1.0, step=0.05, group=g4)
 brkCd  = input.int(10, "   cooldown fra rotture (barre)", minval=0, maxval=500, group=g4)
@@ -993,6 +999,40 @@ if sigKbuy or sigKsell
     pbFired  := true
     lastBrk  := bar_index
 
+// ------------------------------------------------------------- RETEST -------
+//  Sorveglianza aperta da un segnale e chiusa da una di tre cose: il retest
+//  avvenuto, la scadenza della finestra, o l'attraversamento completo della
+//  banda dall'altra parte - che non e' una tenuta del bordo ma un'inversione.
+var int  rtDir   = 0
+var int  rtStart = 0
+var bool rtTouch = false
+if sigKbuy
+    rtDir   := 1
+    rtStart := bar_index
+    rtTouch := false
+else if sigKsell
+    rtDir   := -1
+    rtStart := bar_index
+    rtTouch := false
+else if rtDir != 0
+    if bar_index - rtStart > pbRtWin or na(brkS)
+        rtDir := 0
+    else if rtDir == 1
+        if brkS <= -bndTrig
+            rtDir := 0
+        else if brkS <= bndTrig + pbRtTol
+            rtTouch := true
+    else
+        if brkS >= bndTrig
+            rtDir := 0
+        else if brkS >= -bndTrig - pbRtTol
+            rtTouch := true
+
+sigRbuy  = pbRt and brkOn and stOn and rtDir ==  1 and rtTouch and upCross and (not isM1 or ctxBuy)  and okBarB and f_riskOk(false, true) and f_biasOk(false)
+sigRsell = pbRt and brkOn and stOn and rtDir == -1 and rtTouch and dnCross and (not isM1 or ctxSell) and okBarB and f_riskOk(true,  true) and f_biasOk(true)
+if sigRbuy or sigRsell
+    rtDir := 0
+
 // --- perche' un attraversamento NON e' diventato un segnale ------------------
 //  Senza questi contatori l'unica diagnosi possibile e' "non esce niente", che
 //  non e' una diagnosi. Ogni cross viene attribuito a UNA sola causa, nello
@@ -1002,7 +1042,7 @@ ctxSideOk = upCross ? (isM1 ? ctxBuy : true) : (isM1 ? ctxSell : true)
 pbSideOk  = upCross ? pbOkBuy : pbOkSell
 rejCtx  = crossAny and not ctxSideOk
 rejSide = crossAny and ctxSideOk and isM1 and not pbSideOk
-rejOth  = crossAny and (rawBuy or rawSell) and not (sigKbuy or sigKsell)
+rejOth  = crossAny and (rawBuy or rawSell) and not (sigKbuy or sigKsell or sigRbuy or sigRsell)
 cCross   = f_cnt(crossAny)
 cRejCtx  = f_cnt(rejCtx)
 cRejSide = f_cnt(rejSide)
@@ -1019,7 +1059,7 @@ var bool  trkBrk = false
 sigSell = sigA or sigB
 sigBuy  = sigC or sigD
 anyExt  = sigSell or sigBuy
-anyBrk  = sigKbuy or sigKsell
+anyBrk  = sigKbuy or sigKsell or sigRbuy or sigRsell
 anySig  = anyExt or anyBrk
 
 if useMae and trk
@@ -1040,7 +1080,7 @@ if useMae and trk
 if useMae and anySig and not trk
     trk    := true
     trkPx  := close
-    trkDir := (sigBuy or sigKbuy) ? 1 : -1
+    trkDir := (sigBuy or sigKbuy or sigRbuy) ? 1 : -1
     trkMae := 0.0
     trkBar := 0
     trkBrk := anyBrk and not anyExt
@@ -1066,6 +1106,8 @@ cSigD = f_cnt(sigD)
 cStA  = f_cnt(stallStart)
 cBrkB = f_cnt(sigKbuy)
 cBrkS = f_cnt(sigKsell)
+cRtB  = f_cnt(sigRbuy)
+cRtS  = f_cnt(sigRsell)
 
 // ================================================================== PLOT ======
 plot(showC and use1 ? c1 : na, "CCI S1", color = cc1c, linewidth = 1)
@@ -1204,6 +1246,10 @@ f_markChart(sigA, true,  f_chartTxt(txSell, "A", seqA, rskSell), f_tip("A", seqA
 f_markChart(sigB, true,  f_chartTxt(txSell, "B", seqB, rskSell), f_tip("B", seqB, true,  rskSell), color.new(cUp, 35))
 f_markChart(sigC, false, f_chartTxt(txBuy,  "C", seqC, rskBuy),  f_tip("C", seqC, false, rskBuy),  color.new(cDn, 35))
 f_markChart(sigD, false, f_chartTxt(txBuy,  "D", seqD, rskBuy),  f_tip("D", seqD, false, rskBuy),  cDn)
+f_markPane(sigRsell, markLvl + 80, true,  txSell + "R" + f_rskTxt(rskSellK), f_tip("R retest", 1, true,  rskSellK), color.new(cBrk, 40))
+f_markPane(sigRbuy, -markLvl - 80, false, txBuy  + "R" + f_rskTxt(rskBuyK),  f_tip("R retest", 1, false, rskBuyK),  color.new(cBrk, 40))
+f_markChart(sigRsell, true,  f_chartTxt(txSell, "R", 1, rskSellK), f_tip("R retest", 1, true,  rskSellK), color.new(cBrk, 40))
+f_markChart(sigRbuy,  false, f_chartTxt(txBuy,  "R", 1, rskBuyK),  f_tip("R retest", 1, false, rskBuyK),  color.new(cBrk, 40))
 f_markChart(sigKsell, true,  f_chartTxt(txSell, bndTag, 1, rskSellK), f_tip(bndTag, 1, true,  rskSellK), cBrk)
 f_markChart(sigKbuy,  false, f_chartTxt(txBuy,  bndTag, 1, rskBuyK),  f_tip(bndTag, 1, false, rskBuyK),  cBrk)
 
@@ -1348,10 +1394,10 @@ if showTab and barstate.islast
     kbg = color.new(color.gray, 88)
     table.cell(dash, 0, 12, "rottura " + (brkOn ? brkTfTxt + (brkNat ? " nat" : " live") : "off"), text_size = szDash, text_color = brkOn ? color.white : color.gray, bgcolor = brkOn ? color.new(cBrk, 60) : kbg, tooltip = brkNat ? "lettura NATIVA: il livello e' confrontato con la chiusura della candela della sezione. Un attraversamento per candela, al massimo." : "lettura LIVE: il livello e' confrontato con la curva ricostruita sul prezzo corrente. La stessa candela puo' produrre piu' attraversamenti.")
     table.cell(dash, 1, 12, "liv " + f_n0(brkLvl) + " · " + f_n1(brkS), text_size = szDash, text_color = not brkOn ? color.gray : math.abs(nz(brkS)) >= brkLvl ? color.lime : color.silver, bgcolor = kbg)
-    table.cell(dash, 2, 12, isM1 ? (pbOn ? "pb" + (pbSideReq ? "↩" : "") : "cross") : (brkCont ? "continu." : "revers.") + (brkNeedStall ? " +ctx" : "") + (brkFromBand ? " ⊂" : ""), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "⊂ = richiesto che il valore precedente fosse dentro la banda. +ctx = richiesto un episodio di stallo confermato (persistenza + coil) entro le barre di grazia.")
+    table.cell(dash, 2, 12, isM1 ? (pbOn ? "pb" + (pbSideReq ? "↩" : "") : "cross") + (pbRt ? (rtDir != 0 ? (rtTouch ? " R●" : " R○") : " R–") : "") : (brkCont ? "continu." : "revers.") + (brkNeedStall ? " +ctx" : "") + (brkFromBand ? " ⊂" : ""), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "⊂ = richiesto che il valore precedente fosse dentro la banda. +ctx = richiesto un episodio di stallo confermato (persistenza + coil) entro le barre di grazia.")
     table.cell(dash, 3, 12, "cross " + str.tostring(cCross), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "Attraversamenti del livello da parte della serie di trigger, e come sono finiti.\n\n✗ctx = contesto non valido o discorde in quel momento.\n✗lato = contesto ok, ma il ritracciamento non rispettava permanenza o LATO d'ingresso (per un BUY serve un ingresso nella zona dall'alto: se il CCI e' risalito da -200 e' un rimbalzo, non un respiro).\n✗altro = tutto ok ma bloccato da latch, cooldown, efficienza, bias o filtri di rischio.\n\nSe ✗lato e' alto e ✗ctx basso, il mercato sta girando invece di ritracciare: spegni 'l'ingresso deve venire dal lato del contesto' e confronta i percentili MAE prima di decidere che era il filtro a sbagliare.\n\neff attuale " + f_n2(vEff))
     table.cell(dash, 4, 12, "✗ctx " + str.tostring(cRejCtx) + " ✗lato " + str.tostring(cRejSide), text_size = szDash, text_color = cRejSide > cRejCtx ? color.orange : color.silver, bgcolor = kbg)
-    table.cell(dash, 5, 12, "▲" + str.tostring(cBrkB) + " ▼" + str.tostring(cBrkS) + (cRejOth > 0 ? " ✗" + str.tostring(cRejOth) : ""), text_size = szDash, text_color = cBrkB + cBrkS > 0 ? color.lime : color.silver, bgcolor = kbg)
+    table.cell(dash, 5, 12, "▲" + str.tostring(cBrkB) + " ▼" + str.tostring(cBrkS) + (pbRt ? " R" + str.tostring(cRtB + cRtS) : "") + (cRejOth > 0 ? " ✗" + str.tostring(cRejOth) : ""), text_size = szDash, text_color = cBrkB + cBrkS > 0 ? color.lime : color.silver, bgcolor = kbg)
 
     // -- rischio -------------------------------------------------------------
     rbg = color.new(color.gray, 88)
@@ -1415,19 +1461,21 @@ if showTab and barstate.islast
 
 // ================================================================= ALERT ======
 alertcondition(stallStart, "MTF-CCI · inizio stallo", "MTF-CCI stallo confermato")
+alertcondition(sigRbuy,  "MTF-CCI · retest BUY",  "MTF-CCI retest BUY")
+alertcondition(sigRsell, "MTF-CCI · retest SELL", "MTF-CCI retest SELL")
 alertcondition(sigKbuy,  "MTF-CCI · rottura BUY",  "MTF-CCI rottura BUY")
 alertcondition(sigKsell, "MTF-CCI · rottura SELL", "MTF-CCI rottura SELL")
 alertcondition(sigA, "MTF-CCI · SELL soglia A", "MTF-CCI SELL A")
 alertcondition(sigB, "MTF-CCI · SELL soglia B", "MTF-CCI SELL B")
 alertcondition(sigC, "MTF-CCI · BUY soglia C",  "MTF-CCI BUY C")
 alertcondition(sigD, "MTF-CCI · BUY soglia D",  "MTF-CCI BUY D")
-alertcondition(sigA or sigB or sigKsell, "MTF-CCI · SELL (qualsiasi)", "MTF-CCI SELL")
-alertcondition(sigC or sigD or sigKbuy,  "MTF-CCI · BUY (qualsiasi)",  "MTF-CCI BUY")
+alertcondition(sigA or sigB or sigKsell or sigRsell, "MTF-CCI · SELL (qualsiasi)", "MTF-CCI SELL")
+alertcondition(sigC or sigD or sigKbuy or sigRbuy,  "MTF-CCI · BUY (qualsiasi)",  "MTF-CCI BUY")
 
 if anySig
-    isS = sigSell or sigKsell
+    isS = sigSell or sigKsell or sigRsell
     dir = isS ? "SELL" : "BUY"
-    tag = anyBrk ? (isM1 ? "M1" : "M2") : sigA ? "A" : sigB ? "B" : sigC ? "C" : "D"
+    tag = (sigRbuy or sigRsell) ? "R" : anyBrk ? (isM1 ? "M1" : "M2") : sigA ? "A" : sigB ? "B" : sigC ? "C" : "D"
     nth = anyBrk ? 1 : sigA ? seqA : sigB ? seqB : sigC ? seqC : seqD
     rr  = anyBrk ? (isS ? rskSellK : rskBuyK) : (isS ? rskSell : rskBuy)
     alert("MTF-CCI " + dir + " [" + tag + "#" + str.tostring(nth) + "] " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | cci=" + f_n1(anyBrk ? brkS : cFast) + (stOn ? " | stallo " + str.tostring(inN) + "/" + str.tostring(stNeed) + " len=" + str.tostring(stLen) + " coil=" + f_n2(coilR) : "") + (usePre ? " | pre " + preTag : "") + (useBias ? " | bias " + (biasNat ? "nat " : "live ") + tfBias + "=" + f_n1(cBias) : "") + " | risk=" + str.tostring(rr, format.mintick) + "pt/" + str.tostring(math.round(rr / syminfo.mintick)) + "t | eff=" + f_n2(vEff), alert.freq_once_per_bar_close)
