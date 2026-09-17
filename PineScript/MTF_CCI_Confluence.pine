@@ -338,6 +338,8 @@ showLv   = input.bool(true,  "Linee di soglia e di trigger", group=g9)
 showBand = input.bool(true,  "Banda dello stallo (sezione dominante)", group=g9)
 showArmBg= input.bool(true,  "Sfondo quando un estremo e' armato", group=g9)
 showTab  = input.bool(true,  "Mostra cruscotto", group=g9)
+dashComp = input.bool(false, "   versione compatta (3 righe)", group=g9, active=showTab,
+     tooltip="Il cruscotto completo ha 18 righe e in un pannello basso se ne leggono sei: le righe che servono a capire perche' un segnale non esce restano fuori campo.\n\nLa versione compatta tiene solo la catena diagnostica: valore e soglie, verso dell'armamento, contesto, quanti attraversamenti ci sono stati e come sono finiti, stato del retest, segnali emessi.\n\nSi legge da sinistra a destra come una catena: il primo elemento rosso e' il punto in cui il segnale si ferma.")
 dashSz   = input.string("Piccolo", "Dimensione testo cruscotto", options=["Minimo","Piccolo","Normale","Grande"], group=g9)
 tagSz    = input.string("Piccolo", "Dimensione etichette periodo", options=["Minimo","Piccolo","Normale","Grande"], group=g9)
 markSz   = input.string("Normale", "Dimensione marker", options=["Minimo","Piccolo","Normale","Grande"], group=g9)
@@ -1290,8 +1292,41 @@ f_stat(bool use, string tf, int sec, float v, float h, float l, float ne, float 
      use ? str.tostring(int(math.round(ne))) + " · " + (isLive ? "—" : f_n0(cap)) : "–",
      bad, dead]
 
+// -------------------------------------------------- cruscotto compatto ------
+//  Tre righe da leggere come una catena: dove si interrompe, li' si ferma il
+//  segnale. Sostituisce il cruscotto completo quando il pannello e' basso.
+var table dashC = table.new(position.top_right, 6, 3, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
+if showTab and dashComp and barstate.islast
+    hb = color.new(color.gray, 70)
+    bb = color.new(color.gray, 88)
+    armTx = pbArm == 1 ? "arm ▲" : pbArm == -1 ? "arm ▼" : "arm –"
+    armCl = pbArm == 1 ? cDn : pbArm == -1 ? cUp : color.orange
+    ctxTx = not isM1 ? (stRaw ? "stallo" : "no stallo") : ctxBuy ? "ctx BUY" : ctxSell ? "ctx SELL" : "ctx –"
+    ctxCl = not isM1 ? color.silver : ctxBuy ? cDn : ctxSell ? cUp : color.orange
+    rTx   = not pbRt ? "R off" : not pbFired or pbArm == 0 ? "R –" : rtDeep ? "R ●" : "R ○" + f_n0(rtBackU)
+    nSig  = cBrkB + cBrkS
+    nRt   = cRtB + cRtS
+    table.cell(dashC, 0, 0, "MTF-CCI " + (isM1 ? "M1" : "M2"), text_size = szDash, text_color = color.white, bgcolor = hb)
+    table.cell(dashC, 1, 0, "trg " + brkTfTxt + (brkNat ? " nat" : " live"), text_size = szDash, text_color = color.white, bgcolor = hb)
+    table.cell(dashC, 2, 0, "cci " + f_n1(brkS), text_size = szDash, text_color = na(brkS) ? color.red : math.abs(brkS) >= brkLvl ? color.lime : math.abs(brkS) <= bndTrig ? color.orange : color.white, bgcolor = hb)
+    table.cell(dashC, 3, 0, "zona " + f_n0(bndTrig) + " · liv " + f_n0(brkLvl), text_size = szDash, text_color = color.white, bgcolor = hb)
+    table.cell(dashC, 4, 0, armTx, text_size = szDash, text_color = armCl, bgcolor = hb, tooltip = "Verso in cui il trigger e' uscito dalla zona neutra. Senza armamento nessun attraversamento del livello puo' sparare: il trigger e' dentro la zona, o non ne e' ancora uscito da quando lo guardi.")
+    table.cell(dashC, 5, 0, ctxTx, text_size = szDash, text_color = ctxCl, bgcolor = hb)
+    table.cell(dashC, 0, 1, "cross " + str.tostring(cCross), text_size = szDash, text_color = cCross == 0 ? color.red : color.white, bgcolor = bb, tooltip = "Quante volte il trigger ha attraversato il livello. Se resta 0, il CCI non arriva mai a quella soglia: abbassa il livello, o accorcia il 'Len' della sezione, che con finestre lunghe comprime le letture estreme.")
+    table.cell(dashC, 1, 1, "✗ctx " + str.tostring(cRejCtx), text_size = szDash, text_color = cRejCtx > 0 ? color.orange : color.silver, bgcolor = bb)
+    table.cell(dashC, 2, 1, "✗lato " + str.tostring(cRejSide), text_size = szDash, text_color = cRejSide > 0 ? color.orange : color.silver, bgcolor = bb)
+    table.cell(dashC, 3, 1, "✗altro " + str.tostring(cRejOth), text_size = szDash, text_color = cRejOth > 0 ? color.orange : color.silver, bgcolor = bb, tooltip = "Attraversamenti fermati dopo il contesto: latch (un solo primo segnale per armamento), cooldown, efficienza, bias o filtri di rischio.")
+    table.cell(dashC, 4, 1, rTx, text_size = szDash, text_color = not pbRt ? color.gray : rtDeep ? color.lime : color.silver, bgcolor = bb)
+    table.cell(dashC, 5, 1, "▲" + str.tostring(cBrkB) + " ▼" + str.tostring(cBrkS) + " R" + str.tostring(nRt), text_size = szDash, text_color = nSig + nRt > 0 ? color.lime : color.red, bgcolor = bb)
+    table.cell(dashC, 0, 2, "min/max " + str.tostring(lbEff), text_size = szDash, text_color = color.silver, bgcolor = bb)
+    table.cell(dashC, 1, 2, f_n0(lo1) + " / " + f_n0(hi1), text_size = szDash, text_color = color.silver, bgcolor = bb, tooltip = "Minimo e massimo del CCI della prima sezione nella finestra di confluenza: se non arrivano al livello di rottura, quel livello non e' raggiungibile con questi parametri.")
+    table.cell(dashC, 2, 2, "zona " + (tIn ? "IN" : "out") + " " + str.tostring(pbLen), text_size = szDash, text_color = tIn ? color.orange : color.white, bgcolor = bb)
+    table.cell(dashC, 3, 2, "pb " + (pbOn ? "on" : "off") + (pbSideReq ? "↩" : ""), text_size = szDash, text_color = color.silver, bgcolor = bb)
+    table.cell(dashC, 4, 2, "MAE " + f_n2(p80kEff), text_size = szDash, text_color = color.silver, bgcolor = bb)
+    table.cell(dashC, 5, 2, "cd " + str.tostring(math.max(0, brkCd - (bar_index - lastBrk))), text_size = szDash, text_color = color.silver, bgcolor = bb)
+
 var table dash = table.new(position.top_right, 6, 18, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
-if showTab and barstate.islast
+if showTab and not dashComp and barstate.islast
     hdrBg = color.new(color.gray, 70)
     modeTag = (modeA ? "A nativo" : modeB ? "B grafico/HTF" : "C orizz.equiv.") + (liveOn ? " · LIVE" : modeC ? "" : " · step")
     table.cell(dash, 0, 0, "TF", bgcolor = hdrBg, text_color = color.white, text_size = szDash)
