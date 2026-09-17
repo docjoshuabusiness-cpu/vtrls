@@ -175,9 +175,9 @@ brkLvl = input.float(50, "   livello di rottura |CCI|", minval=10, maxval=400, s
 pbRt   = input.bool(false, "retest su questa soglia", inline="lvl", group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger",
      tooltip="RETEST SULLA SOGLIA QUI ACCANTO. Spuntato, il motore sorveglia il ritorno del trigger su QUESTO livello e la ripartenza: e' il secondo ingresso, quello che molti preferiscono al primo perche' il bordo ha gia' retto una volta.\n\nNon sostituisce il primo segnale, lo AFFIANCA: marker separato con tag R, contatore separato nel cruscotto. Cosi' puoi confrontare i due ingressi sullo stesso movimento invece di sceglierne uno per abitudine.\n\nSEQUENZA per un BUY: segnale, il CCI resta sopra il livello, poi ritorna giu' fino al bordo (o dentro la banda), poi riattraversa il livello verso l'alto. Se nel frattempo scende sotto -banda la sorveglianza si annulla: quella non e' una tenuta del bordo, e' un'inversione.\n\nATTENZIONE alla misura: con il retest acceso la distribuzione MAE della colonna K mescola primi ingressi e retest. Per isolarli, misurali in due passate separate.")
 pbRtOne= input.bool(false, "      un solo retest per segnale", group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger" and pbRt,
-     tooltip="SPENTO (default): ogni volta che il trigger rientra sotto il livello e lo risupera esce un nuovo retest. Un movimento che respira tre volte produce tre segnali R, perche' sono tre occasioni distinte e ognuna ha il suo esito.\n\nACCESO: solo il primo retest dopo ogni segnale. Meno segnali, ma perdi le ripartenze successive, che su un trend lungo sono la maggior parte.\n\nOgni retest fa ripartire da capo la finestra di validita': la sorveglianza segue il movimento finche' il trigger non rientra nella zona neutra o non sfonda dall'altra parte.")
-pbRtWin= input.int(60, "      barre entro cui il retest e' valido", minval=1, maxval=1000, group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger" and pbRt,
-     tooltip="Oltre questa distanza dal segnale, il ritorno sul bordo non e' un retest di quel movimento: e' un movimento nuovo, che merita il suo primo segnale e non l'etichetta di conferma.")
+     tooltip="SPENTO (default): ogni volta che il trigger rientra sotto il livello e lo risupera esce un nuovo retest. Un movimento che respira tre volte produce tre segnali R, perche' sono tre occasioni distinte e ognuna ha il suo esito.\n\nACCESO: solo il primo retest per armamento. Meno segnali, ma perdi le ripartenze successive, che su un trend lungo sono la maggior parte.\n\nOgni retest fa ripartire da capo la finestra di validita': la sorveglianza segue il movimento finche' il trigger non rientra nella zona neutra o non sfonda dall'altra parte.")
+pbRtWin= input.int(60, "      barre entro cui il retest e' valido (0 = nessun limite)", minval=0, maxval=1000, group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger" and pbRt,
+     tooltip="Distanza massima, in barre, fra un segnale e il retest successivo. Oltre, quel ritorno non appartiene piu' allo stesso movimento.\n\nLa distanza si conta dall'ULTIMO segnale, primo o retest che sia: finche' il movimento continua a respirare a ritmo regolare la catena non si interrompe, ma una pausa lunga la chiude.\n\n0 = nessun limite di tempo: contano solo l'armamento e la profondita' del rientro.")
 pbRtDepth= input.float(10, "      rientro minimo sotto il livello (punti CCI)", minval=1, maxval=400, step=5, group=g4, active=bandMode == "M1 · Contesto FUORI banda + trigger" and pbRt,
      tooltip="Il retest e' SEMPRE ancorato al livello di rottura che hai scelto: se metti 90, il retest si misura su 90, e se domani lo porti a 120 il retest segue da solo. Qui decidi solo QUANTO deve rientrare sotto quel livello.\n\nCon livello 90:\n  10 (default) -> il CCI deve ridiscendere a 80 e poi risuperare 90. Retest del livello appena rotto.\n  25           -> deve scendere a 65: rientro piu' profondo, meno segnali, bordo piu' provato.\n  40           -> scende fino a 50, cioe' al bordo della zona neutra: retest pieno.\n\nPiu' il numero e' piccolo, piu' il retest e' superficiale, e a un certo punto la differenza fra 'ha ritestato il livello' e 'il prezzo ha oscillato un attimo' smette di esistere.\n\nSopravvive solo il rientro che NON attraversa tutta la zona neutra fino all'altro lato: quello e' un'inversione, non un livello che tiene.")
 brkFromBand = input.bool(true, "   M2: solo se la candela precedente era DENTRO la banda", group=g4, active=not (bandMode == "M1 · Contesto FUORI banda + trigger"),
@@ -1004,6 +1004,18 @@ okCtx   = isM1 or not brkNeedStall or (inGrace and coilOk)
 //  latch: in M1 un solo segnale per ritracciamento, in M2 uno per episodio
 okLatch = not brkOne ? true : isM1 ? not pbFired : not brkNeedStall or not brkFired
 var int lastBrk = -100000
+//  stato del retest: 'rtDeep' dice che dopo l'ultimo segnale il trigger e'
+//  ridisceso abbastanza sotto il livello da poterlo risuperare davvero.
+var bool rtDeep = false
+var bool rtDone = false
+rtBackU = brkLvl - pbRtDepth
+if pbArm == 0
+    rtDeep := false
+    rtDone := false
+else if pbArm == 1 and not na(brkS) and brkS <= rtBackU
+    rtDeep := true
+else if pbArm == -1 and not na(brkS) and brkS >= -rtBackU
+    rtDeep := true
 
 sigKbuy  = brkOn and stOn and okCtx and rawBuy  and okBarB and okEffB and okLatch and f_preOk(false) and f_preBackOk(false) and f_riskOk(false, true) and f_biasOk(false) and (bar_index - lastBrk >= brkCd)
 sigKsell = brkOn and stOn and okCtx and rawSell and okBarB and okEffB and okLatch and f_preOk(true)  and f_preBackOk(true)  and f_riskOk(true,  true) and f_biasOk(true)  and (bar_index - lastBrk >= brkCd)
@@ -1011,50 +1023,26 @@ if sigKbuy or sigKsell
     brkFired := true
     pbFired  := true
     lastBrk  := bar_index
+    rtDeep   := false
 
 // ------------------------------------------------------------- RETEST -------
-//  Sorveglianza aperta da un segnale e chiusa da una di tre cose: il retest
-//  avvenuto, la scadenza della finestra, o l'attraversamento completo della
-//  banda dall'altra parte - che non e' una tenuta del bordo ma un'inversione.
-//  profondita' effettiva del rientro: sempre sotto il livello di rottura,
-//  altrimenti il rientro sarebbe gia' vero nell'istante del segnale
-rtBackE = math.max(brkLvl - pbRtDepth, -bndTrig)
-var int  rtDir   = 0
-var int  rtStart = 0
-var bool rtTouch = false
-if sigKbuy
-    rtDir   := 1
-    rtStart := bar_index
-    rtTouch := false
-else if sigKsell
-    rtDir   := -1
-    rtStart := bar_index
-    rtTouch := false
-else if rtDir != 0
-    if bar_index - rtStart > pbRtWin or na(brkS)
-        rtDir := 0
-    else if rtDir == 1
-        if brkS <= -bndTrig
-            rtDir := 0
-        else if brkS <= rtBackE
-            rtTouch := true
-    else
-        if brkS >= bndTrig
-            rtDir := 0
-        else if brkS >= -rtBackE
-            rtTouch := true
+//  Dopo il PRIMO segnale, ogni nuovo attraversamento del livello NELLO STESSO
+//  VERSO e' un retest: il trigger e' ridisceso sotto la soglia e l'ha
+//  risuperata. Non serve che rientri nella zona neutra; se lo fa, l'armamento
+//  riparte da capo e l'attraversamento successivo torna a essere un PRIMO
+//  segnale, non un retest.
+//  L'armamento si ribalta solo quando il trigger esce dalla zona dall'ALTRA
+//  parte: da quel momento si guardano i retest sul livello opposto, con la
+//  logica speculare. Non esiste un retest al rialzo mentre si e' armati al
+//  ribasso: sono due stati, mai contemporanei.
+rtFresh = pbRtWin <= 0 or bar_index - lastBrk <= pbRtWin
 
-sigRbuy  = pbRt and brkOn and stOn and rtDir ==  1 and rtTouch and upCross and (not isM1 or ctxBuy)  and okBarB and f_riskOk(false, true) and f_biasOk(false)
-sigRsell = pbRt and brkOn and stOn and rtDir == -1 and rtTouch and dnCross and (not isM1 or ctxSell) and okBarB and f_riskOk(true,  true) and f_biasOk(true)
+sigRbuy  = pbRt and brkOn and stOn and isM1 and upCross and pbArm ==  1 and pbFired and rtDeep and rtFresh and (not pbRtOne or not rtDone) and ctxBuy  and okBarB and f_riskOk(false, true) and f_biasOk(false)
+sigRsell = pbRt and brkOn and stOn and isM1 and dnCross and pbArm == -1 and pbFired and rtDeep and rtFresh and (not pbRtOne or not rtDone) and ctxSell and okBarB and f_riskOk(true,  true) and f_biasOk(true)
 if sigRbuy or sigRsell
-    if pbRtOne
-        rtDir := 0
-    else
-        //  la sorveglianza resta aperta: il movimento puo' respirare ancora e
-        //  ogni ripartenza successiva e' un'occasione a se'. La finestra
-        //  riparte dal retest appena avvenuto, non dal segnale originale.
-        rtTouch := false
-        rtStart := bar_index
+    rtDeep  := false
+    rtDone  := true
+    lastBrk := bar_index
 
 // --- perche' un attraversamento NON e' diventato un segnale ------------------
 //  Senza questi contatori l'unica diagnosi possibile e' "non esce niente", che
@@ -1417,7 +1405,7 @@ if showTab and barstate.islast
     kbg = color.new(color.gray, 88)
     table.cell(dash, 0, 12, "rottura " + (brkOn ? brkTfTxt + (brkNat ? " nat" : " live") : "off"), text_size = szDash, text_color = brkOn ? color.white : color.gray, bgcolor = brkOn ? color.new(cBrk, 60) : kbg, tooltip = brkNat ? "lettura NATIVA: il livello e' confrontato con la chiusura della candela della sezione. Un attraversamento per candela, al massimo." : "lettura LIVE: il livello e' confrontato con la curva ricostruita sul prezzo corrente. La stessa candela puo' produrre piu' attraversamenti.")
     table.cell(dash, 1, 12, "liv " + f_n0(brkLvl) + " · " + f_n1(brkS), text_size = szDash, text_color = not brkOn ? color.gray : math.abs(nz(brkS)) >= brkLvl ? color.lime : color.silver, bgcolor = kbg)
-    table.cell(dash, 2, 12, isM1 ? (pbOn ? "pb" + (pbSideReq ? "↩" : "") : "cross") + (pbRt ? (rtDir != 0 ? (rtTouch ? " R●" : " R○" + f_n0(rtBackE)) : " R–") : "") : (brkCont ? "continu." : "revers.") + (brkNeedStall ? " +ctx" : "") + (brkFromBand ? " ⊂" : ""), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "⊂ = richiesto che il valore precedente fosse dentro la banda. +ctx = richiesto un episodio di stallo confermato (persistenza + coil) entro le barre di grazia.")
+    table.cell(dash, 2, 12, isM1 ? (pbOn ? "pb" + (pbSideReq ? "↩" : "") : "cross") + (pbRt ? (not pbFired or pbArm == 0 ? " R–" : rtDeep ? " R●" : " R○" + f_n0(rtBackU)) : "") : (brkCont ? "continu." : "revers.") + (brkNeedStall ? " +ctx" : "") + (brkFromBand ? " ⊂" : ""), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "⊂ = richiesto che il valore precedente fosse dentro la banda. +ctx = richiesto un episodio di stallo confermato (persistenza + coil) entro le barre di grazia.")
     table.cell(dash, 3, 12, "cross " + str.tostring(cCross), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "Attraversamenti del livello da parte della serie di trigger, e come sono finiti.\n\n✗ctx = contesto non valido o discorde in quel momento.\n✗lato = contesto ok, ma il ritracciamento non rispettava permanenza o LATO d'ingresso (per un BUY serve un ingresso nella zona dall'alto: se il CCI e' risalito da -200 e' un rimbalzo, non un respiro).\n✗altro = tutto ok ma bloccato da latch, cooldown, efficienza, bias o filtri di rischio.\n\nSe ✗lato e' alto e ✗ctx basso, il mercato sta girando invece di ritracciare: spegni 'l'ingresso deve venire dal lato del contesto' e confronta i percentili MAE prima di decidere che era il filtro a sbagliare.\n\neff attuale " + f_n2(vEff))
     table.cell(dash, 4, 12, "✗ctx " + str.tostring(cRejCtx) + " ✗lato " + str.tostring(cRejSide), text_size = szDash, text_color = cRejSide > cRejCtx ? color.orange : color.silver, bgcolor = kbg)
     table.cell(dash, 5, 12, "▲" + str.tostring(cBrkB) + " ▼" + str.tostring(cBrkS) + (pbRt ? " R" + str.tostring(cRtB + cRtS) : "") + (cRejOth > 0 ? " ✗" + str.tostring(cRejOth) : ""), text_size = szDash, text_color = cBrkB + cBrkS > 0 ? color.lime : color.silver, bgcolor = kbg)
