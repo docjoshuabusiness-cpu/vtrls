@@ -993,6 +993,21 @@ if sigKbuy or sigKsell
     pbFired  := true
     lastBrk  := bar_index
 
+// --- perche' un attraversamento NON e' diventato un segnale ------------------
+//  Senza questi contatori l'unica diagnosi possibile e' "non esce niente", che
+//  non e' una diagnosi. Ogni cross viene attribuito a UNA sola causa, nello
+//  stesso ordine in cui il codice la valuta.
+crossAny = brkOn and stOn and (upCross or dnCross)
+ctxSideOk = upCross ? (isM1 ? ctxBuy : true) : (isM1 ? ctxSell : true)
+pbSideOk  = upCross ? pbOkBuy : pbOkSell
+rejCtx  = crossAny and not ctxSideOk
+rejSide = crossAny and ctxSideOk and isM1 and not pbSideOk
+rejOth  = crossAny and (rawBuy or rawSell) and not (sigKbuy or sigKsell)
+cCross   = f_cnt(crossAny)
+cRejCtx  = f_cnt(rejCtx)
+cRejSide = f_cnt(rejSide)
+cRejOth  = f_cnt(rejOth)
+
 // ============================================== MISURA DELLA MAE =============
 var bool  trk    = false
 var float trkPx  = 0.0
@@ -1200,7 +1215,12 @@ f_miss(enM2, trgDRaw, armD, -markLvl,      "D", thrM2, false)
 if stMark and stallStart
     label.new(bar_index, 0.0, "◇", style = label.style_none, textcolor = color.new(color.teal, 10), size = szMark, textalign = text.align_center, tooltip = "inizio stallo #" + str.tostring(stEpi) + " | dentro " + str.tostring(inN) + "/" + str.tostring(stNeed) + " | persistenza " + str.tostring(stLen) + " barre | coil " + f_n2(coilR) + " | dominante " + stDomTf)
 
-bgcolor(stBg and stallOn ? color.new(color.teal, 90) : not showArmBg ? na : (armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title = "Sfondo stallo / armamento")
+//  In M1 lo sfondo colora il CONTESTO valido (verde = solo BUY ammessi, rosso =
+//  solo SELL): e' l'informazione che serve guardando il grafico. Colorare lo
+//  stallo sarebbe fuorviante, perche' in M1 la zona neutra e' il NON-trade.
+bgM1 = ctxBuy ? color.new(cDn, 92) : ctxSell ? color.new(cUp, 92) : na
+bgBand = not stBg ? na : isM1 ? bgM1 : stallOn ? color.new(color.teal, 90) : na
+bgcolor(not na(bgBand) ? bgBand : not showArmBg ? na : (armA or armB) ? color.new(cUp, 92) : (armC or armD) ? color.new(cDn, 92) : na, title = "Sfondo contesto / stallo / armamento")
 
 // ============================================================== CRUSCOTTO =====
 f_stat(bool use, string tf, int sec, float v, float h, float l, float ne, float win, bool isLive) =>
@@ -1329,9 +1349,9 @@ if showTab and barstate.islast
     table.cell(dash, 0, 12, "rottura " + (brkOn ? brkTfTxt + (brkNat ? " nat" : " live") : "off"), text_size = szDash, text_color = brkOn ? color.white : color.gray, bgcolor = brkOn ? color.new(cBrk, 60) : kbg, tooltip = brkNat ? "lettura NATIVA: il livello e' confrontato con la chiusura della candela della sezione. Un attraversamento per candela, al massimo." : "lettura LIVE: il livello e' confrontato con la curva ricostruita sul prezzo corrente. La stessa candela puo' produrre piu' attraversamenti.")
     table.cell(dash, 1, 12, "liv " + f_n0(brkLvl) + " · " + f_n1(brkS), text_size = szDash, text_color = not brkOn ? color.gray : math.abs(nz(brkS)) >= brkLvl ? color.lime : color.silver, bgcolor = kbg)
     table.cell(dash, 2, 12, isM1 ? (pbOn ? "pb" + (pbSideReq ? "↩" : "") : "cross") : (brkCont ? "continu." : "revers.") + (brkNeedStall ? " +ctx" : "") + (brkFromBand ? " ⊂" : ""), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "⊂ = richiesto che il valore precedente fosse dentro la banda. +ctx = richiesto un episodio di stallo confermato (persistenza + coil) entro le barre di grazia.")
-    table.cell(dash, 3, 12, "eff " + f_n2(vEff), text_size = szDash, text_color = not useEff ? color.gray : vEff >= effMin ? color.lime : color.red, bgcolor = kbg)
-    table.cell(dash, 4, 12, "▲ " + str.tostring(cBrkB), text_size = szDash, text_color = cDn, bgcolor = kbg)
-    table.cell(dash, 5, 12, "▼ " + str.tostring(cBrkS), text_size = szDash, text_color = cUp, bgcolor = kbg)
+    table.cell(dash, 3, 12, "cross " + str.tostring(cCross), text_size = szDash, text_color = color.white, bgcolor = kbg, tooltip = "Attraversamenti del livello da parte della serie di trigger, e come sono finiti.\n\n✗ctx = contesto non valido o discorde in quel momento.\n✗lato = contesto ok, ma il ritracciamento non rispettava permanenza o LATO d'ingresso (per un BUY serve un ingresso nella zona dall'alto: se il CCI e' risalito da -200 e' un rimbalzo, non un respiro).\n✗altro = tutto ok ma bloccato da latch, cooldown, efficienza, bias o filtri di rischio.\n\nSe ✗lato e' alto e ✗ctx basso, il mercato sta girando invece di ritracciare: spegni 'l'ingresso deve venire dal lato del contesto' e confronta i percentili MAE prima di decidere che era il filtro a sbagliare.\n\neff attuale " + f_n2(vEff))
+    table.cell(dash, 4, 12, "✗ctx " + str.tostring(cRejCtx) + " ✗lato " + str.tostring(cRejSide), text_size = szDash, text_color = cRejSide > cRejCtx ? color.orange : color.silver, bgcolor = kbg)
+    table.cell(dash, 5, 12, "▲" + str.tostring(cBrkB) + " ▼" + str.tostring(cBrkS) + (cRejOth > 0 ? " ✗" + str.tostring(cRejOth) : ""), text_size = szDash, text_color = cBrkB + cBrkS > 0 ? color.lime : color.silver, bgcolor = kbg)
 
     // -- rischio -------------------------------------------------------------
     rbg = color.new(color.gray, 88)
