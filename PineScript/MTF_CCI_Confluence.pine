@@ -182,6 +182,8 @@ pbMin  = input.int(1, "      permanenza minima nella zona (barre)", minval=1, ma
      tooltip="Quante barre il trigger deve restare nella zona neutra perche' conti come ritracciamento. Con 1 basta un tocco: in lettura nativa e' una candela intera, in live sono cinque secondi.")
 pbMax  = input.int(0, "      permanenza massima (0 = illimitata)", minval=0, maxval=5000, group=g4,
      tooltip="Oltre questa permanenza il ritracciamento non e' piu' un respiro dentro un trend: e' un nuovo stallo, e il contesto che lo ha autorizzato e' vecchio. 0 disattiva il vincolo, ed e' il default solo perche' il valore giusto dipende dal simbolo: misuralo sulla cella 'pb' del cruscotto prima di fissarlo.")
+pbWait = input.int(0, "      attesa massima fra uscita dalla zona e livello (0 = nessun limite)", minval=0, maxval=5000, group=g4,
+     tooltip="SERVE QUANDO IL LIVELLO DI ROTTURA E' PIU' ALTO DELLA BANDA.\n\nCon banda 50 e livello 90 il trigger esce dalla zona a 50 e deve percorrere altri 40 punti prima di sparare: in mezzo c'e' una terra di nessuno in cui non e' ne' dentro ne' oltre. L'armamento deve sopravvivere a quel tratto, altrimenti il segnale non arriva mai e il movimento sembra ignorato.\n\n0 (default): l'armamento resta valido finche' il trigger non rientra nella zona. E' la lettura letterale di 'e' passato dalla zona neutra a oltre il livello', senza limiti di tempo arbitrari.\n\nUn valore > 0 scarta le uscite che ci mettono troppo: se dopo N barre il livello non e' stato raggiunto, quella spinta si e' esaurita nella terra di nessuno e non merita l'etichetta di rottura.\n\nCon livello = banda il parametro e' inerte: l'uscita e l'attraversamento coincidono.")
 pbRt   = input.bool(false, "   M1: segnala anche il RETEST del bordo", group=g4,
      tooltip="Dopo un segnale, sorveglia il ritorno del trigger sul bordo della zona e la ripartenza: e' il secondo ingresso, quello che molti preferiscono al primo perche' il bordo ha gia' retto una volta.\n\nNon sostituisce il primo segnale, lo AFFIANCA: marker separato con tag R, contatore separato nel cruscotto. Cosi' puoi confrontare i due ingressi sullo stesso movimento invece di sceglierne uno per abitudine.\n\nSEQUENZA per un BUY: segnale, il CCI resta sopra il livello, poi ritorna giu' fino al bordo (o dentro la banda), poi riattraversa il livello verso l'alto. Se nel frattempo scende sotto -banda la sorveglianza si annulla: quella non e' una tenuta del bordo, e' un'inversione.\n\nATTENZIONE alla misura: con il retest acceso la distribuzione MAE della colonna K mescola primi ingressi e retest. Per isolarli, misurali in due passate separate.")
 pbRtWin= input.int(40, "      barre entro cui il retest e' valido", minval=1, maxval=1000, group=g4,
@@ -790,7 +792,6 @@ var int   pbSide  = 0
 var int   pbLen   = 0
 var float pbHi    = na
 var float pbLo    = na
-var int   pbEnd   = -100000
 var bool  pbFired = false
 if tIn and not tIn[1]
     pbSide  := brkP >=  bndTrig ? 1 : brkP <= -bndTrig ? -1 : 0
@@ -802,17 +803,27 @@ else if tIn
     pbLen += 1
     pbHi  := math.max(pbHi, high)
     pbLo  := math.min(pbLo, low)
-if not tIn and tIn[1]
-    pbEnd := bar_index
 //  compressione del ritracciamento, stessa formula dell'episodio di stallo
 pbCoil = na(pbHi) or na(pbLo) or pbLen < 2 ? na : (pbHi - pbLo) / (atrR * math.sqrt(pbLen))
-//  armato finche' e' dentro la zona o ne e' uscito da non piu' di 'grazia'
-//  barre: serve perche' fra il bordo della zona e il livello di uscita c'e'
-//  una fascia che il prezzo attraversa senza essere in nessuno dei due stati.
-pbArmed = tIn[1] or (bar_index - pbEnd <= brkGrace)
+//  ARMAMENTO. Quando il trigger ESCE dalla zona neutra resta armato, nel verso
+//  in cui e' uscito, finche' non rientra nella zona (o finche' non scade
+//  l'attesa, se ne hai imposta una). Non una finestra di poche barre: fra il
+//  bordo della zona e il livello di rottura c'e' una fascia che il prezzo
+//  attraversa senza essere ne' dentro ne' oltre, e con banda 50 e livello 90
+//  puo' restarci a lungo. Un armamento che scade in quel tratto fa sparire
+//  proprio i movimenti ampi, cioe' esattamente quelli che il trigger cerca.
+var int pbArm    = 0
+var int pbArmBar = 0
+if tIn
+    pbArm := 0
+else if not na(brkS) and nz(tIn[1], false)
+    pbArm    := brkS > 0 ? 1 : -1
+    pbArmBar := bar_index
+else if pbArm != 0 and pbWait > 0 and bar_index - pbArmBar > pbWait
+    pbArm := 0
 pbDurOk = pbLen >= pbMin and (pbMax <= 0 or pbLen <= pbMax)
-pbOkBuy  = not pbOn or (pbArmed and pbDurOk and (not pbSideReq or pbSide ==  1))
-pbOkSell = not pbOn or (pbArmed and pbDurOk and (not pbSideReq or pbSide == -1))
+pbOkBuy  = not pbOn or (pbArm ==  1 and pbDurOk and (not pbSideReq or pbSide ==  1))
+pbOkSell = not pbOn or (pbArm == -1 and pbDurOk and (not pbSideReq or pbSide == -1))
 
 // ------------------------------------------------------- BIAS DIREZIONALE ----
 sA1 = use1 ? sec1 : 0
@@ -1387,7 +1398,7 @@ if showTab and barstate.islast
     table.cell(dash, 1, 11, isM1 ? "pb " + str.tostring(pbLen) + (pbSide == 1 ? " ↓" : pbSide == -1 ? " ↑" : " ·") : "len " + str.tostring(stLen) + "/" + str.tostring(stHoldB), text_size = szDash, text_color = not stOn ? color.gray : isM1 ? (pbDurOk ? color.lime : color.orange) : (stLen >= stHoldB ? color.lime : color.orange), bgcolor = sbg, tooltip = isM1 ? "barre passate nella zona neutra e LATO d'ingresso: ↓ entrato dall'alto (ritracciamento in trend rialzista), ↑ dal basso." : "barre di persistenza dell'episodio sul minimo richiesto.")
     table.cell(dash, 2, 11, "coil " + f_n2(cR), text_size = szDash, text_color = coilCol, bgcolor = sbg)
     table.cell(dash, 3, 11, isM1 ? "zona " + (tIn ? "IN" : "out") : "epi " + str.tostring(cStA) + "/" + str.tostring(stEpi), text_size = szDash, text_color = color.silver, bgcolor = sbg, tooltip = "episodi CONFERMATI (persistenza + coil) / episodi grezzi (sole bande). Il rapporto dice quanto del 'dentro la banda' e' compressione vera: se i due numeri coincidono, il coil non sta filtrando niente e la soglia va abbassata.")
-    table.cell(dash, 4, 11, isM1 ? "arm " + (pbArmed ? "✓" : "✗") : "med " + f_n1(stAvgLen) + "b", text_size = szDash, text_color = not isM1 ? color.silver : pbArmed ? color.lime : color.silver, bgcolor = sbg)
+    table.cell(dash, 4, 11, isM1 ? "arm " + (pbArm == 1 ? "▲" : pbArm == -1 ? "▼" : "–") : "med " + f_n1(stAvgLen) + "b", text_size = szDash, text_color = not isM1 ? color.silver : pbArm == 1 ? cDn : pbArm == -1 ? cUp : color.silver, bgcolor = sbg, tooltip = isM1 ? "Verso in cui il trigger e' uscito dalla zona neutra. Resta armato finche' non rientra nella zona: quando attraversa il livello in quel verso, spara.\n\n– significa che il trigger e' dentro la zona (sta aspettando) oppure che l'attesa massima e' scaduta." : "durata media degli episodi confermati")
     table.cell(dash, 5, 11, not stOn ? "off" : isM1 ? (ctxBuy ? "ctx BUY" : ctxSell ? "ctx SELL" : "nessun ctx") : stallOn ? "IN STALLO" : inGrace ? "grazia" : "–", text_size = szDash, text_color = not stOn ? color.gray : isM1 ? (ctxBuy ? cDn : ctxSell ? cUp : color.silver) : stallOn ? color.lime : inGrace ? color.yellow : color.silver, bgcolor = sbg)
 
     // -- rottura -------------------------------------------------------------
