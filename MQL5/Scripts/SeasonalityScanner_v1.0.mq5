@@ -46,6 +46,18 @@ input int    InpRangeStartHour     = 0;       // Ora di inizio del range di rife
 input int    InpRangeEndHour       = 8;       // Ora di fine del range (esclusa). Default 0-8 = Sydney+Asia
 input int    InpMinBarsPerDay      = 12;      // Giorni con meno barre H1 di questo valore sono scartati (festivi/mezze sedute)
 
+input group "═══ 🕰 CRONOLOGIA DEGLI EVENTI ═══"
+input bool   InpDoChrono           = true;    // Costruisce il registro cronologico degli eventi e la scaletta
+input int    InpAtrPeriodD1        = 14;      // Periodo dell'ATR giornaliero (smoothing di Wilder, come iATR)
+input int    InpRegWindow          = 100;     // Sedute su cui calcolare il percentile di volatilita'
+input int    InpRegLowPct          = 30;      // Sotto questo percentile: regime di volatilita' BASSA
+input int    InpRegHighPct         = 70;      // Sopra questo percentile: regime di volatilita' ALTA
+input int    InpRegHold            = 10;      // Sedute di permanenza perche' un cambio di regime sia confermato
+input double InpShockSigma         = 3.0;     // Deviazioni standard oltre cui una giornata e' uno shock
+input int    InpRunMinD1           = 5;       // Sedute consecutive nella stessa direzione perche' sia una sequenza
+input int    InpBreakLookback      = 252;     // Sedute su cui misurare massimi e minimi strutturali
+input int    InpBreakGap           = 40;      // Sedute minime fra due rotture strutturali registrate
+
 input group "═══ 💰 COSTI (per calcolare l'edge NETTO) ═══"
 input double InpSpreadPoints       = 0.0;     // Spread medio in punti (0 = usa lo spread corrente del simbolo)
 input double InpCommissionRT_Points= 0.0;     // Commissione round-turn convertita in punti (conto Raw: ~ 6-8 USD/lotto)
@@ -168,6 +180,90 @@ int    g_GapFilled=0, g_GapTotal=0;
 // rendimenti annui
 int    g_Years[];
 double g_YearRet[];
+
+//--- CRONOLOGIA: stato condiviso ----------------------------------------
+#define MAX_EVENTS 5000
+#define MAX_YEARS  40
+
+//--- tipi di evento
+#define EV_SHOCK   0
+#define EV_REGIME  1
+#define EV_BREAK   2
+#define EV_RUN     3
+#define EV_SQUEEZE 4
+
+struct SEvent
+{
+   datetime t;
+   int      kind;
+   double   v1;      // grandezza principale (bp, sedute, percentile)
+   double   v2;      // grandezza secondaria (deviazioni standard, regime)
+   string   txt;
+};
+SEvent g_Ev[];
+int    g_nEv   = 0;
+bool   g_EvCap = false;
+
+//--- statistiche per anno solare
+int    g_yYear[MAX_YEARS];
+int    g_nY = 0;
+int    g_yN[MAX_YEARS], g_yUp[MAX_YEARS], g_yShock[MAX_YEARS];
+double g_ySum[MAX_YEARS], g_yAbs[MAX_YEARS], g_yRange[MAX_YEARS], g_yAtr[MAX_YEARS];
+int    g_yReg[MAX_YEARS][3];
+double g_yDow[MAX_YEARS][7];  int g_yDowN[MAX_YEARS][7];
+double g_yMon[MAX_YEARS][13]; int g_yMonN[MAX_YEARS][13];
+int    g_yExtHour[MAX_YEARS][24];
+
+string RegName(int r)
+{
+   if(r == 0) return "bassa";
+   if(r == 1) return "normale";
+   if(r == 2) return "alta";
+   return "n/d";
+}
+string EvName(int k)
+{
+   switch(k)
+   {
+      case EV_SHOCK:   return "shock";
+      case EV_REGIME:  return "regime";
+      case EV_BREAK:   return "struttura";
+      case EV_RUN:     return "sequenza";
+      case EV_SQUEEZE: return "compressione";
+   }
+   return "-";
+}
+
+//--- slot dell'anno, creato alla prima occorrenza. Gli anni arrivano in
+//--- ordine cronologico da entrambi i chiamanti, quindi la ricerca lineare
+//--- trova quasi sempre l'ultimo slot al primo tentativo.
+int YearSlot(int year)
+{
+   for(int i = g_nY - 1; i >= 0; i--) if(g_yYear[i] == year) return i;
+   if(g_nY >= MAX_YEARS) return -1;
+   int k = g_nY;
+   g_yYear[k] = year;
+   g_yN[k] = 0; g_yUp[k] = 0; g_yShock[k] = 0;
+   g_ySum[k] = 0.0; g_yAbs[k] = 0.0; g_yRange[k] = 0.0; g_yAtr[k] = 0.0;
+   for(int q = 0; q < 3;  q++) g_yReg[k][q] = 0;
+   for(int q = 0; q < 7;  q++) { g_yDow[k][q] = 0.0; g_yDowN[k][q] = 0; }
+   for(int q = 0; q < 13; q++) { g_yMon[k][q] = 0.0; g_yMonN[k][q] = 0; }
+   for(int q = 0; q < 24; q++) g_yExtHour[k][q] = 0;
+   g_nY++;
+   return k;
+}
+
+void PushEvent(datetime t, int kind, double v1, double v2, string txt)
+{
+   if(g_nEv >= MAX_EVENTS) { g_EvCap = true; return; }
+   ArrayResize(g_Ev, g_nEv + 1, 256);
+   g_Ev[g_nEv].t    = t;
+   g_Ev[g_nEv].kind = kind;
+   g_Ev[g_nEv].v1   = v1;
+   g_Ev[g_nEv].v2   = v2;
+   g_Ev[g_nEv].txt  = txt;
+   g_nEv++;
+}
 
 //+------------------------------------------------------------------+
 //| Utility statistiche                                              |
@@ -427,8 +523,20 @@ void BuildDayStructure()
             if(g_H1[k].high > g_H1[hi_idx].high) hi_idx = k;
             if(g_H1[k].low  < g_H1[lo_idx].low)  lo_idx = k;
          }
-         TimeToStruct(g_H1[hi_idx].time, dtp); if(dtp.hour >= 0 && dtp.hour < 24) g_HighHour[dtp.hour]++;
-         TimeToStruct(g_H1[lo_idx].time, dtp); if(dtp.hour >= 0 && dtp.hour < 24) g_LowHour[dtp.hour]++;
+         TimeToStruct(g_H1[hi_idx].time, dtp);
+         if(dtp.hour >= 0 && dtp.hour < 24)
+         {
+            g_HighHour[dtp.hour]++;
+            int ysH = YearSlot(dtp.year);
+            if(ysH >= 0) g_yExtHour[ysH][dtp.hour]++;
+         }
+         TimeToStruct(g_H1[lo_idx].time, dtp);
+         if(dtp.hour >= 0 && dtp.hour < 24)
+         {
+            g_LowHour[dtp.hour]++;
+            int ysL = YearSlot(dtp.year);
+            if(ysL >= 0) g_yExtHour[ysL][dtp.hour]++;
+         }
 
          //--- range di riferimento e sua rottura
          double rh = -DBL_MAX, rl = DBL_MAX;
@@ -914,6 +1022,545 @@ void HtmlYears()
 }
 
 //+------------------------------------------------------------------+
+//| CRONOLOGIA E SCALETTA                                             |
+//|                                                                   |
+//|  Le tabelle precedenti rispondono a "in media cosa succede".      |
+//|  Questo blocco risponde alle due domande che restano:             |
+//|                                                                   |
+//|   1. IN ORDINE CRONOLOGICO, cosa e' successo davvero: quando la   |
+//|      volatilita' ha cambiato regime, quando il prezzo ha rotto    |
+//|      una struttura di un anno, quando ha avuto uno shock, quando  |
+//|      si e' compresso. Una media nasconde la sequenza; la sequenza |
+//|      dice se lo strumento di oggi e' lo stesso di cinque anni fa. |
+//|                                                                   |
+//|   2. LA SCALETTA: per ogni scala temporale, l'elenco ordinato di  |
+//|      cosa fa il prezzo e quando. Non una classifica del "migliore"|
+//|      ma il percorso, dall'inizio alla fine del ciclo: le ore in   |
+//|      sequenza da 00 a 23, i giorni da lunedi' a venerdi', le      |
+//|      sedute del mese dalla prima all'ultima, i mesi da gennaio a  |
+//|      dicembre. E' cosi' che si legge un comportamento nel tempo.  |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Costruisce il registro cronologico e le statistiche per anno.     |
+//| Tutto da barre gia' chiuse: ogni evento e' datato alla seduta in  |
+//| cui era osservabile, non a quella in cui si capisce col senno di  |
+//| poi. Un cambio di regime confermato dopo N sedute porta la data   |
+//| della seduta che lo conferma, non quella in cui era iniziato.     |
+//+------------------------------------------------------------------+
+void BuildChronology()
+{
+   if(!InpDoChrono || g_nD1 < 60) return;
+
+   int per = (int)MathMax(2, InpAtrPeriodD1);
+   double tr[], atr[], r[];
+   ArrayResize(tr, g_nD1); ArrayResize(atr, g_nD1); ArrayResize(r, g_nD1);
+
+   for(int i = 0; i < g_nD1; i++)
+   {
+      double pc = (i > 0 ? g_D1[i-1].close : g_D1[i].open);
+      tr[i]  = MathMax(g_D1[i].high - g_D1[i].low,
+               MathMax(MathAbs(g_D1[i].high - pc), MathAbs(g_D1[i].low - pc)));
+      atr[i] = 0.0;
+      r[i]   = (i > 0 ? LogRet(g_D1[i-1].close, g_D1[i].close) : 0.0);
+   }
+
+   // Smoothing di Wilder, lo stesso di iATR. Una media semplice sarebbe piu'
+   // facile ma diverge dopo ogni salto di volatilita', ed e' proprio nei salti
+   // che questo blocco deve datare gli eventi.
+   if(g_nD1 > per)
+   {
+      double seed = 0.0;
+      for(int i = 0; i < per; i++) seed += tr[i];
+      atr[per - 1] = seed / per;
+      for(int i = per; i < g_nD1; i++) atr[i] = atr[i-1] + (tr[i] - atr[i-1]) / per;
+   }
+
+   int win = (int)MathMax(20, InpRegWindow);
+   int lastReg = -1, regRun = 0, confReg = -1;
+   int lastBreak = -999999, lastSqueeze = -999999;
+   int runLen = 0, runDir = 0;
+
+   for(int i = 1; i < g_nD1; i++)
+   {
+      MqlDateTime dt; TimeToStruct(g_D1[i].time, dt);
+      int ys = YearSlot(dt.year);
+      if(ys < 0) continue;
+
+      //--- accumuli annuali
+      g_yN[ys]++;
+      g_ySum[ys]   += r[i];
+      g_yAbs[ys]   += MathAbs(r[i]);
+      g_yRange[ys] += LogRet(g_D1[i].low, g_D1[i].high);
+      if(r[i] > 0.0) g_yUp[ys]++;
+      if(g_D1[i].close > EPS && atr[i] > EPS) g_yAtr[ys] += atr[i] / g_D1[i].close;
+      if(dt.day_of_week >= 0 && dt.day_of_week < 7)
+      { g_yDow[ys][dt.day_of_week] += r[i]; g_yDowN[ys][dt.day_of_week]++; }
+      if(dt.mon >= 1 && dt.mon <= 12)
+      { g_yMon[ys][dt.mon] += r[i]; g_yMonN[ys][dt.mon]++; }
+
+      //--- REGIME DI VOLATILITA'
+      int reg = -1;
+      if(i >= win && atr[i] > EPS)
+      {
+         int below = 0, cnt = 0;
+         for(int q = i - win; q < i; q++)
+         {
+            if(atr[q] <= EPS) continue;
+            if(atr[q] <= atr[i]) below++;
+            cnt++;
+         }
+         if(cnt > 0)
+         {
+            double pct = 100.0 * below / cnt;
+            reg = (pct >= InpRegHighPct ? 2 : (pct >= InpRegLowPct ? 1 : 0));
+            g_yReg[ys][reg]++;
+            if(reg == lastReg) regRun++; else { lastReg = reg; regRun = 1; }
+            if(regRun >= InpRegHold && reg != confReg)
+            {
+               if(confReg >= 0)
+                  PushEvent(g_D1[i].time, EV_REGIME, pct, (double)reg,
+                            "volatilita' da " + RegName(confReg) + " a " + RegName(reg) +
+                            " (percentile " + F(pct, 0) + ")");
+               confReg = reg;
+            }
+         }
+      }
+
+      //--- SHOCK DI GIORNATA
+      if(i >= 60)
+      {
+         double m = 0.0; int c = 0;
+         for(int q = i - 60; q < i; q++) { m += r[q]; c++; }
+         if(c > 1)
+         {
+            m /= c;
+            double v = 0.0;
+            for(int q = i - 60; q < i; q++) { double d = r[q] - m; v += d * d; }
+            double sd = MathSqrt(v / (c - 1));
+            if(sd > EPS && MathAbs(r[i] - m) >= InpShockSigma * sd)
+            {
+               g_yShock[ys]++;
+               PushEvent(g_D1[i].time, EV_SHOCK, r[i] * BP, (r[i] - m) / sd,
+                         (r[i] > 0 ? "balzo" : "crollo") + " di " + F(MathAbs(r[i]) * 100.0, 2) +
+                         "% — " + F(MathAbs(r[i] - m) / sd, 1) + " deviazioni standard");
+            }
+         }
+      }
+
+      //--- ROTTURA STRUTTURALE
+      if(i >= InpBreakLookback && i - lastBreak >= InpBreakGap)
+      {
+         double hi = -DBL_MAX, lo = DBL_MAX;
+         for(int q = i - InpBreakLookback; q < i; q++)
+         {
+            if(g_D1[q].close > hi) hi = g_D1[q].close;
+            if(g_D1[q].close < lo) lo = g_D1[q].close;
+         }
+         if(g_D1[i].close > hi)
+         {
+            PushEvent(g_D1[i].time, EV_BREAK, LogRet(hi, g_D1[i].close) * BP, 1.0,
+                      "nuovo massimo di " + IntegerToString(InpBreakLookback) + " sedute");
+            lastBreak = i;
+         }
+         else if(g_D1[i].close < lo)
+         {
+            PushEvent(g_D1[i].time, EV_BREAK, LogRet(lo, g_D1[i].close) * BP, -1.0,
+                      "nuovo minimo di " + IntegerToString(InpBreakLookback) + " sedute");
+            lastBreak = i;
+         }
+      }
+
+      //--- COMPRESSIONE: ATR al minimo della finestra. La volatilita' bassa
+      //--- anticipa quella alta piu' spesso del contrario, quindi la data in
+      //--- cui il mercato si e' fermato e' informazione, non assenza di essa.
+      if(i >= win && i - lastSqueeze >= win / 2 && atr[i] > EPS)
+      {
+         bool isMin = true;
+         for(int q = i - win; q < i; q++)
+            if(atr[q] > EPS && atr[q] < atr[i]) { isMin = false; break; }
+         if(isMin)
+         {
+            PushEvent(g_D1[i].time, EV_SQUEEZE,
+                      (g_D1[i].close > EPS ? atr[i] / g_D1[i].close * BP : 0.0), 0.0,
+                      "volatilita' al minimo di " + IntegerToString(win) + " sedute");
+            lastSqueeze = i;
+         }
+      }
+
+      //--- SEQUENZE DIREZIONALI: la sequenza viene chiusa e registrata quando
+      //--- si interrompe, con la data dell'ULTIMA seduta che ne faceva parte.
+      int sg = (r[i] > 0.0 ? 1 : (r[i] < 0.0 ? -1 : 0));
+      if(sg != 0 && sg == runDir) runLen++;
+      else
+      {
+         if(runDir != 0 && runLen >= InpRunMinD1)
+            PushEvent(g_D1[i-1].time, EV_RUN, (double)runLen, (double)runDir,
+                      IntegerToString(runLen) + " sedute consecutive " +
+                      (runDir > 0 ? "al rialzo" : "al ribasso"));
+         runDir = sg;
+         runLen = (sg != 0 ? 1 : 0);
+      }
+   }
+   if(runDir != 0 && runLen >= InpRunMinD1)
+      PushEvent(g_D1[g_nD1-1].time, EV_RUN, (double)runLen, (double)runDir,
+                IntegerToString(runLen) + " sedute consecutive " +
+                (runDir > 0 ? "al rialzo" : "al ribasso") + " (ancora in corso a fine campione)");
+}
+
+//+------------------------------------------------------------------+
+//| Mediana di un array fisso (serve alle soglie di fase della        |
+//| scaletta; SAcc::Median lavora sul proprio buffer interno)         |
+//+------------------------------------------------------------------+
+double MedianOf(double &a[], int n)
+{
+   if(n <= 0) return 0.0;
+   double t[]; ArrayResize(t, n);
+   for(int i = 0; i < n; i++) t[i] = a[i];
+   ArraySort(t);
+   if((n % 2) == 1) return t[n/2];
+   return 0.5 * (t[n/2 - 1] + t[n/2]);
+}
+
+//+------------------------------------------------------------------+
+//| LA SCALETTA                                                       |
+//| Quattro percorsi, ognuno nel suo ordine naturale. Ogni riga dice  |
+//| in che fase si trova il prezzo in quel punto del ciclo, con i     |
+//| numeri che lo sostengono accanto alla frase.                      |
+//+------------------------------------------------------------------+
+void HtmlScaletta()
+{
+   W("<h2>🧭 Scaletta — cosa fa il prezzo, in ordine</h2>");
+   W("<div class=\"card\"><p class=\"dim\" style=\"margin:0\">");
+   W("Le tabelle piu' sotto dicono <i>in media cosa succede</i>. Questa dice <b>in che ordine</b>. ");
+   W("Ogni blocco segue il ciclo dall'inizio alla fine — le ore da 00 a 23, i giorni da lunedi' a venerdi', ");
+   W("le sedute del mese dalla prima all'ultima, i mesi da gennaio a dicembre — e assegna a ogni punto una ");
+   W("<b>fase</b> ricavata dai dati, non scelta a priori:<br><br>");
+   W("<b>compressione</b> = movimento assoluto sotto il 70% della mediana di quella scala. ");
+   W("<b>espansione</b> = sopra il 130%. <b>normale</b> = in mezzo. ");
+   W("A queste si aggiungono due marcatori: <b>inversione</b> quando quel punto del ciclo concentra gli ");
+   W("estremi di giornata molto sopra la quota che gli spetterebbe, e <b>deriva</b> quando il rendimento ");
+   W("medio e' distinguibile da zero (|t| &ge; 2).<br><br>");
+   W("<span class=\"warn\">La fase e' descrittiva e quasi sempre robusta: misura la volatilita', che e' ");
+   W("persistente. La deriva non lo e': con 24 ore, 5 giorni e 12 mesi testati insieme, un |t| di 2 capita ");
+   W("per caso. Le colonne t e la scheda del verdetto restano il giudice.</span></p></div>");
+
+   //================================================================
+   // 1) LA GIORNATA
+   //================================================================
+   double hv[24]; int nhv = 0;
+   for(int h = 0; h < 24; h++)
+      if(g_Hour[h].N() >= InpMinSample) { hv[nhv] = g_Hour[h].MeanAbs(); nhv++; }
+   double hMed = MedianOf(hv, nhv);
+
+   W("<h2>① La giornata, ora per ora</h2><div class=\"card\">");
+   if(hMed < EPS) W("<p class=\"dim\">Dati orari insufficienti.</p>");
+   else
+   {
+      W("<table><thead><tr><th>Ora (server)</th><th>Fase</th><th>Movimento (bp)</th><th>vs mediana</th>");
+      W("<th>Estremi giornata</th><th>Deriva (bp)</th><th>t</th><th>Cosa succede</th></tr></thead><tbody>");
+      for(int h = 0; h < 24; h++)
+      {
+         int n = g_Hour[h].N();
+         if(n == 0) continue;
+         double vol  = g_Hour[h].MeanAbs();
+         double rel  = vol / hMed;
+         double drift= g_Hour[h].Mean() * BP;
+         double t    = g_Hour[h].TStat();
+         double ext  = (g_DaysScanned > 0 ? 100.0 * (g_HighHour[h] + g_LowHour[h]) / g_DaysScanned : 0.0);
+
+         string fase = (n < InpMinSample ? "n/d" : (rel <= 0.70 ? "compressione" : (rel >= 1.30 ? "espansione" : "normale")));
+         string fcls = (rel <= 0.70 ? "dim" : (rel >= 1.30 ? "warn" : ""));
+
+         string frase = "";
+         if(n < InpMinSample) frase = "campione insufficiente";
+         else
+         {
+            if(rel <= 0.70)      frase = "il prezzo costruisce il range, non lo rompe";
+            else if(rel >= 1.30) frase = "e' qui che si allarga la giornata";
+            else                 frase = "attivita' in linea con la media";
+            if(ext >= 8.4/*2x la quota uniforme*/) frase += "; <b>qui si forma spesso l'estremo di giornata</b>";
+            if(MathAbs(t) >= 2.0) frase += "; deriva " + (drift > 0 ? "al rialzo" : "al ribasso");
+         }
+
+         W("<tr><td><b>" + StringFormat("%02d:00", h) + "</b></td>");
+         W("<td class=\"" + fcls + "\">" + fase + "</td>");
+         W("<td>" + F(vol * BP, 1) + "</td>");
+         W("<td class=\"dim\">" + F(rel, 2) + "×</td>");
+         W("<td class=\"" + (ext >= 8.4 ? "pos" : "dim") + "\">" + F(ext, 1) + "%</td>");
+         W(SignedCell(drift, 2));
+         W("<td class=\"" + (MathAbs(t) >= 2.0 ? "warn" : "dim") + "\">" + F(t, 2) + "</td>");
+         W("<td class=\"dim\">" + frase + "</td></tr>");
+      }
+      W("</tbody></table>");
+      W("<p class=\"dim\" style=\"margin:10px 0 0\">La quota uniforme degli estremi e' 4.2% per ora ");
+      W("(1/24 contando massimo e minimo): la colonna e' evidenziata sopra il doppio di quel valore. ");
+      W("Una fascia di ore contigue in <b>compressione</b> seguita da una in <b>espansione</b> e' la ");
+      W("struttura che rende sensato un breakout del range costruito nelle prime; se non esiste, ");
+      W("il range orario non ha un momento naturale di rottura.</p>");
+   }
+   W("</div>");
+
+   //================================================================
+   // 2) LA SETTIMANA
+   //================================================================
+   double dv[7]; int ndv = 0;
+   for(int d = 1; d <= 5; d++)
+      if(g_DowRange[d].N() >= InpMinSample) { dv[ndv] = g_DowRange[d].Mean(); ndv++; }
+   double dMed = MedianOf(dv, ndv);
+
+   W("<h2>② La settimana, giorno per giorno</h2><div class=\"card\">");
+   if(dMed < EPS) W("<p class=\"dim\">Dati giornalieri insufficienti.</p>");
+   else
+   {
+      W("<table><thead><tr><th>Giorno</th><th>Fase</th><th>Range (bp)</th><th>vs mediana</th>");
+      W("<th>Deriva (bp)</th><th>% up</th><th>t</th><th>IS/OOS</th><th>Cosa succede</th></tr></thead><tbody>");
+      for(int d = 1; d <= 5; d++)
+      {
+         int n = g_Dow[d].N();
+         if(n == 0) continue;
+         double rng   = g_DowRange[d].Mean();
+         double rel   = (dMed > EPS ? rng / dMed : 1.0);
+         double drift = g_Dow[d].Mean() * BP;
+         double t     = g_Dow[d].TStat();
+
+         int agree = -1;
+         if(InpSplitIS_OOS && g_DowIS[d].N() >= 10 && g_DowOOS[d].N() >= 10)
+         {
+            double mi = g_DowIS[d].Mean(), mo = g_DowOOS[d].Mean();
+            agree = ((mi > 0 && mo > 0) || (mi < 0 && mo < 0)) ? 1 : 0;
+         }
+
+         string fase = (rel <= 0.90 ? "giornata stretta" : (rel >= 1.10 ? "giornata larga" : "giornata media"));
+         string frase = (rel <= 0.90 ? "stop proporzionalmente piu' stretti, setup di ritorno alla media"
+                      : (rel >= 1.10 ? "e' il giorno che regge un breakout e richiede stop piu' larghi"
+                                     : "ampiezza in linea con il resto della settimana"));
+         if(MathAbs(t) >= 2.0)
+            frase += "; deriva " + (drift > 0 ? "al rialzo" : "al ribasso") +
+                     (agree == 1 ? " <b>concorde nelle due meta'</b>" :
+                     (agree == 0 ? " <span class=\"neg\">ma instabile IS/OOS</span>" : ""));
+
+         W("<tr><td><b>" + DowName(d) + "</b></td>");
+         W("<td class=\"" + (rel <= 0.90 ? "dim" : (rel >= 1.10 ? "warn" : "")) + "\">" + fase + "</td>");
+         W("<td>" + F(rng * BP, 0) + "</td><td class=\"dim\">" + F(rel, 2) + "×</td>");
+         W(SignedCell(drift, 2));
+         W("<td>" + F(g_Dow[d].WinRate(), 1) + "%</td>");
+         W("<td class=\"" + (MathAbs(t) >= 2.0 ? "warn" : "dim") + "\">" + F(t, 2) + "</td>");
+         W("<td>" + (agree == 1 ? "<span class=\"pos\">concorde</span>"
+                   : (agree == 0 ? "<span class=\"neg\">discorde</span>" : "<span class=\"dim\">n/d</span>")) + "</td>");
+         W("<td class=\"dim\">" + frase + "</td></tr>");
+      }
+      W("</tbody></table></div>");
+   }
+
+   //================================================================
+   // 3) IL MESE
+   //================================================================
+   W("<h2>③ Il mese, seduta per seduta</h2><div class=\"card\">");
+   W("<table><thead><tr><th>Posizione nel mese</th><th>n</th><th>Deriva (bp)</th><th>% up</th><th>t</th>");
+   W("<th>Finestra</th><th>Cosa succede</th></tr></thead><tbody>");
+   {
+      double bonf = BonferroniT(MAX_TDOM_S + MAX_TDOM_E);
+      for(int k = 1; k <= MAX_TDOM_S; k++)
+      {
+         int n = g_TdomS[k].N();
+         if(n == 0) continue;
+         double m = g_TdomS[k].Mean() * BP, t = g_TdomS[k].TStat();
+         bool tom = (k <= 3);
+         W("<tr><td><b>" + IntegerToString(k) + "ª seduta del mese</b></td><td class=\"dim\">" +
+           IntegerToString(n) + "</td>");
+         W(SignedCell(m, 2));
+         W("<td>" + F(g_TdomS[k].WinRate(), 1) + "%</td>");
+         W("<td class=\"" + (MathAbs(t) >= bonf ? "pos" : (MathAbs(t) >= 2.0 ? "warn" : "dim")) + "\">" + F(t, 2) + "</td>");
+         W("<td class=\"" + (tom ? "warn" : "dim") + "\">" + (tom ? "turn of month" : "—") + "</td>");
+         W("<td class=\"dim\">" + (n < InpMinSample ? "campione insufficiente"
+            : (MathAbs(t) >= bonf ? "<b>deriva che supera la correzione per test multipli</b>"
+            : (MathAbs(t) >= 2.0 ? "deriva presente ma non oltre la soglia di Bonferroni"
+                                 : "nessuna deriva distinguibile"))) + "</td></tr>");
+      }
+      for(int k = MAX_TDOM_E; k >= 1; k--)
+      {
+         int n = g_TdomE[k].N();
+         if(n == 0) continue;
+         double m = g_TdomE[k].Mean() * BP, t = g_TdomE[k].TStat();
+         bool tom = (k <= 2);
+         string lab = (k == 1 ? "ultima seduta del mese"
+                              : IntegerToString(k) + "ª seduta dalla fine");
+         W("<tr><td><b>" + lab + "</b></td><td class=\"dim\">" + IntegerToString(n) + "</td>");
+         W(SignedCell(m, 2));
+         W("<td>" + F(g_TdomE[k].WinRate(), 1) + "%</td>");
+         W("<td class=\"" + (MathAbs(t) >= bonf ? "pos" : (MathAbs(t) >= 2.0 ? "warn" : "dim")) + "\">" + F(t, 2) + "</td>");
+         W("<td class=\"" + (tom ? "warn" : "dim") + "\">" + (tom ? "turn of month" : "—") + "</td>");
+         W("<td class=\"dim\">" + (n < InpMinSample ? "campione insufficiente"
+            : (MathAbs(t) >= bonf ? "<b>deriva che supera la correzione per test multipli</b>"
+            : (MathAbs(t) >= 2.0 ? "deriva presente ma non oltre la soglia di Bonferroni"
+                                 : "nessuna deriva distinguibile"))) + "</td></tr>");
+      }
+   }
+   W("</tbody></table>");
+   W("<p class=\"dim\" style=\"margin:10px 0 0\">Le righe sono nell'ordine in cui il mese le presenta: ");
+   W("prima le sedute contate dall'inizio, poi quelle contate dalla fine. La finestra <b>turn of month</b> ");
+   W("(ultime due sedute piu' le prime tre) e' quella con la letteratura piu' solida sugli indici; il suo ");
+   W("test formale e' nella sezione dedicata piu' sotto.</p></div>");
+
+   //================================================================
+   // 4) L'ANNO
+   //================================================================
+   W("<h2>④ L'anno, mese per mese</h2><div class=\"card\">");
+   W("<table><thead><tr><th>Mese</th><th>n anni</th><th>Deriva (bp)</th><th>% up</th><th>t</th>");
+   W("<th>IS (bp)</th><th>OOS (bp)</th><th>IS/OOS</th><th>Cosa succede</th></tr></thead><tbody>");
+   {
+      double bonf = BonferroniT(12);
+      for(int m = 1; m <= 12; m++)
+      {
+         int n = g_Mon[m].N();
+         if(n == 0) continue;
+         double mm = g_Mon[m].Mean() * BP, t = g_Mon[m].TStat();
+         int agree = -1;
+         if(InpSplitIS_OOS && g_MonIS[m].N() >= 3 && g_MonOOS[m].N() >= 3)
+         {
+            double a = g_MonIS[m].Mean(), b = g_MonOOS[m].Mean();
+            agree = ((a > 0 && b > 0) || (a < 0 && b < 0)) ? 1 : 0;
+         }
+         string frase;
+         if(n < 8)                         frase = "meno di otto anni: non si conclude nulla";
+         else if(MathAbs(t) >= bonf && agree != 0) frase = "<b>deriva stabile che supera Bonferroni</b>";
+         else if(MathAbs(t) >= 2.0 && agree == 0)  frase = "deriva presente in una sola meta' del campione";
+         else if(MathAbs(t) >= 2.0)                frase = "deriva presente, non oltre Bonferroni";
+         else                                      frase = "nessuna deriva distinguibile";
+
+         W("<tr><td><b>" + MonName(m) + "</b></td><td class=\"dim\">" + IntegerToString(n) + "</td>");
+         W(SignedCell(mm, 2));
+         W("<td>" + F(g_Mon[m].WinRate(), 1) + "%</td>");
+         W("<td class=\"" + (MathAbs(t) >= bonf ? "pos" : (MathAbs(t) >= 2.0 ? "warn" : "dim")) + "\">" + F(t, 2) + "</td>");
+         W(SignedCell(g_MonIS[m].N()  > 0 ? g_MonIS[m].Mean()  * BP : 0.0, 1));
+         W(SignedCell(g_MonOOS[m].N() > 0 ? g_MonOOS[m].Mean() * BP : 0.0, 1));
+         W("<td>" + (agree == 1 ? "<span class=\"pos\">concorde</span>"
+                   : (agree == 0 ? "<span class=\"neg\">discorde</span>" : "<span class=\"dim\">n/d</span>")) + "</td>");
+         W("<td class=\"dim\">" + frase + "</td></tr>");
+      }
+   }
+   W("</tbody></table>");
+   W("<p class=\"dim\" style=\"margin:10px 0 0\">Con dieci anni di storico ogni mese ha dieci osservazioni: ");
+   W("e' il campione piu' piccolo di tutto il report e il piu' facile da sovrainterpretare. ");
+   W("Soglia di Bonferroni per 12 test: |t| &ge; " + F(BonferroniT(12), 2) + ".</p></div>");
+}
+
+//+------------------------------------------------------------------+
+//| CRONOLOGIA — prima il quadro per anno, poi il registro datato     |
+//+------------------------------------------------------------------+
+void HtmlChronology()
+{
+   W("<h2>🕰 Cronologia — anno per anno</h2><div class=\"card\">");
+   W("<p class=\"dim\" style=\"margin:0 0 12px\">Il controllo che conta piu' di ogni media: ");
+   W("<b>lo strumento di oggi e' lo stesso di cinque anni fa?</b> Se volatilita', direzione, regime dominante ");
+   W("o l'ora in cui si forma l'estremo cambiano da un anno all'altro, tutte le tabelle aggregate di questo ");
+   W("report sono la media di mercati diversi, e vanno lette come tali.</p>");
+
+   if(g_nY == 0) { W("<p class=\"dim\">Nessun dato.</p></div>"); }
+   else
+   {
+      W("<table><thead><tr><th>Anno</th><th>Sedute</th><th>Rendimento</th><th>Vol. media (bp/g)</th>");
+      W("<th>Range medio (bp)</th><th>ATR medio</th><th>% up</th><th>Regime dominante</th>");
+      W("<th>Shock</th><th>Giorno migliore</th><th>Giorno peggiore</th><th>Ora degli estremi</th></tr></thead><tbody>");
+
+      for(int y = 0; y < g_nY; y++)
+      {
+         int n = g_yN[y];
+         if(n < 30) continue;
+
+         int reg = 1, rmax = -1;
+         for(int k = 0; k < 3; k++) if(g_yReg[y][k] > rmax) { rmax = g_yReg[y][k]; reg = k; }
+         int regTot = g_yReg[y][0] + g_yReg[y][1] + g_yReg[y][2];
+
+         int bd = -1, wd = -1; double bv = -1e9, wv = 1e9;
+         for(int d = 1; d <= 5; d++)
+         {
+            if(g_yDowN[y][d] < 10) continue;
+            double v = g_yDow[y][d] / g_yDowN[y][d];
+            if(v > bv) { bv = v; bd = d; }
+            if(v < wv) { wv = v; wd = d; }
+         }
+
+         int eh = -1, ec = 0, etot = 0;
+         for(int h = 0; h < 24; h++) { etot += g_yExtHour[y][h]; if(g_yExtHour[y][h] > ec) { ec = g_yExtHour[y][h]; eh = h; } }
+
+         W("<tr><td><b>" + IntegerToString(g_yYear[y]) + "</b></td>");
+         W("<td class=\"dim\">" + IntegerToString(n) + "</td>");
+         W(SignedCell(g_ySum[y] * 100.0, 1, "%"));
+         W("<td>" + F(g_yAbs[y] / n * BP, 0) + "</td>");
+         W("<td>" + F(g_yRange[y] / n * BP, 0) + "</td>");
+         W("<td class=\"dim\">" + F(g_yAtr[y] / n * BP, 0) + " bp</td>");
+         W("<td>" + F(100.0 * g_yUp[y] / n, 1) + "%</td>");
+         W("<td class=\"" + (reg == 2 ? "neg" : (reg == 0 ? "dim" : "")) + "\">" + RegName(reg) +
+           (regTot > 0 ? " <span class=\"dim\">(" + F(100.0 * rmax / regTot, 0) + "%)</span>" : "") + "</td>");
+         W("<td class=\"" + (g_yShock[y] > 0 ? "warn" : "dim") + "\">" + IntegerToString(g_yShock[y]) + "</td>");
+         W("<td>" + (bd > 0 ? DowName(bd) + " <span class=\"dim\">" + F(bv * BP, 0) + "</span>" : "-") + "</td>");
+         W("<td>" + (wd > 0 ? DowName(wd) + " <span class=\"dim\">" + F(wv * BP, 0) + "</span>" : "-") + "</td>");
+         W("<td>" + (eh >= 0 && etot > 0 ? StringFormat("%02d:00", eh) + " <span class=\"dim\">" +
+                     F(100.0 * ec / etot, 0) + "%</span>" : "-") + "</td></tr>");
+      }
+      W("</tbody></table>");
+      W("<p class=\"dim\" style=\"margin:10px 0 0\">Gli anni con meno di 30 sedute sono omessi. ");
+      W("<b>Regime dominante</b> e' quello in cui l'anno ha passato piu' sedute, con accanto la sua quota. ");
+      W("<b>Ora degli estremi</b> e' l'ora che in quell'anno ha concentrato piu' massimi e minimi di giornata: ");
+      W("se cambia di anno in anno, la finestra oraria che sembra migliore nel dato aggregato non e' stabile ");
+      W("e costruirci sopra una strategia e' sovradattamento.</p></div>");
+   }
+
+   //--- registro datato
+   W("<h2>📜 Registro degli eventi, in ordine di data</h2><div class=\"card\">");
+   if(!InpDoChrono) { W("<p class=\"dim\">Disattivato (InpDoChrono).</p></div>"); return; }
+   if(g_nEv == 0)   { W("<p class=\"dim\">Nessun evento rilevato con le soglie impostate.</p></div>"); return; }
+
+   W("<p class=\"dim\" style=\"margin:0 0 12px\">Ogni riga e' datata alla seduta in cui l'evento era ");
+   W("<b>osservabile</b>, non a quella in cui si capisce col senno di poi: un cambio di regime confermato ");
+   W("dopo " + IntegerToString(InpRegHold) + " sedute porta la data della seduta che lo conferma, e una ");
+   W("sequenza direzionale porta quella dell'ultima seduta che ne faceva parte. ");
+   W("Letta dall'alto in basso, questa tabella e' la storia del comportamento dello strumento.</p>");
+
+   W("<table><thead><tr><th>Data</th><th>Tipo</th><th>Evento</th><th>Grandezza</th></tr></thead><tbody>");
+   for(int i = 0; i < g_nEv; i++)
+   {
+      string cls = "dim";
+      if(g_Ev[i].kind == EV_SHOCK)   cls = (g_Ev[i].v1 > 0 ? "pos" : "neg");
+      if(g_Ev[i].kind == EV_REGIME)  cls = ((int)g_Ev[i].v2 == 2 ? "neg" : ((int)g_Ev[i].v2 == 0 ? "dim" : "warn"));
+      if(g_Ev[i].kind == EV_BREAK)   cls = (g_Ev[i].v2 > 0 ? "pos" : "neg");
+      if(g_Ev[i].kind == EV_RUN)     cls = (g_Ev[i].v2 > 0 ? "pos" : "neg");
+      if(g_Ev[i].kind == EV_SQUEEZE) cls = "warn";
+
+      string mag;
+      switch(g_Ev[i].kind)
+      {
+         case EV_SHOCK:   mag = F(g_Ev[i].v2, 1) + " σ";                        break;
+         case EV_REGIME:  mag = "percentile " + F(g_Ev[i].v1, 0);               break;
+         case EV_BREAK:   mag = F(MathAbs(g_Ev[i].v1), 0) + " bp oltre";        break;
+         case EV_RUN:     mag = F(g_Ev[i].v1, 0) + " sedute";                   break;
+         case EV_SQUEEZE: mag = "ATR " + F(g_Ev[i].v1, 0) + " bp";              break;
+         default:         mag = "";
+      }
+
+      W("<tr><td>" + TimeToString(g_Ev[i].t, TIME_DATE) + "</td>");
+      W("<td><span class=\"tag t-no\">" + EvName(g_Ev[i].kind) + "</span></td>");
+      W("<td class=\"" + cls + "\">" + g_Ev[i].txt + "</td>");
+      W("<td class=\"dim\">" + mag + "</td></tr>");
+   }
+   W("</tbody></table>");
+   if(g_EvCap)
+      W("<p class=\"warn\" style=\"margin:10px 0 0\">Tetto di " + IntegerToString(MAX_EVENTS) +
+        " eventi raggiunto: il registro si ferma prima della fine del periodo. Alza InpShockSigma o "
+        "InpRunMinD1 per ridurre il numero di eventi registrati.</p>");
+   W("<p class=\"dim\" style=\"margin:10px 0 0\">Conteggio: ");
+   {
+      int c[5]; ArrayInitialize(c, 0);
+      for(int i = 0; i < g_nEv; i++) if(g_Ev[i].kind >= 0 && g_Ev[i].kind < 5) c[g_Ev[i].kind]++;
+      for(int k = 0; k < 5; k++)
+         W((k > 0 ? " · " : "") + EvName(k) + " <b>" + IntegerToString(c[k]) + "</b>");
+   }
+   W("</p></div>");
+}
+
+//+------------------------------------------------------------------+
 void BuildHtml(string path_label)
 {
    HtmlHead("Stagionalita' " + g_Sym);
@@ -934,6 +1581,7 @@ void BuildHtml(string path_label)
    W("</div>");
 
    HtmlVerdict();
+   HtmlScaletta();
 
    //--- ora del giorno
    string hl[24];
@@ -976,6 +1624,7 @@ void BuildHtml(string path_label)
              1, 12, 12, InpSplitIS_OOS);
 
    HtmlYears();
+   HtmlChronology();
 
    //--- metodologia
    W("<h2>📖 Metodologia e limiti</h2><div class=\"card\">");
@@ -1025,6 +1674,67 @@ void PrintSummary()
                   g_Find[i].t, g_Find[i].bonf_t,
                   IsExploitable(g_Find[i]) ? "SFRUTTABILE" : "non conclusivo");
    }
+   Print("══════════════════════════════════════════════════════");
+
+   if(!InpDoChrono) return;
+
+   //--- scaletta oraria in forma compatta: le fasi della giornata, in ordine.
+   //--- Serve a leggere il comportamento senza aprire il browser.
+   double hv[24]; int nhv = 0;
+   for(int h = 0; h < 24; h++)
+      if(g_Hour[h].N() >= InpMinSample) { hv[nhv] = g_Hour[h].MeanAbs(); nhv++; }
+   double hMed = MedianOf(hv, nhv);
+
+   if(hMed > EPS)
+   {
+      Print("── Scaletta della giornata (fase | movimento | quota estremi) ──");
+      string riga = "";
+      int    run  = -1, runFrom = 0;
+      for(int h = 0; h <= 24; h++)
+      {
+         int fase = -1;
+         if(h < 24 && g_Hour[h].N() >= InpMinSample)
+         {
+            double rel = g_Hour[h].MeanAbs() / hMed;
+            fase = (rel <= 0.70 ? 0 : (rel >= 1.30 ? 2 : 1));
+         }
+         // accorpa le ore contigue nella stessa fase: e' la fascia che conta,
+         // non la singola ora
+         if(fase != run)
+         {
+            if(run >= 0)
+            {
+               double vol = 0.0, ext = 0.0; int c = 0;
+               for(int q = runFrom; q < h; q++)
+               {
+                  if(g_Hour[q].N() < InpMinSample) continue;
+                  vol += g_Hour[q].MeanAbs() * BP;
+                  if(g_DaysScanned > 0) ext += 100.0 * (g_HighHour[q] + g_LowHour[q]) / g_DaysScanned;
+                  c++;
+               }
+               if(c > 0)
+                  PrintFormat("  %02d:00-%02d:00  %-13s  %6.1f bp/ora  estremi %4.1f%%",
+                              runFrom, h % 24,
+                              (run == 0 ? "compressione" : (run == 2 ? "ESPANSIONE" : "normale")),
+                              vol / c, ext);
+            }
+            run = fase; runFrom = h;
+         }
+      }
+   }
+
+   Print("── Cronologia per anno (rend. | vol/g | regime | shock) ──");
+   for(int y = 0; y < g_nY; y++)
+   {
+      int n = g_yN[y];
+      if(n < 30) continue;
+      int reg = 1, rmax = -1;
+      for(int k = 0; k < 3; k++) if(g_yReg[y][k] > rmax) { rmax = g_yReg[y][k]; reg = k; }
+      PrintFormat("  %d  %+7.1f%%  %5.0f bp/g  vol %-8s  shock %2d",
+                  g_yYear[y], g_ySum[y] * 100.0, g_yAbs[y] / n * BP, RegName(reg), g_yShock[y]);
+   }
+   PrintFormat("── Registro eventi: %d righe%s (dettaglio nel report HTML) ──",
+               g_nEv, (g_EvCap ? " — TETTO RAGGIUNTO, campione troncato" : ""));
    Print("══════════════════════════════════════════════════════");
 }
 
@@ -1076,6 +1786,7 @@ void OnStart()
    BuildIntraday();
    BuildDailyAndAbove();
    BuildDayStructure();
+   BuildChronology();
    CollectFindings();
 
    //--- output

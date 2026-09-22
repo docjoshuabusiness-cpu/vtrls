@@ -16,6 +16,47 @@ sul segno della valuta.
 
 ---
 
+## Riclassificazione secondo lo scopo reale
+
+Lo scopo dello script è **osservare e descrivere** il comportamento dello
+strumento nel tempo, non validare una strategia. Con questo scopo la gravità
+dei difetti cambia, e cambia parecchio.
+
+**Contano molto di più di quanto avessi scritto:**
+
+| # | Perché sale |
+|---|---|
+| A6 | `news_flag` con look-ahead è una **descrizione sbagliata**, non solo un filtro rischioso: dice che una giornata "aveva news" usando eventi usciti dopo |
+| A7 | orizzonte in barre invece che in minuti → la descrizione cambia senza avvisare proprio nelle ore illiquide, che sono quelle da descrivere con più cura |
+| A8 | l'ATR è l'unità di misura di **ogni** grandezza riportata; se non è quello di `iATR`, tutto il report è in una scala che non corrisponde al grafico che l'utente guarda. E il warm-up corto elimina in silenzio le prime sedute del periodo |
+| A9 | `InpBaseTF=D1` produce zero righe senza dire perché: fallimento silenzioso di un'osservazione |
+| A5 | il denominatore sbagliato **deforma la descrizione per giorno della settimana**, non solo una decisione |
+| A11/A12 | contaminano la forza relativa, che è una delle poche variabili non derivate dal prezzo dello strumento |
+
+**Contano molto meno:**
+
+| # | Perché scende |
+|---|---|
+| A1, A2, A3 | riguardano solo le colonne di **valore atteso netto**. Descrivono la redditività, non il comportamento. Restano da correggere, ma non bloccano l'uso dello script |
+| A4 | il campione selezionato falsa la calibrazione dello stop, che è una scelta operativa e non un'osservazione |
+
+**Resta in cima per una ragione diversa:** B3. Non perché sia sbagliato, ma
+perché uno strumento di osservazione va lanciato su molti simboli e molti
+periodi. Se un run dura ore, l'osservazione non si fa.
+
+### Nuovo ordine di intervento
+
+| # | Intervento | Categoria |
+|---|---|---|
+| 1 | A8 — ATR di Wilder e warm-up in sedute | l'unità di misura di tutto il report |
+| 2 | A7 — orizzonte in minuti anche nello scan | coerenza fra i due moduli |
+| 3 | A9 — validazione di `InpBaseTF` | fallimento silenzioso |
+| 4 | A6 — separare `news_flag` point-in-time da quello descrittivo | look-ahead in una colonna descrittiva |
+| 5 | B3 — indicatori per simbolo e in forma incrementale | rende lo strumento usabile |
+| 6 | A5 — denominatore delle tabelle per giorno | descrizione deformata |
+| 7 | A1/A2/A3 — costi | solo colonne di redditività |
+
+
 ## A — Errori che falsano i risultati
 
 ### A1. Il costo medio è diviso per il denominatore sbagliato
