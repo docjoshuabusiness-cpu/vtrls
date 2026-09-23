@@ -1,30 +1,25 @@
 #!/usr/bin/env python3
 """
-market_profiler.py - Analisi quantitativa approfondita di uno strumento -> report HTML interattivo.
+market_profiler.py - Analisi descrittiva di uno strumento, timeframe per timeframe -> report HTML a schede.
 
-Cosa misura
-  1. Movimenti su 4h, 6h, 8h, 12h, 24h, 1w, 2w, 1m, 3m, 6m, 12m: distribuzione dei rendimenti,
-     range, MFE/MAE (escursione massima favorevole/avversa), mossa tipica tradotta in prezzo.
-  2. Regime per orizzonte: momentum vs mean reversion (Variance Ratio Lo-MacKinlay robusto,
-     time-series momentum con t-stat corretto per l'overlap delle finestre).
-  3. Matrice lookback x forward: quale movimento passato predice quale movimento futuro.
-  4. Quando continua / quando inverte: probabilita' di continuazione condizionata a forza della
-     mossa (z in sigma), efficienza del trend (Kaufman ER), regime di volatilita', volume relativo,
-     ora del giorno.
-  5. Mean reversion verso la media mobile: probabilita' di rientro e di toccare la media entro l'orizzonte.
-  6. Forza del trend: in quali condizioni il movimento successivo e' piu' direzionale (ER forward).
-  7. Volume: Volume Profile (POC, Value Area 70%), VWAP ancorati, volume corrente vs storico
-     (giornaliero e per ora del giorno), sequenze (streak), stagionalita'.
+Schede: Panoramica | Minuto | Ora | 4 ore | 6 ore | 8 ore | 12 ore | Giorno | Settimana | 2 settimane |
+        Mese | Trimestre | Semestre | Anno | Volume
+
+Ogni periodo (la candela del timeframe) viene scomposto in tre tratti:
+    apertura -> primo estremo             movimento iniziale
+    primo estremo -> secondo estremo      SPOSTAMENTO PIU' AMPIO (= massimo - minimo, con la sua direzione)
+    secondo estremo -> chiusura           SPOSTAMENTO DI MEAN REVERSION (quanto viene restituito)
+Per ciascun tratto misura QUANTO (in % e in prezzo) e QUANDO (ora / giorno / settimana / mese dentro il periodo).
+Poi: come cambia per ora, giorno, mese e anno; cosa succede nel periodo successivo (continuazione, rottura del
+massimo/minimo precedente, false rotture, sequenze); volume profile e volume attuale rispetto allo storico.
 
 Uso
-  python market_profiler.py --mt5 XAUUSD EURUSD US500      # terminale MT5 FP Markets aperto (Windows)
-  python market_profiler.py --csv-h1 XAUUSD_H1.csv [--csv-d1 XAUUSD_D1.csv] --name XAUUSD
-  python market_profiler.py --yf GC=F                        # Yahoo Finance, solo per test (H1 ~730 giorni)
+  python market_profiler.py --mt5 XAUUSD EURUSD US500        # terminale MT5 FP Markets aperto (Windows)
+  python market_profiler.py --csv-m1 X_M1.csv --csv-h1 X_H1.csv --csv-d1 X_D1.csv --name XAUUSD
+  python market_profiler.py --yf GC=F                          # Yahoo Finance, solo per prova
 
-Note
-  - Orari = ora del server MT5 (FP Markets: EET/EEST, GMT+2/+3).
-  - Sui CFD il volume e' tick volume: misura l'attivita', non il controvalore scambiato.
-  - Le finestre si sovrappongono: le significativita' usano N_eff = durata campione / orizzonte.
+Note: orari = ora del server MT5 (FP Markets EET/EEST: la giornata chiude alle 17:00 di New York).
+Sui CFD il volume e' tick volume: misura l'attivita', non il controvalore.
 """
 import argparse
 import html
@@ -39,23 +34,30 @@ from plotly.subplots import make_subplots
 
 HOUR = pd.Timedelta(hours=1).value
 DAY = pd.Timedelta(days=1).value
-SLACK = 5 * DAY  # tolleranza su buchi dati / weekend / festivi
-HORIZONS = [("4h", 4 * HOUR), ("6h", 6 * HOUR), ("8h", 8 * HOUR), ("12h", 12 * HOUR), ("24h", DAY),
-            ("1w", 7 * DAY), ("2w", 14 * DAY), ("1m", 30 * DAY), ("3m", 91 * DAY), ("6m", 182 * DAY),
-            ("12m", 365 * DAY)]
-MIN_NEFF = 10
-SIG_Z = 2.5  # soglia di significativita' usata nel verdetto (piu' severa di 2 per i test multipli)
-Z_EDGES = [0.5, 1, 1.5, 2, 3]
-Z_LAB = ["0-0.5σ", "0.5-1σ", "1-1.5σ", "1.5-2σ", "2-3σ", ">3σ"]
-DEV_LAB = ["0-0.5σ", "0.5-1σ", "1-1.5σ", "1.5-2σ", "2-3σ", ">3σ"]
-Q5 = ["Q1", "Q2", "Q3", "Q4", "Q5"]
-FAMILIES = [("z", "Forza mossa passata |z|", Z_LAB),
-            ("er", "Efficienza trend passato (ER)", ["Q1 choppy", "Q2", "Q3", "Q4", "Q5 pulito"]),
-            ("vol", "Regime volatilità", ["Bassa", "Media", "Alta"]),
-            ("rv", "Volume relativo", ["Q1 basso", "Q2", "Q3", "Q4", "Q5 alto"])]
+DOW = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+MON = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+# key, etichetta, dati usati per misurare il "quando" dentro il periodo (in ordine di preferenza)
+TFS = [dict(key="min", label="Minuto", src=["m1"]),
+       dict(key="h1", label="Ora", src=["m1", "h1"]),
+       dict(key="h4", label="4 ore", src=["h1", "m1"], k=4),
+       dict(key="h6", label="6 ore", src=["h1", "m1"], k=6),
+       dict(key="h8", label="8 ore", src=["h1", "m1"], k=8),
+       dict(key="h12", label="12 ore", src=["h1", "m1"], k=12),
+       dict(key="d", label="Giorno", src=["h1", "m1"]),
+       dict(key="w", label="Settimana", src=["h1", "d1"]),
+       dict(key="w2", label="2 settimane", src=["d1"]),
+       dict(key="mo", label="Mese", src=["d1"]),
+       dict(key="q", label="Trimestre", src=["d1"]),
+       dict(key="s", label="Semestre", src=["d1"]),
+       dict(key="y", label="Anno", src=["d1"])]
+TIMING_UNIT = {"h1": "minuto dell'ora (fasce di 5')", "h4": "ora dentro il blocco", "h6": "ora dentro il blocco",
+               "h8": "ora dentro il blocco", "h12": "ora dentro il blocco", "d": "ora del giorno",
+               "w": "giorno della settimana", "w2": "giorno di borsa del periodo", "mo": "giorno di borsa del mese",
+               "q": "settimana del trimestre", "s": "mese del semestre", "y": "mese dell'anno"}
+CLASSES = ["Trend", "Parziale", "Mean reversion"]
 TEMPLATE = "plotly_dark"
-BLUE, RED, GREY, AMBER = "#3b82f6", "#ef4444", "#6b7280", "#f59e0b"
-DIVERGING = [[0, RED], [0.5, "#1f2937"], [1, BLUE]]
+BLUE, RED, GREY, AMBER, GREEN = "#3b82f6", "#ef4444", "#6b7280", "#f59e0b", "#34d399"
+CLS_COL = {"Trend": BLUE, "Parziale": GREY, "Mean reversion": RED}
 
 
 # ----------------------------------------------------------------------------- caricamento dati
@@ -73,7 +75,7 @@ def _finish(df):
     return df[(df.close > 0) & (df.high >= df.low)], kind
 
 
-def load_mt5(symbol, n_h1, n_d1):
+def load_mt5(symbol, bars):
     try:
         import MetaTrader5 as mt5
     except ImportError:
@@ -91,13 +93,19 @@ def load_mt5(symbol, n_h1, n_d1):
                     df = pd.DataFrame(r)
                     df.index = pd.to_datetime(df["time"], unit="s")
                     return df.iloc[:-1]  # scarta la barra in formazione
-                n //= 2  # 'Max bars in chart' del terminale puo' limitare la richiesta
-            raise RuntimeError(f"Nessun dato per {symbol}: {mt5.last_error()}")
+                n //= 2  # 'Barre massime nel grafico' del terminale puo' limitare la richiesta
+            return None
 
-        h1, kind = _finish(get(mt5.TIMEFRAME_H1, n_h1))
-        d1, _ = _finish(get(mt5.TIMEFRAME_D1, n_d1))
+        data, kind = {}, None
+        for key, tf in (("m1", mt5.TIMEFRAME_M1), ("h1", mt5.TIMEFRAME_H1), ("d1", mt5.TIMEFRAME_D1)):
+            raw = get(tf, bars[key]) if bars[key] > 0 else None
+            if raw is not None:
+                data[key], k = _finish(raw)
+                kind = kind or k
+        if "d1" not in data and "h1" not in data:
+            raise RuntimeError(f"Nessun dato per {symbol}: {mt5.last_error()}")
         info = mt5.symbol_info(symbol)
-        return h1, d1, dict(source="MetaTrader 5", digits=info.digits, vol_kind=kind)
+        return data, dict(source="MetaTrader 5", digits=info.digits, vol_kind=kind)
     finally:
         mt5.shutdown()
 
@@ -124,178 +132,226 @@ def load_csv(path):
 
 def load_yf(ticker):
     import yfinance as yf
-
-    def dl(**kw):
+    data, kind = {}, None
+    for key, kw in (("m1", dict(period="7d", interval="1m")), ("h1", dict(period="730d", interval="1h")),
+                    ("d1", dict(period="max", interval="1d"))):
         df = yf.download(ticker, auto_adjust=False, progress=False, multi_level_index=False, **kw)
         if df.empty:
-            raise RuntimeError(f"Yahoo: nessun dato per {ticker} {kw}")
+            continue
         idx = df.index
         df.index = idx.tz_convert("UTC").tz_localize(None) if idx.tz is not None else idx
-        return _finish(df)
+        data[key], k = _finish(df)
+        kind = kind or k
+    if not data:
+        raise RuntimeError(f"Yahoo: nessun dato per {ticker}")
+    return data, dict(source="Yahoo Finance (UTC)", digits=None, vol_kind=kind)
 
-    h1, kind = dl(period="730d", interval="1h")
-    d1, _ = dl(period="max", interval="1d")
-    return h1, d1, dict(source="Yahoo Finance (UTC)", digits=None, vol_kind=kind)
 
-
-def daily_from_intraday(h1):
+def resample(df, rule):
     agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
-    if "volume" in h1:
+    if "volume" in df:
         agg["volume"] = "sum"
-    return h1.resample("1D").agg(agg).dropna(subset=["close"])
+    return df.resample(rule).agg(agg).dropna(subset=["close"])
 
 
-# ----------------------------------------------------------------------------- strutture numeriche
-class RMQ:
-    """Sparse table: max/min sull'intervallo [l, r] in O(1) per query, vettoriale."""
-
-    def __init__(self, a, fn):
-        self.fn, self.tab = fn, [np.asarray(a, float)]
-        k = 1
-        while (1 << k) <= len(a):
-            prev, half = self.tab[-1], 1 << (k - 1)
-            self.tab.append(fn(prev[:-half], prev[half:]))
-            k += 1
-
-    def __call__(self, l, r):
-        k = np.log2(r - l + 1).astype(int)
-        out = np.empty(len(l))
-        for kk in np.unique(k):
-            m = k == kk
-            t = self.tab[kk]
-            out[m] = self.fn(t[l[m]], t[r[m] - (1 << kk) + 1])
-        return out
+def ns(idx):
+    return pd.DatetimeIndex(idx).values.astype("datetime64[ns]").astype(np.int64)
 
 
-class Bars:
-    def __init__(self, df, name):
-        self.name, self.df, self.idx = name, df, df.index
-        self.t = df.index.values.astype("datetime64[ns]").astype(np.int64)
-        self.tf = int(np.median(np.diff(self.t))) if len(df) > 1 else DAY
-        self.intraday = self.tf < DAY
-        if not self.intraday:
-            self.tf = DAY
-        self.tc = self.t + self.tf  # orario di chiusura barra = istante decisionale
-        self.o, self.h, self.l, self.c = (df[k].to_numpy(float) for k in ("open", "high", "low", "close"))
-        self.n = len(df)
-        self.lr = np.r_[np.nan, np.diff(np.log(self.c))]
-        self.S = np.r_[0.0, np.cumsum(np.abs(np.diff(self.c)))]  # lunghezza del percorso, per l'ER
-        self.CS = np.cumsum(self.c)
-        self.bpd = DAY / self.tf
-        span = int(20 * self.bpd) if self.intraday else 60
-        self.sig = np.sqrt(pd.Series(self.lr ** 2).ewm(span=span, min_periods=span // 2).mean().to_numpy())
-        self.hi, self.lo = RMQ(self.h, np.maximum), RMQ(self.l, np.minimum)
-        self.v = None
-        if "volume" in df and df["volume"].fillna(0).sum() > 0:
-            v = df["volume"].fillna(0).astype(float)
-            if self.intraday:  # atteso per la stessa ora del giorno: elimina la stagionalita' intraday
-                exp = v.groupby(df.index.hour).transform(lambda s: s.ewm(span=20, min_periods=5).mean().shift(1))
+# ----------------------------------------------------------------------------- periodi
+def block_key(spec, idx):
+    key, k = spec["key"], spec.get("k")
+    if key == "min":
+        return ns(idx.floor("min"))
+    if key == "h1":
+        return ns(idx.floor("h"))
+    if k:
+        return ns(idx.normalize()) + (idx.hour.to_numpy().astype(np.int64) // k * k) * HOUR
+    if key == "d":
+        return ns(idx.normalize())
+    ws = ns(idx.normalize() - pd.to_timedelta(idx.dayofweek, unit="D"))
+    if key == "w":
+        return ws
+    if key == "w2":
+        return (ws - pd.Timestamp("1970-01-05").value) // (14 * DAY)
+    m = idx.year.to_numpy().astype(np.int64) * 12 + idx.month.to_numpy() - 1
+    return {"mo": m, "q": m // 3, "s": m // 6, "y": m // 12}[key]
+
+
+def _cat(v, order):
+    order = list(order)
+    return pd.Categorical(np.array(order, dtype=object)[np.asarray(v, int)], categories=order, ordered=True)
+
+
+def timing(spec, t_ext, t0, off):
+    """In quale parte del periodo cade l'estremo."""
+    key, k = spec["key"], spec.get("k")
+    t = pd.DatetimeIndex(t_ext)
+    if key == "h1":
+        return _cat(t.minute // 5, [f"{m:02d}-{m + 4:02d}'" for m in range(0, 60, 5)])
+    if k:
+        return _cat(t.hour % k, [f"+{i}h" for i in range(k)])
+    if key == "d":
+        return _cat(t.hour, [f"{h:02d}h" for h in range(24)])
+    if key == "w":
+        return _cat(t.dayofweek, DOW)
+    if key in ("w2", "mo"):
+        off = np.asarray(off, int)
+        return _cat(off, [f"G{i + 1}" for i in range(off.max() + 1)])
+    if key == "q":
+        w = np.minimum((t.normalize() - pd.DatetimeIndex(t0).normalize()).days.to_numpy() // 7, 13)
+        return _cat(w, [f"S{i + 1}" for i in range(14)])
+    if key == "s":
+        return _cat((t.month - 1) % 6, [f"M{i + 1}" for i in range(6)])
+    return _cat(t.month - 1, MON)
+
+
+def category(spec, t0):
+    """Sotto-categoria del periodo per vedere come cambia il comportamento (ora, giorno, mese...)."""
+    key, k = spec["key"], spec.get("k")
+    t = pd.DatetimeIndex(t0)
+    if key in ("min", "h1"):
+        return _cat(t.hour, [f"{h:02d}h" for h in range(24)])
+    if k:
+        return _cat(t.hour // k, [f"{i * k:02d}-{(i + 1) * k:02d}h" for i in range(24 // k)])
+    if key == "d":
+        return _cat(t.dayofweek, DOW)
+    if key in ("w", "w2", "mo"):
+        return _cat(t.month - 1, MON)
+    if key == "q":
+        return _cat((t.month - 1) // 3, ["Q1", "Q2", "Q3", "Q4"])
+    if key == "s":
+        return _cat((t.month - 1) // 6, ["1° semestre", "2° semestre"])
+    return None
+
+
+def period_label(key, t):
+    t = pd.DatetimeIndex(t)
+    if key in ("min", "h1", "h4", "h6", "h8", "h12"):
+        return list(t.strftime("%Y-%m-%d %H:%M"))
+    if key == "d":
+        return [f"{x:%Y-%m-%d} {DOW[x.dayofweek]}" for x in t]
+    if key in ("w", "w2"):
+        return list(t.strftime("sett. %Y-%m-%d"))
+    if key == "mo":
+        return [f"{MON[x.month - 1]} {x.year}" for x in t]
+    if key == "q":
+        return [f"Q{(x.month - 1) // 3 + 1} {x.year}" for x in t]
+    if key == "s":
+        return [f"{(x.month - 1) // 6 + 1}° sem {x.year}" for x in t]
+    return list(t.strftime("%Y"))
+
+
+class Blocks:
+    """Scompone la serie nei periodi del timeframe e misura ogni periodo."""
+
+    def __init__(self, spec, df, src):
+        self.spec, self.src = spec, src
+        idx = pd.DatetimeIndex(df.index)
+        kv = block_key(spec, idx)
+        n = len(df)
+        starts = np.r_[0, np.flatnonzero(np.diff(kv) != 0) + 1]
+        cnt = np.diff(np.r_[starts, n])
+        o, h, l, c = (df[x].to_numpy(float) for x in ("open", "high", "low", "close"))
+        H, L = np.maximum.reduceat(h, starts), np.minimum.reduceat(l, starts)
+        ar = np.arange(n)
+        iH = np.minimum.reduceat(np.where(h == np.repeat(H, cnt), ar, n), starts)
+        iL = np.minimum.reduceat(np.where(l == np.repeat(L, cnt), ar, n), starts)
+        self.intra = np.median(cnt) > 1  # False = il periodo e' una sola barra: niente "quando" interno
+        # ordine degli estremi; se cadono nella stessa barra decide la direzione di quella barra
+        lfirst = np.where(iL < iH, True, np.where(iL > iH, False, c[iH] >= o[iH]))
+        b = pd.DataFrame(dict(t0=idx[starts], O=o[starts], H=H, L=L, C=c[starts + cnt - 1], cnt=cnt,
+                              tH=idx[iH], tL=idx[iL], offH=iH - starts, offL=iL - starts, lfirst=lfirst))
+        if "volume" in df:
+            b["V"] = np.add.reduceat(df["volume"].fillna(0).to_numpy(float), starts)
+        self.med_cnt = float(np.median(cnt))
+        self.cur = b.iloc[-1]  # periodo in corso
+        keep = cnt >= 0.5 * self.med_cnt  # scarta periodi monchi (festivi, inizio dati)
+        keep[0] &= cnt[0] >= 0.9 * self.med_cnt
+        keep[-1] = False
+        b = b[keep].reset_index(drop=True)
+        R = (b.H - b.L).to_numpy()
+        first = np.where(b.lfirst, b.L, b.H)
+        second = np.where(b.lfirst, b.H, b.L)
+        b["rng"] = R / b.O
+        b["ret"] = b.C / b.O - 1
+        b["mfe"], b["mae"] = b.H / b.O - 1, 1 - b.L / b.O
+        b["init"] = np.abs(first - b.O) / b.O
+        b["retr"] = np.abs(b.C - second) / b.O
+        b["rf"] = np.where(R > 0, np.abs(b.C - second) / np.where(R > 0, R, 1), 0.0)
+        b["cls"] = pd.Categorical(np.select([b.rf <= 0.25, b.rf >= 0.75], ["Trend", "Mean reversion"], "Parziale"),
+                                  categories=CLASSES)
+        b["dir"] = np.where(b.lfirst, "rialzista", "ribassista")
+        b["year"] = pd.DatetimeIndex(b.t0).year
+        b["pH"], b["pL"] = (b.offH + 1) / b.cnt, (b.offL + 1) / b.cnt  # frazione del periodo trascorsa all'estremo
+        cat = category(spec, b.t0)
+        b["cat"] = cat if cat is not None else "—"
+        if self.intra:
+            b["bH"] = timing(spec, b.tH, b.t0, b.offH)
+            b["bL"] = timing(spec, b.tL, b.t0, b.offL)
+        if "V" in b:
+            if cat is not None:
+                base = b.V.groupby(b.cat, observed=True).transform(lambda s: s.shift(1).rolling(20, min_periods=5).mean())
             else:
-                exp = v.ewm(span=20, min_periods=5).mean().shift(1)
-            self.v, self.vexp = v.to_numpy(), exp.to_numpy()
-            bad = ~np.isfinite(self.vexp) | (self.vexp <= 0)
-            self.rvol = np.where(bad, np.nan, self.v / np.where(bad, 1, self.vexp))
-            self.CV, self.CE = np.cumsum(self.v), np.cumsum(np.where(bad, 0, self.vexp))
-            self.CB = np.cumsum(bad)
-
-    def fwd(self, h):
-        """j = prima barra che chiude almeno h dopo la chiusura di i (uscita realistica dopo gap/weekend)."""
-        target = self.tc + h
-        j = np.searchsorted(self.tc, target, side="left")
-        jj = np.minimum(j, self.n - 1)
-        ok = (j < self.n) & (self.tc[jj] - target <= SLACK) & (jj > np.arange(self.n))
-        return jj, dense(jj - np.arange(self.n), ok)
-
-    def back(self, h):
-        """p = ultima barra chiusa almeno h prima della chiusura di i."""
-        target = self.tc - h
-        p = np.searchsorted(self.tc, target, side="right") - 1
-        pp = np.maximum(p, 0)
-        ok = (p >= 0) & (target - self.tc[pp] <= SLACK) & (pp < np.arange(self.n))
-        return pp, dense(np.arange(self.n) - pp, ok)
-
-    def window_rvol(self, p, i):
-        if self.v is None:
-            return np.full(len(i), np.nan)
-        ev = self.CE[i] - self.CE[p]
-        ok = (self.CB[i] - self.CB[p] == 0) & (ev > 0)
-        return np.where(ok, (self.CV[i] - self.CV[p]) / np.where(ok, ev, 1), np.nan)
+                base = b.V.shift(1).rolling(20, min_periods=5).mean()
+            b["rv"] = b.V / base.where(base > 0)
+        self.b = b
 
 
-class Ctx:
-    def __init__(self, name, h1, d1, meta):
-        self.name, self.meta = name, meta
-        self.h1 = Bars(h1, "H1") if h1 is not None and len(h1) > 500 else None
-        if self.h1 is not None and not self.h1.intraday:
-            self.h1 = None
-        self.d1 = Bars(d1, "D1")
-        self.bpw = max(1.0, (self.d1.t >= self.d1.t[-1] - 364 * DAY).sum() / 52)
-        self.base = self.h1 or self.d1
-        self.last = self.base.c[-1]
-        d = meta.get("digits")
-        self.digits = int(d) if d is not None else int(np.clip(5 - np.floor(np.log10(self.last)), 0, 5))
-        self.horizons = [(n, h) for n, h in HORIZONS if self.bars_for(h) is not None]
-
-    def bars_for(self, h):
-        return self.h1 if h <= DAY else self.d1
-
-    def q_for(self, b, h):
-        return max(1, round(h / b.tf)) if b.intraday else max(1, round(h / DAY * self.bpw / 7))
-
-    def px(self, x):
-        return fmt(x, self.digits)
+def pick_source(spec, data):
+    for s in spec["src"]:
+        if s in data and data[s] is not None and len(data[s]) > 50:
+            return s
+    return None
 
 
-# ----------------------------------------------------------------------------- statistica
-def nw_t(x, lag):
-    """t-stat della media con errore standard Newey-West (autocovarianze via FFT)."""
-    x = np.asarray(x, float)
-    n = len(x)
-    if n < 20:
-        return np.nan
-    d = x - x.mean()
-    lag = int(min(max(lag, 0), n - 1))
-    f = np.fft.rfft(d, 2 * n)
-    ac = np.fft.irfft(f * np.conj(f))[: lag + 1] / n
-    w = 1 - np.arange(lag + 1) / (lag + 1)
-    s = ac[0] + 2 * (w[1:] * ac[1:]).sum()
-    return x.mean() / np.sqrt(s / n) if s > 0 else np.nan
+# ----------------------------------------------------------------------------- statistiche descrittive
+def next_period(b):
+    """Cosa succede nel periodo successivo, per condizione del periodo appena chiuso."""
+    cur, nx = b.iloc[:-1].reset_index(drop=True), b.iloc[1:].reset_index(drop=True)
+    s0, s1 = np.sign(cur.ret.to_numpy()), np.sign(nx.ret.to_numpy())
+    same = (s0 == s1) & (s0 != 0)
+    bh, bl = (nx.H > cur.H).to_numpy(), (nx.L < cur.L).to_numpy()
+    fb = (bh & (nx.C <= cur.H).to_numpy()) | (bl & (nx.C >= cur.L).to_numpy())
+    mid = ((cur.H + cur.L) / 2).to_numpy()
+    tmid = (nx.L.to_numpy() <= mid) & (nx.H.to_numpy() >= mid)
+    rr = (nx.rng / b.rng.median()).to_numpy()
+    nret = nx.ret.to_numpy()
+    rows = []
 
+    def add(group, label, m):
+        m = np.asarray(m, bool)
+        n = int(m.sum())
+        if n < 5:
+            return
+        br = (bh | bl)[m]
+        rows.append(dict(group=group, label=label, N=n, same=same[m].mean(), up=(nret[m] > 0).mean(),
+                         ret=nret[m].mean(), rr=rr[m].mean(), bh=bh[m].mean(), bl=bl[m].mean(),
+                         inside=(~bh & ~bl)[m].mean(), fb=fb[m].sum() / br.sum() if br.sum() else np.nan,
+                         mid=tmid[m].mean()))
 
-def variance_ratio(logp, q):
-    """VR(q) di Lo-MacKinlay con z robusto all'eteroschedasticita'. VR>1 persistenza, VR<1 mean reversion."""
-    logp = logp[np.isfinite(logp)]
-    r = np.diff(logp)
-    n = len(r)
-    if q < 2 or n < 5 * q:
-        return np.nan, np.nan
-    mu = r.mean()
-    d = r - mu
-    var1 = d @ d / (n - 1)
-    rq = logp[q:] - logp[:-q]
-    varq = ((rq - q * mu) ** 2).sum() / (q * (n - q + 1) * (1 - q / n))
-    vr = varq / var1
-    e2 = d ** 2
-    den = e2.sum() ** 2
-    theta = sum((2 * (q - k) / q) ** 2 * n * (e2[k:] @ e2[:-k]) / den for k in range(1, q))
-    return vr, np.sqrt(n) * (vr - 1) / np.sqrt(theta)
-
-
-def dense(cnt, ok):
-    """Scarta le finestre con meno della meta' delle barre tipiche: cadono per lo piu' a mercato chiuso."""
-    if ok.any():
-        ok &= cnt >= max(1, 0.5 * np.median(cnt[ok]))
-    return ok
-
-
-def bucketize(x, inner):
-    k = np.digitize(x, inner)
-    return np.where(np.isfinite(x), k, -1)
-
-
-def qedges(x, k):
-    x = x[np.isfinite(x)]
-    return np.percentile(x, np.linspace(0, 100, k + 1)[1:-1]) if len(x) else np.array([])
+    add("", "Tutti i periodi", np.ones(len(cur), bool))
+    up = cur.ret.to_numpy() > 0
+    for cl in CLASSES:
+        m = (cur.cls == cl).to_numpy()
+        add("Tipo del periodo appena chiuso", f"{cl} rialzista", m & up)
+        add("Tipo del periodo appena chiuso", f"{cl} ribassista", m & ~up)
+    for name, x, labs in (("Rendimento del periodo appena chiuso", cur.ret,
+                           ["Q1 forte ribasso", "Q2", "Q3", "Q4", "Q5 forte rialzo"]),
+                          ("Ampiezza del periodo appena chiuso", cur.rng, ["Q1 stretto", "Q2", "Q3", "Q4", "Q5 ampio"]),
+                          ("Volume del periodo appena chiuso (vs ultimi 20)", cur.get("rv"),
+                           ["Q1 basso", "Q2", "Q3", "Q4", "Q5 alto"])):
+        if x is None or x.notna().sum() < 25:
+            continue
+        q = pd.qcut(x.rank(method="first"), 5, labels=False).to_numpy()
+        for i, lb in enumerate(labs):
+            add(name, lb, q == i)
+    s = pd.Series(s0)
+    run = s.groupby((s != s.shift()).cumsum()).cumcount().to_numpy() + 1
+    for k in range(1, 7):
+        add("Sequenza: periodi consecutivi nella stessa direzione", f"{k}{'+' if k == 6 else ''} di fila",
+            ((run >= k) if k == 6 else (run == k)) & (s0 != 0))
+    return rows
 
 
 def fmt(x, d=2, suf=""):
@@ -307,251 +363,189 @@ def fmt(x, d=2, suf=""):
     return f"{x:.{d}f}{suf}"
 
 
-# ----------------------------------------------------------------------------- analisi
-def horizon_stats(ctx):
-    rows, hists = [], {}
-    for name, h in ctx.horizons:
-        b = ctx.bars_for(h)
-        j, ok = b.fwd(h)
-        i, j = np.flatnonzero(ok), j[ok]
-        if len(i) < 30:
-            continue
-        e = b.c[i]
-        r = b.c[j] / e - 1
-        hi, lo = b.hi(i + 1, j), b.lo(i + 1, j)
-        mfe, mae, rng = hi / e - 1, 1 - lo / e, (hi - lo) / e
-        lr = pd.Series(np.log1p(r))
-        lg = np.log(rng[rng > 0])
-        cnt, ed = np.histogram(lg, bins=60)
-        k = cnt.argmax()
-        q = ctx.q_for(b, h)
-        vr, vz = variance_ratio(np.log(b.c), q)
-        rows.append(dict(
-            name=name, h=h, tf=b.name, N=len(i), neff=(b.tc[i[-1]] - b.tc[i[0]]) / h,
-            mean=r.mean(), t=nw_t(r, np.ceil(np.mean(j - i))), med=np.median(r), std=r.std(), up=(r > 0).mean(),
-            skew=lr.skew(), kurt=lr.kurt(), qs=np.percentile(r, [5, 25, 75, 95]),
-            absmed=np.median(np.abs(r)), rng_med=np.median(rng), rng_mode=np.exp((ed[k] + ed[k + 1]) / 2),
-            mfe=np.percentile(mfe, [50, 75, 90]), mae=np.percentile(mae, [50, 75, 90]), vq=q, vr=vr, vz=vz))
-        lo_, hi_ = np.percentile(r, [0.5, 99.5])
-        cnt, ed = np.histogram(r, bins=80, range=(lo_, hi_))
-        hists[name] = (ed, cnt / max(cnt.sum(), 1))
-    return rows, hists
+def pcol(p, center=0.5, span=0.15):
+    """Blu sopra il centro, rosso sotto."""
+    if p is None or not np.isfinite(p):
+        return ""
+    v = p - center
+    a = min(abs(v) / span, 1) * 0.55
+    return "" if a < 0.04 else (f"rgba(59,130,246,{a:.2f})" if v > 0 else f"rgba(239,68,68,{a:.2f})")
 
 
-def combined_close(ctx):
-    d = ctx.d1
-    if ctx.h1 is None:
-        return d.tc, d.c
-    m = d.tc <= ctx.h1.tc[0]
-    return np.r_[d.tc[m], ctx.h1.tc], np.r_[d.c[m], ctx.h1.c]
-
-
-def tsmom_matrix(ctx):
-    """Payoff sign(rendimento passato su lookback) * rendimento futuro su forward, per ogni coppia."""
-    ctc, cc = combined_close(ctx)
-    hz = ctx.horizons
-    T, P, NE = (np.full((len(hz), len(hz)), np.nan) for _ in range(3))
-    for a, (_, lb) in enumerate(hz):
-        for bb, (_, fw) in enumerate(hz):
-            anc = ctx.h1 if min(lb, fw) <= DAY else ctx.d1
-            ta, ca = anc.tc, anc.c
-            tp, tf_ = ta - lb, ta + fw
-            p = np.searchsorted(ctc, tp, "right") - 1
-            f = np.searchsorted(ctc, tf_, "left")
-            ok = (p >= 0) & (f < len(ctc))
-            p, f = np.clip(p, 0, len(ctc) - 1), np.clip(f, 0, len(ctc) - 1)
-            ok &= (tp - ctc[p] <= SLACK) & (ctc[f] - tf_ <= SLACK) & (ctc[f] > ta)
-            pos = np.searchsorted(ctc, ta, "left")
-            if fw <= DAY:
-                ok = dense(f - pos, ok)
-            if lb <= DAY:
-                ok = dense(pos - p, ok)
-            if ok.sum() < 30:
-                continue
-            s = np.sign(np.log(ca[ok] / cc[p[ok]])) * (cc[f[ok]] / ca[ok] - 1)
-            neff = (ta[ok][-1] - ta[ok][0]) / fw
-            if neff < MIN_NEFF or s.std() == 0:
-                continue
-            T[a, bb], P[a, bb], NE[a, bb] = s.mean() / (s.std() / np.sqrt(neff)), (s > 0).mean(), neff
-    return dict(names=[n for n, _ in hz], T=T, P=P, NE=NE)
-
-
-def _cell(n, ne, hit, pay, erf=None, base_erf=None):
-    return dict(n=n, ne=ne, P=hit.mean(), zP=(hit.mean() - 0.5) / np.sqrt(0.25 / ne),
-                mean=pay.mean(), t=pay.mean() / (pay.std() / np.sqrt(ne)) if pay.std() > 0 else np.nan,
-                ERr=np.nanmean(erf) / base_erf if erf is not None else np.nan)
-
-
-def conditional(ctx):
-    """Continuazione (lookback = forward = orizzonte) condizionata a forza, efficienza, volatilita', volume, ora."""
-    cond = {k: dict(title=t, labels=lab, data={}, edges={}) for k, t, lab in FAMILIES}
-    hours = dict(P={}, zP={}, ERr={}, N={})
-    overall = {}
-    for name, h in ctx.horizons:
-        b = ctx.bars_for(h)
-        j, okf = b.fwd(h)
-        p, okb = b.back(h)
-        ok = okf & okb & np.isfinite(b.sig) & (b.sig > 0)
-        i, j, p = np.flatnonzero(ok), j[ok], p[ok]
-        if len(i) < 100:
-            continue
-        ci, cj, cp = b.c[i], b.c[j], b.c[p]
-        past = np.log(ci / cp)
-        s = np.sign(past) * (cj / ci - 1)
-        hit = s > 0
-        pl, plf = b.S[i] - b.S[p], b.S[j] - b.S[i]
-        feats = dict(z=np.abs(past) / (b.sig[i] * np.sqrt(i - p)),
-                     er=np.where(pl > 0, np.abs(ci - cp) / np.where(pl > 0, pl, 1), np.nan),
-                     vol=b.sig[i], rv=b.window_rvol(p, i))
-        erf = np.where(plf > 0, np.abs(cj - ci) / np.where(plf > 0, plf, 1), np.nan)
-        base_erf = np.nanmean(erf)
-        w = (b.tc[i[-1]] - b.tc[i[0]]) / h / len(i)  # N_eff per osservazione
-        overall[name] = _cell(len(i), len(i) * w, hit, s)
-        for key, _, lab in FAMILIES:
-            x = feats[key]
-            if not np.isfinite(x).any():
-                continue
-            inner = np.array(Z_EDGES) if key == "z" else qedges(x, len(lab))
-            cond[key]["edges"][name] = inner
-            k = bucketize(x, inner)
-            cell = {}
-            for bi, lb in enumerate(lab):
-                m = k == bi
-                if m.sum() >= 30:
-                    cell[lb] = _cell(m.sum(), m.sum() * w, hit[m], s[m], erf[m], base_erf)
-            cond[key]["data"][name] = cell
-        if b.intraday:
-            hrs = pd.DatetimeIndex(b.tc[i]).hour.to_numpy()
-            arr = {k: np.full(24, np.nan) for k in hours}
-            for hh in range(24):
-                m = hrs == hh
-                if m.sum() >= 30:
-                    c = _cell(m.sum(), m.sum() * w, hit[m], s[m], erf[m], base_erf)
-                    arr["P"][hh], arr["zP"][hh], arr["ERr"][hh], arr["N"][hh] = c["P"], c["zP"], c["ERr"], c["ne"]
-            for k in hours:
-                hours[k][name] = arr[k]
-    return cond, hours, overall
-
-
-def mean_reversion(ctx):
-    """Distanza dalla media mobile (finestra 2x orizzonte) -> rientro verso la media entro l'orizzonte."""
-    out = dict(labels=DEV_LAB, data={})
-    for name, h in ctx.horizons:
-        b = ctx.bars_for(h)
-        j, okf = b.fwd(h)
-        p, okb = b.back(2 * h)
-        ok = okf & okb & np.isfinite(b.sig) & (b.sig > 0)
-        i, j, p = np.flatnonzero(ok), j[ok], p[ok]
-        if len(i) < 100:
-            continue
-        ci = b.c[i]
-        ma = (b.CS[i] - b.CS[p]) / (i - p)
-        dev = np.log(ci / ma) / (b.sig[i] * np.sqrt(np.maximum((i - p) / 2, 1)))
-        rev = -np.sign(dev) * (b.c[j] / ci - 1)
-        touch = np.where(dev > 0, b.lo(i + 1, j) <= ma, b.hi(i + 1, j) >= ma)
-        w = (b.tc[i[-1]] - b.tc[i[0]]) / h / len(i)
-        k = bucketize(np.abs(dev), np.array(Z_EDGES))
-        cell = {}
-        for bi, lb in enumerate(DEV_LAB):
-            m = k == bi
-            if m.sum() >= 30:
-                c = _cell(m.sum(), m.sum() * w, rev[m] > 0, rev[m])
-                c["touch"] = touch[m].mean()
-                cell[lb] = c
-        out["data"][name] = cell
-    return out
-
-
-def current_state(ctx, cond, mr):
+def pct_rows(b, px, last):
+    """Percentili delle misure di ogni periodo."""
+    up = b.lfirst.to_numpy()
+    spec = [("Spostamento più ampio (massimo − minimo)", b.rng, True),
+            ("  … dal minimo al massimo (rialzista)", b.rng[up], True),
+            ("  … dal massimo al minimo (ribassista)", b.rng[~up], True),
+            ("Escursione sopra l'apertura", b.mfe, True),
+            ("Escursione sotto l'apertura", b.mae, True),
+            ("Movimento iniziale (apertura → primo estremo)", b.init, True),
+            ("Mean reversion (secondo estremo → chiusura)", b.retr, True),
+            ("Mean reversion in % dello spostamento", b.rf, False),
+            ("Rendimento apertura → chiusura", b.ret, True),
+            ("|Rendimento| apertura → chiusura", b.ret.abs(), True)]
     rows = []
-    for name, h in ctx.horizons:
-        b = ctx.bars_for(h)
-        n = b.n - 1
-        p, ok = b.back(h)
-        if not ok[n] or not np.isfinite(b.sig[n]):
+    for name, x, has_px in spec:
+        x = x.dropna().to_numpy()
+        if len(x) == 0:
             continue
-        p = p[n]
-        past = np.log(b.c[n] / b.c[p])
-        pl = b.S[n] - b.S[p]
-        feats = dict(z=abs(past) / (b.sig[n] * np.sqrt(n - p)), er=abs(b.c[n] - b.c[p]) / pl if pl > 0 else np.nan,
-                     vol=b.sig[n], rv=b.window_rvol(np.array([p]), np.array([n]))[0])
-        r = dict(name=name, past=np.expm1(past), z=feats["z"], fam={})
-        for key, _, lab in FAMILIES:
-            inner = cond[key]["edges"].get(name)
-            if inner is None or not np.isfinite(feats[key]):
-                continue
-            lb = lab[int(np.digitize(feats[key], inner))]
-            r["fam"][key] = (lb, cond[key]["data"].get(name, {}).get(lb))
-        p2, ok2 = b.back(2 * h)
-        if ok2[n]:
-            p2 = p2[n]
-            ma = (b.CS[n] - b.CS[p2]) / (n - p2)
-            dev = np.log(b.c[n] / ma) / (b.sig[n] * np.sqrt(max((n - p2) / 2, 1)))
-            lb = DEV_LAB[int(np.digitize(abs(dev), Z_EDGES))]
-            r.update(ma=ma, dev=dev, mr=(lb, mr["data"].get(name, {}).get(lb)))
-        rows.append(r)
+        q = np.percentile(x, [10, 25, 50, 75, 90, 95])
+        rows.append([name, len(x), *[fmt(v * 100, 3) for v in (x.mean(), *q, x.max())],
+                     px(q[2] * last) if has_px else "–", px(q[4] * last) if has_px else "–"])
     return rows
 
 
-def streaks(ctx):
-    """P(la barra successiva ha lo stesso segno | k barre consecutive nello stesso verso)."""
-    series = {"D1": pd.Series(ctx.d1.c, ctx.d1.idx)}
-    if ctx.h1 is not None:
-        series = {"H1": pd.Series(ctx.h1.c, ctx.h1.idx), **series}
-    series["W1"] = series["D1"].resample("W-FRI").last().dropna()
-    out = {}
-    for tf, c in series.items():
-        s = np.sign(np.diff(c.to_numpy()))
-        s = s[s != 0]
-        if len(s) < 50:
+def table(headers, rows):
+    th = "".join(f"<th>{h}</th>" for h in headers)
+    body = []
+    for r in rows:
+        if isinstance(r, str):  # riga di intestazione di gruppo
+            body.append(f'<tr class="grp"><td colspan="{len(headers)}">{r}</td></tr>')
             continue
-        starts = np.r_[0, np.flatnonzero(np.diff(s)) + 1]
-        lens, sg = np.diff(np.r_[starts, len(s)])[:-1], s[starts][:-1]  # l'ultima sequenza e' incompleta
-        res = {}
-        for sign, lab in ((1, "up"), (-1, "down")):
-            L = lens[sg == sign]
-            pr, nn = [], []
-            for k in range(1, 7):
-                ge = (L >= k).sum()
-                pr.append((L > k).sum() / ge if ge >= 20 else np.nan)
-                nn.append(ge)
-            res[lab] = dict(P=pr, N=nn, base=(s == sign).mean())
-        out[tf] = res
-    return out
+        tds = []
+        for c in r:
+            if isinstance(c, tuple):
+                tds.append(f'<td style="background:{c[1]}">{c[0]}</td>' if c[1] else f"<td>{c[0]}</td>")
+            else:
+                tds.append(f"<td>{c}</td>")
+        body.append("<tr>" + "".join(tds) + "</tr>")
+    return f'<div class="tw"><table><thead><tr>{th}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
 
 
-def seasonality(ctx):
-    out = {}
-    if ctx.h1 is not None:
-        b = ctx.h1
-        df = pd.DataFrame({"r": b.lr * 1e4, "a": np.abs(b.lr) * 1e4}, index=b.idx).dropna()
-        g = df.groupby(df.index.hour)
-        out["hour"] = pd.DataFrame({"mean": g.r.mean(), "se": g.r.std() / np.sqrt(g.r.count()), "abs": g.a.mean()})
-    d = ctx.d1
-    df = pd.DataFrame({"r": d.lr * 1e4, "a": np.abs(d.lr) * 1e4}, index=d.idx).dropna()
-    df = df[df.index.dayofweek < 7]
-    g = df.groupby(df.index.dayofweek)
-    out["dow"] = pd.DataFrame({"mean": g.r.mean(), "se": g.r.std() / np.sqrt(g.r.count()), "abs": g.a.mean(),
-                               "up": g.r.apply(lambda x: (x > 0).mean())})
-    m = pd.Series(d.c, d.idx).resample("ME").last().pct_change().dropna() * 100
-    g = m.groupby(m.index.month)
-    out["month"] = pd.DataFrame({"mean": g.mean(), "se": g.std() / np.sqrt(g.count()),
-                                 "up": g.apply(lambda x: (x > 0).mean()), "n": g.count()})
-    return out
+def kpis(items):
+    return "<div class='kpi'>" + "".join(
+        f"<div><span>{a}</span><b>{b}</b>{f'<small>{c}</small>' if c else ''}</div>" for a, b, c in items) + "</div>"
 
 
-def volume_profile(b, start, nbins=120):
-    m = b.t >= start
-    if m.sum() < 5:
-        return None
-    h, l, c, v = b.h[m], b.l[m], b.c[m], b.v[m]
-    lo, hi = l.min(), h.max()
+def most(cat_series):
+    vc = cat_series.value_counts(normalize=True)
+    return f"{vc.index[0]} ({vc.iloc[0] * 100:.0f}%)" if len(vc) else "–"
+
+
+# ----------------------------------------------------------------------------- grafici
+def _layout(fig, h, **kw):
+    lay = dict(template=TEMPLATE, height=h, margin=dict(l=50, r=20, t=60, b=40), paper_bgcolor="rgba(0,0,0,0)",
+               plot_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=-0.18, x=0))
+    lay.update(kw)
+    fig.update_layout(**lay)
+    return fig
+
+
+def _hist(x, lo, hi, bins=60):
+    x = x[np.isfinite(x)]
     if hi <= lo:
+        hi = lo + 1e-9
+    cnt, ed = np.histogram(np.clip(x, lo, hi), bins=bins, range=(lo, hi))
+    return (ed[:-1] + ed[1:]) / 2, cnt / max(cnt.sum(), 1) * 100
+
+
+def fig_dist(b):
+    fig = make_subplots(1, 3, subplot_titles=["Spostamento più ampio (massimo − minimo) %",
+                                              "Rendimento apertura → chiusura %",
+                                              "Mean reversion: % dello spostamento restituita"])
+    r = b.rng.to_numpy() * 100
+    x, y = _hist(r, 0, np.percentile(r, 99.5))
+    fig.add_bar(x=x, y=y, marker_color=BLUE, row=1, col=1, hovertemplate="%{x:.3f}%: %{y:.1f}% dei periodi<extra></extra>")
+    t = b.ret.to_numpy() * 100
+    x, y = _hist(t, *np.percentile(t, [0.5, 99.5]))
+    fig.add_bar(x=x, y=y, marker_color=[BLUE if v >= 0 else RED for v in x], row=1, col=2,
+                hovertemplate="%{x:.3f}%: %{y:.1f}% dei periodi<extra></extra>")
+    x, y = _hist(b.rf.to_numpy() * 100, 0, 100, 20)
+    fig.add_bar(x=x, y=y, marker_color=[BLUE if v <= 25 else RED if v >= 75 else GREY for v in x], row=1, col=3,
+                hovertemplate="%{x:.0f}%: %{y:.1f}% dei periodi<extra></extra>")
+    fig.update_yaxes(title="% dei periodi", col=1)
+    return _layout(fig, 340, showlegend=False, bargap=0.02)
+
+
+def fig_timing(b, unit):
+    h = b.bH.value_counts(normalize=True, sort=False) * 100
+    l = b.bL.value_counts(normalize=True, sort=False) * 100
+    up, dn = b[b.lfirst], b[~b.lfirst]
+    rev_up = up.bH.value_counts(normalize=True, sort=False) * 100  # fine swing rialzista = inizio del rientro
+    rev_dn = dn.bL.value_counts(normalize=True, sort=False) * 100
+    fig = make_subplots(1, 2, subplot_titles=[f"Quando si forma il massimo e il minimo ({unit})",
+                                              f"Dove finisce lo spostamento più ampio e parte il rientro ({unit})"])
+    x = [str(c) for c in h.index]
+    fig.add_bar(x=x, y=h.values, name="Massimo del periodo", marker_color=BLUE, row=1, col=1)
+    fig.add_bar(x=x, y=l.values, name="Minimo del periodo", marker_color=AMBER, row=1, col=1)
+    fig.add_bar(x=x, y=rev_up.reindex(h.index).values, name="Swing rialzista: rientro dal massimo",
+                marker_color="#93c5fd", row=1, col=2)
+    fig.add_bar(x=x, y=rev_dn.reindex(h.index).values, name="Swing ribassista: rientro dal minimo",
+                marker_color="#fcd34d", row=1, col=2)
+    fig.update_yaxes(title="% dei periodi", col=1)
+    return _layout(fig, 400, barmode="group", bargap=0.15)
+
+
+def fig_category(b, title):
+    g = b.groupby("cat", observed=True)
+    rng = g.rng.mean() * 100
+    up = g.ret.apply(lambda x: (x > 0).mean() * 100)
+    cls = pd.crosstab(b.cat, b.cls, normalize="index").reindex(columns=CLASSES, fill_value=0) * 100
+    x = [str(c) for c in rng.index]
+    fig = make_subplots(1, 2, specs=[[{"secondary_y": True}, {}]],
+                        subplot_titles=[f"Spostamento medio e % rialzisti per {title}", f"Tipo di periodo per {title}"])
+    fig.add_bar(x=x, y=rng.values, name="Spostamento medio %", marker_color=GREY, row=1, col=1)
+    fig.add_scatter(x=x, y=up.values, name="% rialzisti", mode="lines+markers", line=dict(color=GREEN),
+                    row=1, col=1, secondary_y=True)
+    for c in CLASSES:
+        fig.add_bar(x=[str(i) for i in cls.index], y=cls[c].values, name=c, marker_color=CLS_COL[c], row=1, col=2)
+    fig.update_yaxes(title="% del prezzo", row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title="% rialzisti", range=[0, 100], row=1, col=1, secondary_y=True, showgrid=False)
+    return _layout(fig, 400, barmode="stack")
+
+
+def fig_years(b):
+    g = b.groupby("year")
+    rng, up = g.rng.mean() * 100, g.ret.apply(lambda x: (x > 0).mean() * 100)
+    cls = pd.crosstab(b.year, b.cls, normalize="index").reindex(columns=CLASSES, fill_value=0) * 100
+    x = [str(i) for i in rng.index]
+    fig = make_subplots(1, 2, specs=[[{"secondary_y": True}, {}]],
+                        subplot_titles=["Spostamento medio e % rialzisti per anno", "Tipo di periodo per anno"])
+    fig.add_bar(x=x, y=rng.values, name="Spostamento medio %", marker_color=GREY, row=1, col=1)
+    fig.add_scatter(x=x, y=up.values, name="% rialzisti", mode="lines+markers", line=dict(color=GREEN),
+                    row=1, col=1, secondary_y=True)
+    for c in CLASSES:
+        fig.add_bar(x=x, y=cls[c].values, name=c, marker_color=CLS_COL[c], row=1, col=2)
+    fig.update_yaxes(title="% rialzisti", range=[0, 100], row=1, col=1, secondary_y=True, showgrid=False)
+    return _layout(fig, 400, barmode="stack")
+
+
+def fig_history(d1):
+    c = d1["close"]
+    has_v = "volume" in d1
+    titles = ["Prezzo giornaliero (scala log) con SMA50 / SMA200", "Drawdown dal massimo %"]
+    if has_v:
+        titles.append("Volume giornaliero con media 20 / 252")
+    fig = make_subplots(len(titles), 1, shared_xaxes=True, vertical_spacing=0.05, subplot_titles=titles,
+                        row_heights=[0.55, 0.2, 0.25][: len(titles)])
+    fig.add_scatter(x=c.index, y=c, name="Chiusura", line=dict(width=1.3, color="#e5e7eb"), row=1, col=1)
+    fig.add_scatter(x=c.index, y=c.rolling(50).mean(), name="SMA50", line=dict(width=1, color=AMBER), row=1, col=1)
+    fig.add_scatter(x=c.index, y=c.rolling(200).mean(), name="SMA200", line=dict(width=1, color=BLUE), row=1, col=1)
+    fig.update_yaxes(type="log", row=1, col=1)
+    dd = (c / c.cummax() - 1) * 100
+    fig.add_scatter(x=dd.index, y=dd, fill="tozeroy", line=dict(width=0.8, color=RED), showlegend=False, row=2, col=1)
+    if has_v:
+        v = d1["volume"]
+        fig.add_bar(x=v.index, y=v, marker_color="#374151", showlegend=False, row=3, col=1)
+        fig.add_scatter(x=v.index, y=v.rolling(20).mean(), name="Vol MA20", line=dict(width=1, color=AMBER), row=3, col=1)
+        fig.add_scatter(x=v.index, y=v.rolling(252).mean(), name="Vol MA252", line=dict(width=1.2, color=BLUE), row=3, col=1)
+    return _layout(fig, 820 if has_v else 620, hovermode="x unified", legend=dict(orientation="h", y=1.06, x=0))
+
+
+# ----------------------------------------------------------------------------- volume
+def volume_profile(df, start, nbins=120):
+    d = df[df.index >= start]
+    if len(d) < 5:
+        return None
+    h, l, c, v = (d[k].to_numpy(float) for k in ("high", "low", "close", "volume"))
+    lo, hi = l.min(), h.max()
+    if hi <= lo or v.sum() <= 0:
         return None
     w = (hi - lo) / nbins
     a = np.clip(((l - lo) / w).astype(int), 0, nbins - 1)
     z = np.clip(((h - lo) / w).astype(int), 0, nbins - 1)
-    per = v / (z - a + 1)  # volume di ogni barra distribuito uniformemente sul suo range
+    per = v / (z - a + 1)  # volume della barra distribuito uniformemente sul suo range
     diff = np.zeros(nbins + 1)
     np.add.at(diff, a, per)
     np.add.at(diff, z + 1, -per)
@@ -569,600 +563,368 @@ def volume_profile(b, start, nbins=120):
             lo_i -= 1
             acc += dn
     ctr = lo + (np.arange(nbins) + 0.5) * w
-    return dict(ctr=ctr, prof=prof, poc=ctr[poc], val=lo + lo_i * w, vah=lo + (hi_i + 1) * w, w=w,
+    return dict(ctr=ctr, prof=prof, poc=ctr[poc], val=lo + lo_i * w, vah=lo + (hi_i + 1) * w,
                 vwap=((h + l + c) / 3 * v).sum() / v.sum(), va=(lo_i, hi_i), poc_i=poc)
 
 
-def volume_analysis(ctx):
-    b = ctx.base
-    if b.v is None:
-        return None
-    end = b.t[-1]
-    prof = {}
-    for lab, days in (("12 mesi", 365), ("6 mesi", 182), ("3 mesi", 91), ("1 mese", 30), ("1 settimana", 7)):
-        pf = volume_profile(b, end - days * DAY)
-        if pf:
-            prof[lab] = pf
-    out = dict(profiles=prof)
-    d = ctx.d1
-    if d.v is not None:
-        v = pd.Series(d.v, d.idx)
-        out["daily"] = dict(last=v.iloc[-1], ma20=v.iloc[-21:-1].mean(), ma252=v.iloc[-253:-1].mean(),
-                            pct=(v.iloc[-253:-1] < v.iloc[-1]).mean(), last5=v.iloc[-5:].mean(),
-                            date=v.index[-1])
-    if ctx.h1 is not None and ctx.h1.v is not None:
-        h = ctx.h1
-        v = pd.Series(h.v, h.idx)
-        t_end = h.idx[-1]
-        out["hourly"] = dict(
-            y12=v[v.index >= t_end - pd.Timedelta(days=365)].groupby(lambda x: x.hour).mean(),
-            d20=v[v.index >= t_end - pd.Timedelta(days=28)].groupby(lambda x: x.hour).mean(),
-            last=v[v.index.normalize() == t_end.normalize()].groupby(lambda x: x.hour).mean(),
-            rvol_last=h.rvol[-1], last_time=t_end)
-    return out
-
-
-def trend_summary(ctx):
-    d = ctx.d1
-    c = pd.Series(d.c, d.idx)
-    days = max((d.idx[-1] - d.idx[0]).days, 1)
-    ann = np.sqrt(ctx.bpw * 52)
-    dd = c / c.cummax() - 1
-    s50, s200 = c.rolling(50).mean(), c.rolling(200).mean()
-    rv20 = pd.Series(d.lr, d.idx).rolling(20).std() * ann
-    rets = {}
-    for name, h in HORIZONS[5:]:
-        p, ok = d.back(h)
-        if ok[-1]:
-            rets[name] = d.c[-1] / d.c[p[-1]] - 1
-    y = c[c.index >= c.index[-1] - pd.Timedelta(days=365)]
-    rvh = rv20.dropna()
-    return dict(start=d.idx[0], end=ctx.base.idx[-1], last=ctx.last, cagr=(c.iloc[-1] / c.iloc[0]) ** (365.25 / days) - 1,
-                vol=np.nanstd(d.lr) * ann, mdd=dd.min(), cur_dd=dd.iloc[-1],
-                above200=(c > s200)[s200.notna()].mean(), s50=s50.iloc[-1], s200=s200.iloc[-1], rets=rets,
-                hi52=y.max(), lo52=y.min(), rv20=rv20.iloc[-1],
-                rv_pct=(rvh < rvh.iloc[-1]).mean() if len(rvh) else np.nan)
-
-
-# ----------------------------------------------------------------------------- grafici
-def _layout(fig, h, **kw):
-    lay = dict(template=TEMPLATE, height=h, margin=dict(l=50, r=20, t=50, b=40), paper_bgcolor="rgba(0,0,0,0)",
-               plot_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=1.08, x=0))
-    lay.update(kw)
-    fig.update_layout(**lay)
-    return fig
-
-
-def fig_history(ctx):
-    d = ctx.d1
-    c = pd.Series(d.c, d.idx)
-    lp = np.log(c)
-    has_v = d.v is not None
-    titles = ["Prezzo (scala log) con SMA50 / SMA200", "Drawdown %",
-              "Variance Ratio mobile (1 anno): >1 fasi di trend, <1 fasi di mean reversion"]
-    if has_v:
-        titles.append("Volume giornaliero con media 20 / 252 barre")
-    fig = make_subplots(len(titles), 1, shared_xaxes=True, vertical_spacing=0.04, subplot_titles=titles,
-                        row_heights=[0.42, 0.14, 0.22, 0.22][: len(titles)])
-    fig.add_scatter(x=c.index, y=c, name="Close", line=dict(width=1.3, color="#e5e7eb"), row=1, col=1)
-    fig.add_scatter(x=c.index, y=c.rolling(50).mean(), name="SMA50", line=dict(width=1, color=AMBER), row=1, col=1)
-    fig.add_scatter(x=c.index, y=c.rolling(200).mean(), name="SMA200", line=dict(width=1, color=BLUE), row=1, col=1)
-    fig.update_yaxes(type="log", row=1, col=1)
-    dd = (c / c.cummax() - 1) * 100
-    fig.add_scatter(x=dd.index, y=dd, name="Drawdown", fill="tozeroy", line=dict(width=0.8, color=RED),
-                    showlegend=False, row=2, col=1)
-    r1 = lp.diff()
-    wk, mo = max(2, round(ctx.bpw)), max(2, round(ctx.bpw * 52 / 12))
-    for q, col in ((wk, "#a78bfa"), (mo, "#34d399")):
-        vr = lp.diff(q).rolling(252).var() / (q * r1.rolling(252).var())
-        fig.add_scatter(x=vr.index, y=vr, name=f"VR({q} barre)", line=dict(width=1.1, color=col), row=3, col=1)
-    fig.add_hline(y=1, line=dict(color=GREY, dash="dash"), row=3, col=1)
-    if has_v:
-        v = pd.Series(d.v, d.idx)
-        fig.add_bar(x=v.index, y=v, name="Volume", marker_color="#374151", showlegend=False, row=4, col=1)
-        fig.add_scatter(x=v.index, y=v.rolling(20).mean(), name="Vol MA20", line=dict(width=1, color=AMBER), row=4, col=1)
-        fig.add_scatter(x=v.index, y=v.rolling(252).mean(), name="Vol MA252", line=dict(width=1.2, color=BLUE), row=4, col=1)
-    return _layout(fig, 950 if has_v else 780, hovermode="x unified")
-
-
-def fig_hists(hists):
-    names = list(hists)
-    nc = 4
-    nr = int(np.ceil(len(names) / nc))
-    fig = make_subplots(nr, nc, subplot_titles=[f"Rendimento {n} (%)" for n in names],
-                        vertical_spacing=0.09, horizontal_spacing=0.05)
-    for k, nm in enumerate(names):
-        ed, pr = hists[nm]
-        ctr = (ed[:-1] + ed[1:]) / 2 * 100
-        fig.add_bar(x=ctr, y=pr * 100, marker_color=[BLUE if x >= 0 else RED for x in ctr], showlegend=False,
-                    hovertemplate="%{x:.2f}%: %{y:.2f}% dei casi<extra></extra>", row=k // nc + 1, col=k % nc + 1)
-    return _layout(fig, 220 * nr + 60, bargap=0)
-
-
-def fig_vr(rows):
-    rows = [r for r in rows if np.isfinite(r["vr"])]
-    col = [BLUE if r["vz"] > 2 else RED if r["vz"] < -2 else GREY for r in rows]
-    fig = go.Figure(go.Bar(x=[r["name"] for r in rows], y=[r["vr"] - 1 for r in rows], marker_color=col,
-                           text=[f"z {r['vz']:.1f}" for r in rows], textposition="outside",
-                           hovertemplate="%{x}: VR-1 = %{y:.3f}<extra></extra>"))
-    fig.add_hline(y=0, line=dict(color=GREY))
-    return _layout(fig, 360, yaxis_title="VR − 1  (>0 trend · <0 mean reversion)")
-
-
-def _heat(z, text, x, y, custom=None, hover="", zmax=None):
-    zmax = zmax or np.nanmax(np.abs(z)) if np.isfinite(z).any() else 1
-    return go.Heatmap(z=z, x=x, y=y, text=text, texttemplate="%{text}", textfont=dict(size=10),
-                      colorscale=DIVERGING, zmid=0, zmin=-zmax, zmax=zmax, customdata=custom,
-                      hovertemplate=hover + "<extra></extra>", xgap=1, ygap=1, showscale=False)
-
-
-def fig_tsmom(tm):
-    T, P = np.clip(tm["T"], -4, 4), tm["P"]
-    text = np.where(np.isfinite(T), np.vectorize(lambda p: f"{p * 100:.0f}%")(np.nan_to_num(P)), "")
-    fig = go.Figure(_heat(T, text, tm["names"], tm["names"], np.dstack([tm["NE"], tm["P"] * 100]),
-                          "lookback %{y} → forward %{x}<br>t = %{z:.2f}<br>hit %{customdata[1]:.1f}%"
-                          "<br>N_eff %{customdata[0]:.0f}", zmax=4))
-    fig.data[0].showscale = True
-    fig.data[0].colorbar = dict(title="t")
-    return _layout(fig, 520, xaxis_title="Orizzonte futuro (forward)", yaxis_title="Mossa passata (lookback)",
-                   yaxis_autorange="reversed")
-
-
-def fig_conditional(cond, names, metric):
-    fams = [k for k, _, _ in FAMILIES if cond[k]["data"]]
-    fig = make_subplots(1, len(fams), shared_yaxes=True, horizontal_spacing=0.02,
-                        subplot_titles=[cond[k]["title"] for k in fams],
-                        column_widths=[len(cond[k]["labels"]) for k in fams])
-    for c, k in enumerate(fams):
-        lab = cond[k]["labels"]
-        z = np.full((len(names), len(lab)), np.nan)
-        text = np.full(z.shape, "", dtype=object)
-        cust = np.full(z.shape + (3,), np.nan)
-        for a, nm in enumerate(names):
-            for bb, lb in enumerate(lab):
-                cell = cond[k]["data"].get(nm, {}).get(lb)
-                if not cell:
-                    continue
-                star = "*" if abs(cell["zP"]) > SIG_Z else ""
-                if metric == "P":
-                    z[a, bb] = (cell["P"] - 0.5) * 100
-                    text[a, bb] = f"{cell['P'] * 100:.0f}%{star}"
-                else:
-                    z[a, bb] = (cell["ERr"] - 1) * 100
-                    text[a, bb] = f"{cell['ERr']:.2f}"
-                cust[a, bb] = (cell["ne"], cell["mean"] * 100, cell["t"])
-        hover = ("%{y} · %{x}<br>" + ("P(continua) − 50 = %{z:.1f} pt" if metric == "P" else "ER forward vs media: %{z:+.1f}%")
-                 + "<br>payoff medio %{customdata[1]:.3f}%  t=%{customdata[2]:.2f}<br>N_eff %{customdata[0]:.0f}")
-        fig.add_trace(_heat(z, text, lab, names, cust, hover, zmax=15 if metric == "P" else 30), 1, c + 1)
-    fig.update_yaxes(autorange="reversed")
-    return _layout(fig, 90 + 36 * len(names))
-
-
-def fig_hours(hours):
-    names = list(hours["P"])
-    if not names:
-        return None
-    fig = make_subplots(1, 2, shared_yaxes=True, horizontal_spacing=0.04,
-                        subplot_titles=["P(continuazione) per ora di ingresso", "Forza del trend successivo (ER forward / media)"])
-    P = np.array([hours["P"][n] for n in names]).T
-    Z = np.array([hours["zP"][n] for n in names]).T
-    E = np.array([hours["ERr"][n] for n in names]).T
-    N = np.array([hours["N"][n] for n in names]).T
-    hrs = [f"{h:02d}:00" for h in range(24)]
-    tp = np.where(np.isfinite(P), np.vectorize(lambda p, z: f"{p * 100:.0f}{'*' if abs(z) > SIG_Z else ''}")(
-        np.nan_to_num(P), np.nan_to_num(Z)), "")
-    te = np.where(np.isfinite(E), np.vectorize(lambda e: f"{e:.2f}")(np.nan_to_num(E)), "")
-    fig.add_trace(_heat((P - 0.5) * 100, tp, names, hrs, N, "ore %{y} · %{x}: P−50 = %{z:.1f} pt<br>N_eff %{customdata:.0f}",
-                        zmax=10), 1, 1)
-    fig.add_trace(_heat((E - 1) * 100, te, names, hrs, N, "ore %{y} · %{x}: ER vs media %{z:+.1f}%", zmax=25), 1, 2)
-    fig.update_yaxes(autorange="reversed")
-    return _layout(fig, 720)
-
-
-def fig_mr(mr, names):
-    lab = mr["labels"]
-    z = np.full((len(names), len(lab)), np.nan)
-    text = np.full(z.shape, "", dtype=object)
-    cust = np.full(z.shape + (3,), np.nan)
-    for a, nm in enumerate(names):
-        for bb, lb in enumerate(lab):
-            c = mr["data"].get(nm, {}).get(lb)
-            if c:
-                z[a, bb] = (c["P"] - 0.5) * 100
-                text[a, bb] = f"{c['P'] * 100:.0f}% · {c['touch'] * 100:.0f}%{'*' if abs(c['zP']) > SIG_Z else ''}"
-                cust[a, bb] = (c["ne"], c["mean"] * 100, c["touch"] * 100)
-    fig = go.Figure(_heat(z, text, lab, names, cust,
-                          "%{y} · distanza %{x}<br>P(rientro) − 50 = %{z:.1f} pt<br>P(tocca la media) %{customdata[2]:.0f}%"
-                          "<br>rientro medio %{customdata[1]:.3f}%<br>N_eff %{customdata[0]:.0f}", zmax=15))
-    return _layout(fig, 90 + 36 * len(names), xaxis_title="Distanza dalla media mobile (in σ dell'orizzonte)",
-                   yaxis_autorange="reversed")
-
-
-def fig_streaks(st):
-    fig = make_subplots(1, 2, subplot_titles=["Dopo k barre rialziste consecutive", "Dopo k barre ribassiste consecutive"])
-    cols = {"H1": "#a78bfa", "D1": AMBER, "W1": "#34d399"}
-    for c, lab in enumerate(("up", "down")):
-        for tf, res in st.items():
-            r = res[lab]
-            fig.add_scatter(x=list(range(1, 7)), y=np.array(r["P"]) * 100, mode="lines+markers", name=tf,
-                            line=dict(color=cols[tf]), showlegend=c == 0, customdata=r["N"],
-                            hovertemplate=f"{tf}: k=%{{x}} → P(continua) %{{y:.1f}}%  (N=%{{customdata}})<extra></extra>",
-                            row=1, col=c + 1)
-            fig.add_hline(y=r["base"] * 100, line=dict(color=cols[tf], dash="dot", width=1), row=1, col=c + 1)
-    fig.update_xaxes(title="k barre consecutive")
-    fig.update_yaxes(title="P(barra successiva stesso verso) %", col=1)
-    return _layout(fig, 430, legend=dict(orientation="h", y=-0.22, x=0))
-
-
-def fig_season(se):
-    dow_n = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
-    mon_n = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
-    has_h = "hour" in se
-    specs = [("hour", "Rendimento medio per ora (bps)", "mean"), ("dow", "Rendimento medio per giorno (bps)", "mean"),
-             ("month", "Rendimento medio per mese (%)", "mean"), ("hour", "Movimento assoluto medio per ora (bps)", "abs"),
-             ("dow", "Movimento assoluto medio per giorno (bps)", "abs"), ("month", "% mesi positivi", "up")]
-    fig = make_subplots(2, 3, subplot_titles=[s[1] for s in specs], vertical_spacing=0.15)
-    for k, (key, _, col) in enumerate(specs):
-        if key not in se:
-            continue
-        df = se[key]
-        x = ([f"{h:02d}" for h in df.index] if key == "hour" else [dow_n[i] for i in df.index] if key == "dow"
-             else [mon_n[i - 1] for i in df.index])
-        y = df[col] * (100 if col == "up" else 1)
-        err = dict(type="data", array=2 * df["se"], color=GREY) if col == "mean" else None
-        color = ([BLUE if v >= 0 else RED for v in y] if col == "mean"
-                 else [BLUE if v >= 50 else RED for v in y] if col == "up" else "#9ca3af")
-        fig.add_bar(x=x, y=y, error_y=err, marker_color=color, showlegend=False, row=k // 3 + 1, col=k % 3 + 1)
-    if not has_h:
-        fig.layout.annotations[0].text = fig.layout.annotations[3].text = "(servono dati H1)"
-    return _layout(fig, 620)
-
-
-def fig_profiles(ctx, vp):
-    prof = vp["profiles"]
+def fig_profiles(prof, last):
     fig = make_subplots(1, len(prof), subplot_titles=list(prof), horizontal_spacing=0.035)
     for k, (lab, pf) in enumerate(prof.items()):
         lo_i, hi_i = pf["va"]
-        col = np.where((np.arange(len(pf["prof"])) >= lo_i) & (np.arange(len(pf["prof"])) <= hi_i), "#1d4ed8", "#374151")
+        i = np.arange(len(pf["prof"]))
+        col = np.where((i >= lo_i) & (i <= hi_i), "#1d4ed8", "#374151").astype(object)
         col[pf["poc_i"]] = AMBER
         fig.add_bar(y=pf["ctr"], x=pf["prof"], orientation="h", marker_color=list(col), showlegend=False,
                     hovertemplate="prezzo %{y}<br>volume %{x:.0f}<extra></extra>", row=1, col=k + 1)
-        fig.add_hline(y=ctx.last, line=dict(color="#f9fafb", dash="dash", width=1), row=1, col=k + 1)
-        fig.add_hline(y=pf["vwap"], line=dict(color="#34d399", dash="dot", width=1), row=1, col=k + 1)
-    fig.update_layout(bargap=0)
+        fig.add_hline(y=last, line=dict(color="#f9fafb", dash="dash", width=1), row=1, col=k + 1)
+        fig.add_hline(y=pf["vwap"], line=dict(color=GREEN, dash="dot", width=1), row=1, col=k + 1)
     fig.update_xaxes(showticklabels=False)
-    return _layout(fig, 620)
+    return _layout(fig, 620, bargap=0)
 
 
-def fig_hour_volume(hv):
-    fig = go.Figure()
-    for key, lab, col in (("y12", "Media 12 mesi", GREY), ("d20", "Media ultime 4 settimane", BLUE),
-                          ("last", "Ultima sessione", AMBER)):
-        s = hv[key]
-        if len(s):
-            fig.add_scatter(x=[f"{h:02d}" for h in s.index], y=s.values, name=lab, mode="lines+markers",
-                            line=dict(color=col, width=2 if key == "last" else 1.4))
-    return _layout(fig, 360, xaxis_title="Ora (server)", yaxis_title="Volume medio per barra H1")
-
-
-# ----------------------------------------------------------------------------- HTML
-def dcol(v, vmax):
-    if v is None or not np.isfinite(v) or v == 0:
-        return ""
-    a = min(abs(v) / vmax, 1) * 0.55
-    return f"rgba(59,130,246,{a:.2f})" if v > 0 else f"rgba(239,68,68,{a:.2f})"
-
-
-def table(headers, rows):
-    th = "".join(f"<th>{h}</th>" for h in headers)
-    body = []
-    for r in rows:
-        tds = []
-        for c in r:
-            if isinstance(c, tuple):
-                tds.append(f'<td style="background:{c[1]}">{c[0]}</td>' if c[1] else f"<td>{c[0]}</td>")
-            else:
-                tds.append(f"<td>{c}</td>")
-        body.append("<tr>" + "".join(tds) + "</tr>")
-    return f'<div class="tw"><table><thead><tr>{th}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
-
-
-def regime_label(vz, t):
-    """VR misura la persistenza dentro la finestra, TSMOM quella fra finestre consecutive."""
-    a = 0 if not np.isfinite(vz) else (1 if vz > 2 else -1 if vz < -2 else 0)
-    b = 0 if not np.isfinite(t) else (1 if t > SIG_Z else -1 if t < -SIG_Z else 0)
-    if a * b < 0:
-        return ("Misto: " + ("rumore che rientra, direzione che persiste" if a < 0 else "trend interno, inversione fra finestre"),
-                "rgba(245,158,11,.35)")
-    if a + b > 0:
-        return ("Momentum / trend", dcol(1, 1))
-    if a + b < 0:
-        return ("Mean reversion", dcol(-1, 1))
-    return ("Random walk", "")
-
-
-def verdict(ctx, ts, rows, tm, cond, hours, overall, mr, vp):
-    out = []
-    lp = ts["last"]
-    above = lp > ts["s200"] if np.isfinite(ts["s200"]) else None
-    if above is not None:
-        out.append(f"<b>Trend di fondo:</b> prezzo {'sopra' if above else 'sotto'} la SMA200 "
-                   f"({(lp / ts['s200'] - 1) * 100:+.1f}%), SMA50 {'>' if ts['s50'] > ts['s200'] else '<'} SMA200. "
-                   f"Storicamente sopra la SMA200 il {ts['above200'] * 100:.0f}% del tempo. "
-                   f"Rendimento 12m: {fmt(ts['rets'].get('12m', np.nan) * 100, 1, '%')}, 3m: {fmt(ts['rets'].get('3m', np.nan) * 100, 1, '%')}.")
-    names = tm["names"]
-    diag = {n: tm["T"][k, k] for k, n in enumerate(names)}
-    mom = [r["name"] for r in rows if regime_label(r["vz"], diag.get(r["name"], np.nan))[0].startswith("Momentum")]
-    rev = [r["name"] for r in rows if regime_label(r["vz"], diag.get(r["name"], np.nan))[0].startswith("Mean")]
-    mix = [r["name"] for r in rows if regime_label(r["vz"], diag.get(r["name"], np.nan))[0].startswith("Misto")]
-    rnd = [r["name"] for r in rows if r["name"] not in mom + rev + mix]
-    out.append(f"<b>Regime per orizzonte:</b> momentum su <b>{', '.join(mom) or 'nessuno'}</b>; mean reversion su "
-               f"<b>{', '.join(rev) or 'nessuno'}</b>; misto (VR e momentum in disaccordo) su {', '.join(mix) or 'nessuno'}; "
-               f"indistinguibile dal random walk su {', '.join(rnd) or 'nessuno'}.")
-    cells = []
-    for k, _, _ in FAMILIES:
-        for nm, d in cond[k]["data"].items():
-            for lb, c in d.items():
-                if c["ne"] >= 30:
-                    cells.append((c["zP"], c["P"], nm, cond[k]["title"], lb, c))
-    best = sorted([c for c in cells if c[0] > SIG_Z], key=lambda c: -c[1])[:4]
-    worst = sorted([c for c in cells if c[0] < -SIG_Z], key=lambda c: c[1])[:4]
-    if best:
-        out.append("<b>Quando continua (momentum):</b> " + "; ".join(
-            f"{nm} con {t.lower()} = {lb}: continua nel {P * 100:.0f}% (z {z:.1f}, N_eff {c['ne']:.0f})"
-            for z, P, nm, t, lb, c in best) + ".")
-    else:
-        out.append("<b>Quando continua:</b> nessuna condizione con continuazione statisticamente robusta (z > 2.5).")
-    if worst:
-        out.append("<b>Quando inverte (mean reversion della mossa):</b> " + "; ".join(
-            f"{nm} con {t.lower()} = {lb}: continua solo nel {P * 100:.0f}% (z {z:.1f})"
-            for z, P, nm, t, lb, c in worst) + ".")
-    mrc = [(c["zP"], c["P"], nm, lb, c) for nm, d in mr["data"].items() for lb, c in d.items() if c["ne"] >= 30]
-    mrb = sorted([c for c in mrc if c[0] > SIG_Z], key=lambda c: -c[1])[:4]
-    if mrb:
-        out.append("<b>Rientro verso la media:</b> " + "; ".join(
-            f"{nm} a {lb} dalla media: rientra nel {P * 100:.0f}%, tocca la media nel {c['touch'] * 100:.0f}%"
-            for z, P, nm, lb, c in mrb) + ".")
-    er = sorted([c for c in cells if c[5]["ne"] >= 30 and np.isfinite(c[5]["ERr"])], key=lambda c: -c[5]["ERr"])[:3]
-    if er:
-        out.append("<b>Trend più puliti quando:</b> " + "; ".join(
-            f"{nm} con {t.lower()} = {lb} (ER forward {c['ERr']:.2f}× la media)" for z, P, nm, t, lb, c in er) + ".")
-    if hours["P"]:
-        nm = next(iter(hours["P"]))
-        P, Z = hours["P"][nm], hours["zP"][nm]
-        hc = [f"{h:02d}h ({P[h] * 100:.0f}%)" for h in np.argsort(-np.nan_to_num(P)) if np.isfinite(Z[h]) and Z[h] > SIG_Z][:4]
-        hr = [f"{h:02d}h ({P[h] * 100:.0f}%)" for h in np.argsort(np.nan_to_num(P, nan=1)) if np.isfinite(Z[h]) and Z[h] < -SIG_Z][:4]
-        out.append(f"<b>Ore (server), orizzonte {nm}:</b> continuazione in {', '.join(hc) or 'nessuna ora significativa'}; "
-                   f"inversione in {', '.join(hr) or 'nessuna ora significativa'}.")
-    if vp and vp["profiles"]:
-        parts = []
-        for lab, pf in vp["profiles"].items():
-            pos = "sopra la VA" if lp > pf["vah"] else "sotto la VA" if lp < pf["val"] else "dentro la VA"
-            parts.append(f"{lab}: POC {ctx.px(pf['poc'])} ({(lp / pf['poc'] - 1) * 100:+.2f}%), {pos}")
-        out.append("<b>Dove si è scambiato di più:</b> " + "; ".join(parts) + ".")
-        if "daily" in vp:
-            dv = vp["daily"]
-            out.append(f"<b>Volume:</b> ultima sessione {dv['last'] / dv['ma20']:.2f}× la media 20g e "
-                       f"{dv['last'] / dv['ma252']:.2f}× la media annua (percentile {dv['pct'] * 100:.0f}); "
-                       f"media 20g / media annua = {dv['ma20'] / dv['ma252']:.2f}.")
-    out.append(f"<span class='muted'>Sono stati testati centinaia di condizioni: per il puro caso circa l'1% supera "
-               f"|z| > {SIG_Z}. Considera un edge credibile solo se è coerente fra orizzonti vicini e sopravvive "
-               f"a spread + commissioni.</span>")
-    return "<ul>" + "".join(f"<li>{x}</li>" for x in out) + "</ul>"
-
-
+# ----------------------------------------------------------------------------- report
 CSS = """
 :root{--bg:#0b0f17;--card:#111827;--fg:#e5e7eb;--mut:#9ca3af;--line:#1f2937;--acc:#3b82f6}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-main{max-width:1500px;margin:0 auto;padding:16px}h1{font-size:26px;margin:8px 0 4px}h2{font-size:19px;margin:0 0 6px}
-section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin:14px 0}
+header{position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 16px 0}
+header h1{font-size:20px;margin:0 0 2px}header p{margin:0 0 8px;color:var(--mut);font-size:12px}
+nav{display:flex;gap:4px;overflow-x:auto;padding-bottom:8px}
+nav button{background:#0f172a;color:var(--mut);border:1px solid var(--line);border-radius:6px;padding:6px 11px;
+cursor:pointer;white-space:nowrap;font:inherit;font-size:13px}nav button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+main{max-width:1500px;margin:0 auto;padding:12px 16px}h2{font-size:18px;margin:0 0 6px}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin:12px 0}
 .muted{color:var(--mut)}.desc{color:var(--mut);margin:0 0 10px;max-width:1100px}
 .tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:12.5px;font-variant-numeric:tabular-nums}
 th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
-th:first-child,td:first-child{text-align:left}th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)}
-ul{margin:0;padding-left:20px}li{margin:6px 0}.kpi{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
+th:first-child,td:first-child{text-align:left}th{color:var(--mut);font-weight:600}
+tr.grp td{color:var(--acc);font-weight:600;padding-top:12px;text-align:left}
+.kpi{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:10px}
 .kpi div{background:#0f172a;border:1px solid var(--line);border-radius:8px;padding:10px}.kpi b{display:block;font-size:18px}
-.kpi span{color:var(--mut);font-size:12px}
+.kpi span{color:var(--mut);font-size:12px}.kpi small{display:block;color:var(--mut);font-size:11px}
+.plot{min-height:60px}
+"""
+
+JS = """
+function show(id){
+  if(!document.getElementById('tab-'+id)) id='overview';
+  document.querySelectorAll('.tab').forEach(t=>t.hidden=(t.id!=='tab-'+id));
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===id));
+  document.querySelectorAll('#tab-'+id+' .plot:not(.done)').forEach(d=>{
+    const f=FIGS[d.dataset.fig]; Plotly.newPlot(d,f.data,f.layout,{displaylogo:false,responsive:true}); d.classList.add('done');});
+  if(location.hash!=='#'+id) history.replaceState(null,'','#'+id);
+  window.scrollTo(0,0);
+}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>show(b.dataset.tab));
+show(location.hash.slice(1)||'overview');
 """
 
 
-def build_report(ctx, offline=False):
-    rows, hists = horizon_stats(ctx)
-    tm = tsmom_matrix(ctx)
-    cond, hours, overall = conditional(ctx)
-    mr = mean_reversion(ctx)
-    cur = current_state(ctx, cond, mr)
-    ts = trend_summary(ctx)
-    vp = volume_analysis(ctx)
-    names = [n for n, _ in ctx.horizons]
-    diag = {n: tm["T"][k, k] for k, n in enumerate(tm["names"])}
-    first = [True]
+class Page:
+    """Raccoglie i grafici: vengono disegnati solo quando si apre la loro scheda."""
 
-    def F(fig):
+    def __init__(self):
+        self.figs, self.n = {}, 0
+
+    def fig(self, fig):
         if fig is None:
             return ""
-        s = fig.to_html(full_html=False, include_plotlyjs=False, config={"displaylogo": False, "responsive": True})
-        first[0] = False
-        return s
+        self.n += 1
+        fid = f"f{self.n}"
+        self.figs[fid] = fig.to_json()
+        return f'<div class="plot" data-fig="{fid}"></div>'
 
-    def sec(title, desc, body):
-        return f"<section><h2>{title}</h2><p class='desc'>{desc}</p>{body}</section>"
 
-    last_px = ctx.last
-    kp = ([("Ultimo prezzo", ctx.px(last_px)), ("Dati D1 dal", ts["start"].strftime("%Y-%m-%d")),
-          ("CAGR", fmt(ts["cagr"] * 100, 1, "%")), ("Volatilità annua", fmt(ts["vol"] * 100, 1, "%")),
-          ("Max drawdown", fmt(ts["mdd"] * 100, 1, "%")), ("Drawdown attuale", fmt(ts["cur_dd"] * 100, 1, "%")),
-          ("vs SMA50", fmt((last_px / ts["s50"] - 1) * 100, 2, "%")), ("vs SMA200", fmt((last_px / ts["s200"] - 1) * 100, 2, "%")),
-          ("Dist. max 52w", fmt((last_px / ts["hi52"] - 1) * 100, 1, "%")), ("Dist. min 52w", fmt((last_px / ts["lo52"] - 1) * 100, 1, "%")),
-          ("Vol 20g annualizz.", fmt(ts["rv20"] * 100, 1, "%")), ("Percentile vol 20g", fmt(ts["rv_pct"] * 100, 0))]
-          + [(f"Rend. {k}", fmt(v * 100, 2, "%")) for k, v in ts["rets"].items()])
-    kpi = "<div class='kpi'>" + "".join(f"<div><span>{a}</span><b>{b}</b></div>" for a, b in kp) + "</div>"
+def sec(title, desc, body):
+    return f"<section><h2>{title}</h2>" + (f"<p class='desc'>{desc}</p>" if desc else "") + f"{body}</section>"
 
-    # tabella movimenti
-    tA = table(["Orizzonte", "Dati", "N eff", "Media %", "t", "Mediana %", "Dev.std %", "% rialzo",
-                "P5 %", "P25 %", "P75 %", "P95 %", "Skew", "Kurt"],
-               [[r["name"], r["tf"], (fmt(r["neff"], 0), "" if r["neff"] >= 30 else "rgba(245,158,11,.35)"),
-                 fmt(r["mean"] * 100, 3), (fmt(r["t"], 2), dcol(r["t"], 4)), fmt(r["med"] * 100, 3), fmt(r["std"] * 100, 2),
-                 (fmt(r["up"] * 100, 1), dcol(r["up"] - 0.5, 0.1)), *[fmt(x * 100, 2) for x in r["qs"]],
-                 fmt(r["skew"], 2), fmt(r["kurt"], 1)] for r in rows])
-    tB = table(["Orizzonte", "|mossa| mediana %", "≈ prezzo", "Range mediano %", "≈ prezzo", "Range più frequente %",
-                "MFE P50 %", "MFE P75 %", "MFE P90 %", "MAE P50 %", "MAE P75 %", "MAE P90 %", "MFE P50 prezzo", "MAE P50 prezzo"],
-               [[r["name"], fmt(r["absmed"] * 100, 2), ctx.px(r["absmed"] * last_px), fmt(r["rng_med"] * 100, 2),
-                 ctx.px(r["rng_med"] * last_px), fmt(r["rng_mode"] * 100, 2), *[fmt(x * 100, 2) for x in r["mfe"]],
-                 *[fmt(x * 100, 2) for x in r["mae"]], ctx.px(r["mfe"][0] * last_px), ctx.px(r["mae"][0] * last_px)]
-                for r in rows])
-    tC = table(["Orizzonte", "Barre q", "VR(q)", "z VR", "TSMOM t", "P(continua)", "Payoff medio %", "Regime"],
-               [[r["name"], f"{r['vq']} {r['tf']}", fmt(r["vr"], 3), (fmt(r["vz"], 2), dcol(r["vz"], 4)),
-                 (fmt(diag.get(r["name"]), 2), dcol(diag.get(r["name"], np.nan), 4)),
-                 (fmt(overall.get(r["name"], {}).get("P", np.nan) * 100, 1),
-                  dcol(overall.get(r["name"], {}).get("P", np.nan) - 0.5, 0.08)),
-                 fmt(overall.get(r["name"], {}).get("mean", np.nan) * 100, 3),
-                 regime_label(r["vz"], diag.get(r["name"], np.nan))] for r in rows])
 
-    def pc(c, key="P"):
-        return ("–", "") if not c else (f"{c[key] * 100:.0f}%" + ("*" if abs(c["zP"]) > SIG_Z else ""), dcol(c[key] - 0.5, 0.12))
+def tf_page(pg, bl, px, last):
+    spec, b = bl.spec, bl.b
+    key, label, src = spec["key"], spec["label"], bl.src.upper()
+    if len(b) < 3:
+        return sec(label, "", "<p class='muted'>Meno di 3 periodi completi: servono più dati storici.</p>")
+    big = b.loc[b.rng.idxmax()]
+    cls_share = b.cls.value_counts(normalize=True).reindex(CLASSES).fillna(0)
+    nxt = next_period(b)
+    items = [("Periodi analizzati", f"{len(b):,}".replace(",", "."), f"{b.t0.iloc[0]:%Y-%m-%d} → {b.t0.iloc[-1]:%Y-%m-%d}"),
+             ("Spostamento più ampio mediano", fmt(b.rng.median() * 100, 3, "%"), f"≈ {px(b.rng.median() * last)} in prezzo"),
+             ("Spostamento medio", fmt(b.rng.mean() * 100, 3, "%"), f"≈ {px(b.rng.mean() * last)}"),
+             ("1 periodo su 10 supera", fmt(b.rng.quantile(0.9) * 100, 3, "%"), f"≈ {px(b.rng.quantile(0.9) * last)}"),
+             ("Spostamento massimo storico", fmt(big.rng * 100, 2, "%"), period_label(key, [big.t0])[0]),
+             ("Periodi rialzisti", fmt((b.ret > 0).mean() * 100, 1, "%"), f"rendimento medio {fmt(b.ret.mean() * 100, 3, '%')}"),
+             ("Trend (restituisce ≤ 25%)", fmt(cls_share["Trend"] * 100, 1, "%"), "chiude vicino all'estremo"),
+             ("Mean reversion (restituisce ≥ 75%)", fmt(cls_share["Mean reversion"] * 100, 1, "%"), "torna indietro quasi tutto"),
+             ("Parziale", fmt(cls_share["Parziale"] * 100, 1, "%"), "restituisce tra 25% e 75%"),
+             ("Mean reversion media", fmt(b.retr.mean() * 100, 3, "%"), f"{fmt(b.rf.mean() * 100, 0)}% dello spostamento"),
+             ("Periodo dopo nella stessa direzione", fmt(nxt[0]["same"] * 100, 1, "%") if nxt else "–", "")]
+    if bl.intra:
+        items += [("Massimo più spesso in", most(b.bH), TIMING_UNIT.get(key, "")),
+                  ("Minimo più spesso in", most(b.bL), TIMING_UNIT.get(key, ""))]
+    note = (f"Misurato su barre {src}: il 'quando' dentro il periodo ha la risoluzione di una barra {src}."
+            if bl.intra else f"Ogni periodo è una singola barra {src}: si misurano ampiezza e direzione; l'ordine "
+            "massimo/minimo è dedotto dalla candela (chiusura sopra l'apertura = prima il minimo).")
+    out = [sec(f"{label}: sintesi", note, kpis(items))]
+    out.append(sec("Spostamento più ampio e mean reversion: quanto",
+                   "Ogni riga è una misura calcolata su tutti i periodi, in % del prezzo di apertura del periodo. "
+                   "P90 = superato solo nel 10% dei periodi. Le ultime due colonne traducono mediana e P90 in prezzo "
+                   "al livello attuale.",
+                   table(["Misura", "N", "Media %", "P10 %", "P25 %", "Mediana %", "P75 %", "P90 %", "P95 %", "Max %",
+                          "Mediana ≈ prezzo", "P90 ≈ prezzo"], pct_rows(b, px, last)) + pg.fig(fig_dist(b))))
+    if bl.intra:
+        out.append(sec("Quando avvengono",
+                       f"Sinistra: in quale {TIMING_UNIT.get(key)} si forma il massimo e il minimo del periodo. Destra: dove "
+                       "finisce lo spostamento più ampio, cioè il punto da cui parte il rientro (mean reversion).",
+                       pg.fig(fig_timing(b, TIMING_UNIT.get(key)))))
+    if category(spec, b.t0.iloc[:1]) is not None:
+        cname = {"min": "ora del giorno", "h1": "ora del giorno", "d": "giorno della settimana", "q": "trimestre",
+                 "s": "semestre"}.get(key, "blocco orario" if spec.get("k") else "mese")
+        crow = []
+        for cv, x in b.groupby("cat", observed=True):
+            crow.append([str(cv), len(x), fmt(x.rng.mean() * 100, 3), fmt(x.rng.median() * 100, 3),
+                         px(x.rng.median() * last), (fmt((x.ret > 0).mean() * 100, 1), pcol((x.ret > 0).mean())),
+                         fmt(x.ret.mean() * 100, 3), fmt((x.cls == "Trend").mean() * 100, 1),
+                         fmt((x.cls == "Mean reversion").mean() * 100, 1), fmt(x.rf.mean() * 100, 0),
+                         fmt(x.rv.mean(), 2) if "rv" in x else "–"] + ([most(x.bH), most(x.bL)] if bl.intra else []))
+        out.append(sec(f"Quando: per {cname}", f"Come cambiano ampiezza, direzione e tipo di periodo in base a {cname}.",
+                       pg.fig(fig_category(b, cname)) + table(
+                           [cname.capitalize(), "N", "Spost. medio %", "Spost. mediano %", "≈ prezzo", "% rialzisti",
+                            "Rend. medio %", "% Trend", "% Mean rev.", "Restituito medio %", "Volume rel."]
+                           + (["Massimo più spesso", "Minimo più spesso"] if bl.intra else []), crow)))
+    if key != "y" and b.year.nunique() > 1:
+        out.append(sec("Come cambia nel tempo", "Stesse misure, anno per anno.", pg.fig(fig_years(b))))
 
-    tCur = table(["Orizzonte", "Mossa ultima finestra", "|z|", "P(cont) per |z|", "ER → P(cont)", "Vol → P(cont)",
-                  "Volume → P(cont)", "Dist. media (σ)", "P(rientro)", "P(tocca media)", "Media mobile"],
-                 [[r["name"], (fmt(r["past"] * 100, 2, "%"), dcol(r["past"], 0.05)), fmt(r["z"], 2),
-                   pc(r["fam"].get("z", (None, None))[1]),
-                   *[(f"{r['fam'][k][0]}: " + pc(r["fam"][k][1])[0], pc(r["fam"][k][1])[1]) if k in r["fam"] else "–"
-                     for k in ("er", "vol", "rv")],
-                   fmt(r.get("dev"), 2), pc(r.get("mr", (None, None))[1]),
-                   (fmt(r["mr"][1]["touch"] * 100, 0, "%") if r.get("mr") and r["mr"][1] else "–"),
-                   ctx.px(r.get("ma", np.nan))] for r in cur])
+    nrows, last_g = [], None
+    for r in nxt:
+        if r["group"] and r["group"] != last_g:
+            nrows.append(r["group"])
+        last_g = r["group"]
+        nrows.append([r["label"], r["N"], (fmt(r["same"] * 100, 1), pcol(r["same"])), (fmt(r["up"] * 100, 1), pcol(r["up"])),
+                      fmt(r["ret"] * 100, 3), (fmt(r["rr"], 2), pcol(r["rr"], 1, 0.5)), fmt(r["bh"] * 100, 1),
+                      fmt(r["bl"] * 100, 1), fmt(r["inside"] * 100, 1), fmt(r["fb"] * 100, 1), fmt(r["mid"] * 100, 1)])
+    out.append(sec("Cosa succede nel periodo successivo (momentum o mean reversion fra periodi)",
+                   "Per ogni condizione del periodo appena chiuso: quante volte il successivo va nella stessa direzione "
+                   "(blu = prosegue, momentum; rosso = inverte, mean reversion), quanto è ampio rispetto al mediano, quante "
+                   "volte rompe il massimo o il minimo precedente, quante volte resta dentro (inside), quante rotture sono "
+                   "false (rompe ma chiude di nuovo dentro il range precedente) e quante volte torna a metà del periodo "
+                   "precedente.",
+                   table(["Condizione", "N", "% stessa direzione", "% rialzista", "Rend. medio %", "Ampiezza vs mediano",
+                          "% rompe massimo prec.", "% rompe minimo prec.", "% inside", "% false rotture",
+                          "% torna a metà prec."], nrows)))
 
-    vol_html = ""
-    if vp:
-        tV = table(["Finestra", "POC", "VAL", "VAH", "VWAP", "Prezzo vs POC", "Posizione"],
-                   [[lab, ctx.px(pf["poc"]), ctx.px(pf["val"]), ctx.px(pf["vah"]), ctx.px(pf["vwap"]),
-                     (fmt((last_px / pf["poc"] - 1) * 100, 2, "%"), dcol(last_px / pf["poc"] - 1, 0.05)),
-                     "sopra VA" if last_px > pf["vah"] else "sotto VA" if last_px < pf["val"] else "dentro VA"]
-                    for lab, pf in vp["profiles"].items()])
-        vk = []
-        if "daily" in vp:
-            dv = vp["daily"]
-            vk += [("Volume ultima sessione", f"{dv['last']:,.0f}"), ("vs media 20g", f"{dv['last'] / dv['ma20']:.2f}×"),
-                   ("vs media 252g", f"{dv['last'] / dv['ma252']:.2f}×"), ("Percentile 1 anno", f"{dv['pct'] * 100:.0f}"),
-                   ("Media 5g / 252g", f"{dv['last5'] / dv['ma252']:.2f}×"), ("Media 20g / 252g", f"{dv['ma20'] / dv['ma252']:.2f}×")]
-        if "hourly" in vp:
-            vk.append(("RVOL ultima H1 (stessa ora)", fmt(vp["hourly"]["rvol_last"], 2, "×")))
-        vk_html = "<div class='kpi'>" + "".join(f"<div><span>{a}</span><b>{b}</b></div>" for a, b in vk) + "</div>"
-        vol_html = sec("Volume: dove si concentra e come si confronta con lo storico",
-                       f"Volume Profile da barre {ctx.base.name} (volume di ogni barra distribuito sul suo range). "
-                       "<b style='color:#f59e0b'>Arancio</b> = POC (prezzo con più volume), blu = Value Area 70%, "
-                       "linea tratteggiata = prezzo attuale, linea verde punteggiata = VWAP della finestra. "
-                       f"Volume: {ctx.meta.get('vol_kind') or 'n/d'}"
-                       + (" — sui CFD è tick volume: misura l'attività, non il controvalore." if ctx.meta.get("vol_kind") == "tick" else "."),
-                       tV + F(fig_profiles(ctx, vp)) + "<h2 style='margin-top:16px'>Volume corrente vs storico</h2>" + vk_html
-                       + (F(fig_hour_volume(vp["hourly"])) if "hourly" in vp else ""))
+    tf = "%Y-%m-%d %H:%M" if bl.src != "d1" else "%Y-%m-%d"
 
-    body = [
-        f"<h1>{html.escape(ctx.name)} — analisi quantitativa</h1><p class='muted'>Fonte: {ctx.meta['source']} · "
-        f"H1: {len(ctx.h1.df) if ctx.h1 else 0} barre"
-        + (f" ({ctx.h1.idx[0]:%Y-%m-%d} → {ctx.h1.idx[-1]:%Y-%m-%d %H:%M})" if ctx.h1 else "")
-        + f" · D1: {len(ctx.d1.df)} barre ({ctx.d1.idx[0]:%Y-%m-%d} → {ctx.d1.idx[-1]:%Y-%m-%d}) · orari = ora del server/fonte</p>",
-        sec("Verdetto", "Sintesi automatica. * = |z| > 2.5 sulla N effettiva (finestre sovrapposte già corrette).",
-            verdict(ctx, ts, rows, tm, cond, hours, overall, mr, vp)),
-        sec("Stato attuale", "Dove si trova oggi lo strumento rispetto alla sua storia.", kpi),
-        sec("Cruscotto: cosa dice la storia sulla situazione di adesso",
-            "Per ogni orizzonte: la mossa dell'ultima finestra, in quale fascia storica cade e con che frequenza, "
-            "in passato, da quella fascia il movimento è continuato (blu) o si è invertito (rosso); a destra la "
-            "distanza dalla media mobile (2× orizzonte) e la probabilità storica di rientro.", tCur),
-        sec("Come cambia il prezzo nel tempo", "Prezzo, drawdown, regimi di trend/mean reversion nel tempo (Variance Ratio "
-            "mobile a 1 anno) e volume.", F(fig_history(ctx))),
-        sec("Movimenti per orizzonte: rendimenti",
-            "Rendimento da chiusura a chiusura dopo l'orizzonte (le uscite che cadono nel weekend slittano alla prima barra "
-            "disponibile). t = t-stat Newey-West della media. N eff = finestre indipendenti; in arancio se < 30 "
-            "(campione insufficiente per conclusioni).", tA + F(fig_hists(hists))),
-        sec("Movimenti per orizzonte: escursioni (per SL/TP)",
-            "MFE = massimo movimento favorevole a un long entro l'orizzonte (high massimo), MAE = massimo movimento avverso "
-            "(low minimo). Per uno short scambia le colonne. P75 = soglia superata nel 25% dei casi. Prezzi = percentuali "
-            "applicate al prezzo attuale. 'Range più frequente' = moda della distribuzione high−low.", tB),
-        sec("Regime: momentum o mean reversion per orizzonte",
-            "Variance Ratio: VR>1 significa che i movimenti tendono a proseguire, VR<1 che tendono a rientrare (z robusto, "
-            "|z|>2 significativo). TSMOM t = t-stat della strategia 'segui il segno dell'ultima finestra' sullo stesso "
-            "orizzonte.", tC + F(fig_vr(rows))),
-        sec("Matrice momentum: mossa passata → mossa futura",
-            "Colore = t-stat del payoff sign(mossa passata) × rendimento futuro. Blu = la direzione passata prosegue "
-            "(momentum), rosso = si inverte (mean reversion). Numero = % di volte in cui la direzione è proseguita. "
-            "Celle vuote = meno di 10 finestre indipendenti.", F(fig_tsmom(tm))),
-        sec("Quando prosegue e quando si inverte",
-            "P(continuazione) dopo una mossa sull'orizzonte, per la stessa durata futura, divisa per condizione al momento "
-            "dell'ingresso. |z| = mossa in σ (volatilità recente); ER = efficienza di Kaufman (1 = linea retta, 0 = laterale); "
-            "volume relativo = volume della finestra vs atteso per quelle ore. Blu > 50%, rosso < 50%, * significativo.",
-            F(fig_conditional(cond, names, "P"))),
-        sec("Quando il trend è più forte",
-            "Efficienza (ER) del movimento successivo rispetto alla media dell'orizzonte: 1.20 = trend del 20% più "
-            "direzionale del normale. Indica in quali condizioni i movimenti successivi sono puliti e in quali sono choppy.",
-            F(fig_conditional(cond, names, "ER"))),
-        sec("Quando: ora del giorno (server)",
-            "Per gli orizzonti intraday: continuazione della mossa appena conclusa e forza del trend successivo, per ora di "
-            "ingresso. Qui si vedono le sessioni con breakout/momentum e quelle da range/mean reversion.",
-            F(fig_hours(hours)) if hours["P"] else "<p class='muted'>Servono dati H1.</p>"),
-        sec("Mean reversion verso la media mobile",
-            "Distanza del prezzo dalla media mobile (finestra = 2× orizzonte) in σ dell'orizzonte. Primo numero = "
-            "P(il prezzo si muove verso la media entro l'orizzonte), secondo = P(tocca la media entro l'orizzonte). "
-            "Blu = tende a rientrare, rosso = tende ad allontanarsi ancora (trend).", F(fig_mr(mr, names))),
-        sec("Sequenze (streak)", "Probabilità che la barra successiva prosegua nello stesso verso dopo k barre consecutive. "
-            "Linee punteggiate = probabilità base. Sopra la base = persistenza, sotto = esaurimento.", F(fig_streaks(streaks(ctx)))),
-        sec("Stagionalità", "Barre di errore = ±2 errori standard: se attraversano lo zero, l'effetto non è distinguibile "
-            "dal rumore.", F(fig_season(seasonality(ctx)))),
-        vol_html,
-        sec("Metodologia e limiti",
-            "", "<ul><li>Orizzonti ≤ 24h calcolati su barre H1, oltre su D1. Tempo di calendario: '24h' = 24 ore reali, "
-            "weekend inclusi se attraversati.</li><li>Le finestre sovrapposte gonfiano il campione: tutte le "
-            "significatività usano N_eff = durata del campione / orizzonte. Con meno di 30 N_eff (tipico per 6m–12m) "
-            "i numeri sono descrittivi, non inferenziali.</li><li>σ = volatilità EWMA causale (nessun dato futuro); "
-            "fasce di ER/volatilità/volume sono quintili/terzili dell'intero campione (descrittivo, non un segnale "
-            "eseguibile così com'è).</li><li>Escluse le finestre con meno della metà delle barre tipiche (cadono per lo più "
-            "nel weekend/chiusura): altrimenti falsano ER e continuazione del venerdì sera.</li><li>Nessun costo di transazione incluso: un edge del 52% su 4h raramente "
-            "sopravvive allo spread.</li><li>Test multipli: con centinaia di celle, qualche 'significatività' è "
-            "rumore. Cerca coerenza fra orizzonti vicini e stabilità nel tempo (VR mobile).</li></ul>"),
-    ]
+    def plist(x):
+        return [[period_label(key, [r.t0])[0], px(r.O), px(r.H), px(r.L), px(r.C), fmt(r.rng * 100, 3),
+                 (fmt(r.ret * 100, 3), pcol(r.ret, 0, max(b.rng.median(), 1e-9))), r.dir, str(r.cls), fmt(r.rf * 100, 0),
+                 f"{r.tH:{tf}}" if bl.intra else "–", f"{r.tL:{tf}}" if bl.intra else "–",
+                 fmt(getattr(r, "rv", np.nan), 2)] for r in x.itertuples()]
+
+    hdr = ["Periodo", "Apertura", "Massimo", "Minimo", "Chiusura", "Spostamento %", "Rendimento %", "Spostamento",
+           "Tipo", "Restituito %", "Quando il massimo", "Quando il minimo", "Volume rel."]
+    if key == "y":
+        out.append(sec("Anno per anno", "", table(hdr, plist(b.iloc[::-1]))))
+    else:
+        out.append(sec("Periodi più ampi della storia", "I 15 periodi con lo spostamento più ampio.",
+                       table(hdr, plist(b.nlargest(15, "rng")))))
+        out.append(sec("Ultimi periodi chiusi", "", table(hdr, plist(b.iloc[-15:][::-1]))))
+    return "".join(out)
+
+
+def overview(pg, data, blocks, px, last, last_time):
+    d1 = data["d1"]
+    c = d1["close"]
+    s50, s200 = c.rolling(50).mean().iloc[-1], c.rolling(200).mean().iloc[-1]
+    y = c[c.index >= c.index[-1] - pd.Timedelta(days=365)]
+    dd = c / c.cummax() - 1
+    items = [("Ultimo prezzo", px(last), f"{last_time:%Y-%m-%d %H:%M}"),
+             ("vs SMA50 giornaliera", fmt((last / s50 - 1) * 100, 2, "%"), px(s50)),
+             ("vs SMA200 giornaliera", fmt((last / s200 - 1) * 100, 2, "%"), px(s200)),
+             ("Massimo 52 settimane", px(y.max()), fmt((last / y.max() - 1) * 100, 2, "% dal massimo")),
+             ("Minimo 52 settimane", px(y.min()), fmt((last / y.min() - 1) * 100, 2, "% dal minimo")),
+             ("Drawdown attuale", fmt(dd.iloc[-1] * 100, 1, "%"), f"massimo storico {fmt(dd.min() * 100, 1, '%')}")]
+    for lab, days in (("1 settimana", 7), ("1 mese", 30), ("3 mesi", 91), ("6 mesi", 182), ("12 mesi", 365)):
+        p = c[c.index <= c.index[-1] - pd.Timedelta(days=days)]
+        if len(p):
+            items.append((f"Rendimento {lab}", fmt((last / p.iloc[-1] - 1) * 100, 2, "%"), ""))
+
+    crow, srow = [], []
+    for spec in TFS:
+        bl = blocks.get(spec["key"])
+        if bl is None or len(bl.b) < 3:
+            continue
+        b, cu = bl.b, bl.cur
+        med = b.rng.median()
+        if bl.intra:
+            el = min(cu.cnt / bl.med_cnt, 1)
+            rs = (cu.H - cu.L) / cu.O
+            pos = (last - cu.L) / (cu.H - cu.L) if cu.H > cu.L else np.nan
+            crow.append([spec["label"], period_label(spec["key"], [cu.t0])[0], fmt(el * 100, 0, "%"), px(cu.O), px(cu.H),
+                         px(cu.L), (fmt((last / cu.O - 1) * 100, 3, "%"), pcol(last / cu.O - 1, 0, max(med, 1e-9))),
+                         fmt(rs * 100, 3, "%"), (fmt(rs / med * 100, 0, "%"), pcol(rs / med, 1, 0.6)),
+                         fmt((b.rng <= rs).mean() * 100, 0), fmt(pos * 100, 0, "%"),
+                         fmt((b.pH <= el).mean() * 100, 0, "%"), fmt((b.pL <= el).mean() * 100, 0, "%")])
+        nx = next_period(b)
+        srow.append([spec["label"], len(b), fmt(med * 100, 3), px(med * last), fmt(b.rng.quantile(0.9) * 100, 3),
+                     (fmt((b.ret > 0).mean() * 100, 1), pcol((b.ret > 0).mean())),
+                     fmt((b.cls == "Trend").mean() * 100, 1), fmt((b.cls == "Mean reversion").mean() * 100, 1),
+                     fmt(b.retr.mean() * 100, 3), fmt(b.rf.mean() * 100, 0),
+                     most(b.bH) if bl.intra else "–", most(b.bL) if bl.intra else "–",
+                     (fmt(nx[0]["same"] * 100, 1), pcol(nx[0]["same"])) if nx else "–"])
+    return "".join([
+        sec("Stato attuale", "", kpis(items)),
+        sec("Periodo in corso, per timeframe",
+            "Il periodo non ancora chiuso di ogni timeframe confrontato con la storia: quanto spostamento ha già fatto "
+            "rispetto al mediano (100% = ha già fatto uno spostamento tipico), in quale percentile storico cade, dove si "
+            "trova il prezzo nel range del periodo (0% = sul minimo, 100% = sul massimo) e in quale percentuale dei periodi "
+            "passati il massimo e il minimo erano già stati fatti a questo punto del periodo.",
+            table(["Timeframe", "Periodo", "Trascorso", "Apertura", "Massimo finora", "Minimo finora", "Dall'apertura",
+                   "Spostamento finora", "vs mediano", "Percentile", "Posizione nel range",
+                   "Massimo già fatto (storico)", "Minimo già fatto (storico)"], crow)),
+        sec("Sintesi di tutti i timeframe", "Valori su tutta la storia disponibile. Dettagli nelle schede.",
+            table(["Timeframe", "N periodi", "Spost. mediano %", "≈ prezzo", "Spost. P90 %", "% rialzisti", "% Trend",
+                   "% Mean rev.", "Mean rev. media %", "Restituito medio %", "Massimo più spesso", "Minimo più spesso",
+                   "% successivo stessa direzione"], srow)),
+        sec("Come cambia il prezzo nel tempo", "", pg.fig(fig_history(d1)))])
+
+
+def volume_tab(pg, data, meta, px, last):
+    base = data.get("h1") if data.get("h1") is not None else data["d1"]
+    d1 = data["d1"]
+    if "volume" not in base or base["volume"].sum() <= 0:
+        return sec("Volume", "", "<p class='muted'>Nessun dato di volume disponibile.</p>")
+    end = base.index[-1]
+    prof = {}
+    for lab, days in (("12 mesi", 365), ("6 mesi", 182), ("3 mesi", 91), ("1 mese", 30), ("1 settimana", 7)):
+        pf = volume_profile(base, end - pd.Timedelta(days=days))
+        if pf:
+            prof[lab] = pf
+    tv = table(["Finestra", "POC (prezzo con più volume)", "Value Area bassa", "Value Area alta", "VWAP",
+                "Prezzo vs POC", "Prezzo vs VWAP", "Posizione"],
+               [[lab, px(pf["poc"]), px(pf["val"]), px(pf["vah"]), px(pf["vwap"]),
+                 (fmt((last / pf["poc"] - 1) * 100, 2, "%"), pcol(last / pf["poc"] - 1, 0, 0.05)),
+                 (fmt((last / pf["vwap"] - 1) * 100, 2, "%"), pcol(last / pf["vwap"] - 1, 0, 0.05)),
+                 "sopra la Value Area" if last > pf["vah"] else "sotto la Value Area" if last < pf["val"]
+                 else "dentro la Value Area"] for lab, pf in prof.items()])
+    vk = []
+    if "volume" in d1:
+        v = d1["volume"]
+        vk += [("Volume ultima sessione", f"{v.iloc[-1]:,.0f}".replace(",", "."), f"{v.index[-1]:%Y-%m-%d}"),
+               ("vs media 20 sessioni", fmt(v.iloc[-1] / v.iloc[-21:-1].mean(), 2, "×"), ""),
+               ("vs media 252 sessioni", fmt(v.iloc[-1] / v.iloc[-253:-1].mean(), 2, "×"), ""),
+               ("Percentile sull'ultimo anno", fmt((v.iloc[-253:-1] < v.iloc[-1]).mean() * 100, 0), ""),
+               ("Media 20 / media 252", fmt(v.iloc[-20:].mean() / v.iloc[-252:].mean(), 2, "×"),
+                "partecipazione recente vs anno")]
+    hv = ""
+    h1 = data.get("h1")
+    if h1 is not None and "volume" in h1:
+        v = h1["volume"]
+        te = v.index[-1]
+        same = v[(v.index.hour == te.hour) & (v.index < te)].iloc[-20:].mean()
+        vk.append(("Ultima ora vs stessa ora (20 gg)", fmt(v.iloc[-1] / same, 2, "×"), f"{te:%Y-%m-%d %H:00}"))
+        fig = go.Figure()
+        for s, lab, col in ((v[v.index >= te - pd.Timedelta(days=365)], "Media 12 mesi", GREY),
+                            (v[v.index >= te - pd.Timedelta(days=28)], "Media ultime 4 settimane", BLUE),
+                            (v[v.index.normalize() == te.normalize()], "Ultima sessione", AMBER)):
+            g = s.groupby(s.index.hour).mean()
+            if len(g):
+                fig.add_scatter(x=[f"{h:02d}h" for h in g.index], y=g.values, name=lab, mode="lines+markers",
+                                line=dict(color=col))
+        hv = pg.fig(_layout(fig, 380, xaxis_title="Ora (server)", yaxis_title="Volume medio per barra H1"))
+    return (sec("Dove si è scambiato di più (Volume Profile)",
+                f"Profilo da barre {'H1' if base is h1 else 'D1'}: il volume di ogni barra è distribuito sul suo range. "
+                "<b style='color:#f59e0b'>Arancio</b> = POC, blu = Value Area (70% del volume), tratteggio bianco = prezzo "
+                "attuale, punteggiato verde = VWAP."
+                + (" Volume = tick volume (attività, non controvalore)." if meta.get("vol_kind") == "tick" else ""),
+                tv + (pg.fig(fig_profiles(prof, last)) if prof else ""))
+            + sec("Volume attuale rispetto allo storico", "", kpis(vk) + hv))
+
+
+def build_report(name, data, meta, offline=False):
+    last_src = max((k for k in ("m1", "h1", "d1") if data.get(k) is not None), key=lambda k: data[k].index[-1])
+    last, last_time = float(data[last_src]["close"].iloc[-1]), data[last_src].index[-1]
+    dg = meta.get("digits")
+    digits = int(dg) if dg is not None else int(np.clip(5 - np.floor(np.log10(last)), 0, 5))
+
+    def px(x):
+        return fmt(x, digits)
+
+    pg = Page()
+    blocks, tabs = {}, []
+    for spec in TFS:
+        s = pick_source(spec, data)
+        if s is None:
+            need = spec["src"][0].upper()
+            tabs.append((spec["key"], spec["label"], sec(spec["label"], "", f"<p class='muted'>Servono dati {need} "
+                                                                              f"(MT5 o --csv-{need.lower()}).</p>")))
+            continue
+        bl = Blocks(spec, data[s], s)
+        blocks[spec["key"]] = bl
+        tabs.append((spec["key"], spec["label"], tf_page(pg, bl, px, last)))
+    tabs = ([("overview", "Panoramica", overview(pg, data, blocks, px, last, last_time))] + tabs
+            + [("volume", "Volume", volume_tab(pg, data, meta, px, last))])
+
+    nav = "".join(f'<button data-tab="{k}">{html.escape(lb)}</button>' for k, lb, _ in tabs)
+    body = "".join(f'<div class="tab" id="tab-{k}" hidden>{h}</div>' for k, _, h in tabs)
+    info = " · ".join(f"{k.upper()}: {len(data[k])} barre ({data[k].index[0]:%Y-%m-%d} → {data[k].index[-1]:%Y-%m-%d})"
+                      for k in ("m1", "h1", "d1") if data.get(k) is not None)
+    figs = ("const FIGS={" + ",".join(f'"{k}":{v}' for k, v in pg.figs.items()) + "};").replace("</", "<\\/")
     js = (f"<script>{get_plotlyjs()}</script>" if offline
           else f'<script src="https://cdn.plot.ly/plotly-{get_plotlyjs_version()}.min.js" charset="utf-8"></script>')
     return (f"<!doctype html><html lang='it'><head><meta charset='utf-8'><meta name='viewport' "
-            f"content='width=device-width,initial-scale=1'><title>{html.escape(ctx.name)} — Market Profiler</title>"
-            f"<style>{CSS}</style>{js}</head><body><main>{''.join(body)}</main></body></html>")
+            f"content='width=device-width,initial-scale=1'><title>{html.escape(name)} — Market Profiler</title>"
+            f"<style>{CSS}</style>{js}</head><body><header><h1>{html.escape(name)} — analisi descrittiva</h1>"
+            f"<p>Fonte: {html.escape(meta['source'])} · {info} · orari = ora del server/fonte</p><nav>{nav}</nav></header>"
+            f"<main>{body}</main><script>{figs}{JS}</script></body></html>")
 
 
-# ----------------------------------------------------------------------------- main
+def prepare(data):
+    data = {k: v for k, v in data.items() if v is not None and len(v)}
+    if "h1" not in data and "m1" in data:
+        data["h1"] = resample(data["m1"], "1h")
+    if "d1" not in data:
+        data["d1"] = resample(data.get("h1", data.get("m1")), "1D")
+    return data
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Analisi quantitativa di uno strumento -> report HTML")
-    src = ap.add_mutually_exclusive_group(required=True)
-    src.add_argument("--mt5", nargs="+", metavar="SYMBOL", help="simboli dal terminale MT5 aperto")
-    src.add_argument("--csv-h1", help="CSV H1 (export MT5 o generico OHLCV)")
-    src.add_argument("--csv-d1-only", help="solo CSV D1 (niente orizzonti intraday)")
-    src.add_argument("--yf", nargs="+", metavar="TICKER", help="ticker Yahoo Finance (test)")
-    ap.add_argument("--csv-d1", help="CSV D1 opzionale da affiancare a --csv-h1 (storico più lungo)")
+    ap = argparse.ArgumentParser(description="Analisi descrittiva di uno strumento per timeframe -> report HTML a schede")
+    ap.add_argument("--mt5", nargs="+", metavar="SYMBOL", help="simboli dal terminale MT5 aperto")
+    ap.add_argument("--yf", nargs="+", metavar="TICKER", help="ticker Yahoo Finance (prova)")
+    ap.add_argument("--csv-m1", help="CSV M1 (export MT5 o generico OHLCV)")
+    ap.add_argument("--csv-h1", help="CSV H1")
+    ap.add_argument("--csv-d1", help="CSV D1")
     ap.add_argument("--name", help="nome dello strumento per i CSV")
+    ap.add_argument("--bars-m1", type=int, default=500_000, help="barre M1 da MT5 (0 = non scaricare)")
     ap.add_argument("--bars-h1", type=int, default=100_000)
     ap.add_argument("--bars-d1", type=int, default=20_000)
     ap.add_argument("--out", default=".", help="cartella di output")
     ap.add_argument("--offline", action="store_true", help="incorpora plotly.js nel file (funziona senza internet)")
     a = ap.parse_args()
 
-    jobs = []
     if a.mt5:
-        jobs = [(s, lambda s=s: load_mt5(s, a.bars_h1, a.bars_d1)) for s in a.mt5]
+        bars = dict(m1=a.bars_m1, h1=a.bars_h1, d1=a.bars_d1)
+        jobs = [(s, lambda s=s: load_mt5(s, bars)) for s in a.mt5]
     elif a.yf:
         jobs = [(t, lambda t=t: load_yf(t)) for t in a.yf]
-    else:
+    elif a.csv_m1 or a.csv_h1 or a.csv_d1:
         def from_csv():
-            h1 = load_csv(a.csv_h1) if a.csv_h1 else (None, None)
-            d1 = load_csv(a.csv_d1 or a.csv_d1_only) if (a.csv_d1 or a.csv_d1_only) else (daily_from_intraday(h1[0]), None)
-            return h1[0], d1[0], dict(source="CSV", digits=None, vol_kind=h1[1] or d1[1])
-        jobs = [(a.name or Path(a.csv_h1 or a.csv_d1_only).stem, from_csv)]
+            data, kind = {}, None
+            for k, p in (("m1", a.csv_m1), ("h1", a.csv_h1), ("d1", a.csv_d1)):
+                if p:
+                    data[k], kd = load_csv(p)
+                    kind = kind or kd
+            return data, dict(source="CSV", digits=None, vol_kind=kind)
+        jobs = [(a.name or Path(a.csv_h1 or a.csv_m1 or a.csv_d1).stem, from_csv)]
+    else:
+        ap.error("indica una sorgente: --mt5, --csv-m1/--csv-h1/--csv-d1 oppure --yf")
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     for name, loader in jobs:
         try:
-            h1, d1, meta = loader()
-            ctx = Ctx(name, h1, d1, meta)
+            data, meta = loader()
             path = out / f"report_{''.join(ch if ch.isalnum() else '_' for ch in name)}.html"
-            path.write_text(build_report(ctx, a.offline), encoding="utf-8")
+            path.write_text(build_report(name, prepare(data), meta, a.offline), encoding="utf-8")
             print(f"[ok] {name}: {path}")
         except Exception as e:  # un simbolo fallito non blocca gli altri
             print(f"[errore] {name}: {e}", file=sys.stderr)
