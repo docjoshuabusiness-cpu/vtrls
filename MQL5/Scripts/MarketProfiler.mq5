@@ -5,7 +5,8 @@
 //|                                                                  |
 //|  Schede: Panoramica, Minuto, Ora, 4/6/8/12 ore, Giorno,           |
 //|  Settimana, 2 settimane, Mese, Trimestre, Semestre, Anno,        |
-//|  Sessioni, Swing, Rotture, Impulsi, Notizie, Gap, Volume,         |
+//|  Sessioni, Livelli, Direzione, Swing, Rotture, Impulsi, Notizie,  |
+//|  Gap, Volume,                                                    |
 //|  Rapporto. Orari chiave di New York, Londra, Francoforte e Tokyo  |
 //|  convertiti giorno per giorno: vale per indici USA ed europei,    |
 //|  forex e materie prime (imposta il fuso orario dei dati).         |
@@ -64,6 +65,7 @@ input ENUM_REF_MKT InpRefMarket = REF_AUTO; // Piazza di riferimento per le etic
 input int    InpSessionHours = 4;     // Sessioni: ore osservate dopo ogni orario chiave
 input int    InpORMinutes    = 30;    // Sessioni: minuti del range iniziale
 input bool   InpSkipIncomplete = true; // Escludi dalle analisi intraday i primi anni con copertura oraria incompleta
+input double InpLevelR       = 0.10;  // Livelli: distanza di reazione r (frazione del range mediano del periodo)
 
 #define NTF     13
 #define NX_ROWS 28
@@ -4233,6 +4235,822 @@ void SessionTab(CSeries &s, const int barSec)
   }
 
 //+------------------------------------------------------------------+
+//| Periodi di 4 ore, 8 ore, giorno, settimana, mese costruiti dalle  |
+//| barre M1 (o M5): base delle schede Livelli e Direzione            |
+//+------------------------------------------------------------------+
+#define NFAM 5
+string FAM_NAME[NFAM] = {"4 ore", "8 ore", "Giorno", "Settimana", "Mese"};
+string FAM_PREV[NFAM] = {"del blocco di 4 ore precedente", "del blocco di 8 ore precedente", "del giorno precedente",
+                         "della settimana precedente", "del mese precedente"
+                        };
+string FAM_HI[NFAM]   = {"del giorno", "del giorno", "della settimana", "del mese", ""};
+string FAM_FIRST[NFAM] = {"primo blocco del giorno", "primo blocco del giorno", "primo giorno della settimana", "prima settimana del mese", ""};
+string FAM_NEXT[NFAM]  = {"nel blocco successivo", "nel blocco successivo", "nel giorno successivo", "nella settimana successiva", "nel mese successivo"};
+string g_repLv = "", g_repDir = "";
+
+class CPer
+  {
+public:
+   int               n;
+   int               s[], e[];
+   datetime          t0[], tH[], tL[], tO[];
+   double            O[], H[], L[], C[];
+   bool              ok[];
+                     CPer(void) { n = 0; }
+   void              Size(const int k)
+     {
+      ArrayResize(s, k, 4096); ArrayResize(e, k, 4096); ArrayResize(t0, k, 4096); ArrayResize(tH, k, 4096);
+      ArrayResize(tL, k, 4096); ArrayResize(tO, k, 4096); ArrayResize(O, k, 4096); ArrayResize(H, k, 4096);
+      ArrayResize(L, k, 4096); ArrayResize(C, k, 4096); ArrayResize(ok, k, 4096);
+     }
+   void              Free(void) { n = 0; Size(0); }
+  };
+CPer g_per[NFAM];
+
+long PerKey(const datetime t, const int fam, long &cDay, long &cYM)
+  {
+   long day = (long)t / 86400;
+   if(fam == 0)
+      return day * 6 + HourOf(t) / 4;
+   if(fam == 1)
+      return day * 3 + HourOf(t) / 8;
+   if(fam == 2)
+      return day;
+   if(fam == 3)
+      return (day + 4) / 7;  // settimana che parte la domenica (il forex riapre la domenica sera in UTC)
+   if(day != cDay)
+     {
+      MqlDateTime d;
+      TimeToStruct(t, d);
+      cYM = (long)d.year * 12 + d.mon - 1;
+      cDay = day;
+     }
+   return cYM;
+  }
+
+void PerBuild(CSeries &s, const int fam, CPer &p)
+  {
+   p.Free();
+   long cDay = -1, cYM = 0, cur = LONG_MIN;
+   for(int i = 0; i < s.n; i++)
+     {
+      long k = PerKey(s.t[i], fam, cDay, cYM);
+      if(k != cur)
+        {
+         if(p.n > 0)
+            p.e[p.n - 1] = i;
+         p.n++;
+         p.Size(p.n);
+         int y = p.n - 1;
+         p.s[y] = i;
+         p.e[y] = s.n;
+         p.t0[y] = s.t[i];
+         p.O[y] = s.o[i];
+         p.H[y] = s.h[i];
+         p.L[y] = s.l[i];
+         p.tH[y] = s.t[i];
+         p.tL[y] = s.t[i];
+         cur = k;
+        }
+      int x = p.n - 1;
+      if(s.h[i] > p.H[x])
+        {
+         p.H[x] = s.h[i];
+         p.tH[x] = s.t[i];
+        }
+      if(s.l[i] < p.L[x])
+        {
+         p.L[x] = s.l[i];
+         p.tL[x] = s.t[i];
+        }
+      p.C[x] = s.c[i];
+     }
+   if(p.n > 1)
+      p.n--;  // l'ultimo periodo e' ancora in corso
+   if(p.n < 3)
+      return;
+   double cs[];
+   ArrayResize(cs, p.n);
+   for(int k = 0; k < p.n; k++)
+      cs[k] = p.e[k] - p.s[k];
+   double med = MedianOf(cs, p.n);
+   for(int k = 0; k < p.n; k++)
+     {
+      p.ok[k] = k > 0 && cs[k] >= 0.25 * med;  // il primo periodo puo' essere parziale; scarta i frammenti
+      int last = p.s[k];
+      for(int j = p.s[k]; j < p.e[k]; j++)
+         if(s.l[j] <= p.O[k] && s.h[j] >= p.O[k])
+            last = j;
+      p.tO[k] = s.t[last];  // ultimo passaggio sull'apertura: da qui il periodo resta da un lato
+     }
+  }
+
+double PerMedRange(CPer &p, const int k, const int look)
+  {
+   double a[];
+   ArrayResize(a, look);
+   int q = 0;
+   for(int j = k - 1; j >= 0 && q < look; j--)
+      if(p.ok[j])
+         a[q++] = p.H[j] - p.L[j];
+   return q >= 5 ? MedianOf(a, q) : Nan();
+  }
+
+//+------------------------------------------------------------------+
+//| Livelli chiave: massimo, minimo, chiusura del periodo precedente  |
+//| e apertura del periodo in corso                                   |
+//+------------------------------------------------------------------+
+int    g_lvN = 0;
+int    g_lvTy[], g_lvRc[], g_lvB[], g_lvPD[], g_lvCP[], g_lvOP[], g_lvOF[];
+bool   g_lvT[], g_lvCB[];
+double g_lvX[], g_lvFr[];
+
+int LvBucket(const int fam, const datetime t)
+  {
+   if(fam <= 2)
+      return HourOf(t);
+   if(fam == 3)
+      return DowMon(t);
+   MqlDateTime d;
+   TimeToStruct(t, d);
+   return (d.day - 1) / 7;
+  }
+
+string LvBucketLab(const int fam, const int b)
+  {
+   if(fam <= 2)
+      return HourLab(b);
+   if(fam == 3)
+      return DOW[b];
+   string w[5] = {"giorni 1-7", "giorni 8-14", "giorni 15-21", "giorni 22-28", "giorni 29-31"};
+   return w[b];
+  }
+
+int LvNB(const int fam) { return fam <= 2 ? 24 : (fam == 3 ? 7 : 5); }
+
+// Primo tocco del livello partendo dal lato sd (+1 prezzo sopra, -1 sotto), poi gara: attraversa di r (+1) o respinto di r (-1).
+bool LvTouch(CSeries &s, const int j0, const int j1, const double lev, const int sd, const double r, const double closeP,
+             int &jt, int &race, bool &cb, double &exc)
+  {
+   jt = -1;
+   race = 0;
+   exc = 0;
+   cb = -sd * (closeP - lev) > 0;  // il periodo chiude dall'altra parte del livello
+   for(int j = j0; j < j1; j++)
+      if(sd > 0 ? s.l[j] <= lev : s.h[j] >= lev)
+        {
+         jt = j;
+         break;
+        }
+   if(jt < 0)
+      return false;
+   int c = -sd;
+   double tgt = lev + c * r, bnc = lev + sd * r;
+   bool done = false;
+   for(int q = jt; q < j1; q++)
+     {
+      double pen = c > 0 ? s.h[q] - lev : lev - s.l[q];
+      if(pen > exc)
+         exc = pen;
+      if(done)
+         continue;
+      bool ht = c > 0 ? s.h[q] >= tgt : s.l[q] <= tgt;
+      bool hb = sd > 0 ? s.h[q] >= bnc : s.l[q] <= bnc;
+      if(q == jt)  // nella barra del tocco il ritorno di r puo' essere avvenuto prima del tocco: conta solo l'attraversamento
+        {
+         if(ht)
+           {
+            race = hb ? 0 : 1;
+            done = true;
+           }
+         continue;
+        }
+      if(ht && hb)
+         done = true;
+      else
+         if(ht)
+           {
+            race = 1;
+            done = true;
+           }
+         else
+            if(hb)
+              {
+               race = -1;
+               done = true;
+              }
+     }
+   exc = lev > 0 ? exc / lev : Nan();
+   return true;
+  }
+
+void LvAdd(const int ty, const bool t, const int rc, const bool cb, const double x, const int b, const int pd, const int cp,
+           const int op, const int of, const double fr)
+  {
+   int i = g_lvN++;
+   ArrayResize(g_lvTy, g_lvN, 16384); ArrayResize(g_lvRc, g_lvN, 16384); ArrayResize(g_lvB, g_lvN, 16384);
+   ArrayResize(g_lvPD, g_lvN, 16384); ArrayResize(g_lvCP, g_lvN, 16384); ArrayResize(g_lvOP, g_lvN, 16384);
+   ArrayResize(g_lvOF, g_lvN, 16384); ArrayResize(g_lvT, g_lvN, 16384); ArrayResize(g_lvCB, g_lvN, 16384);
+   ArrayResize(g_lvX, g_lvN, 16384); ArrayResize(g_lvFr, g_lvN, 16384);
+   g_lvTy[i] = ty;
+   g_lvT[i] = t;
+   g_lvRc[i] = rc;
+   g_lvCB[i] = cb;
+   g_lvX[i] = x;
+   g_lvB[i] = b;
+   g_lvPD[i] = pd;
+   g_lvCP[i] = cp;
+   g_lvOP[i] = op;
+   g_lvOF[i] = of;
+   g_lvFr[i] = fr;
+  }
+
+// totTouch > 0: righe per orario (N = tocchi, terza colonna = quota dei tocchi)
+void LvLine(const string label, const bool &m[], const int fam, const int totTouch)
+  {
+   int n = 0, nt = 0, rc = 0, rr = 0, cb = 0, nx = 0, nf = 0;
+   int bc[24];
+   ArrayInitialize(bc, 0);
+   double xs[], fr[];
+   ArrayResize(xs, g_lvN);
+   ArrayResize(fr, g_lvN);
+   for(int e = 0; e < g_lvN; e++)
+     {
+      if(!m[e])
+         continue;
+      n++;
+      if(!g_lvT[e])
+         continue;
+      nt++;
+      if(g_lvRc[e] > 0)
+         rc++;
+      if(g_lvRc[e] < 0)
+         rr++;
+      if(g_lvCB[e])
+         cb++;
+      if(MathIsValidNumber(g_lvX[e]))
+         xs[nx++] = g_lvX[e];
+      if(MathIsValidNumber(g_lvFr[e]))
+         fr[nf++] = g_lvFr[e];
+      if(g_lvB[e] >= 0 && g_lvB[e] < 24)
+         bc[g_lvB[e]]++;
+     }
+   if(n < 10)
+      return;
+   int bb = 0;
+   for(int z = 1; z < 24; z++)
+      if(bc[z] > bc[bb])
+         bb = z;
+   string when = (nt > 0 && totTouch <= 0) ? LvBucketLab(fam, bb) + " (" + FP((double)bc[bb] / nt, 0) + "%)" : "-";
+   double pt = totTouch > 0 ? (double)n / totTouch : (double)nt / n;
+   double pc = nt > 0 ? (double)rc / nt : Nan(), pr = nt > 0 ? (double)rr / nt : Nan(), pb = nt > 0 ? (double)cb / nt : Nan();
+   double mx = nx > 0 ? MedianOf(xs, nx) : Nan(), mf = nf > 0 ? MedianOf(fr, nf) : Nan();
+   W("<tr>" + TD(label) + TD(I2S(n)) + TD(FP(pt, 1)) + TD(when) + TDc(FP(pc, 1), PCol(pc, pr, 0.15)) + TD(FP(pr, 1)) +
+     TD(FP(pb, 1)) + TD(FP(mx, 3)) + TD(PX(mx * g_last)) + TD(FP(mf, 0)) + "</tr>");
+   R(g_repLv, "    " + label + " (N " + I2S(n) + "): " + (totTouch > 0 ? FP(pt, 1) + "% dei tocchi" : "toccato " + FP(pt, 1) + "%" +
+     (nt > 0 ? ", pi&ugrave; spesso " + when : "")) + ", dopo il tocco attraversa di r " + FP(pc, 1) + "%, respinto di r " + FP(pr, 1) +
+     "%, il periodo chiude dall'altra parte " + FP(pb, 1) + "%, escursione mediana oltre il livello " + FP(mx, 3) + "% (circa " +
+     PX(mx * g_last) + "), tocco al " + FP(mf, 0) + "% del periodo (mediana)");
+  }
+
+void LvGrp(const string t)
+  {
+   Grp(t, 10);
+   R(g_repLv, "  [" + t + "]");
+  }
+
+void LevelFam(CSeries &s, CPer &p, const int fam, const int barSec)
+  {
+   g_lvN = 0;
+   int nIn = 0, nOH = 0, nOL = 0, nBoth = 0, nBothHF = 0, nInside = 0, cAbove = 0, cBelow = 0, nPer = 0;
+   int oAway = 0, oBack = 0, oNever = 0, oNeverUp = 0;
+   double rs[];
+   ArrayResize(rs, p.n);
+   int nr = 0;
+   for(int k = 2; k < p.n; k++)
+     {
+      if(!p.ok[k] || !p.ok[k - 1])
+         continue;
+      double r = InpLevelR * PerMedRange(p, k, 20);
+      if(!(r > 0))
+         continue;
+      rs[nr++] = r / p.O[k];
+      double PH = p.H[k - 1], PL = p.L[k - 1], PC = p.C[k - 1], O = p.O[k], C = p.C[k];
+      int j0 = p.s[k], j1 = p.e[k];
+      int pd = p.C[k - 1] >= p.O[k - 1] ? 1 : -1;
+      double pr = PH - PL;
+      int cp = pr > 0 ? (int)MathMin(2.0, MathFloor(3.0 * (PC - PL) / pr)) : 1;
+      int op = O > PH ? 1 : (O < PL ? -1 : 0);
+      double per = (double)((long)s.t[j1 - 1] - (long)s.t[j0] + barSec);
+      nPer++;
+      int jH = -1, rH = 0, jL = -1, rL = 0;
+      bool cbH = false, cbL = false;
+      double xH = 0, xL = 0;
+      bool tH = LvTouch(s, j0, j1, PH, O > PH ? 1 : -1, r, C, jH, rH, cbH, xH);
+      bool tL = LvTouch(s, j0, j1, PL, O < PL ? -1 : 1, r, C, jL, rL, cbL, xL);
+      int ofH = tH ? ((tL && jL < jH) ? 1 : 0) : -1;
+      int ofL = tL ? ((tH && jH < jL) ? 1 : 0) : -1;
+      LvAdd(0, tH, rH, cbH, xH, tH ? LvBucket(fam, s.t[jH]) : -1, pd, cp, op, ofH, tH ? ((long)s.t[jH] - (long)s.t[j0]) / per : Nan());
+      LvAdd(1, tL, rL, cbL, xL, tL ? LvBucket(fam, s.t[jL]) : -1, pd, cp, op, ofL, tL ? ((long)s.t[jL] - (long)s.t[j0]) / per : Nan());
+      if(op == 0)
+        {
+         nIn++;
+         if(!tH && !tL)
+            nInside++;
+         else
+            if(tH && !tL)
+               nOH++;
+            else
+               if(!tH && tL)
+                  nOL++;
+               else
+                 {
+                  nBoth++;
+                  if(jH < jL)
+                     nBothHF++;
+                 }
+        }
+      if(C > PH)
+         cAbove++;
+      else
+         if(C < PL)
+            cBelow++;
+      //--- apertura del periodo: dopo essersi allontanato di r, ci ritorna?
+      int jd = -1, sdO = 0;
+      for(int j = j0; j < j1; j++)
+        {
+         bool up = s.h[j] >= O + r, dn = s.l[j] <= O - r;
+         if(up && dn)
+            break;
+         if(up || dn)
+           {
+            sdO = up ? 1 : -1;
+            jd = j;
+            break;
+           }
+        }
+      if(jd >= 0 && jd + 1 < j1)
+        {
+         int jO = -1, rO = 0;
+         bool cbO = false;
+         double xO = 0;
+         bool tO = LvTouch(s, jd + 1, j1, O, sdO, r, C, jO, rO, cbO, xO);
+         LvAdd(2, tO, rO, cbO, xO, tO ? LvBucket(fam, s.t[jO]) : -1, pd, cp, op, -1, tO ? ((long)s.t[jO] - (long)s.t[j0]) / per : Nan());
+         oAway++;
+         if(tO)
+            oBack++;
+         else
+           {
+            oNever++;
+            if(sdO > 0)
+               oNeverUp++;
+           }
+        }
+      //--- chiusura precedente (giorno, settimana, mese): il gap viene riempito?
+      if(fam >= 2 && MathAbs(O - PC) >= 0.05 * r)
+        {
+         int jC = -1, rC = 0;
+         bool cbC = false;
+         double xC = 0;
+         bool tC = LvTouch(s, j0, j1, PC, O > PC ? 1 : -1, r, C, jC, rC, cbC, xC);
+         LvAdd(3, tC, rC, cbC, xC, tC ? LvBucket(fam, s.t[jC]) : -1, pd, cp, op, -1, tC ? ((long)s.t[jC] - (long)s.t[j0]) / per : Nan());
+        }
+     }
+   if(nPer < 20)
+      return;
+   double rMed = MedianOf(rs, nr);
+   string pv = FAM_PREV[fam];
+   string sum = I2S(nPer) + " periodi. Di quelli che aprono dentro il range " + pv + " (" + I2S(nIn) + "): restano dentro " +
+                Share(nInside, nIn) + "%, toccano solo il massimo " + Share(nOH, nIn) + "%, solo il minimo " + Share(nOL, nIn) +
+                "%, entrambi " + Share(nBoth, nIn) + "% (prima il massimo nel " + Share(nBothHF, nBoth) + "%). Chiude sopra il massimo " +
+                pv + " nel " + Share(cAbove, nPer) + "%, sotto il minimo nel " + Share(cBelow, nPer) + "%. Apertura: dopo essersi " +
+                "allontanato di r ci ritorna nel " + Share(oBack, oAway) + "%, non ci torna pi&ugrave; nel " + Share(oNever, oAway) +
+                "% (di questi al rialzo il " + Share(oNeverUp, oNever) + "%). r mediano = " + FP(rMed, 3) + "% (circa " + PX(rMed * g_last) + ").";
+   SecStart("Livelli: " + FAM_NAME[fam],
+            "Livelli = massimo, minimo e chiusura " + pv + " e apertura del periodo in corso. <b>Toccato</b> = il prezzo lo raggiunge " +
+            "durante il periodo (se il periodo apre oltre il livello conta il ritorno sul livello). Dopo il primo tocco: <b>attraversa</b> = " +
+            "va oltre il livello di r prima di tornare indietro di r; <b>respinto</b> = il contrario (misura simmetrica); r = " +
+            F(InpLevelR * 100, 0) + "% del range mediano degli ultimi 20 periodi. <b>Chiude dall'altra parte</b> = a fine periodo il " +
+            "prezzo &egrave; oltre il livello. Colonna 'a che punto del periodo' = quanta parte del periodo &egrave; passata al tocco.<br>" + sum);
+   THead("Livello / condizione|N|% toccato|Quando pi&ugrave; spesso|% attraversa di r|% respinto di r|% chiude dall'altra parte|Escursione mediana oltre %|&asymp; prezzo|A che punto del periodo (mediana %)");
+   R(g_repLv, "");
+   R(g_repLv, "Livelli " + FAM_NAME[fam] + ": " + sum);
+   bool m[];
+   ArrayResize(m, g_lvN);
+   LvGrp("Livelli");
+   string nm[4] = {"Massimo ", "Minimo ", "Apertura del periodo (ritorno dopo essersi allontanato di r)", "Chiusura "};
+   for(int ty = 0; ty < 4; ty++)
+     {
+      if(ty == 3 && fam < 2)
+         continue;
+      for(int e = 0; e < g_lvN; e++)
+         m[e] = g_lvTy[e] == ty;
+      LvLine(ty == 2 ? nm[2] : nm[ty] + pv + (ty == 3 ? " (riempimento del gap)" : ""), m, fam, 0);
+     }
+   for(int lt = 0; lt < 2; lt++)
+     {
+      string L0 = lt == 0 ? "Massimo " : "Minimo ";
+      string o0 = lt == 0 ? "minimo" : "massimo";
+      LvGrp(L0 + pv + ": com'era il periodo precedente");
+      int pdv[2] = {1, -1};
+      string pdl[2] = {"precedente rialzista", "precedente ribassista"};
+      for(int z = 0; z < 2; z++)
+        {
+         for(int e = 0; e < g_lvN; e++)
+            m[e] = g_lvTy[e] == lt && g_lvPD[e] == pdv[z];
+         LvLine(pdl[z], m, fam, 0);
+        }
+      string cpl[3] = {"precedente chiuso nel terzo basso del suo range", "precedente chiuso nel terzo centrale", "precedente chiuso nel terzo alto"};
+      for(int z = 2; z >= 0; z--)
+        {
+         for(int e = 0; e < g_lvN; e++)
+            m[e] = g_lvTy[e] == lt && g_lvCP[e] == z;
+         LvLine(cpl[z], m, fam, 0);
+        }
+      LvGrp(L0 + pv + ": dove apre il periodo");
+      int opv[3] = {1, 0, -1};
+      string opl[3] = {"apre sopra il massimo precedente", "apre dentro il range precedente", "apre sotto il minimo precedente"};
+      for(int z = 0; z < 3; z++)
+        {
+         for(int e = 0; e < g_lvN; e++)
+            m[e] = g_lvTy[e] == lt && g_lvOP[e] == opv[z];
+         LvLine(opl[z], m, fam, 0);
+        }
+      LvGrp(L0 + pv + ": il " + o0 + " era gi&agrave; stato toccato prima? (solo i tocchi)");
+      for(int z = 1; z >= 0; z--)
+        {
+         for(int e = 0; e < g_lvN; e++)
+            m[e] = g_lvTy[e] == lt && g_lvT[e] && g_lvOF[e] == z;
+         LvLine(z == 1 ? "s&igrave;, prima il " + o0 : "no, &egrave; il primo dei due", m, fam, 0);
+        }
+      int tt = 0;
+      for(int e = 0; e < g_lvN; e++)
+         if(g_lvTy[e] == lt && g_lvT[e])
+            tt++;
+      LvGrp(L0 + pv + ": quando viene toccato (N = tocchi)");
+      for(int b = 0; b < LvNB(fam); b++)
+        {
+         for(int e = 0; e < g_lvN; e++)
+            m[e] = g_lvTy[e] == lt && g_lvT[e] && g_lvB[e] == b;
+         LvLine(LvBucketLab(fam, b), m, fam, tt);
+        }
+     }
+   TEnd();
+   SecEnd();
+  }
+
+void LevelTab(CSeries &s, const int barSec)
+  {
+   for(int f = 0; f < NFAM; f++)
+      if(g_per[f].n >= 30)
+         LevelFam(s, g_per[f], f, barSec);
+  }
+
+//+------------------------------------------------------------------+
+//| Direzione: movimenti forti, cosa li precede, quando si formano,   |
+//| cosa succede dopo                                                 |
+//+------------------------------------------------------------------+
+int    g_drN = 0;
+int    g_drK[], g_drC[], g_drA[], g_drB[], g_drCc[], g_drD[], g_drE[], g_drF[], g_drG[], g_drH[];
+double g_drR[];
+double g_drUp = 0.5;
+
+int DirCal(const int fam, const datetime t)
+  {
+   if(fam <= 1)
+      return HourOf(t);
+   if(fam == 2)
+      return DowMon(t);
+   MqlDateTime d;
+   TimeToStruct(t, d);
+   return (d.day - 1) / 7;
+  }
+
+string DirCalLab(const int fam, const int b)
+  {
+   if(fam <= 1)
+      return "blocco delle " + HourLab(b);
+   if(fam == 2)
+      return DOW[b];
+   string w[5] = {"settimana che inizia il giorno 1-7", "... 8-14", "... 15-21", "... 22-28", "... 29-31"};
+   return w[b];
+  }
+
+void DirLine(const string label, const bool &m[], const int nUp, const int nDn, const int tot)
+  {
+   int n = 0, u = 0, d = 0, pos = 0;
+   double sr = 0;
+   for(int i = 0; i < g_drN; i++)
+     {
+      if(!m[i])
+         continue;
+      n++;
+      if(g_drC[i] == 1)
+         u++;
+      if(g_drC[i] == -1)
+         d++;
+      if(g_drR[i] > 0)
+         pos++;
+      sr += g_drR[i];
+     }
+   if(n < 10)
+      return;
+   double pu = (double)u / n, pd = (double)d / n, pp = (double)pos / n;
+   W("<tr>" + TD(label) + TD(I2S(n)) + TD(FP((double)n / tot, 1)) + TD(FP(Dv(u, nUp), 1)) + TD(FP(Dv(d, nDn), 1)) +
+     TDc(FP(pu, 1), PCol(pu, 0.2, 0.1)) + TDc(FP(pd, 1), PCol(pd, 0.2, 0.1)) + TDc(FP(pp, 1), PCol(pp, g_drUp, 0.1)) +
+     TD(FP(sr / n, 3)) + "</tr>");
+   R(g_repDir, "    " + label + ": N " + I2S(n) + " (" + FP((double)n / tot, 1) + "% dei periodi; " + FP(Dv(u, nUp), 1) +
+     "% dei forti rialzi, " + FP(Dv(d, nDn), 1) + "% dei forti ribassi): forte rialzo " + FP(pu, 1) + "%, forte ribasso " + FP(pd, 1) +
+     "%, rialzista " + FP(pp, 1) + "%, rendimento medio " + FP(sr / n, 3) + "%");
+  }
+
+void DirGrp(const string t)
+  {
+   Grp(t, 9);
+   R(g_repDir, "  [" + t + "]");
+  }
+
+void DirFam(CSeries &s, CPer &p, CPer &ph, const int fam)
+  {
+   int n = p.n;
+   if(n < 80)
+      return;
+   double ret[], tr[];
+   ArrayResize(ret, n);
+   ArrayResize(tr, n);
+   for(int k = 0; k < n; k++)
+     {
+      ret[k] = p.O[k] > 0 ? p.C[k] / p.O[k] - 1 : 0;
+      double pc = k > 0 ? p.C[k - 1] : p.O[k];
+      tr[k] = MathMax(p.H[k], pc) - MathMin(p.L[k], pc);
+     }
+   double tmp[];
+   ArrayResize(tmp, n);
+   int q = 0;
+   for(int k = 2; k < n; k++)
+      if(p.ok[k] && p.ok[k - 1] && p.ok[k - 2])
+         tmp[q++] = ret[k];
+   if(q < 60)
+      return;
+   double srt[];
+   Sorted(tmp, q, srt);
+   double p20 = Pct(srt, q, 20), p80 = Pct(srt, q, 80);
+   int cls[];
+   ArrayResize(cls, n);
+   for(int k = 0; k < n; k++)
+      cls[k] = ret[k] >= p80 ? 1 : (ret[k] <= p20 ? -1 : 0);
+   g_drN = 0;
+   ArrayResize(g_drK, n); ArrayResize(g_drC, n); ArrayResize(g_drA, n); ArrayResize(g_drB, n); ArrayResize(g_drCc, n);
+   ArrayResize(g_drD, n); ArrayResize(g_drE, n); ArrayResize(g_drF, n); ArrayResize(g_drG, n); ArrayResize(g_drH, n);
+   ArrayResize(g_drR, n);
+   int nUp = 0, nDn = 0, nPos = 0;
+   for(int k = 2; k < n; k++)
+     {
+      if(!p.ok[k] || !p.ok[k - 1] || !p.ok[k - 2])
+         continue;
+      int i = g_drN++;
+      g_drK[i] = k;
+      g_drC[i] = cls[k];
+      g_drR[i] = ret[k];
+      if(cls[k] == 1)
+         nUp++;
+      if(cls[k] == -1)
+         nDn++;
+      if(ret[k] > 0)
+         nPos++;
+      g_drA[i] = cls[k - 1] == 1 ? 0 : (cls[k - 1] == -1 ? 1 : 2);
+      bool u1 = ret[k - 1] > 0, u2 = ret[k - 2] > 0;
+      g_drB[i] = (u1 && u2) ? 0 : ((!u1 && !u2) ? 1 : 2);
+      double pr = p.H[k - 1] - p.L[k - 1];
+      g_drCc[i] = pr > 0 ? (int)MathMin(2.0, MathFloor(3.0 * (p.C[k - 1] - p.L[k - 1]) / pr)) : 1;
+      double mr = PerMedRange(p, k - 1, 20);
+      g_drD[i] = !MathIsValidNumber(mr) ? -1 : (pr < 0.75 * mr ? 0 : (pr > 1.33 * mr ? 2 : 1));
+      g_drE[i] = p.O[k] > p.H[k - 1] ? 0 : (p.O[k] < p.L[k - 1] ? 2 : 1);
+      g_drF[i] = -1;
+      if(fam < 4 && ph.n > 0)
+        {
+         int hi = LowerBound(ph.t0, ph.n, p.t0[k] + 1) - 1;
+         if(hi >= 0 && p.s[k] >= ph.s[hi] && p.s[k] < ph.e[hi])
+            g_drF[i] = ph.t0[hi] == p.t0[k] ? 2 : (p.O[k] > ph.O[hi] ? 0 : 1);
+        }
+      g_drG[i] = -1;
+      if(k >= 101)
+        {
+         double a14 = 0, a100 = 0;
+         for(int z = 1; z <= 100; z++)
+           {
+            a100 += tr[k - z];
+            if(z <= 14)
+               a14 += tr[k - z];
+           }
+         double rr = Dv(a14 / 14, a100 / 100);
+         g_drG[i] = !MathIsValidNumber(rr) ? -1 : (rr < 0.8 ? 0 : (rr > 1.2 ? 2 : 1));
+        }
+      g_drH[i] = DirCal(fam, p.t0[k]);
+     }
+   int tot = g_drN;
+   if(tot < 60)
+      return;
+   g_drUp = (double)nPos / tot;
+   string fn = FAM_NAME[fam];
+   SecStart("Direzione: " + fn + " &mdash; cosa precede i movimenti forti",
+            "<b>Forte rialzo</b> = il 20% dei periodi con il rendimento pi&ugrave; alto (apertura &rarr; chiusura &ge; " + FP(p80, 3) +
+            "%), <b>forte ribasso</b> = il 20% pi&ugrave; basso (&le; " + FP(p20, 3) + "%). Per ogni condizione conosciuta all'inizio " +
+            "del periodo: quanti periodi la hanno, quanti forti rialzi e forti ribassi la avevano, e con quale frequenza un periodo con " +
+            "quella condizione diventa un forte rialzo o un forte ribasso (normale = 20%; blu = pi&ugrave; spesso del normale).");
+   THead("Condizione all'inizio del periodo|N|% dei periodi|% dei forti rialzi|% dei forti ribassi|% diventa forte rialzo|% diventa forte ribasso|% rialzista|Rendimento medio %");
+   R(g_repDir, "");
+   R(g_repDir, "Direzione " + fn + ": forte rialzo = rendimento >= " + FP(p80, 3) + "% (20% dei periodi), forte ribasso <= " + FP(p20, 3) +
+     "%; rialzisti in generale " + FP(g_drUp, 1) + "%. Cosa c'era all'inizio del periodo:");
+   bool m[];
+   ArrayResize(m, tot);
+   for(int i = 0; i < tot; i++)
+      m[i] = true;
+   DirLine("Tutti i periodi", m, nUp, nDn, tot);
+   DirGrp("Periodo precedente");
+   string al[3] = {"forte rialzo", "forte ribasso", "n&eacute; forte rialzo n&eacute; forte ribasso"};
+   for(int z = 0; z < 3; z++)
+     {
+      for(int i = 0; i < tot; i++)
+         m[i] = g_drA[i] == z;
+      DirLine("precedente: " + al[z], m, nUp, nDn, tot);
+     }
+   string bl[3] = {"ultimi due entrambi rialzisti", "ultimi due entrambi ribassisti", "ultimi due in direzioni diverse"};
+   for(int z = 0; z < 3; z++)
+     {
+      for(int i = 0; i < tot; i++)
+         m[i] = g_drB[i] == z;
+      DirLine(bl[z], m, nUp, nDn, tot);
+     }
+   string cl[3] = {"precedente chiuso nel terzo basso del suo range", "precedente chiuso nel terzo centrale", "precedente chiuso nel terzo alto"};
+   for(int z = 2; z >= 0; z--)
+     {
+      for(int i = 0; i < tot; i++)
+         m[i] = g_drCc[i] == z;
+      DirLine(cl[z], m, nUp, nDn, tot);
+     }
+   string dl[3] = {"precedente stretto (range &lt; 0.75 volte il mediano)", "precedente di ampiezza normale", "precedente ampio (range &gt; 1.33 volte il mediano)"};
+   for(int z = 0; z < 3; z++)
+     {
+      for(int i = 0; i < tot; i++)
+         m[i] = g_drD[i] == z;
+      DirLine(dl[z], m, nUp, nDn, tot);
+     }
+   DirGrp("Apertura");
+   string el[3] = {"apre sopra il massimo precedente", "apre dentro il range precedente", "apre sotto il minimo precedente"};
+   for(int z = 0; z < 3; z++)
+     {
+      for(int i = 0; i < tot; i++)
+         m[i] = g_drE[i] == z;
+      DirLine(el[z], m, nUp, nDn, tot);
+     }
+   if(fam < 4)
+     {
+      DirGrp("Rispetto all'apertura " + FAM_HI[fam]);
+      string fl[3] = {"apre sopra l'apertura " + FAM_HI[fam], "apre sotto l'apertura " + FAM_HI[fam], FAM_FIRST[fam]};
+      for(int z = 0; z < 3; z++)
+        {
+         for(int i = 0; i < tot; i++)
+            m[i] = g_drF[i] == z;
+         DirLine(fl[z], m, nUp, nDn, tot);
+        }
+     }
+   DirGrp("Volatilit&agrave; dei periodi precedenti (ATR14 / ATR100)");
+   string gl[3] = {"compressione (sotto 0.8)", "normale (0.8-1.2)", "espansione (sopra 1.2)"};
+   for(int z = 0; z < 3; z++)
+     {
+      for(int i = 0; i < tot; i++)
+         m[i] = g_drG[i] == z;
+      DirLine(gl[z], m, nUp, nDn, tot);
+     }
+   DirGrp("Calendario");
+   int nb = fam <= 1 ? 24 : (fam == 2 ? 7 : 5);
+   for(int b = 0; b < nb; b++)
+     {
+      for(int i = 0; i < tot; i++)
+         m[i] = g_drH[i] == b;
+      DirLine(DirCalLab(fam, b), m, nUp, nDn, tot);
+     }
+   TEnd();
+   //--- quando si forma la direzione
+   int nq = fam == 0 ? 4 : (fam == 1 ? 8 : (fam == 2 ? 24 : 7));
+   int uL[24], uH[24], uO[24], dH[24], dL[24], dO[24], aO[24];
+   ArrayInitialize(uL, 0); ArrayInitialize(uH, 0); ArrayInitialize(uO, 0); ArrayInitialize(dH, 0);
+   ArrayInitialize(dL, 0); ArrayInitialize(dO, 0); ArrayInitialize(aO, 0);
+   for(int i = 0; i < tot; i++)
+     {
+      int k = g_drK[i];
+      int h0 = HourOf(p.t0[k]);
+      int bL, bH, bO;
+      if(fam == 2)
+        {
+         bL = HourOf(p.tL[k]);
+         bH = HourOf(p.tH[k]);
+         bO = HourOf(p.tO[k]);
+        }
+      else
+         if(fam == 3)
+           {
+            bL = DowMon(p.tL[k]);
+            bH = DowMon(p.tH[k]);
+            bO = DowMon(p.tO[k]);
+           }
+         else
+           {
+            bL = MathMin(nq - 1, (HourOf(p.tL[k]) - h0 + 24) % 24);
+            bH = MathMin(nq - 1, (HourOf(p.tH[k]) - h0 + 24) % 24);
+            bO = MathMin(nq - 1, (HourOf(p.tO[k]) - h0 + 24) % 24);
+           }
+      aO[bO]++;
+      if(g_drC[i] == 1)
+        {
+         uL[bL]++;
+         uH[bH]++;
+         uO[bO]++;
+        }
+      if(g_drC[i] == -1)
+        {
+         dH[bH]++;
+         dL[bL]++;
+         dO[bO]++;
+        }
+     }
+   W("<h3>Quando si forma la direzione</h3><p class='desc'>Nei forti rialzi: quando si forma il minimo, quando il massimo e quando il " +
+     "prezzo passa per l'ultima volta sull'apertura (da l&igrave; in poi resta sopra). Nei forti ribassi il contrario.</p>");
+   THead("Quando|Forti rialzi: % minimo|% massimo|% ultimo passaggio sull'apertura|Forti ribassi: % massimo|% minimo|% ultimo passaggio sull'apertura|Tutti: % ultimo passaggio sull'apertura");
+   R(g_repDir, "  [Quando si forma la direzione: forti rialzi minimo / massimo / ultimo passaggio sull'apertura; forti ribassi massimo / minimo / ultimo passaggio; tutti]");
+   for(int b = 0; b < nq; b++)
+     {
+      if(fam == 3 && b >= 5 && uL[b] + dH[b] + aO[b] == 0)
+         continue;
+      string lb = fam == 2 ? HourLab(b) : (fam == 3 ? DOW[b] : "+" + I2S(b) + "h");
+      W("<tr>" + TD(lb) + TD(FP(Dv(uL[b], nUp), 1)) + TD(FP(Dv(uH[b], nUp), 1)) + TD(FP(Dv(uO[b], nUp), 1)) + TD(FP(Dv(dH[b], nDn), 1)) +
+        TD(FP(Dv(dL[b], nDn), 1)) + TD(FP(Dv(dO[b], nDn), 1)) + TD(FP(Dv(aO[b], tot), 1)) + "</tr>");
+      R(g_repDir, "    " + lb + ": forti rialzi " + FP(Dv(uL[b], nUp), 1) + " / " + FP(Dv(uH[b], nUp), 1) + " / " + FP(Dv(uO[b], nUp), 1) +
+        "%; forti ribassi " + FP(Dv(dH[b], nDn), 1) + " / " + FP(Dv(dL[b], nDn), 1) + " / " + FP(Dv(dO[b], nDn), 1) + "%; tutti " +
+        FP(Dv(aO[b], tot), 1) + "%");
+     }
+   TEnd();
+   //--- cosa succede dopo
+   W("<h3>Cosa succede " + FAM_NEXT[fam] + "</h3>");
+   THead("Dopo un|N|% rialzista|Rendimento medio %|% tocca il massimo del periodo prima|% tocca il minimo del periodo prima|% forte rialzo|% forte ribasso");
+   R(g_repDir, "  [Cosa succede " + FAM_NEXT[fam] + "]");
+   int cv[3] = {1, -1, 0};
+   string cn[3] = {"forte rialzo", "forte ribasso", "periodo normale"};
+   for(int z = 0; z < 3; z++)
+     {
+      int nn = 0, up = 0, th = 0, tl = 0, fu = 0, fd = 0;
+      double sr = 0;
+      for(int i = 0; i < tot; i++)
+        {
+         int k = g_drK[i];
+         if(g_drC[i] != cv[z] || k + 1 >= n || !p.ok[k + 1])
+            continue;
+         nn++;
+         if(ret[k + 1] > 0)
+            up++;
+         sr += ret[k + 1];
+         if(p.H[k + 1] >= p.H[k])
+            th++;
+         if(p.L[k + 1] <= p.L[k])
+            tl++;
+         if(cls[k + 1] == 1)
+            fu++;
+         if(cls[k + 1] == -1)
+            fd++;
+        }
+      if(nn < 10)
+         continue;
+      W("<tr>" + TD(cn[z]) + TD(I2S(nn)) + TDc(Share(up, nn), PCol(Frac(up, nn), g_drUp, 0.1)) + TD(FP(sr / nn, 3)) + TD(Share(th, nn)) +
+        TD(Share(tl, nn)) + TDc(Share(fu, nn), PCol(Frac(fu, nn), 0.2, 0.1)) + TDc(Share(fd, nn), PCol(Frac(fd, nn), 0.2, 0.1)) + "</tr>");
+      R(g_repDir, "    dopo un " + cn[z] + " (N " + I2S(nn) + "): rialzista " + Share(up, nn) + "%, rendimento medio " + FP(sr / nn, 3) +
+        "%, tocca il massimo " + Share(th, nn) + "%, tocca il minimo " + Share(tl, nn) + "%, forte rialzo " + Share(fu, nn) +
+        "%, forte ribasso " + Share(fd, nn) + "%");
+     }
+   TEnd();
+   SecEnd();
+  }
+
+void DirTab(CSeries &s)
+  {
+   int hi[4] = {2, 2, 3, 4};
+   for(int f = 0; f < 4; f++)
+      DirFam(s, g_per[f], g_per[hi[f]], f);
+  }
+
+void PerAll(CSeries &s)
+  {
+   for(int f = 0; f < NFAM; f++)
+      PerBuild(s, f, g_per[f]);
+  }
+
+void PerFree(void)
+  {
+   for(int f = 0; f < NFAM; f++)
+      g_per[f].Free();
+  }
+
+//+------------------------------------------------------------------+
 //| Gap: salti di prezzo alla riapertura                              |
 //+------------------------------------------------------------------+
 void GapLine(const string label, const bool &m[])
@@ -4567,7 +5385,7 @@ bool Analyze(const string sym)
      "nel 10% dei periodi.");
    for(int k = 0; k < NTF; k++)
       W("<button data-tab='" + TF_KEY[k] + "'>" + TF_LABEL[k] + "</button>");
-   W("<button data-tab='sess'>Sessioni</button><button data-tab='swing'>Swing</button><button data-tab='break'>Rotture</button><button data-tab='imp'>Impulsi</button>" +
+   W("<button data-tab='sess'>Sessioni</button><button data-tab='lev'>Livelli</button><button data-tab='dir'>Direzione</button><button data-tab='swing'>Swing</button><button data-tab='break'>Rotture</button><button data-tab='imp'>Impulsi</button>" +
      "<button data-tab='news'>Notizie</button><button data-tab='gap'>Gap</button>");
    W("<button data-tab='volume'>Volume</button></nav></header><main>");
 
@@ -4640,6 +5458,25 @@ bool Analyze(const string sym)
    else
       SessionTab(m5, 300);
    W("</div>");
+   Comment("MarketProfiler ", sym, ": livelli chiave e direzione ...");
+   g_repLv = "";
+   g_repDir = "";
+   if(m1.n > 5000)
+      PerAll(m1);
+   else
+      PerAll(m5);
+   W("<div class='tab' id='tab-lev' hidden>");
+   if(m1.n > 5000)
+      LevelTab(m1, 60);
+   else
+      LevelTab(m5, 300);
+   W("</div><div class='tab' id='tab-dir' hidden>");
+   if(m1.n > 5000)
+      DirTab(m1);
+   else
+      DirTab(m5);
+   W("</div>");
+   PerFree();
    W("<div class='tab' id='tab-gap' hidden>");
    if(m1.n > 1000)
       GapTab(m1, 60);
@@ -4660,6 +5497,11 @@ bool Analyze(const string sym)
    W(g_rep);
    W("\n=== EVENTI ===\n");
    W(g_repEv);
+   W("\n=== LIVELLI CHIAVE (massimo, minimo, chiusura del periodo precedente e apertura del periodo; r = " + F(InpLevelR * 100, 0) +
+     "% del range mediano) ===\n");
+   W(g_repLv);
+   W("\n=== DIREZIONE: movimenti forti, cosa li precede, quando si formano, cosa succede dopo ===\n");
+   W(g_repDir);
    W("\n=== VOLUME ===\n");
    W(g_repVol);
    W("</textarea>");
