@@ -34,6 +34,12 @@ enum ENUM_DATA_TZ
    TZ_EUROPE = 2,     // Europa centrale: CET/CEST
    TZ_FIXED = 3       // Fisso: GMT + ore indicate sotto
   };
+enum ENUM_LV_LOW
+  {
+   LV_LOW_NONE = 0, // Solo 4 ore e oltre
+   LV_LOW_H1 = 1,   // Anche 2 ore e 1 ora
+   LV_LOW_M15 = 2   // Anche 2 ore, 1 ora, 30 e 15 minuti (scalping)
+  };
 enum ENUM_REF_MKT
   {
    REF_AUTO = 0,  // Automatica dalla valuta dello strumento
@@ -66,6 +72,7 @@ input int    InpSessionHours = 4;     // Sessioni: ore osservate dopo ogni orari
 input int    InpORMinutes    = 30;    // Sessioni: minuti del range iniziale
 input bool   InpSkipIncomplete = true; // Escludi dalle analisi intraday i primi anni con copertura oraria incompleta
 input double InpLevelR       = 0.10;  // Livelli: distanza di reazione r (frazione del range mediano del periodo)
+input ENUM_LV_LOW InpLevelLowTF = LV_LOW_NONE; // Livelli: timeframe sotto le 4 ore
 
 #define NTF     13
 #define NX_ROWS 28
@@ -4247,14 +4254,29 @@ void SessionTab(CSeries &s, const int barSec)
 //| Periodi di 4 ore, 8 ore, giorno, settimana, mese costruiti dalle  |
 //| barre M1 (o M5): base delle schede Livelli e Direzione            |
 //+------------------------------------------------------------------+
-#define NFAM 5
-string FAM_NAME[NFAM] = {"4 ore", "8 ore", "Giorno", "Settimana", "Mese"};
+// 0-4: 4 ore, 8 ore, giorno, settimana, mese (sempre attivi); 5-8: 2 ore, 1 ora, 30 e 15 minuti (solo livelli, a scelta)
+#define NFAM 9
+string FAM_NAME[NFAM] = {"4 ore", "8 ore", "Giorno", "Settimana", "Mese", "2 ore", "1 ora", "30 minuti", "15 minuti"};
 string FAM_PREV[NFAM] = {"del blocco di 4 ore precedente", "del blocco di 8 ore precedente", "del giorno precedente",
-                         "della settimana precedente", "del mese precedente"
+                         "della settimana precedente", "del mese precedente", "del blocco di 2 ore precedente", "dell'ora precedente",
+                         "dei 30 minuti precedenti", "dei 15 minuti precedenti"
                         };
-string FAM_HI[NFAM]   = {"del giorno", "del giorno", "della settimana", "del mese", ""};
-string FAM_FIRST[NFAM] = {"primo blocco del giorno", "primo blocco del giorno", "primo giorno della settimana", "prima settimana del mese", ""};
-string FAM_NEXT[NFAM]  = {"nel blocco successivo", "nel blocco successivo", "nel giorno successivo", "nella settimana successiva", "nel mese successivo"};
+string FAM_HI[NFAM]   = {"del giorno", "del giorno", "della settimana", "del mese", "", "", "", "", ""};
+string FAM_FIRST[NFAM] = {"primo blocco del giorno", "primo blocco del giorno", "primo giorno della settimana", "prima settimana del mese",
+                          "", "", "", "", ""
+                         };
+string FAM_NEXT[NFAM]  = {"nel blocco successivo", "nel blocco successivo", "nel giorno successivo", "nella settimana successiva",
+                          "nel mese successivo", "", "", "", ""
+                         };
+int    FAM_MIN[NFAM]   = {240, 480, 0, 0, 0, 120, 60, 30, 15};  // durata in minuti dei blocchi intraday (0 = giorno, settimana, mese)
+int    FAM_ORDER[NFAM] = {8, 7, 6, 5, 0, 1, 2, 3, 4};          // ordine di presentazione: dal piu' piccolo al piu' grande
+
+bool FamOn(const int fam)
+  {
+   if(fam <= 4)
+      return true;
+   return fam <= 6 ? InpLevelLowTF >= LV_LOW_H1 : InpLevelLowTF >= LV_LOW_M15;
+  }
 string g_repLv = "", g_repDir = "";
 
 class CPer
@@ -4278,11 +4300,9 @@ CPer g_per[NFAM];
 
 long PerKey(const datetime t, const int fam, long &cDay, long &cYM)
   {
+   if(FAM_MIN[fam] > 0)
+      return (long)t / ((long)FAM_MIN[fam] * 60);  // blocchi allineati alla mezzanotte dell'orologio dei dati
    long day = (long)t / 86400;
-   if(fam == 0)
-      return day * 6 + HourOf(t) / 4;
-   if(fam == 1)
-      return day * 3 + HourOf(t) / 8;
    if(fam == 2)
       return day;
    if(fam == 3)
@@ -4376,7 +4396,7 @@ double g_lvX[], g_lvFr[];
 
 int LvBucket(const int fam, const datetime t)
   {
-   if(fam <= 2)
+   if(fam != 3 && fam != 4)
       return HourOf(t);
    if(fam == 3)
       return DowMon(t);
@@ -4387,7 +4407,7 @@ int LvBucket(const int fam, const datetime t)
 
 string LvBucketLab(const int fam, const int b)
   {
-   if(fam <= 2)
+   if(fam != 3 && fam != 4)
       return HourLab(b);
    if(fam == 3)
       return DOW[b];
@@ -4395,7 +4415,7 @@ string LvBucketLab(const int fam, const int b)
    return w[b];
   }
 
-int LvNB(const int fam) { return fam <= 2 ? 24 : (fam == 3 ? 7 : 5); }
+int LvNB(const int fam) { return fam == 3 ? 7 : (fam == 4 ? 5 : 24); }
 
 // Primo tocco del livello partendo dal lato sd (+1 prezzo sopra, -1 sotto), poi gara dalla chiusura della barra del tocco:
 // +1 se va prima di r oltre il livello (prosegue), -1 se torna prima indietro di r. Partire dal livello invece che dalla
@@ -4613,7 +4633,7 @@ void LevelFam(CSeries &s, CPer &p, const int fam, const int barSec)
            }
         }
       //--- chiusura precedente (giorno, settimana, mese): il gap viene riempito?
-      if(fam >= 2 && MathAbs(O - PC) >= 0.05 * r)
+      if(fam >= 2 && fam <= 4 && MathAbs(O - PC) >= 0.05 * r)
         {
          int jC = -1, rC = 0;
          bool cbC = false;
@@ -4648,7 +4668,7 @@ void LevelFam(CSeries &s, CPer &p, const int fam, const int barSec)
    string nm[4] = {"Massimo ", "Minimo ", "Apertura del periodo (ritorno dopo essersi allontanato di r)", "Chiusura "};
    for(int ty = 0; ty < 4; ty++)
      {
-      if(ty == 3 && fam < 2)
+      if(ty == 3 && (fam < 2 || fam > 4))
          continue;
       for(int e = 0; e < g_lvN; e++)
          m[e] = g_lvTy[e] == ty;
@@ -4708,9 +4728,12 @@ void LevelFam(CSeries &s, CPer &p, const int fam, const int barSec)
 
 void LevelTab(CSeries &s, const int barSec)
   {
-   for(int f = 0; f < NFAM; f++)
-      if(g_per[f].n >= 30)
+   for(int i = 0; i < NFAM; i++)
+     {
+      int f = FAM_ORDER[i];
+      if(FamOn(f) && g_per[f].n >= 30)
          LevelFam(s, g_per[f], f, barSec);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -5057,7 +5080,8 @@ void DirTab(CSeries &s)
 void PerAll(CSeries &s)
   {
    for(int f = 0; f < NFAM; f++)
-      PerBuild(s, f, g_per[f]);
+      if(FamOn(f))
+         PerBuild(s, f, g_per[f]);
   }
 
 void PerFree(void)
