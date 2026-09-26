@@ -79,6 +79,7 @@ input int    InpORMinutes    = 30;    // Sessioni: minuti del range iniziale
 input bool   InpSkipIncomplete = true; // Escludi dalle analisi intraday i primi anni con copertura oraria incompleta
 input double InpLevelR       = 0.10;  // Livelli: distanza di reazione r (frazione del range mediano del periodo)
 input ENUM_LV_LOW InpLevelLowTF = LV_LOW_NONE; // Livelli: timeframe sotto le 4 ore
+input int    InpLvFollow     = 3;     // Livelli: candele osservate dopo una chiusura oltre il livello (conferma, falsa, ritest)
 input int    InpBaseDraws    = 20;    // Sessioni: estrazioni casuali mediate per il valore atteso
 input ENUM_RR_STOP InpRRStop = RR_STOP_ATR; // Rischio/rendimento: tipo di stop
 input double InpRRStopK      = 1.0;   // Rischio/rendimento: K dello stop
@@ -5308,8 +5309,357 @@ void LevelLife(CSeries &s, CPer &p, const int fam, const int barSec)
    SecEnd();
   }
 
+//+------------------------------------------------------------------+
+//| Livelli visti sulle candele del loro timeframe e di tutti i       |
+//| timeframe inferiori (es. livelli del 4 ore su H4, H1, M30, M15,   |
+//| M5, M1)                                                           |
+//+------------------------------------------------------------------+
+#define LO_M    20  // candele massime per risolvere un test (prima chiusura a r dal livello)
+#define LO_NTF  6
+#define LO_NOBS 9   // 0-5 = M1..H4, 6 = D1, 7 = W1, 8 = le candele del livello stesso
+int    LO_MIN[LO_NTF]  = {1, 5, 15, 30, 60, 240};
+string LO_NAME[LO_NOBS] = {"M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", ""};
+int    FAM_SPAN[NFAM]  = {240, 480, 1440, 10080, 43200, 120, 60, 30, 15};  // durata del periodo in minuti (settimana e mese circa)
+string FAM_TF[NFAM]    = {"H4", "8 ore", "D1", "W1", "MN", "2 ore", "H1", "M30", "M15"};
+
+class CCand
+  {
+public:
+   int               n;
+   int               st[];  // indice della prima barra della serie base
+   double            o[], h[], l[], c[];
+                     CCand(void) { n = 0; }
+   void              Free(void) { n = 0; ArrayFree(st); ArrayFree(o); ArrayFree(h); ArrayFree(l); ArrayFree(c); }
+  };
+CCand g_lc[LO_NTF];
+
+struct LoAcc
+  {
+   int               nPer, nTP, tests, brk, rej, conf, fb, rt, rtH, rUp, rDn, rNo;
+   int               hq[LO_M + 2];
+  };
+LoAcc g_lo[];
+
+int LowerBoundInt(const int &a[], const int n, const int x)
+  {
+   int lo = 0, hi = n;
+   while(lo < hi)
+     {
+      int mid = (lo + hi) / 2;
+      if(a[mid] < x)
+         lo = mid + 1;
+      else
+         hi = mid;
+     }
+   return lo;
+  }
+
+void CandBuild(CSeries &s, const int tfSec, CCand &q)
+  {
+   q.Free();
+   int n = 0;
+   long cur = LONG_MIN;
+   for(int i = 0; i < s.n; i++)
+     {
+      long key = (long)s.t[i] / tfSec;
+      if(key != cur)
+        {
+         n++;
+         cur = key;
+        }
+     }
+   ArrayResize(q.st, n); ArrayResize(q.o, n); ArrayResize(q.h, n); ArrayResize(q.l, n); ArrayResize(q.c, n);
+   int x = -1;
+   cur = LONG_MIN;
+   for(int i = 0; i < s.n; i++)
+     {
+      long key = (long)s.t[i] / tfSec;
+      if(key != cur)
+        {
+         x++;
+         cur = key;
+         q.st[x] = i;
+         q.o[x] = s.o[i];
+         q.h[x] = s.h[i];
+         q.l[x] = s.l[i];
+        }
+      if(s.h[i] > q.h[x])
+         q.h[x] = s.h[i];
+      if(s.l[i] < q.l[x])
+         q.l[x] = s.l[i];
+      q.c[x] = s.c[i];
+     }
+   q.n = n;
+  }
+
+// Candele a..b-1 (quelle che si aprono nel periodo), seguito fino alla candela n-1. Test = candela che tocca il livello
+// dopo che il prezzo se ne era allontanato di almeno r (il primo tocco e' il test 1). Per ogni test: la candela del test
+// chiude oltre il livello o dal lato da cui arriva (rifiuto); dopo una chiusura oltre, nelle N candele successive: la
+// prossima conferma, una chiude di nuovo dal lato di partenza (falsa rottura), una ritocca il livello (ritest) e chiude
+// dal lato nuovo (tiene). Risoluzione = la prima chiusura a r dal livello: oltre (rotto) o dal lato di partenza (respinto);
+// le candele fino alla risoluzione misurano quanto il prezzo resta sul livello.
+void LoScan(const double &o[], const double &h[], const double &l[], const double &c[], const int n, const int a, const int b,
+            const double lev, const int sd, const double r, const int N, const int ai)
+  {
+   g_lo[ai].nPer++;
+   bool armed = true;
+   int side = sd, tests = 0;
+   for(int i = a; i < b; i++)
+     {
+      bool touch = l[i] <= lev && h[i] >= lev;
+      if(!touch && i > a && (c[i - 1] - lev) * (o[i] - lev) < 0)
+         touch = true;  // gap attraverso il livello
+      if(armed && touch)
+        {
+         tests++;
+         g_lo[ai].tests++;
+         int sc = c[i] > lev ? 1 : (c[i] < lev ? -1 : 0);
+         if(sc == -side)
+           {
+            g_lo[ai].brk++;
+            if(i + 1 < n && (c[i + 1] - lev) * (-side) > 0)
+               g_lo[ai].conf++;
+            bool fb = false;
+            int jr = -1;
+            for(int q = i + 1; q <= i + N && q < n; q++)
+              {
+               if((c[q] - lev) * side > 0)
+                  fb = true;
+               if(jr < 0 && l[q] <= lev && h[q] >= lev)
+                  jr = q;
+              }
+            if(fb)
+               g_lo[ai].fb++;
+            if(jr >= 0)
+              {
+               g_lo[ai].rt++;
+               if((c[jr] - lev) * (-side) > 0)
+                  g_lo[ai].rtH++;
+              }
+           }
+         else
+            if(sc == side)
+               g_lo[ai].rej++;
+         int res = 0, nq = 0;
+         for(int q = i; q < n && q <= i + LO_M; q++)
+           {
+            nq++;
+            double dd = (c[q] - lev) * side;
+            if(dd >= r)
+              {
+               res = -1;
+               break;
+              }
+            if(dd <= -r)
+              {
+               res = 1;
+               break;
+              }
+           }
+         if(res > 0)
+            g_lo[ai].rUp++;
+         else
+            if(res < 0)
+               g_lo[ai].rDn++;
+            else
+               g_lo[ai].rNo++;
+         if(res != 0)
+            g_lo[ai].hq[nq < LO_M + 1 ? nq : LO_M + 1]++;
+         armed = false;
+        }
+      if(!armed && (l[i] > lev + r || h[i] < lev - r))
+        {
+         armed = true;
+         side = l[i] > lev + r ? 1 : -1;
+        }
+     }
+   if(tests > 0)
+      g_lo[ai].nTP++;
+  }
+
+// un livello su tutte le candele disponibili per la famiglia: from = prima barra della serie base da cui osservare
+void LoLevel(CSeries &s, CPer &p, const int fam, const int barSec, const int k, const bool useOwn, const int from, const double lev,
+             const int sd, const double r, const int ty)
+  {
+   int N = InpLvFollow < 1 ? 1 : InpLvFollow;
+   int j1 = p.e[k];
+   for(int t = 0; t < LO_NTF; t++)
+     {
+      if(LO_MIN[t] >= FAM_SPAN[fam] || LO_MIN[t] * 60 < barSec)
+         continue;
+      if(LO_MIN[t] * 60 == barSec)  // il timeframe della serie base: le sue barre
+        {
+         LoScan(s.o, s.h, s.l, s.c, s.n, from, j1, lev, sd, r, N, t * 7 + ty);
+         continue;
+        }
+      if(g_lc[t].n == 0)
+         continue;
+      int a = LowerBoundInt(g_lc[t].st, g_lc[t].n, from), b = LowerBoundInt(g_lc[t].st, g_lc[t].n, j1);
+      LoScan(g_lc[t].o, g_lc[t].h, g_lc[t].l, g_lc[t].c, g_lc[t].n, a, b, lev, sd, r, N, t * 7 + ty);
+     }
+   for(int f = 2; f <= 3; f++)  // D1 per settimana e mese, W1 per il mese
+     {
+      if((f == 2 && fam != 3 && fam != 4) || (f == 3 && fam != 4) || g_per[f].n < 2)
+         continue;
+      int a = LowerBoundInt(g_per[f].s, g_per[f].n, from), b = LowerBoundInt(g_per[f].s, g_per[f].n, j1);
+      LoScan(g_per[f].O, g_per[f].H, g_per[f].L, g_per[f].C, g_per[f].n, a, b, lev, sd, r, N, (f == 2 ? 6 : 7) * 7 + ty);
+     }
+   if(useOwn)
+      LoScan(p.O, p.H, p.L, p.C, p.n, k, k + 1, lev, sd, r, N, 8 * 7 + ty);
+  }
+
+double LoMedQ(LoAcc &x)
+  {
+   int tot = 0;
+   for(int i = 0; i < LO_M + 2; i++)
+      tot += x.hq[i];
+   if(tot <= 0)
+      return Nan();
+   int acc = 0;
+   for(int i = 0; i < LO_M + 2; i++)
+     {
+      acc += x.hq[i];
+      if(2 * acc >= tot)
+         return i;
+     }
+   return Nan();
+  }
+
+string LoPair(const int a, const int na, const int b, const int nb)
+  {
+   return Share(a, na) + " (" + Share(b, nb) + ")";
+  }
+
+void LoRow(const string tf, LoAcc &a, LoAcc &f)
+  {
+   int ra = a.rUp + a.rDn, rf = f.rUp + f.rDn;
+   double zB = Z2(Frac(a.brk, a.tests), a.tests, Frac(f.brk, f.tests), f.tests);
+   double zR = Z2(Frac(a.rUp, ra), ra, Frac(f.rUp, rf), rf);
+   double mq = LoMedQ(a), mf = LoMedQ(f);
+   string res = Share(a.rUp, a.tests) + " / " + Share(a.rDn, a.tests) + " (" + Share(f.rUp, f.tests) + " / " + Share(f.rDn, f.tests) + ")";
+   W("<tr>" + TD(tf) + TD(LoPair(a.nTP, a.nPer, f.nTP, f.nPer)) + TD(F(Dv(a.tests, a.nTP), 2)) +
+     TDc(LoPair(a.brk, a.tests, f.brk, f.tests), PCol(Frac(a.brk, a.tests), Frac(f.brk, f.tests), 0.1)) +
+     TDc(LoPair(a.rej, a.tests, f.rej, f.tests), PCol(Frac(a.rej, a.tests), Frac(f.rej, f.tests), 0.1)) +
+     TD(LoPair(a.conf, a.brk, f.conf, f.brk)) + TDc(LoPair(a.fb, a.brk, f.fb, f.brk), PCol(-Frac(a.fb, a.brk), -Frac(f.fb, f.brk), 0.1)) +
+     TD(LoPair(a.rt, a.brk, f.rt, f.brk)) + TDc(LoPair(a.rtH, a.rt, f.rtH, f.rt), PCol(Frac(a.rtH, a.rt), Frac(f.rtH, f.rt), 0.1)) +
+     TDc(res, PCol(Frac(a.rUp, ra), Frac(f.rUp, rf), 0.1)) + TD(F(mq, 0) + " (" + F(mf, 0) + ")") + TD(ZS(zB) + " / " + ZS(zR)) + "</tr>");
+   R(g_repLv, "    " + tf + ": periodi con test " + LoPair(a.nTP, a.nPer, f.nTP, f.nPer) + "%, test per periodo " + F(Dv(a.tests, a.nTP), 2) +
+     ", candela del test chiude oltre " + LoPair(a.brk, a.tests, f.brk, f.tests) + "%, rifiuto " + LoPair(a.rej, a.tests, f.rej, f.tests) +
+     "%; dopo chiusura oltre conferma " + LoPair(a.conf, a.brk, f.conf, f.brk) + "%, falsa " + LoPair(a.fb, a.brk, f.fb, f.brk) +
+     "%, ritest " + LoPair(a.rt, a.brk, f.rt, f.brk) + "%, al ritest tiene " + LoPair(a.rtH, a.rt, f.rtH, f.rt) +
+     "%; risolto rotto / respinto " + res + "%, candele sul livello " + F(mq, 0) + " (" + F(mf, 0) + "); z chiude oltre " + ZS(zB) +
+     ", z rotto " + ZS(zR));
+  }
+
+void LevelLtf(CSeries &s, CPer &p, const int fam, const int barSec)
+  {
+   ArrayResize(g_lo, LO_NOBS * 7);
+   for(int i = 0; i < LO_NOBS * 7; i++)
+      ZeroMemory(g_lo[i]);
+   int N = InpLvFollow < 1 ? 1 : InpLvFollow;
+   for(int k = 2; k < p.n && !IsStopped(); k++)
+     {
+      if(!p.ok[k] || !p.ok[k - 1])
+         continue;
+      double mr = PerMedRange(p, k, 20), r = InpLevelR * mr;
+      if(!(r > 0))
+         continue;
+      double PH = p.H[k - 1], PL = p.L[k - 1], PC = p.C[k - 1], O = p.O[k], d = 0.25 * mr;
+      int j0 = p.s[k], j1 = p.e[k];
+      LoLevel(s, p, fam, barSec, k, true, j0, PH, O > PH ? 1 : -1, r, 0);
+      LoLevel(s, p, fam, barSec, k, true, j0, PL, O < PL ? -1 : 1, r, 1);
+      LoLevel(s, p, fam, barSec, k, true, j0, PH + d, O > PH + d ? 1 : -1, r, 4);
+      LoLevel(s, p, fam, barSec, k, true, j0, PH - d, O > PH - d ? 1 : -1, r, 4);
+      LoLevel(s, p, fam, barSec, k, true, j0, PL + d, O < PL + d ? -1 : 1, r, 5);
+      LoLevel(s, p, fam, barSec, k, true, j0, PL - d, O < PL - d ? -1 : 1, r, 5);
+      //--- apertura (solo timeframe inferiori: sulla candela del periodo l'apertura e' il suo inizio)
+      int jd = -1, sdO = 0;
+      for(int j = j0; j < j1; j++)
+        {
+         bool up = s.h[j] >= O + r, dn = s.l[j] <= O - r;
+         if(up && dn)
+            break;
+         if(up || dn)
+           {
+            sdO = up ? 1 : -1;
+            jd = j;
+            break;
+           }
+        }
+      if(jd >= 0 && jd + 1 < j1)
+         LoLevel(s, p, fam, barSec, k, false, jd + 1, O, sdO, r, 2);
+      LoLevel(s, p, fam, barSec, k, false, j0, O + d, -1, r, 6);
+      LoLevel(s, p, fam, barSec, k, false, j0, O - d, 1, r, 6);
+      if(fam >= 2 && fam <= 4 && MathAbs(O - PC) >= 0.05 * r)
+         LoLevel(s, p, fam, barSec, k, true, j0, PC, O > PC ? 1 : -1, r, 3);
+     }
+   string pv = FAM_PREV[fam];
+   SecStart("Livelli: " + FAM_NAME[fam] + " &mdash; visti sulle candele " + FAM_TF[fam] + " e di tutti i timeframe inferiori",
+            "Lo stesso livello letto candela per candela su ogni timeframe, dal timeframe del livello fino a M1 (tra parentesi il " +
+            "<b>livello finto</b>, livello &plusmn; 25% del range mediano, negli stessi periodi). Si osservano le candele che si " +
+            "aprono durante il periodo; per vedere cosa succede dopo si guardano anche le candele successive. <b>Test</b> = candela " +
+            "che tocca il livello dopo che il prezzo se ne era allontanato di almeno r. <b>Chiude oltre</b> = la candela del test " +
+            "chiude dall'altra parte del livello; <b>rifiuto</b> = tocca e chiude dal lato da cui arriva (stoppino sul livello). " +
+            "Dopo una chiusura oltre, nelle " + I2S(N) + " candele successive: <b>conferma</b> = la candela dopo chiude ancora oltre; " +
+            "<b>falsa</b> = una chiude di nuovo dal lato di partenza; <b>ritest</b> = una ritocca il livello; <b>tiene</b> = quella " +
+            "candela chiude dal lato nuovo. <b>Risolto</b> = la prima chiusura a r dal livello (entro " + I2S(LO_M) + " candele): " +
+            "oltre = rotto, dal lato di partenza = respinto; <b>candele sul livello</b> = quante candele servono per risolvere " +
+            "(accumulo). z = reale contro finto. Sull'apertura del periodo la candela " + FAM_TF[fam] + " non c'&egrave; (&egrave; " +
+            "il suo inizio).");
+   THead("Timeframe delle candele|% periodi con test (finto)|Test per periodo|Candela del test: % chiude oltre (finto)|% rifiuto (finto)|Dopo chiusura oltre: % conferma (finto)|% falsa entro " + I2S(N) + " (finto)|% ritest entro " + I2S(N) + " (finto)|Al ritest % tiene (finto)|Risolto: % rotto / % respinto (finto)|Candele sul livello, mediana (finto)|z: chiude oltre / rotto");
+   R(g_repLv, "  [Livelli " + FAM_NAME[fam] + " visti sulle candele " + FAM_TF[fam] + " e dei timeframe inferiori: tra parentesi il livello finto; " +
+     "conferma/falsa/ritest nelle " + I2S(N) + " candele dopo una chiusura oltre; risolto = prima chiusura a r dal livello]");
+   int tyR[4] = {0, 1, 2, 3};
+   int tyF[4] = {4, 5, 6, 6};
+   string lbR[4];
+   lbR[0] = "Massimo " + pv;
+   lbR[1] = "Minimo " + pv;
+   lbR[2] = "Apertura del periodo (dopo essersi allontanato di r)";
+   lbR[3] = "Chiusura " + pv;
+   int ord[LO_NOBS] = {8, 7, 6, 5, 4, 3, 2, 1, 0};
+   for(int x = 0; x < 4; x++)
+     {
+      bool head = false;
+      for(int oi = 0; oi < LO_NOBS; oi++)
+        {
+         int ob = ord[oi], ia = ob * 7 + tyR[x], ifk = ob * 7 + tyF[x];
+         if(g_lo[ia].nPer < 10 || g_lo[ia].tests < 10)
+            continue;
+         if(!head)
+           {
+            Grp(lbR[x], 12);
+            R(g_repLv, "   " + lbR[x] + ":");
+            head = true;
+           }
+         LoRow(ob == 8 ? FAM_TF[fam] + " (candele del livello)" : LO_NAME[ob], g_lo[ia], g_lo[ifk]);
+        }
+     }
+   TEnd();
+   SecEnd();
+  }
+
+
+void LoCandles(CSeries &s, const int barSec)
+  {
+   for(int t = 0; t < LO_NTF; t++)
+     {
+      g_lc[t].Free();
+      if(LO_MIN[t] * 60 <= barSec)
+         continue;  // la serie base stessa (M1) o sotto la sua risoluzione
+      CandBuild(s, LO_MIN[t] * 60, g_lc[t]);
+     }
+  }
+
+void LoFree(void)
+  {
+   for(int t = 0; t < LO_NTF; t++)
+      g_lc[t].Free();
+   ArrayFree(g_lo);
+  }
+
 void LevelTab(CSeries &s, const int barSec)
   {
+   LoCandles(s, barSec);
    for(int i = 0; i < NFAM; i++)
      {
       int f = FAM_ORDER[i];
@@ -5318,8 +5668,10 @@ void LevelTab(CSeries &s, const int barSec)
          Comment("MarketProfiler: livelli ", FAM_NAME[f], " ...");
          LevelFam(s, g_per[f], f, barSec);
          LevelLife(s, g_per[f], f, barSec);
+         LevelLtf(s, g_per[f], f, barSec);
         }
      }
+   LoFree();
   }
 
 //+------------------------------------------------------------------+
