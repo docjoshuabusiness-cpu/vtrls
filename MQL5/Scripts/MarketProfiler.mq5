@@ -119,13 +119,15 @@ public:
          return false;
       n = got;  // l'ultima barra e' quella in formazione: entra solo nel "periodo in corso"
       ArrayResize(t, n); ArrayResize(o, n); ArrayResize(h, n); ArrayResize(l, n); ArrayResize(c, n); ArrayResize(v, n);
-      double real = 0;
+      int withReal = 0;  // volume reale solo se c'e' su quasi tutte le barre, altrimenti tick volume
       for(int i = 0; i < n; i++)
-         real += (double)r[i].real_volume;
+         if(r[i].real_volume > 0)
+            withReal++;
+      bool useReal = withReal >= 0.95 * n;
       for(int i = 0; i < n; i++)
         {
          t[i] = r[i].time; o[i] = r[i].open; h[i] = r[i].high; l[i] = r[i].low; c[i] = r[i].close;
-         v[i] = real > 0 ? (double)r[i].real_volume : (double)r[i].tick_volume;
+         v[i] = useReal ? (double)r[i].real_volume : (double)r[i].tick_volume;
          if(v[i] > 0)
             hasVol = true;
         }
@@ -164,6 +166,7 @@ public:
 //| Utilita'                                                          |
 //+------------------------------------------------------------------+
 double Nan(void) { return MathArcsin(2.0); }
+double Dv(const double a, const double b) { return b != 0 ? a / b : Nan(); }  // in MQL5 dividere per 0 blocca lo script
 void   W(const string s) { FileWriteString(g_fh, s); }
 string F(const double x, const int d) { if(!MathIsValidNumber(x)) return "&ndash;"; return DoubleToString(x, d); }
 string FP(const double x, const int d) { return F(x * 100.0, d); }
@@ -512,8 +515,8 @@ bool Build(const int tfi, const int srcIdx, CSeries &s, CBlocks &b)
          b.curT0 = s.t[a]; b.curO = s.o[a]; b.curH = hh; b.curL = ll; b.curC = s.c[e]; b.curCnt = cn[j];
          continue;
         }
-      if(cn[j] < 0.5 * b.medCnt || (j == 0 && cn[j] < 0.9 * b.medCnt))
-         continue;  // periodo monco (festivo, inizio dati)
+      if(cn[j] < 0.5 * b.medCnt || (j == 0 && cn[j] < 0.9 * b.medCnt) || s.o[a] <= 0)
+         continue;  // periodo monco (festivo, inizio dati) o prezzo non valido
       b.t0[m] = s.t[a]; b.O[m] = s.o[a]; b.H[m] = hh; b.L[m] = ll; b.C[m] = s.c[e]; b.V[m] = vv; b.cnt[m] = cn[j];
       b.tH[m] = s.t[ih]; b.tL[m] = s.t[il]; b.offH[m] = ih - a; b.offL[m] = il - a;
       // ordine degli estremi; se cadono nella stessa barra decide la direzione di quella barra
@@ -1164,7 +1167,7 @@ void TfPage(CBlocks &b)
      }
 
    //--- righe per la Panoramica
-   if(b.intra)
+   if(b.intra && b.curO > 0)
      {
       double el = MathMin(b.curCnt / b.medCnt, 1.0);
       double ch = MathMax(b.curH, g_last), cl = MathMin(b.curL, g_last);
@@ -1183,7 +1186,7 @@ void TfPage(CBlocks &b)
       double fromO = g_last / b.curO - 1;
       g_curRows += "<tr>" + TD(TF_LABEL[tfi]) + TD(PeriodLabel(tfi, b.curT0)) + TD(F(el * 100, 0) + "%") + TD(PX(b.curO)) +
                    TD(PX(ch)) + TD(PX(cl)) + TDc(FP(fromO, 3) + "%", PCol(fromO, 0, medR)) + TD(FP(rs, 3) + "%") +
-                   TDc(F(rs / medR * 100, 0) + "%", PCol(rs / medR, 1.0, 0.6)) + TD(F(100.0 * le / m, 0)) +
+                   TDc(F(Dv(rs, medR) * 100, 0) + "%", PCol(Dv(rs, medR), 1.0, 0.6)) + TD(F(100.0 * le / m, 0)) +
                    TD(F(pos * 100, 0) + "%") + TD(F(100.0 * ph / m, 0) + "%") + TD(F(100.0 * pl / m, 0) + "%") + "</tr>";
      }
    double upr = (double)nUp / m;
@@ -1280,16 +1283,16 @@ void Overview(CSeries &d, const datetime lastT)
          lo52 = MathMin(lo52, d.c[i]);
         }
       pk = MathMax(pk, d.c[i]);
-      dd = d.c[i] / pk - 1;
+      dd = Dv(d.c[i], pk) - 1;
       mdd = MathMin(mdd, dd);
      }
    SecStart("Stato attuale", "");
    W("<div class='kpi'>");
    Kpi("Ultimo prezzo", PX(g_last), TimeToString(lastT, TIME_DATE | TIME_MINUTES));
-   Kpi("vs SMA50 giornaliera", FP(g_last / s50 - 1, 2) + "%", PX(s50));
-   Kpi("vs SMA200 giornaliera", FP(g_last / s200 - 1, 2) + "%", PX(s200));
-   Kpi("Massimo 52 settimane", PX(hi52), FP(g_last / hi52 - 1, 2) + "% dal massimo");
-   Kpi("Minimo 52 settimane", PX(lo52), FP(g_last / lo52 - 1, 2) + "% dal minimo");
+   Kpi("vs SMA50 giornaliera", FP(Dv(g_last, s50) - 1, 2) + "%", PX(s50));
+   Kpi("vs SMA200 giornaliera", FP(Dv(g_last, s200) - 1, 2) + "%", PX(s200));
+   Kpi("Massimo 52 settimane", PX(hi52), FP(Dv(g_last, hi52) - 1, 2) + "% dal massimo");
+   Kpi("Minimo 52 settimane", PX(lo52), FP(Dv(g_last, lo52) - 1, 2) + "% dal minimo");
    Kpi("Drawdown attuale", FP(dd, 1) + "%", "massimo storico " + FP(mdd, 1) + "%");
    int days[5] = {7, 30, 91, 182, 365};
    string dl[5] = {"1 settimana", "1 mese", "3 mesi", "6 mesi", "12 mesi"};
@@ -1303,7 +1306,7 @@ void Overview(CSeries &d, const datetime lastT)
             break;
            }
       if(j >= 0)
-         Kpi("Rendimento " + dl[k], FP(g_last / d.c[j] - 1, 2) + "%", "");
+         Kpi("Rendimento " + dl[k], FP(Dv(g_last, d.c[j]) - 1, 2) + "%", "");
      }
    W("</div>");
    SecEnd();
@@ -1419,7 +1422,7 @@ void VolumeTab(CSeries &h1, CSeries &d1)
       bool okp = useH ? VolProfile(h1, end - wd[k] * 86400, pr[k]) : VolProfile(d1, end - wd[k] * 86400, pr[k]);
       if(!okp)
          continue;
-      double vp = g_last / pr[k].poc - 1, vw = g_last / pr[k].vwap - 1;
+      double vp = Dv(g_last, pr[k].poc) - 1, vw = Dv(g_last, pr[k].vwap) - 1;
       string pos = g_last > pr[k].vah ? "sopra la Value Area" : (g_last < pr[k].val ? "sotto la Value Area" : "dentro la Value Area");
       W("<tr>" + TD(wl[k]) + TD(PX(pr[k].poc)) + TD(PX(pr[k].val)) + TD(PX(pr[k].vah)) + TD(PX(pr[k].vwap)) +
         TDc(FP(vp, 2) + "%", PCol(vp, 0, 0.05)) + TDc(FP(vw, 2) + "%", PCol(vw, 0, 0.05)) + TD(pos) + "</tr>");
@@ -1436,7 +1439,7 @@ void VolumeTab(CSeries &h1, CSeries &d1)
         {
          string col = z == pr[k].pocI ? C_AMBER : ((z >= pr[k].vaL && z <= pr[k].vaH) ? "#1d4ed8" : "#374151");
          W("<div class='r" + (z == cb ? " cur" : "") + "' title='" + PX(pr[k].lo + (z + 0.5) * pr[k].w) + "'><i style='width:" +
-           DoubleToString(pr[k].p[z] / pr[k].mx * 100, 1) + "%;background:" + col + "'></i></div>");
+           F(Dv(pr[k].p[z], pr[k].mx) * 100, 1) + "%;background:" + col + "'></i></div>");
         }
       W("<div class='cf'>" + PX(pr[k].lo) + "</div></div>");
      }
@@ -1471,10 +1474,10 @@ void VolumeTab(CSeries &h1, CSeries &d1)
       r20 /= MathMin(20, j + 1);
       r252 /= MathMin(252, j + 1);
       Kpi("Volume ultima sessione chiusa", DoubleToString(d1.v[j], 0), TimeToString(d1.t[j], TIME_DATE));
-      Kpi("vs media 20 sessioni", F(d1.v[j] / m20, 2) + "&times;", "");
-      Kpi("vs media 252 sessioni", F(d1.v[j] / m252, 2) + "&times;", "");
+      Kpi("vs media 20 sessioni", F(Dv(d1.v[j], m20), 2) + "&times;", "");
+      Kpi("vs media 252 sessioni", F(Dv(d1.v[j], m252), 2) + "&times;", "");
       Kpi("Percentile sull'ultimo anno", F(100.0 * below / MathMax(c252, 1), 0), "");
-      Kpi("Media 20 / media 252", F(r20 / r252, 2) + "&times;", "partecipazione recente vs anno");
+      Kpi("Media 20 / media 252", F(Dv(r20, r252), 2) + "&times;", "partecipazione recente vs anno");
       Kpi("Sessione in corso finora", DoubleToString(d1.v[n - 1], 0), TimeToString(d1.t[n - 1], TIME_DATE));
      }
    double a12[24], a4w[24], al[24];
