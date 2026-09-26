@@ -3638,6 +3638,7 @@ double g_seAct[], g_seOr[], g_seAbs[], g_seRng[], g_seDist[], g_seRv[];
 int    g_seCont[], g_seInv[], g_seBrk[], g_seVwS[], g_seX[], g_seTch[];
 bool   g_seF[], g_seHold[], g_seExt[], g_seNw[];
 int    g_seN = 0;
+datetime g_seTk[];  // orario chiave di ogni giorno valido (per il riferimento casuale)
 
 struct SeSt
   {
@@ -3944,6 +3945,7 @@ int SeCollect(CSeries &s, const int mk, const int mn, const long d0, const long 
       if(!SeWindow(s, KeyTime(day, mk, mn), ORm, H, barSec, true, vOr, kk))
          continue;
       kd[g_seN] = kk;
+      g_seTk[g_seN] = KeyTime(day, mk, mn);
       if(s.hasVol)  // volume dei primi minuti rispetto agli ultimi 20 giorni validi
         {
          if(hN >= 10)
@@ -3972,14 +3974,20 @@ void SeAll(SeSt &r)
    SeCalc(m, r);
   }
 
-// Riferimento: le stesse barre degli stessi giorni (stessa volatilita' minuto per minuto, stesso volume), ma la direzione
-// di ogni barra e' estratta a caso (movimento invertito con probabilita' 1/2). Cio' che resta e' l'effetto della sola volatilita'.
+// Riferimento: le stesse barre degli stessi giorni, con i loro orari (pause comprese), la stessa volatilita' minuto per
+// minuto e lo stesso volume, ma la direzione di ogni barra e' estratta a caso (movimento invertito con probabilita' 1/2).
+// Quello che resta e' l'effetto della sola volatilita'.
 void SeSurrogate(CSeries &s, const int &kd[], const int nk, const int ORm, const int H, const int barSec, SeSt &z)
   {
-   int preB = 3600 / barSec, hB = H * 3600 / barSec, L = preB + hB + 2, G = L + 10;
+   long slot = (long)(H + 3) * 3600;
    CSeries sim;
    sim.hasVol = s.hasVol;
-   int tot = nk * G;
+   int tot = 0;
+   for(int p = 0; p < nk; p++)
+     {
+      int kp = LowerBound(s.t, s.n, g_seTk[p] - 3600), kh = LowerBound(s.t, s.n, g_seTk[p] + H * 3600);
+      tot += kh - kp + 1;
+     }
    ArrayResize(sim.t, tot); ArrayResize(sim.o, tot); ArrayResize(sim.h, tot);
    ArrayResize(sim.l, tot); ArrayResize(sim.c, tot); ArrayResize(sim.v, tot);
    datetime Tp[];
@@ -3988,14 +3996,14 @@ void SeSurrogate(CSeries &s, const int &kd[], const int nk, const int ORm, const
    datetime tb = D'2001.01.01';
    for(int p = 0; p < nk; p++)
      {
-      int q0 = kd[p] - preB;
-      if(q0 < 1 || q0 + L >= s.n)
+      datetime T = g_seTk[p];
+      int kp = LowerBound(s.t, s.n, T - 3600), kh = LowerBound(s.t, s.n, T + H * 3600);
+      if(kp < 1 || kh <= kp || kd[p] < kp)
          continue;
-      double pc = s.c[q0 - 1];
-      datetime t0 = (datetime)((long)tb + (long)np * G * barSec);
-      for(int j = 0; j < L; j++)
+      double pc = s.c[kp - 1];
+      datetime t0 = (datetime)((long)tb + (long)np * slot + 3600);
+      for(int q = kp; q < kh; q++)
         {
-         int q = q0 + j;
          double ref = s.c[q - 1];
          double ro = s.o[q] / ref, rh = s.h[q] / ref, rl = s.l[q] / ref, rc = s.c[q] / ref;
          if((MathRand() & 1) == 1)
@@ -4006,7 +4014,7 @@ void SeSurrogate(CSeries &s, const int &kd[], const int nk, const int ORm, const
             ro = 1.0 / ro;
             rc = 1.0 / rc;
            }
-         sim.t[n] = (datetime)((long)t0 + (long)j * barSec);
+         sim.t[n] = (datetime)((long)t0 + ((long)s.t[q] - (long)T));
          sim.o[n] = pc * ro;
          sim.h[n] = pc * rh;
          sim.l[n] = pc * rl;
@@ -4015,7 +4023,7 @@ void SeSurrogate(CSeries &s, const int &kd[], const int nk, const int ORm, const
          pc = sim.c[n];
          n++;
         }
-      Tp[np++] = (datetime)((long)t0 + (long)preB * barSec);
+      Tp[np++] = t0;
      }
    sim.n = n;
    g_seN = 0;
@@ -4104,6 +4112,7 @@ void SessionTab(CSeries &s, const int barSec)
    ArrayResize(g_seRv, nd); ArrayResize(g_seCont, nd); ArrayResize(g_seInv, nd); ArrayResize(g_seBrk, nd); ArrayResize(g_seVwS, nd);
    ArrayResize(g_seX, nd); ArrayResize(g_seTch, nd); ArrayResize(g_seF, nd); ArrayResize(g_seHold, nd); ArrayResize(g_seExt, nd);
    ArrayResize(g_seNw, nd);
+   ArrayResize(g_seTk, nd);
    int kd[];
    ArrayResize(kd, nd);
    bool m[];
@@ -4388,7 +4397,9 @@ string LvBucketLab(const int fam, const int b)
 
 int LvNB(const int fam) { return fam <= 2 ? 24 : (fam == 3 ? 7 : 5); }
 
-// Primo tocco del livello partendo dal lato sd (+1 prezzo sopra, -1 sotto), poi gara: attraversa di r (+1) o respinto di r (-1).
+// Primo tocco del livello partendo dal lato sd (+1 prezzo sopra, -1 sotto), poi gara dalla chiusura della barra del tocco:
+// +1 se va prima di r oltre il livello (prosegue), -1 se torna prima indietro di r. Partire dal livello invece che dalla
+// chiusura favorirebbe 'prosegue' (la barra che tocca il livello chiude in media gia' oltre).
 bool LvTouch(CSeries &s, const int j0, const int j1, const double lev, const int sd, const double r, const double closeP,
              int &jt, int &race, bool &cb, double &exc)
   {
@@ -4405,9 +4416,13 @@ bool LvTouch(CSeries &s, const int j0, const int j1, const double lev, const int
    if(jt < 0)
       return false;
    int c = -sd;
-   double tgt = lev + c * r, bnc = lev + sd * r;
+   double ref = s.c[jt];
+   double tgt = ref + c * r, bnc = ref + sd * r;
    bool done = false;
-   for(int q = jt; q < j1; q++)
+   double pen0 = c > 0 ? s.h[jt] - lev : lev - s.l[jt];
+   if(pen0 > exc)
+      exc = pen0;
+   for(int q = jt + 1; q < j1; q++)
      {
       double pen = c > 0 ? s.h[q] - lev : lev - s.l[q];
       if(pen > exc)
@@ -4416,15 +4431,6 @@ bool LvTouch(CSeries &s, const int j0, const int j1, const double lev, const int
          continue;
       bool ht = c > 0 ? s.h[q] >= tgt : s.l[q] <= tgt;
       bool hb = sd > 0 ? s.h[q] >= bnc : s.l[q] <= bnc;
-      if(q == jt)  // nella barra del tocco il ritorno di r puo' essere avvenuto prima del tocco: conta solo l'attraversamento
-        {
-         if(ht)
-           {
-            race = hb ? 0 : 1;
-            done = true;
-           }
-         continue;
-        }
       if(ht && hb)
          done = true;
       else
@@ -4508,7 +4514,7 @@ void LvLine(const string label, const bool &m[], const int fam, const int totTou
    W("<tr>" + TD(label) + TD(I2S(n)) + TD(FP(pt, 1)) + TD(when) + TDc(FP(pc, 1), PCol(pc, pr, 0.15)) + TD(FP(pr, 1)) +
      TD(FP(pb, 1)) + TD(FP(mx, 3)) + TD(PX(mx * g_last)) + TD(FP(mf, 0)) + "</tr>");
    R(g_repLv, "    " + label + " (N " + I2S(n) + "): " + (totTouch > 0 ? FP(pt, 1) + "% dei tocchi" : "toccato " + FP(pt, 1) + "%" +
-     (nt > 0 ? ", pi&ugrave; spesso " + when : "")) + ", dopo il tocco attraversa di r " + FP(pc, 1) + "%, respinto di r " + FP(pr, 1) +
+     (nt > 0 ? ", pi&ugrave; spesso " + when : "")) + ", dopo il tocco prosegue di r " + FP(pc, 1) + "%, respinto di r " + FP(pr, 1) +
      "%, il periodo chiude dall'altra parte " + FP(pb, 1) + "%, escursione mediana oltre il livello " + FP(mx, 3) + "% (circa " +
      PX(mx * g_last) + "), tocco al " + FP(mf, 0) + "% del periodo (mediana)");
   }
@@ -4628,11 +4634,12 @@ void LevelFam(CSeries &s, CPer &p, const int fam, const int barSec)
                 "% (di questi al rialzo il " + Share(oNeverUp, oNever) + "%). r mediano = " + FP(rMed, 3) + "% (circa " + PX(rMed * g_last) + ").";
    SecStart("Livelli: " + FAM_NAME[fam],
             "Livelli = massimo, minimo e chiusura " + pv + " e apertura del periodo in corso. <b>Toccato</b> = il prezzo lo raggiunge " +
-            "durante il periodo (se il periodo apre oltre il livello conta il ritorno sul livello). Dopo il primo tocco: <b>attraversa</b> = " +
-            "va oltre il livello di r prima di tornare indietro di r; <b>respinto</b> = il contrario (misura simmetrica); r = " +
+            "durante il periodo (se il periodo apre oltre il livello conta il ritorno sul livello). Dopo il primo tocco, dalla chiusura " +
+            "della barra che lo tocca: <b>prosegue</b> = va avanti di r oltre prima di tornare indietro di r; <b>respinto</b> = il " +
+            "contrario (misura simmetrica: senza tendenza sarebbe circa 50 e 50); r = " +
             F(InpLevelR * 100, 0) + "% del range mediano degli ultimi 20 periodi. <b>Chiude dall'altra parte</b> = a fine periodo il " +
             "prezzo &egrave; oltre il livello. Colonna 'a che punto del periodo' = quanta parte del periodo &egrave; passata al tocco.<br>" + sum);
-   THead("Livello / condizione|N|% toccato|Quando pi&ugrave; spesso|% attraversa di r|% respinto di r|% chiude dall'altra parte|Escursione mediana oltre %|&asymp; prezzo|A che punto del periodo (mediana %)");
+   THead("Livello / condizione|N|% toccato|Quando pi&ugrave; spesso|% prosegue di r|% respinto di r|% chiude dall'altra parte|Escursione mediana oltre %|&asymp; prezzo|A che punto del periodo (mediana %)");
    R(g_repLv, "");
    R(g_repLv, "Livelli " + FAM_NAME[fam] + ": " + sum);
    bool m[];
@@ -4715,10 +4722,17 @@ int    g_drK[], g_drC[], g_drA[], g_drB[], g_drCc[], g_drD[], g_drE[], g_drF[], 
 double g_drR[];
 double g_drUp = 0.5;
 
+// ora nominale di inizio del blocco di 4 o 8 ore (la prima barra puo' arrivare dopo, es. alle 01 dopo la pausa)
+int BlockStart(const int fam, const datetime t)
+  {
+   int k = fam == 0 ? 4 : 8;
+   return (HourOf(t) / k) * k;
+  }
+
 int DirCal(const int fam, const datetime t)
   {
    if(fam <= 1)
-      return HourOf(t);
+      return BlockStart(fam, t);
    if(fam == 2)
       return DowMon(t);
    MqlDateTime d;
@@ -4757,16 +4771,16 @@ void DirLine(const string label, const bool &m[], const int nUp, const int nDn, 
       return;
    double pu = (double)u / n, pd = (double)d / n, pp = (double)pos / n;
    W("<tr>" + TD(label) + TD(I2S(n)) + TD(FP((double)n / tot, 1)) + TD(FP(Dv(u, nUp), 1)) + TD(FP(Dv(d, nDn), 1)) +
-     TDc(FP(pu, 1), PCol(pu, 0.2, 0.1)) + TDc(FP(pd, 1), PCol(pd, 0.2, 0.1)) + TDc(FP(pp, 1), PCol(pp, g_drUp, 0.1)) +
-     TD(FP(sr / n, 3)) + "</tr>");
+     TDc(FP(pu, 1), PCol(pu, 0.2, 0.1)) + TDc(FP(pd, 1), PCol(pd, 0.2, 0.1)) + TDc(FP(pu - pd, 1), PCol(pu - pd, 0, 0.1)) +
+     TDc(FP(pp, 1), PCol(pp, g_drUp, 0.1)) + TD(FP(sr / n, 3)) + "</tr>");
    R(g_repDir, "    " + label + ": N " + I2S(n) + " (" + FP((double)n / tot, 1) + "% dei periodi; " + FP(Dv(u, nUp), 1) +
      "% dei forti rialzi, " + FP(Dv(d, nDn), 1) + "% dei forti ribassi): forte rialzo " + FP(pu, 1) + "%, forte ribasso " + FP(pd, 1) +
-     "%, rialzista " + FP(pp, 1) + "%, rendimento medio " + FP(sr / n, 3) + "%");
+     "% (sbilanciamento " + FP(pu - pd, 1) + " punti), rialzista " + FP(pp, 1) + "%, rendimento medio " + FP(sr / n, 3) + "%");
   }
 
 void DirGrp(const string t)
   {
-   Grp(t, 9);
+   Grp(t, 10);
    R(g_repDir, "  [" + t + "]");
   }
 
@@ -4857,8 +4871,10 @@ void DirFam(CSeries &s, CPer &p, CPer &ph, const int fam)
             "<b>Forte rialzo</b> = il 20% dei periodi con il rendimento pi&ugrave; alto (apertura &rarr; chiusura &ge; " + FP(p80, 3) +
             "%), <b>forte ribasso</b> = il 20% pi&ugrave; basso (&le; " + FP(p20, 3) + "%). Per ogni condizione conosciuta all'inizio " +
             "del periodo: quanti periodi la hanno, quanti forti rialzi e forti ribassi la avevano, e con quale frequenza un periodo con " +
-            "quella condizione diventa un forte rialzo o un forte ribasso (normale = 20%; blu = pi&ugrave; spesso del normale).");
-   THead("Condizione all'inizio del periodo|N|% dei periodi|% dei forti rialzi|% dei forti ribassi|% diventa forte rialzo|% diventa forte ribasso|% rialzista|Rendimento medio %");
+            "quella condizione diventa un forte rialzo o un forte ribasso (normale = 20%; blu = pi&ugrave; spesso del normale). " +
+            "Se crescono entrambi la condizione porta <b>volatilit&agrave;</b>, non direzione: la direzione &egrave; lo " +
+            "<b>sbilanciamento</b> (forte rialzo meno forte ribasso).");
+   THead("Condizione all'inizio del periodo|N|% dei periodi|% dei forti rialzi|% dei forti ribassi|% diventa forte rialzo|% diventa forte ribasso|Sbilanciamento (rialzo - ribasso)|% rialzista|Rendimento medio %");
    R(g_repDir, "");
    R(g_repDir, "Direzione " + fn + ": forte rialzo = rendimento >= " + FP(p80, 3) + "% (20% dei periodi), forte ribasso <= " + FP(p20, 3) +
      "%; rialzisti in generale " + FP(g_drUp, 1) + "%. Cosa c'era all'inizio del periodo:");
@@ -4940,7 +4956,7 @@ void DirFam(CSeries &s, CPer &p, CPer &ph, const int fam)
    for(int i = 0; i < tot; i++)
      {
       int k = g_drK[i];
-      int h0 = HourOf(p.t0[k]);
+      int h0 = fam <= 1 ? BlockStart(fam, p.t0[k]) : HourOf(p.t0[k]);
       int bL, bH, bO;
       if(fam == 2)
         {
@@ -5497,8 +5513,8 @@ bool Analyze(const string sym)
    W(g_rep);
    W("\n=== EVENTI ===\n");
    W(g_repEv);
-   W("\n=== LIVELLI CHIAVE (massimo, minimo, chiusura del periodo precedente e apertura del periodo; r = " + F(InpLevelR * 100, 0) +
-     "% del range mediano) ===\n");
+   W("\n=== LIVELLI CHIAVE (massimo, minimo, chiusura del periodo precedente e apertura del periodo; dopo il tocco, dalla chiusura " +
+     "della barra che tocca: prosegue di r oltre o respinto di r, r = " + F(InpLevelR * 100, 0) + "% del range mediano) ===\n");
    W(g_repLv);
    W("\n=== DIREZIONE: movimenti forti, cosa li precede, quando si formano, cosa succede dopo ===\n");
    W(g_repDir);
