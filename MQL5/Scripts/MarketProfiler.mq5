@@ -66,6 +66,10 @@ string g_curRows = "";
 string g_sumRows = "";
 string g_warn = "";
 string g_minNote = "";
+string g_rep = "";      // rapporto testuale: sezioni per timeframe
+string g_repCur = "";   // rapporto testuale: periodo in corso
+string g_repHead = "";  // rapporto testuale: dati e stato attuale
+string g_repVol = "";   // rapporto testuale: volume
 
 struct NxAcc
   {
@@ -202,6 +206,8 @@ string F(const double x, const int d) { if(!MathIsValidNumber(x)) return "&ndash
 string FP(const double x, const int d) { return F(x * 100.0, d); }
 string PX(const double x) { if(!MathIsValidNumber(x)) return "&ndash;"; return DoubleToString(x, g_digits); }
 string I2S(const long x) { return IntegerToString(x); }
+void   R(string &dst, const string s) { dst += s + "\n"; }
+double ArcF(const double x) { return 2.0 / M_PI * MathArcsin(MathSqrt(MathMax(0.0, MathMin(1.0, x)))); }  // legge dell'arcoseno
 string TD(const string s) { return "<td>" + s + "</td>"; }
 string TDc(const string s, const string bg) { if(bg == "") return TD(s); return "<td style='background:" + bg + "'>" + s + "</td>"; }
 
@@ -820,6 +826,10 @@ void PctRow(const string name, const double &x[], const int n, const bool hasPx)
    W("<tr>" + TD(name) + TD(I2S(n)) + TD(FP(Mean(x, n), 3)) + TD(FP(Pct(s, n, 10), 3)) + TD(FP(Pct(s, n, 25), 3)) +
      TD(FP(Pct(s, n, 50), 3)) + TD(FP(Pct(s, n, 75), 3)) + TD(FP(Pct(s, n, 90), 3)) + TD(FP(Pct(s, n, 95), 3)) +
      TD(FP(s[n - 1], 3)) + TD(hasPx ? PX(Pct(s, n, 50) * g_last) : "&ndash;") + TD(hasPx ? PX(Pct(s, n, 90) * g_last) : "&ndash;") + "</tr>");
+   R(g_rep, "- " + name + ": media " + FP(Mean(x, n), 3) + "%, P10 " + FP(Pct(s, n, 10), 3) + "%, P25 " + FP(Pct(s, n, 25), 3) +
+     "%, mediana " + FP(Pct(s, n, 50), 3) + "%, P75 " + FP(Pct(s, n, 75), 3) + "%, P90 " + FP(Pct(s, n, 90), 3) + "%, P95 " +
+     FP(Pct(s, n, 95), 3) + "%, max " + FP(s[n - 1], 3) + "%" +
+     (hasPx ? " (in prezzo: mediana " + PX(Pct(s, n, 50) * g_last) + ", P90 " + PX(Pct(s, n, 90) * g_last) + ")" : ""));
   }
 
 string ModeLabel(const int tfi, const int &cnts[], const int tc, const int tot)
@@ -887,6 +897,7 @@ void GroupTable(CBlocks &b, const int &g[], const int ng, string &glab[], const 
    if(tc > 0)
       hd += "|Massimo pi&ugrave; spesso|Minimo pi&ugrave; spesso";
    THead(hd);
+   R(g_rep, "Per " + gname + ":");
    double tmp[];
    ArrayResize(tmp, m);
    int hsub[], lsub[];
@@ -919,6 +930,12 @@ void GroupTable(CBlocks &b, const int &g[], const int ng, string &glab[], const 
          row += TD(ModeLabel(b.tf, hsub, tc, gn[k])) + TD(ModeLabel(b.tf, lsub, tc, gn[k]));
         }
       W(row + "</tr>");
+      R(g_rep, "  " + glab[k] + ": N " + I2S(gn[k]) + ", spostamento medio " + FP(sR[k] / gn[k], 3) + "%, mediano " + FP(med, 3) +
+        "%, rialzisti " + FP(up, 1) + "%, rend. medio " + FP(sRet[k] / gn[k], 3) + "%, Trend " + FP((double)gc[k * 3] / gn[k], 1) +
+        "%, Mean rev. " + FP((double)gc[k * 3 + 2] / gn[k], 1) + "%, restituito medio " + F(sRf[k] / gn[k] * 100, 0) + "%" +
+        (rvn[k] > 0 ? ", volume rel. " + F(sRv[k] / rvn[k], 2) : "") +
+        (tc > 0 ? ", massimo pi&ugrave; spesso " + ModeLabel(b.tf, hsub, tc, gn[k]) + ", minimo pi&ugrave; spesso " +
+         ModeLabel(b.tf, lsub, tc, gn[k]) : ""));
      }
    TEnd();
   }
@@ -936,6 +953,7 @@ void NextTable(NxAcc &acc[])
    grp[22] = "Sequenza: periodi consecutivi nella stessa direzione";
    int gs[5] = {1, 7, 12, 17, 22};
    int ge[5] = {6, 11, 16, 21, 27};
+   R(g_rep, "Cosa fa il periodo successivo:");
    for(int k = 0; k < NX_ROWS; k++)
      {
       if(grp[k] != "")
@@ -947,7 +965,10 @@ void NextTable(NxAcc &acc[])
                   if(acc[r].n >= 5)
                      has = true;
          if(has)
+           {
             Grp(grp[k], 11);
+            R(g_rep, "  [" + grp[k] + "]");
+           }
         }
       NxAcc a = acc[k];
       if(a.n < 5)
@@ -956,6 +977,10 @@ void NextTable(NxAcc &acc[])
       W("<tr>" + TD(NX_LABEL[k]) + TD(I2S(a.n)) + TDc(FP(same, 1), PCol(same, 0.5, 0.15)) + TDc(FP(up, 1), PCol(up, 0.5, 0.15)) +
         TD(FP(a.ret / a.n, 3)) + TDc(F(rr, 2), PCol(rr, 1.0, 0.5)) + TD(FP((double)a.bh / a.n, 1)) + TD(FP((double)a.bl / a.n, 1)) +
         TD(FP((double)a.ins / a.n, 1)) + TD(a.br > 0 ? FP((double)a.fb / a.br, 1) : "&ndash;") + TD(FP((double)a.mid / a.n, 1)) + "</tr>");
+      R(g_rep, "  " + NX_LABEL[k] + " (N " + I2S(a.n) + "): stessa direzione " + FP(same, 1) + "%, rialzista " + FP(up, 1) +
+        "%, rend. medio " + FP(a.ret / a.n, 3) + "%, ampiezza " + F(rr, 2) + "x il mediano, rompe il massimo prec. " +
+        FP((double)a.bh / a.n, 1) + "%, rompe il minimo prec. " + FP((double)a.bl / a.n, 1) + "%, inside " + FP((double)a.ins / a.n, 1) +
+        "%, false rotture " + (a.br > 0 ? FP((double)a.fb / a.br, 1) : "-") + "%, torna a met&agrave; prec. " + FP((double)a.mid / a.n, 1) + "%");
      }
    TEnd();
   }
@@ -1029,6 +1054,20 @@ void TfPage(CBlocks &b)
      }
    W("</div>");
    SecEnd();
+   R(g_rep, "");
+   R(g_rep, "=== " + TF_LABEL[tfi] + " ===");
+   R(g_rep, I2S(m) + " periodi completi dal " + TimeToString(b.t0[0], TIME_DATE) + " al " + TimeToString(b.t0[m - 1], TIME_DATE) +
+     ", misurati su barre " + src + (b.intra ? "." : " (ogni periodo &egrave; una sola barra: ordine massimo/minimo dedotto dalla candela).") +
+     (tfi == 0 ? g_minNote : ""));
+   R(g_rep, "Spostamento pi&ugrave; ampio (massimo - minimo): mediana " + FP(medR, 3) + "% (circa " + PX(medR * g_last) +
+     " in prezzo), media " + FP(Mean(b.rng, m), 3) + "%, 1 periodo su 10 supera " + FP(p90, 3) + "%, massimo storico " +
+     FP(b.rng[ib], 2) + "% (" + PeriodLabel(tfi, b.t0[ib]) + ").");
+   R(g_rep, "Direzione: " + FP((double)nUp / m, 1) + "% dei periodi chiude sopra l'apertura, rendimento medio " + FP(sRet / m, 3) + "%.");
+   R(g_rep, "Tipo: Trend (restituisce al massimo il 25% dello spostamento) " + FP((double)nc[0] / m, 1) + "%, Parziale " +
+     FP((double)nc[1] / m, 1) + "%, Mean reversion (restituisce almeno il 75%) " + FP((double)nc[2] / m, 1) +
+     "%. In media viene restituito il " + F(Mean(b.rf, m) * 100, 0) + "% dello spostamento (mean reversion media " + FP(meanRetr, 3) + "%).");
+   R(g_rep, "Il periodo successivo va nella stessa direzione nel " + FP(sameAll, 1) + "% dei casi.");
+   R(g_rep, "Distribuzioni (in % del prezzo di apertura del periodo):");
 
    //--- quanto
    SecStart("Spostamento pi&ugrave; ampio e mean reversion: quanto",
@@ -1133,6 +1172,61 @@ void TfPage(CBlocks &b)
              "Swing ribassista: rientro dal minimo");
       W("</div>");
       SecEnd();
+      string sh = "", sl = "", su = "", sd = "";
+      for(int k = ts; k < te; k++)
+        {
+         sh += lab[k] + " " + F(h[k], 1) + "%; ";
+         sl += lab[k] + " " + F(l[k], 1) + "%; ";
+         su += lab[k] + " " + F(ru[k], 1) + "%; ";
+         sd += lab[k] + " " + F(rd[k], 1) + "%; ";
+        }
+      R(g_rep, "Quando si forma il massimo (" + TimUnit(tfi) + ", % dei periodi): " + sh);
+      R(g_rep, "Quando si forma il minimo: " + sl);
+      R(g_rep, "Dove parte il rientro dopo uno swing rialzista (al massimo): " + su);
+      R(g_rep, "Dove parte il rientro dopo uno swing ribassista (al minimo): " + sd);
+
+      //--- posizione degli estremi nel periodo contro quella di un prezzo casuale (legge dell'arcoseno)
+      int nq = b.medCnt >= 10 ? 10 : (int)MathRound(b.medCnt);
+      if(nq >= 2)
+        {
+         double oh[], ol[], ex[];
+         ArrayResize(oh, nq); ArrayResize(ol, nq); ArrayResize(ex, nq);
+         ArrayInitialize(oh, 0.0); ArrayInitialize(ol, 0.0); ArrayInitialize(ex, 0.0);
+         for(int i = 0; i < m; i++)
+           {
+            int cc = b.cnt[i];
+            int kh = (int)MathFloor((double)b.offH[i] / cc * nq), kl = (int)MathFloor((double)b.offL[i] / cc * nq);
+            oh[kh < nq ? kh : nq - 1] += 1;
+            ol[kl < nq ? kl : nq - 1] += 1;
+            for(int j = 0; j < cc; j++)  // atteso: probabilita' di ogni barra per un prezzo casuale, sommata nella sua fascia
+              {
+               int kk = (int)MathFloor((double)j / cc * nq);
+               ex[kk < nq ? kk : nq - 1] += ArcF((j + 1.0) / cc) - ArcF((double)j / cc);
+              }
+           }
+         SecStart("Quando: confronto con un prezzo casuale",
+                  "Anche un prezzo che si muove del tutto a caso fa pi&ugrave; spesso massimo e minimo all'inizio o alla fine del " +
+                  "periodo (legge dell'arcoseno). Per questo &egrave; normale che le fasce estreme risultino le 'pi&ugrave; frequenti'. " +
+                  "Qui il periodo &egrave; diviso in " + I2S(nq) + " parti di tempo: il rapporto osservato/atteso dice dove lo strumento " +
+                  "si comporta davvero in modo diverso dal caso (sopra 1.20 pi&ugrave; spesso del caso, sotto 0.80 meno spesso).");
+         THead("Parte del periodo trascorsa|% massimi|% minimi|Atteso se casuale|Massimi / atteso|Minimi / atteso");
+         string sx = "";
+         for(int k = 0; k < nq; k++)
+           {
+            oh[k] = oh[k] / m * 100;
+            ol[k] = ol[k] / m * 100;
+            ex[k] = ex[k] / m * 100;
+            double rh = Dv(oh[k], ex[k]), rl = Dv(ol[k], ex[k]);
+            string ql = F(100.0 * k / nq, 0) + "-" + F(100.0 * (k + 1) / nq, 0) + "%";
+            W("<tr>" + TD(ql) + TD(F(oh[k], 1)) + TD(F(ol[k], 1)) + TD(F(ex[k], 1)) + TDc(F(rh, 2), PCol(rh, 1.0, 0.5)) +
+              TDc(F(rl, 2), PCol(rl, 1.0, 0.5)) + "</tr>");
+            sx += ql + ": massimi " + F(oh[k], 1) + "%, minimi " + F(ol[k], 1) + "%, atteso " + F(ex[k], 1) + "% (x" + F(rh, 2) +
+                  " / x" + F(rl, 2) + "); ";
+           }
+         TEnd();
+         SecEnd();
+         R(g_rep, "Posizione di massimo e minimo nel tempo del periodo contro un prezzo casuale: " + sx);
+        }
      }
 
    //--- per categoria
@@ -1186,6 +1280,15 @@ void TfPage(CBlocks &b)
       SecStart("Anno per anno", "");
       PeriodList(b, idx, m, medR);
       SecEnd();
+      string sy = "";
+      for(int j = 0; j < m; j++)
+        {
+         int i = idx[j];
+         sy += PeriodLabel(tfi, b.t0[i]) + ": rendimento " + FP(b.ret[i], 2) + "%, spostamento " + FP(b.rng[i], 2) + "% " +
+               (b.lf[i] ? "rialzista" : "ribassista") + ", " + CLS_NAME[b.cls[i]] + ", massimo " + TimeToString(b.tH[i], TIME_DATE) +
+               ", minimo " + TimeToString(b.tL[i], TIME_DATE) + "; ";
+        }
+      R(g_rep, "Anno per anno: " + sy);
      }
    else
      {
@@ -1207,6 +1310,15 @@ void TfPage(CBlocks &b)
       SecStart("Periodi pi&ugrave; ampi della storia", "I 15 periodi con lo spostamento pi&ugrave; ampio.");
       PeriodList(b, idx, k, medR);
       SecEnd();
+      string sb = "";
+      int fmtT = b.src == 2 ? TIME_DATE : (TIME_DATE | TIME_MINUTES);
+      for(int j = 0; j < k; j++)
+        {
+         int i = idx[j];
+         sb += PeriodLabel(tfi, b.t0[i]) + " " + FP(b.rng[i], 2) + "% " + (b.lf[i] ? "rialzista" : "ribassista") + " (" +
+               CLS_NAME[b.cls[i]] + (b.intra ? ", massimo " + TimeToString(b.tH[i], fmtT) + ", minimo " + TimeToString(b.tL[i], fmtT) : "") + "); ";
+        }
+      R(g_rep, "I 15 periodi pi&ugrave; ampi: " + sb);
       for(int j = 0; j < k; j++)
          idx[j] = m - 1 - j;
       SecStart("Ultimi periodi chiusi", "");
@@ -1232,6 +1344,10 @@ void TfPage(CBlocks &b)
             pl++;
         }
       double fromO = g_last / b.curO - 1;
+      R(g_repCur, TF_LABEL[tfi] + " (" + PeriodLabel(tfi, b.curT0) + "): trascorso " + F(el * 100, 0) + "%, dall'apertura " + FP(fromO, 3) +
+        "%, spostamento finora " + FP(rs, 3) + "% = " + F(Dv(rs, medR) * 100, 0) + "% del mediano (percentile " + F(100.0 * le / m, 0) +
+        "), prezzo al " + F(pos * 100, 0) + "% del range, a questo punto il massimo era gi&agrave; fatto nel " + F(100.0 * ph / m, 0) +
+        "% dei periodi e il minimo nel " + F(100.0 * pl / m, 0) + "%.");
       g_curRows += "<tr>" + TD(TF_LABEL[tfi]) + TD(PeriodLabel(tfi, b.curT0)) + TD(F(el * 100, 0) + "%") + TD(PX(b.curO)) +
                    TD(PX(ch)) + TD(PX(cl)) + TDc(FP(fromO, 3) + "%", PCol(fromO, 0, medR)) + TD(FP(rs, 3) + "%") +
                    TDc(F(Dv(rs, medR) * 100, 0) + "%", PCol(Dv(rs, medR), 1.0, 0.6)) + TD(F(100.0 * le / m, 0)) +
@@ -1342,6 +1458,11 @@ void Overview(CSeries &d, const datetime lastT)
    Kpi("Massimo 52 settimane", PX(hi52), FP(Dv(g_last, hi52) - 1, 2) + "% dal massimo");
    Kpi("Minimo 52 settimane", PX(lo52), FP(Dv(g_last, lo52) - 1, 2) + "% dal minimo");
    Kpi("Drawdown attuale", FP(dd, 1) + "%", "massimo storico " + FP(mdd, 1) + "%");
+   R(g_repHead, "Stato attuale: prezzo " + PX(g_last) + " (" + TimeToString(lastT, TIME_DATE | TIME_MINUTES) + "), " +
+     FP(Dv(g_last, s50) - 1, 2) + "% dalla SMA50 giornaliera, " + FP(Dv(g_last, s200) - 1, 2) + "% dalla SMA200, " +
+     FP(Dv(g_last, hi52) - 1, 2) + "% dal massimo a 52 settimane (" + PX(hi52) + "), " + FP(Dv(g_last, lo52) - 1, 2) +
+     "% dal minimo a 52 settimane (" + PX(lo52) + "), drawdown attuale " + FP(dd, 1) + "%, massimo drawdown storico " + FP(mdd, 1) + "%.");
+   string srt = "";
    int days[5] = {7, 30, 91, 182, 365};
    string dl[5] = {"1 settimana", "1 mese", "3 mesi", "6 mesi", "12 mesi"};
    for(int k = 0; k < 5; k++)
@@ -1354,10 +1475,14 @@ void Overview(CSeries &d, const datetime lastT)
             break;
            }
       if(j >= 0)
+        {
          Kpi("Rendimento " + dl[k], FP(Dv(g_last, d.c[j]) - 1, 2) + "%", "");
+         srt += dl[k] + " " + FP(Dv(g_last, d.c[j]) - 1, 2) + "%; ";
+        }
      }
    W("</div>");
    SecEnd();
+   R(g_repHead, "Rendimenti: " + srt);
    SecStart("Periodo in corso, per timeframe",
             "Il periodo non ancora chiuso di ogni timeframe confrontato con la storia: quanto spostamento ha gi&agrave; fatto rispetto " +
             "al mediano (100% = ha gi&agrave; fatto uno spostamento tipico), in quale percentile storico cade, dove si trova il prezzo " +
@@ -1474,6 +1599,8 @@ void VolumeTab(CSeries &h1, CSeries &d1)
       string pos = g_last > pr[k].vah ? "sopra la Value Area" : (g_last < pr[k].val ? "sotto la Value Area" : "dentro la Value Area");
       W("<tr>" + TD(wl[k]) + TD(PX(pr[k].poc)) + TD(PX(pr[k].val)) + TD(PX(pr[k].vah)) + TD(PX(pr[k].vwap)) +
         TDc(FP(vp, 2) + "%", PCol(vp, 0, 0.05)) + TDc(FP(vw, 2) + "%", PCol(vw, 0, 0.05)) + TD(pos) + "</tr>");
+      R(g_repVol, "Volume Profile " + wl[k] + ": POC " + PX(pr[k].poc) + " (prezzo " + FP(vp, 2) + "% dal POC), Value Area " +
+        PX(pr[k].val) + " - " + PX(pr[k].vah) + ", VWAP " + PX(pr[k].vwap) + " (prezzo " + FP(vw, 2) + "%), prezzo " + pos + ".");
      }
    TEnd();
    W("<div class='vps'>");
@@ -1527,6 +1654,9 @@ void VolumeTab(CSeries &h1, CSeries &d1)
       Kpi("Percentile sull'ultimo anno", F(100.0 * below / MathMax(c252, 1), 0), "");
       Kpi("Media 20 / media 252", F(Dv(r20, r252), 2) + "&times;", "partecipazione recente vs anno");
       Kpi("Sessione in corso finora", DoubleToString(d1.v[n - 1], 0), TimeToString(d1.t[n - 1], TIME_DATE));
+      R(g_repVol, "Volume ultima sessione chiusa (" + TimeToString(d1.t[j], TIME_DATE) + "): " + F(Dv(d1.v[j], m20), 2) +
+        "x la media di 20 sessioni, " + F(Dv(d1.v[j], m252), 2) + "x la media di 252, percentile " + F(100.0 * below / MathMax(c252, 1), 0) +
+        " sull'ultimo anno; media 20 sessioni / media 252 = " + F(Dv(r20, r252), 2) + ".");
      }
    double a12[24], a4w[24], al[24];
    int n12[24], n4w[24], nl[24];
@@ -1573,7 +1703,11 @@ void VolumeTab(CSeries &h1, CSeries &d1)
            }
         }
       if(sameN > 0 && sameSum > 0)
+        {
          Kpi("Ultima ora chiusa vs stessa ora (20 gg)", F(h1.v[j] / (sameSum / sameN), 2) + "&times;", TimeToString(h1.t[j], TIME_DATE | TIME_MINUTES));
+         R(g_repVol, "Ultima ora chiusa (" + TimeToString(h1.t[j], TIME_DATE | TIME_MINUTES) + "): " + F(h1.v[j] / (sameSum / sameN), 2) +
+           "x la media della stessa ora negli ultimi 20 giorni.");
+        }
      }
    W("</div>");
    if(hasH)
@@ -1588,6 +1722,7 @@ void VolumeTab(CSeries &h1, CSeries &d1)
         }
       W("<h3>Volume medio per ora (server)</h3>");
       THead("Ora|Media 12 mesi|Media ultime 4 settimane|Ultima sessione|Ultime 4 sett. vs 12 mesi|Ultima sessione vs 12 mesi");
+      R(g_repVol, "Volume medio per ora:");
       for(int k = 0; k < 24; k++)
         {
          if(n12[k] == 0)
@@ -1596,6 +1731,8 @@ void VolumeTab(CSeries &h1, CSeries &d1)
          W("<tr>" + TD(StringFormat("%02dh", k)) + TD(HBar(a12[k], mx, DoubleToString(a12[k], 0))) +
            TD(HBar(a4w[k], mx, DoubleToString(a4w[k], 0))) + TD(nl[k] > 0 ? HBar(al[k], mx, DoubleToString(al[k], 0)) : "&ndash;") +
            TDc(F(r1, 2) + "&times;", PCol(r1, 1.0, 0.6)) + TDc(F(r2, 2) + "&times;", PCol(r2, 1.0, 0.6)) + "</tr>");
+         R(g_repVol, "  " + StringFormat("%02dh", k) + ": volume medio 12 mesi " + DoubleToString(a12[k], 0) + ", ultime 4 settimane " +
+           DoubleToString(a4w[k], 0) + " (" + F(r1, 2) + "x), ultima sessione " + (nl[k] > 0 ? DoubleToString(al[k], 0) : "-") + ".");
         }
       TEnd();
      }
@@ -1638,12 +1775,16 @@ string Css(void)
           ".st{display:flex;min-width:120px;height:12px;border-radius:3px;overflow:hidden}.st i{display:block;height:100%}" +
           ".vps{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-top:14px}" +
           ".vp .r{height:5px}.vp .r i{display:block;height:100%}.vp .r.cur{outline:1px solid #f9fafb}" +
-          ".svg{display:block;max-width:100%}";
+          ".svg{display:block;max-width:100%}" +
+          "textarea{width:100%;height:70vh;background:#0f172a;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:12px;font:12px/1.5 Consolas,monospace}" +
+          ".cp{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:8px 14px;cursor:pointer;font:inherit;margin-bottom:10px}";
   }
 
 string Js(void)
   {
-   return "function show(id){if(!document.getElementById('tab-'+id))id='overview';" +
+   return "function cp(b){var t=document.getElementById('rep');t.select();try{document.execCommand('copy');}catch(e){}" +
+          "if(navigator.clipboard)navigator.clipboard.writeText(t.value);b.textContent='Copiato';}" +
+          "function show(id){if(!document.getElementById('tab-'+id))id='overview';" +
           "var t=document.querySelectorAll('.tab');for(var i=0;i<t.length;i++)t[i].hidden=(t[i].id!=='tab-'+id);" +
           "var b=document.querySelectorAll('nav button');for(var j=0;j<b.length;j++)b[j].className=(b[j].getAttribute('data-tab')===id)?'on':'';" +
           "if(location.hash!=='#'+id)history.replaceState(null,'','#'+id);window.scrollTo(0,0);}" +
@@ -1693,6 +1834,10 @@ bool Analyze(const string sym)
    if(m1.n > 0 && m1.t[m1.n - 1] >= lastT) { lastT = m1.t[m1.n - 1]; g_last = m1.c[m1.n - 1]; }
    g_curRows = "";
    g_sumRows = "";
+   g_rep = "";
+   g_repCur = "";
+   g_repHead = "";
+   g_repVol = "";
    int i0m = 0;  // scheda Minuto: solo gli ultimi InpMinuteYears anni (milioni di barre M1 altrimenti)
    g_minNote = "";
    if(InpMinuteYears > 0 && m1.n > 0)
@@ -1739,7 +1884,15 @@ bool Analyze(const string sym)
                : "orari = ora del server " + AccountInfoString(ACCOUNT_COMPANY);
    W("<header><h1>" + sym + " &mdash; analisi descrittiva</h1><p>" + info + tz + " &middot; generato " +
      TimeToString(TimeLocal(), TIME_DATE | TIME_MINUTES) + "</p>" + (g_warn != "" ? "<p style='color:#f59e0b'>" + g_warn + "</p>" : "") + "<nav>");
-   W("<button data-tab='overview'>Panoramica</button>");
+   W("<button data-tab='overview'>Panoramica</button><button data-tab='report'>Rapporto</button>");
+   R(g_repHead, "RAPPORTO DESCRITTIVO - " + sym + " (generato " + TimeToString(TimeLocal(), TIME_DATE | TIME_MINUTES) + ")");
+   R(g_repHead, "Dati: " + info + tz + ".");
+   if(g_warn != "")
+      R(g_repHead, g_warn);
+   R(g_repHead, "Metodo: ogni periodo (candela del timeframe) &egrave; scomposto in apertura -> primo estremo (movimento iniziale), " +
+     "primo -> secondo estremo (spostamento pi&ugrave; ampio = massimo - minimo) e secondo estremo -> chiusura (mean reversion, " +
+     "quanto viene restituito). Percentuali in % del prezzo di apertura del periodo. Mediana = valore tipico, P90 = superato " +
+     "nel 10% dei periodi.");
    for(int k = 0; k < NTF; k++)
       W("<button data-tab='" + TF_KEY[k] + "'>" + TF_LABEL[k] + "</button>");
    W("<button data-tab='volume'>Volume</button></nav></header><main>");
@@ -1781,6 +1934,17 @@ bool Analyze(const string sym)
    Overview(d1, lastT);
    W("</div><div class='tab' id='tab-volume' hidden>");
    VolumeTab(h1, d1);
+   W("</div><div class='tab' id='tab-report' hidden>");
+   SecStart("Rapporto descrittivo", "Tutti i risultati in forma di testo. Premi 'Copia tutto' e incollalo in chat per l'analisi.");
+   W("<button class='cp' onclick='cp(this)'>Copia tutto</button><textarea id='rep' readonly>");
+   W(g_repHead);
+   W("\n=== PERIODO IN CORSO ===\n");
+   W(g_repCur);
+   W(g_rep);
+   W("\n=== VOLUME ===\n");
+   W(g_repVol);
+   W("</textarea>");
+   SecEnd();
    W("</div></main><script>" + Js() + "</script></body></html>");
    FileClose(g_fh);
    g_fh = INVALID_HANDLE;
