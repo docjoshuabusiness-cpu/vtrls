@@ -4863,13 +4863,462 @@ void LevelFam(CSeries &s, CPer &p, const int fam, const int barSec)
    SecEnd();
   }
 
+//+------------------------------------------------------------------+
+//| Vita del livello nel periodo: test ripetuti, attraversamenti,     |
+//| ritest dopo la rottura, rimbalzi, tempo e volume vicino al        |
+//| livello (accumulo)                                                |
+//+------------------------------------------------------------------+
+// tipi: 0 massimo, 1 minimo, 2 apertura, 3 chiusura precedente; livelli finti: 4 vicino al massimo, 5 vicino al minimo,
+// 6 vicino all'apertura (livello +/- 25% del range mediano)
+int    g_lfN = 0;
+int    g_lfTy[], g_lfNT[], g_lfRr[], g_lfFo[], g_lfAcc[];
+bool   g_lfT[], g_lfX[], g_lfRt[];
+double g_lfBn[], g_lfNear[], g_lfVr[];
+int    g_ltN = 0;
+int    g_ltTy[], g_ltK[], g_ltRc[];  // ogni test: tipo di livello, numero del test (4 = 4 o piu'), gara dopo il test
+
+void LtAdd(const int ty, const int k, const int rc)
+  {
+   int i = g_ltN++;
+   ArrayResize(g_ltTy, g_ltN, 65536); ArrayResize(g_ltK, g_ltN, 65536); ArrayResize(g_ltRc, g_ltN, 65536);
+   g_ltTy[i] = ty;
+   g_ltK[i] = k;
+   g_ltRc[i] = rc;
+  }
+
+void LfAdd(const int ty, const bool t, const int nt, const bool x, const bool rt, const int rr, const double bn, const double nr,
+           const double vr, const int acc, const int fo)
+  {
+   int i = g_lfN++;
+   ArrayResize(g_lfTy, g_lfN, 65536); ArrayResize(g_lfNT, g_lfN, 65536); ArrayResize(g_lfRr, g_lfN, 65536);
+   ArrayResize(g_lfFo, g_lfN, 65536); ArrayResize(g_lfAcc, g_lfN, 65536); ArrayResize(g_lfT, g_lfN, 65536);
+   ArrayResize(g_lfX, g_lfN, 65536); ArrayResize(g_lfRt, g_lfN, 65536); ArrayResize(g_lfBn, g_lfN, 65536);
+   ArrayResize(g_lfNear, g_lfN, 65536); ArrayResize(g_lfVr, g_lfN, 65536);
+   g_lfTy[i] = ty;
+   g_lfT[i] = t;
+   g_lfNT[i] = nt;
+   g_lfX[i] = x;
+   g_lfRt[i] = rt;
+   g_lfRr[i] = rr;
+   g_lfBn[i] = bn;
+   g_lfNear[i] = nr;
+   g_lfVr[i] = vr;
+   g_lfAcc[i] = acc;
+   g_lfFo[i] = fo;
+  }
+
+// Scorre le barre j0..j1-1 del periodo per il livello lev, partendo dal lato sd (+1 prezzo sopra, -1 sotto).
+// Test = tocco del livello dopo che il prezzo se ne era allontanato di almeno r (il primo tocco e' il test 1); dopo ogni
+// test, gara dalla chiusura della barra: attraversa di r oppure respinto di r. Attraversato = il prezzo va r oltre il
+// livello dal lato opposto a quello di partenza; ritest = il primo ritorno sul livello dopo l'attraversamento; al ritest
+// 'tiene' = riparte di r dal lato attraversato prima di tornare indietro di r. Rimbalzo = la massima distanza dal livello,
+// dal lato di partenza, dopo il primo tocco e prima dell'attraversamento. Accumulo = barre entro +/- r dal livello tra il
+// primo tocco e l'attraversamento.
+void LvLife(CSeries &s, const int j0, const int j1, const double lev, const int sd, const double r, const int ty)
+  {
+   int c = -sd;
+   int jt = -1, jx = -1, jr = -1, tests = 0, side = sd, nearN = 0, totN = 0, accN = 0;
+   bool armed = true;
+   double bounce = 0, vNear = 0, vTot = 0;
+   for(int j = j0; j < j1; j++)
+     {
+      bool touch = s.l[j] <= lev && s.h[j] >= lev;
+      if(!touch && j > j0 && (s.c[j - 1] - lev) * (s.o[j] - lev) < 0)
+         touch = true;  // gap attraverso il livello
+      if(jt < 0)
+        {
+         if(!touch)
+            continue;
+         jt = j;
+        }
+      totN++;
+      vTot += s.v[j];
+      if(s.l[j] <= lev + r && s.h[j] >= lev - r)
+        {
+         nearN++;
+         vNear += s.v[j];
+         if(jx < 0)
+            accN++;
+        }
+      if(touch && armed)
+        {
+         tests++;
+         LtAdd(ty, tests < 4 ? tests : 4, Race(s, j, -side, r, j1 - 1 - j));
+         armed = false;
+        }
+      if(!armed && (s.l[j] > lev + r || s.h[j] < lev - r))
+        {
+         armed = true;
+         side = s.l[j] > lev + r ? 1 : -1;
+        }
+      if(jx < 0)
+        {
+         double thr = c > 0 ? s.h[j] - lev : lev - s.l[j];
+         if(thr >= r)
+            jx = j;
+         else
+            if(j > jt)
+              {
+               double aw = sd > 0 ? s.h[j] - lev : lev - s.l[j];
+               if(aw > bounce)
+                  bounce = aw;
+              }
+        }
+      else
+         if(jr < 0 && j > jx && touch)
+            jr = j;
+     }
+   if(jt < 0)
+     {
+      LfAdd(ty, false, 0, false, false, 0, Nan(), Nan(), Nan(), -1, 0);
+      return;
+     }
+   //--- dopo l'attraversamento: arriva a 3r oltre il livello prima di tornarci?
+   int fo = 0;
+   if(jx >= 0)
+     {
+      double t3 = lev + c * 3 * r;
+      if(c > 0 ? s.h[jx] >= t3 : s.l[jx] <= t3)
+         fo = 1;
+      else
+         for(int q = jx + 1; q < j1; q++)
+           {
+            bool a3 = c > 0 ? s.h[q] >= t3 : s.l[q] <= t3;
+            bool bk = c > 0 ? s.l[q] <= lev : s.h[q] >= lev;
+            if(a3 && bk)
+               break;  // stessa barra: ordine sconosciuto
+            if(a3)
+              {
+               fo = 1;
+               break;
+              }
+            if(bk)
+              {
+               fo = -1;
+               break;
+              }
+           }
+     }
+   int rr = jr >= 0 ? Race(s, jr, c, r, j1 - 1 - jr) : 0;
+   double nf = totN > 0 ? (double)nearN / totN : Nan();
+   double vr = (s.hasVol && vTot > 0 && nearN > 0) ? (vNear / vTot) / nf : Nan();
+   LfAdd(ty, true, tests, jx >= 0, jr >= 0, rr, bounce / r, nf, vr, jx >= 0 ? accN : -1, fo);
+  }
+
+struct LfS
+  {
+   int               n, nt, ts, t1, t2, t3, t4, nx, nrt, rtH, rtF, nb3, nfoU, nfoD, nnr;
+   double            nrS, nrQ, bnMed, vrMed;
+  };
+
+void LfCalc(const int ty, LfS &q)
+  {
+   ZeroMemory(q);
+   double bn[], vr[];
+   ArrayResize(bn, g_lfN);
+   ArrayResize(vr, g_lfN);
+   int nb = 0, nv = 0;
+   for(int i = 0; i < g_lfN; i++)
+     {
+      if(g_lfTy[i] != ty)
+         continue;
+      q.n++;
+      if(!g_lfT[i])
+         continue;
+      q.nt++;
+      int t = g_lfNT[i];
+      q.ts += t;
+      if(t == 1)
+         q.t1++;
+      else
+         if(t == 2)
+            q.t2++;
+         else
+            if(t == 3)
+               q.t3++;
+            else
+               if(t >= 4)
+                  q.t4++;
+      if(MathIsValidNumber(g_lfBn[i]))
+        {
+         bn[nb++] = g_lfBn[i];
+         if(g_lfBn[i] >= 3)
+            q.nb3++;
+        }
+      if(MathIsValidNumber(g_lfNear[i]))
+        {
+         q.nnr++;
+         q.nrS += g_lfNear[i];
+         q.nrQ += g_lfNear[i] * g_lfNear[i];
+        }
+      if(MathIsValidNumber(g_lfVr[i]))
+         vr[nv++] = g_lfVr[i];
+      if(g_lfX[i])
+        {
+         q.nx++;
+         if(g_lfFo[i] > 0)
+            q.nfoU++;
+         if(g_lfFo[i] < 0)
+            q.nfoD++;
+         if(g_lfRt[i])
+           {
+            q.nrt++;
+            if(g_lfRr[i] > 0)
+               q.rtH++;
+            if(g_lfRr[i] < 0)
+               q.rtF++;
+           }
+        }
+     }
+   q.bnMed = nb > 0 ? MedianOf(bn, nb) : Nan();
+   q.vrMed = nv > 0 ? MedianOf(vr, nv) : Nan();
+  }
+
+// z della differenza tra le medie del tempo vicino al livello (vero contro finto)
+double LfZNear(LfS &a, LfS &b)
+  {
+   if(a.nnr < 2 || b.nnr < 2)
+      return Nan();
+   double ma = a.nrS / a.nnr, mb = b.nrS / b.nnr;
+   double va = a.nrQ / a.nnr - ma * ma, vb = b.nrQ / b.nnr - mb * mb;
+   double se = MathSqrt(va / a.nnr + vb / b.nnr);
+   return se > 0 ? (ma - mb) / se : Nan();
+  }
+
+void LfRow(const string label, LfS &q, const bool base, const double rMed, const string zTxt)
+  {
+   if(q.n < 10)
+      return;
+   double bn3 = Frac(q.nb3, q.nt), nr = q.nnr > 0 ? q.nrS / q.nnr : Nan();
+   string tests = Share(q.t1, q.nt) + " / " + Share(q.t2, q.nt) + " / " + Share(q.t3, q.nt) + " / " + Share(q.t4, q.nt);
+   W("<tr" + (base ? " class='base'" : "") + ">" + TD(label) + TD(I2S(q.n)) + TD(Share(q.nt, q.n)) + TD(F(Dv(q.ts, q.nt), 2)) + TD(tests) +
+     TD(Share(q.nx, q.n)) + TD(Share(q.nrt, q.nx)) + TD(Share(q.rtH, q.nrt) + " / " + Share(q.rtF, q.nrt)) + TD(F(q.bnMed, 1) + " r") +
+     TD(PX(q.bnMed * rMed * g_last)) + TD(FP(bn3, 1)) + TD(FP(nr, 1)) + TD(F(q.vrMed, 2)) +
+     TD(Share(q.nfoU, q.nx) + " / " + Share(q.nfoD, q.nx)) + TD(zTxt) + "</tr>");
+   R(g_repLv, "    " + label + " (N " + I2S(q.n) + "): toccato " + Share(q.nt, q.n) + "%, test medi " + F(Dv(q.ts, q.nt), 2) +
+     " (1 / 2 / 3 / 4+ test: " + tests + "%), attraversato di r " + Share(q.nx, q.n) + "%, ritestato dopo l'attraversamento " +
+     Share(q.nrt, q.nx) + "% (al ritest tiene " + Share(q.rtH, q.nrt) + "% / torna indietro " + Share(q.rtF, q.nrt) +
+     "%), rimbalzo mediano al primo tocco " + F(q.bnMed, 1) + " r (circa " + PX(q.bnMed * rMed * g_last) + "), rimbalzi di almeno 3r " +
+     FP(bn3, 1) + "%, tempo entro +/-r dal livello " + FP(nr, 1) + "%, volume vicino al livello " + F(q.vrMed, 2) +
+     "x il normale, dopo l'attraversamento arriva a 3r " + Share(q.nfoU, q.nx) + "% / torna sul livello " + Share(q.nfoD, q.nx) + "%" +
+     (zTxt != "" ? " (" + zTxt + ")" : ""));
+  }
+
+void LevelLife(CSeries &s, CPer &p, const int fam, const int barSec)
+  {
+   g_lfN = 0;
+   g_ltN = 0;
+   double rs[];
+   ArrayResize(rs, p.n);
+   int nr = 0;
+   for(int k = 2; k < p.n && !IsStopped(); k++)
+     {
+      if(!p.ok[k] || !p.ok[k - 1])
+         continue;
+      double mr = PerMedRange(p, k, 20), r = InpLevelR * mr;
+      if(!(r > 0))
+         continue;
+      rs[nr++] = r / p.O[k];
+      double PH = p.H[k - 1], PL = p.L[k - 1], PC = p.C[k - 1], O = p.O[k], d = 0.25 * mr;
+      int j0 = p.s[k], j1 = p.e[k];
+      LvLife(s, j0, j1, PH, O > PH ? 1 : -1, r, 0);
+      LvLife(s, j0, j1, PL, O < PL ? -1 : 1, r, 1);
+      LvLife(s, j0, j1, PH + d, O > PH + d ? 1 : -1, r, 4);
+      LvLife(s, j0, j1, PH - d, O > PH - d ? 1 : -1, r, 4);
+      LvLife(s, j0, j1, PL + d, O < PL + d ? -1 : 1, r, 5);
+      LvLife(s, j0, j1, PL - d, O < PL - d ? -1 : 1, r, 5);
+      //--- apertura: dopo che il prezzo se ne e' allontanato di r (come nella tabella sopra)
+      int jd = -1, sdO = 0;
+      for(int j = j0; j < j1; j++)
+        {
+         bool up = s.h[j] >= O + r, dn = s.l[j] <= O - r;
+         if(up && dn)
+            break;
+         if(up || dn)
+           {
+            sdO = up ? 1 : -1;
+            jd = j;
+            break;
+           }
+        }
+      if(jd >= 0 && jd + 1 < j1)
+         LvLife(s, jd + 1, j1, O, sdO, r, 2);
+      LvLife(s, j0, j1, O + d, -1, r, 6);
+      LvLife(s, j0, j1, O - d, 1, r, 6);
+      if(fam >= 2 && fam <= 4 && MathAbs(O - PC) >= 0.05 * r)
+         LvLife(s, j0, j1, PC, O > PC ? 1 : -1, r, 3);
+     }
+   if(nr < 20)
+      return;
+   double rMed = MedianOf(rs, nr);
+   string pv = FAM_PREV[fam];
+   SecStart("Livelli: " + FAM_NAME[fam] + " &mdash; vita del livello (test, attraversamenti, ritest, appoggi, accumulo)",
+            "Tutto quello che succede su ogni livello durante il periodo, non solo al primo tocco. <b>Test</b> = tocco del livello dopo " +
+            "che il prezzo se ne era allontanato di almeno r (r = " + F(InpLevelR * 100, 0) + "% del range mediano, circa " +
+            PX(rMed * g_last) + "). <b>Attraversato</b> = il prezzo va r oltre il livello dal lato opposto a quello da cui arriva. " +
+            "<b>Ritest</b> = il primo ritorno sul livello dopo l'attraversamento; <b>tiene</b> = da l&igrave; riparte di r nel verso " +
+            "della rottura prima di tornare indietro di r (il livello rotto fa da appoggio). <b>Rimbalzo</b> = la distanza massima dal " +
+            "livello, dal lato da cui arriva il prezzo, dopo il primo tocco e prima di un attraversamento (quanto il livello fa da " +
+            "appoggio). <b>Tempo entro &plusmn;r</b> e <b>volume vicino al livello</b> (volume per barra vicino al livello diviso il " +
+            "volume per barra del periodo) misurano l'accumulo. In grigio i <b>livelli finti</b> (livello &plusmn; 25% del range " +
+            "mediano) negli stessi periodi: quello che il livello vero fa in pi&ugrave; del finto &egrave; l'effetto del livello. " +
+            "z vs finto: rimbalzi di almeno 3r, ritest che tiene, tempo vicino al livello. Nota: anche su un prezzo casuale vero " +
+            "e finto differiscono di 2-3 punti in % toccato, % attraversato e rimbalzi (dipendono dalla distanza dall'apertura); " +
+            "i test e il ritest (gare simmetriche dalla chiusura della barra) no.");
+   THead("Livello|N periodi|% toccato|Test medi (se toccato)|% con 1 / 2 / 3 / 4+ test|% attraversato di r|% ritestato dopo l'attraversamento|Al ritest: % tiene / % torna indietro|Rimbalzo mediano al primo tocco|&asymp; prezzo|% rimbalzi &ge; 3r|% tempo entro &plusmn;r dal livello|Volume vicino al livello / normale|Dopo l'attraversamento: % arriva a 3r / % torna sul livello|z vs livello finto");
+   R(g_repLv, "  [Vita del livello " + FAM_NAME[fam] + ": test, attraversamenti, ritest, rimbalzi, accumulo; r mediano " + FP(rMed, 3) +
+     "% (circa " + PX(rMed * g_last) + ")]");
+   int tyR[4] = {0, 1, 2, 3};
+   int tyF[4] = {4, 5, 6, 6};
+   string lbR[4], lbF[4];
+   lbR[0] = "Massimo " + pv;
+   lbR[1] = "Minimo " + pv;
+   lbR[2] = "Apertura del periodo (dopo essersi allontanato di r)";
+   lbR[3] = "Chiusura " + pv;
+   lbF[0] = "&nbsp;&nbsp;&#8627; livello finto vicino al massimo";
+   lbF[1] = "&nbsp;&nbsp;&#8627; livello finto vicino al minimo";
+   lbF[2] = "&nbsp;&nbsp;&#8627; livello finto vicino all'apertura";
+   lbF[3] = "&nbsp;&nbsp;&#8627; livello finto vicino all'apertura";
+   for(int x = 0; x < 4; x++)
+     {
+      LfS a, b;
+      LfCalc(tyR[x], a);
+      LfCalc(tyF[x], b);
+      if(a.n < 10)
+         continue;
+      double zB = Z2(Frac(a.nb3, a.nt), a.nt, Frac(b.nb3, b.nt), b.nt);
+      double zT = Z2(Frac(a.rtH, a.nrt), a.nrt, Frac(b.rtH, b.nrt), b.nrt);
+      double zN = LfZNear(a, b);
+      LfRow(lbR[x], a, false, rMed, "z vs finto: rimbalzi " + ZS(zB) + ", ritest tiene " + ZS(zT) + ", tempo vicino " + ZS(zN));
+      LfRow(lbF[x], b, true, rMed, "");
+     }
+   TEnd();
+   //--- ogni test: il livello regge di piu' o di meno a ogni nuovo test?
+   W("<h3>Ogni test del livello: attraversa o respinge?</h3><p class='desc'>Dopo ogni test, dalla chiusura della barra: " +
+     "<b>attraversa</b> = va r oltre il livello prima di tornare indietro di r; <b>respinto</b> = il contrario. Test 4 = quarto " +
+     "test e successivi. A destra la stessa misura sui livelli finti e l'effetto del livello (punti in pi&ugrave; di " +
+     "'attraversa - respinto' rispetto al finto).</p>");
+   THead("Livello e test|N test|% attraversa di r|% respinto di r|z (attraversa - respinto)|Livello finto: % attraversa / % respinto|Effetto del livello (punti)|z effetto");
+   R(g_repLv, "  [Ogni test del livello " + FAM_NAME[fam] + ": attraversa di r / respinto di r dopo il test; livello finto; effetto del livello]");
+   string tn[4] = {"1&deg; test (primo tocco)", "2&deg; test", "3&deg; test", "4&deg; test e oltre"};
+   for(int x = 0; x < 4; x++)
+     {
+      for(int k = 1; k <= 4; k++)
+        {
+         int n = 0, a = 0, rj = 0, nf = 0, af = 0, rf = 0;
+         for(int i = 0; i < g_ltN; i++)
+           {
+            if(g_ltK[i] != k)
+               continue;
+            if(g_ltTy[i] == tyR[x])
+              {
+               n++;
+               if(g_ltRc[i] > 0)
+                  a++;
+               if(g_ltRc[i] < 0)
+                  rj++;
+              }
+            else
+               if(g_ltTy[i] == tyF[x])
+                 {
+                  nf++;
+                  if(g_ltRc[i] > 0)
+                     af++;
+                  if(g_ltRc[i] < 0)
+                     rf++;
+                 }
+           }
+         if(n < 10)
+            continue;
+         double pa = (double)a / n, pr = (double)rj / n, se = LvSe(pa, pr, n), z = MathIsValidNumber(se) ? (pa - pr) / se : Nan();
+         double paF = nf > 0 ? (double)af / nf : Nan(), prF = nf > 0 ? (double)rf / nf : Nan(), seF = LvSe(paF, prF, nf);
+         double eff = (pa - pr) - (paF - prF);
+         double zE = (MathIsValidNumber(se) && MathIsValidNumber(seF)) ? eff / MathSqrt(se * se + seF * seF) : Nan();
+         string lab = lbR[x] + ": " + tn[k - 1];
+         W("<tr>" + TD(lab) + TD(I2S(n)) + TDc(FP(pa, 1), PCol(pa, pr, 0.15)) + TD(FP(pr, 1)) + TD(ZS(z)) +
+           TD(nf >= 10 ? FP(paF, 1) + " / " + FP(prF, 1) : "-") + TDc(nf >= 10 ? FP(eff, 1) : "-", nf >= 10 ? PCol(eff, 0, 0.15) : "") +
+           TD(nf >= 10 ? ZS(zE) : "-") + "</tr>");
+         R(g_repLv, "    " + lab + " (N " + I2S(n) + "): attraversa " + FP(pa, 1) + "%, respinto " + FP(pr, 1) + "% (z " + ZS(z) + ")" +
+           (nf >= 10 ? "; livello finto " + FP(paF, 1) + "% / " + FP(prF, 1) + "% -> effetto del livello " + (eff >= 0 ? "+" : "") +
+            FP(eff, 1) + " punti (z " + ZS(zE) + ")" : ""));
+        }
+     }
+   TEnd();
+   //--- accumulo prima della rottura
+   W("<h3>Accumulo prima della rottura</h3><p class='desc'>Solo i livelli attraversati. Tempo vicino al livello = barre entro " +
+     "&plusmn;r dal livello tra il primo tocco e l'attraversamento. <b>Rottura rapida</b> = tempo sotto la mediana di quel " +
+     "livello, <b>dopo accumulo</b> = sopra. Dopo la rottura: arriva a 3r oltre il livello prima di tornarci, oppure torna sul " +
+     "livello prima; ritest e tenuta come sopra.</p>");
+   THead("Livello|Rottura|N|Tempo mediano vicino al livello prima della rottura|% arriva a 3r prima di tornare|% torna sul livello prima|% ritestato|Al ritest % tiene");
+   R(g_repLv, "  [Accumulo prima della rottura " + FAM_NAME[fam] + ": rottura rapida / dopo accumulo (tempo vicino al livello sotto / sopra la mediana)]");
+   string lbA[7];
+   lbA[0] = lbR[0];
+   lbA[1] = lbR[1];
+   lbA[2] = lbR[2];
+   lbA[3] = lbR[3];
+   lbA[4] = "livello finto vicino al massimo";
+   lbA[5] = "livello finto vicino al minimo";
+   lbA[6] = "livello finto vicino all'apertura";
+   for(int ty = 0; ty < 7; ty++)
+     {
+      double ac[];
+      ArrayResize(ac, g_lfN);
+      int na = 0;
+      for(int i = 0; i < g_lfN; i++)
+         if(g_lfTy[i] == ty && g_lfX[i] && g_lfAcc[i] >= 0)
+            ac[na++] = g_lfAcc[i];
+      if(na < 20)
+         continue;
+      double med = MedianOf(ac, na);
+      for(int g = 0; g < 2; g++)
+        {
+         int n = 0, fu = 0, fd = 0, rt = 0, rh = 0;
+         double gs[];
+         ArrayResize(gs, na);
+         for(int i = 0; i < g_lfN; i++)
+           {
+            if(g_lfTy[i] != ty || !g_lfX[i] || g_lfAcc[i] < 0)
+               continue;
+            if((g == 0) != (g_lfAcc[i] <= med))
+               continue;
+            gs[n++] = g_lfAcc[i];
+            if(g_lfFo[i] > 0)
+               fu++;
+            if(g_lfFo[i] < 0)
+               fd++;
+            if(g_lfRt[i])
+              {
+               rt++;
+               if(g_lfRr[i] > 0)
+                  rh++;
+              }
+           }
+         if(n < 5)
+            continue;
+         double mt = MedianOf(gs, n) * barSec / 3600.0;
+         string gl = g == 0 ? "rapida" : "dopo accumulo";
+         W("<tr" + (ty >= 4 ? " class='base'" : "") + ">" + TD(lbA[ty]) + TD(gl) + TD(I2S(n)) + TD(DurLab(mt)) +
+           TDc(Share(fu, n), PCol(Frac(fu, n), Frac(fd, n), 0.15)) + TD(Share(fd, n)) + TD(Share(rt, n)) + TD(Share(rh, rt)) + "</tr>");
+         R(g_repLv, "    " + lbA[ty] + ", rottura " + gl + " (N " + I2S(n) + "): tempo mediano vicino al livello " + DurLab(mt) +
+           ", arriva a 3r " + Share(fu, n) + "% / torna sul livello " + Share(fd, n) + "%, ritestato " + Share(rt, n) +
+           "%, al ritest tiene " + Share(rh, rt) + "%");
+        }
+     }
+   TEnd();
+   SecEnd();
+  }
+
 void LevelTab(CSeries &s, const int barSec)
   {
    for(int i = 0; i < NFAM; i++)
      {
       int f = FAM_ORDER[i];
       if(FamOn(f) && g_per[f].n >= 30)
+        {
+         Comment("MarketProfiler: livelli ", FAM_NAME[f], " ...");
          LevelFam(s, g_per[f], f, barSec);
+         LevelLife(s, g_per[f], f, barSec);
+        }
      }
   }
 
