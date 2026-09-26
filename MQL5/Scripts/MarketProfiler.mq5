@@ -250,7 +250,7 @@ string TDc(const string s, const string bg) { if(bg == "") return TD(s); return 
 
 string PCol(const double p, const double center, const double span)
   {
-   if(!MathIsValidNumber(p) || span <= 0)
+   if(!MathIsValidNumber(p) || !MathIsValidNumber(center) || span <= 0)
       return "";
    double v = p - center;
    double a = MathMin(MathAbs(v) / span, 1.0) * 0.55;
@@ -1059,6 +1059,8 @@ void TfPage(CBlocks &b)
    NxAcc acc[];
    NextStats(b, acc);
    double sameAll = acc[0].n > 0 ? (double)acc[0].same / acc[0].n : Nan();
+   double upShare = m > 0 ? (double)nUp / m : Nan();
+   double sameBase = upShare * upShare + (1 - upShare) * (1 - upShare);  // stessa direzione dovuta solo alla prevalenza dei rialzi
    double retr[];  // mean reversion: dal secondo estremo alla chiusura, in % dell'apertura
    ArrayResize(retr, m);
    for(int i = 0; i < m; i++)
@@ -1083,7 +1085,7 @@ void TfPage(CBlocks &b)
    Kpi("Mean reversion (restituisce &ge; 75%)", FP((double)nc[2] / m, 1) + "%", "torna indietro quasi tutto");
    Kpi("Parziale", FP((double)nc[1] / m, 1) + "%", "restituisce tra 25% e 75%");
    Kpi("Mean reversion media", FP(meanRetr, 3) + "%", F(Mean(b.rf, m) * 100, 0) + "% dello spostamento");
-   Kpi("Periodo dopo nella stessa direzione", FP(sameAll, 1) + "%", "");
+   Kpi("Periodo dopo nella stessa direzione", FP(sameAll, 1) + "%", "con la sola prevalenza dei rialzi: " + FP(sameBase, 1) + "%");
    if(b.intra)
      {
       Kpi("Massimo pi&ugrave; spesso in", ModeOf(b, true), TimUnit(tfi));
@@ -1103,7 +1105,8 @@ void TfPage(CBlocks &b)
    R(g_rep, "Tipo: Trend (restituisce al massimo il 25% dello spostamento) " + FP((double)nc[0] / m, 1) + "%, Parziale " +
      FP((double)nc[1] / m, 1) + "%, Mean reversion (restituisce almeno il 75%) " + FP((double)nc[2] / m, 1) +
      "%. In media viene restituito il " + F(Mean(b.rf, m) * 100, 0) + "% dello spostamento (mean reversion media " + FP(meanRetr, 3) + "%).");
-   R(g_rep, "Il periodo successivo va nella stessa direzione nel " + FP(sameAll, 1) + "% dei casi.");
+   R(g_rep, "Il periodo successivo va nella stessa direzione nel " + FP(sameAll, 1) + "% dei casi (con la sola prevalenza dei periodi " +
+     "rialzisti, senza legame tra un periodo e il successivo, sarebbe " + FP(sameBase, 1) + "%).");
    R(g_rep, "Distribuzioni (in % del prezzo di apertura del periodo):");
 
    //--- quanto
@@ -1394,7 +1397,7 @@ void TfPage(CBlocks &b)
    g_sumRows += "<tr>" + TD(TF_LABEL[tfi]) + TD(I2S(m)) + TD(FP(medR, 3)) + TD(PX(medR * g_last)) + TD(FP(p90, 3)) +
                 TDc(FP(upr, 1), PCol(upr, 0.5, 0.15)) + TD(FP((double)nc[0] / m, 1)) + TD(FP((double)nc[2] / m, 1)) +
                 TD(FP(meanRetr, 3)) + TD(F(Mean(b.rf, m) * 100, 0)) + TD(b.intra ? ModeOf(b, true) : "&ndash;") +
-                TD(b.intra ? ModeOf(b, false) : "&ndash;") + TDc(FP(sameAll, 1), PCol(sameAll, 0.5, 0.15)) + "</tr>";
+                TD(b.intra ? ModeOf(b, false) : "&ndash;") + TDc(FP(sameAll, 1) + " (" + FP(sameBase, 1) + ")", PCol(sameAll, sameBase, 0.1)) + "</tr>";
   }
 
 //+------------------------------------------------------------------+
@@ -1764,12 +1767,13 @@ void VolumeTab(CSeries &h1, CSeries &d1)
         {
          if(n12[k] == 0)
             continue;
-         double r1 = a12[k] > 0 ? a4w[k] / a12[k] : Nan(), r2 = (a12[k] > 0 && nl[k] > 0) ? al[k] / a12[k] : Nan();
-         W("<tr>" + TD(StringFormat("%02dh", k)) + TD(HBar(a12[k], mx, DoubleToString(a12[k], 0))) +
-           TD(HBar(a4w[k], mx, DoubleToString(a4w[k], 0))) + TD(nl[k] > 0 ? HBar(al[k], mx, DoubleToString(al[k], 0)) : "&ndash;") +
+         double r1 = (a12[k] > 0 && n4w[k] > 0) ? a4w[k] / a12[k] : Nan(), r2 = (a12[k] > 0 && nl[k] > 0) ? al[k] / a12[k] : Nan();
+         W("<tr>" + TD(HourLab(k)) + TD(HBar(a12[k], mx, DoubleToString(a12[k], 0))) +
+           TD(n4w[k] > 0 ? HBar(a4w[k], mx, DoubleToString(a4w[k], 0)) : "&ndash;") + TD(nl[k] > 0 ? HBar(al[k], mx, DoubleToString(al[k], 0)) : "&ndash;") +
            TDc(F(r1, 2) + "&times;", PCol(r1, 1.0, 0.6)) + TDc(F(r2, 2) + "&times;", PCol(r2, 1.0, 0.6)) + "</tr>");
-         R(g_repVol, "  " + StringFormat("%02dh", k) + ": volume medio 12 mesi " + DoubleToString(a12[k], 0) + ", ultime 4 settimane " +
-           DoubleToString(a4w[k], 0) + " (" + F(r1, 2) + "x), ultima sessione " + (nl[k] > 0 ? DoubleToString(al[k], 0) : "-") + ".");
+         R(g_repVol, "  " + HourLab(k) + ": volume medio 12 mesi " + DoubleToString(a12[k], 0) + ", ultime 4 settimane " +
+           (n4w[k] > 0 ? DoubleToString(a4w[k], 0) + " (" + F(r1, 2) + "x)" : "- (nessuna barra)") + ", ultima sessione " +
+           (nl[k] > 0 ? DoubleToString(al[k], 0) : "-") + ".");
         }
       TEnd();
      }
@@ -3048,10 +3052,9 @@ string MostNews(const bool &m[])
 
 void ImpLine(const string label, const bool &m[], const bool withNews)
   {
-   int n = 0, nn = 0, k15 = 0, n15 = 0, k60 = 0, n60 = 0, nr = 0;
-   double a[], b[];
+   int n = 0, nn = 0, k15 = 0, n15 = 0, k60 = 0, n60 = 0, nr = 0, kr = 0;
+   double a[];
    ArrayResize(a, g_imN);
-   ArrayResize(b, g_imN);
    for(int e = 0; e < g_imN; e++)
      {
       if(!m[e])
@@ -3072,20 +3075,24 @@ void ImpLine(const string label, const bool &m[], const bool withNews)
             k60++;
         }
       if(MathIsValidNumber(g_imRt[e]))
-         b[nr++] = g_imRt[e];
+        {
+         nr++;
+         if(g_imRt[e] >= 1.0)
+            kr++;
+        }
      }
    if(n < 3)
       return;
    double med = MedianOf(a, n);
    double p15 = n15 > 0 ? (double)k15 / n15 : Nan(), p60 = n60 > 0 ? (double)k60 / n60 : Nan();
-   double rtm = nr > 0 ? MedianOf(b, nr) : Nan();
+   double rtp = nr > 0 ? (double)kr / nr : Nan();
    string mn = withNews ? MostNews(m) : "";
    W("<tr>" + TD(label) + TD(I2S(n)) + TD(FP((double)n / g_imN, 1)) + TD(FP(med, 3)) + TD(PX(med * g_last)) +
      TD(FP((double)nn / n, 1)) + TDc(FP(p15, 1), PCol(p15, 0.5, 0.15)) + TDc(FP(p60, 1), PCol(p60, 0.5, 0.15)) +
-     TDc(F(rtm, 2), PCol(-rtm, -0.5, 0.4)) + (withNews ? TD(mn) : "") + "</tr>");
+     TDc(FP(rtp, 1), PCol(-rtp, -0.5, 0.2)) + (withNews ? TD(mn) : "") + "</tr>");
    R(g_repEv, "    " + label + ": N " + I2S(n) + " (" + FP((double)n / g_imN, 1) + "% degli impulsi), dimensione mediana " + FP(med, 3) +
      "% (circa " + PX(med * g_last) + "), con notizia " + FP((double)nn / n, 1) + "%, continua dopo 15 min " + FP(p15, 1) +
-     "%, dopo 60 min " + FP(p60, 1) + "%, rientro mediano entro 60 min " + F(rtm, 2) + (withNews ? ", notizia pi&ugrave; frequente " + mn : ""));
+     "%, dopo 60 min " + FP(p60, 1) + "%, torna all'origine entro 60 min " + FP(rtp, 1) + "%" + (withNews ? ", notizia pi&ugrave; frequente " + mn : ""));
   }
 
 void ImpulseWindow(CSeries &s, const int w, const int barSec, const int mins)
@@ -3152,11 +3159,11 @@ void ImpulseWindow(CSeries &s, const int w, const int barSec, const int mins)
       double r = s.c[i] / s.c[i - w] - 1;
       g_imSz[e] = MathAbs(r);
       g_imUp[e] = r > 0;
-      g_imHr[e] = HourOf(s.t[st]);
-      g_imMd[e] = MinOfDay(s.t[st]);
-      g_imDw[e] = DowMon(s.t[st]);
+      g_imHr[e] = HourOf(s.t[i]);   // barra in cui l'impulso supera la soglia (es. 15:30 per un dato delle 8:30 NY)
+      g_imMd[e] = MinOfDay(s.t[i]);
+      g_imDw[e] = DowMon(s.t[i]);
       MqlDateTime d;
-      TimeToStruct(s.t[st], d);
+      TimeToStruct(s.t[i], d);
       g_imYr[e] = d.year;
       g_imNw[e] = NewsNear(s.t[i - w] - 300, s.t[i] + barSec);
       g_imC15[e] = Follow(s, i, h15, barSec, r);
@@ -3189,9 +3196,9 @@ void ImpulseWindow(CSeries &s, const int w, const int barSec, const int mins)
             "periodi): &egrave; lo " + F(100 - InpImpulsePct, 1) + "% dei movimenti pi&ugrave; forti. " + I2S(ne) + " impulsi. " +
             "Ogni impulso &egrave; misurato dalla <b>prima</b> barra che supera la soglia (le barre oltre soglia subito dopo fanno parte " +
             "dello stesso impulso): nessuna scelta a posteriori del punto migliore. " +
-            "<b>Continua</b> = dopo 15/60 minuti il prezzo &egrave; oltre la chiusura dell'impulso nella sua direzione. <b>Rientro</b> = " +
-            "quanto dell'impulso viene restituito entro 60 minuti (1.00 = tutto).");
-   THead("Condizione|N|% degli impulsi|Dimensione mediana %|&asymp; prezzo|% con notizia|% continua dopo 15 min|% continua dopo 60 min|Rientro mediano entro 60 min");
+            "<b>Continua</b> = dopo 15/60 minuti il prezzo &egrave; oltre la chiusura dell'impulso nella sua direzione. <b>Torna all'origine</b> = " +
+            "entro 60 minuti il prezzo ritorna al livello da cui l'impulso era partito. Orari = barra in cui l'impulso supera la soglia.");
+   THead("Condizione|N|% degli impulsi|Dimensione mediana %|&asymp; prezzo|% con notizia|% continua dopo 15 min|% continua dopo 60 min|% torna all'origine entro 60 min");
    R(g_repEv, "Impulsi di " + wl + ": soglia " + F(Q, 1) + " volte il movimento normale, " + I2S(ne) + " impulsi.");
    bool m[];
    ArrayResize(m, ne);
@@ -3230,8 +3237,8 @@ void ImpulseWindow(CSeries &s, const int w, const int barSec, const int mins)
          ImpLine(rn[zz], m, false);
         }
      }
-   Grp("Ora di inizio (orario dei dati)", 9);
-   R(g_repEv, "  [Ora di inizio]");
+   Grp("Ora della barra che completa l'impulso (orario dei dati)", 9);
+   R(g_repEv, "  [Ora della barra che completa l'impulso]");
    for(int h = 0; h < 24; h++)
      {
       for(int e = 0; e < ne; e++)
@@ -3266,7 +3273,7 @@ void ImpulseWindow(CSeries &s, const int w, const int barSec, const int mins)
    for(int e = 0; e < ne; e++)
       cnt[g_imMd[e]]++;
    W("<h3>Gli orari esatti in cui partono pi&ugrave; impulsi</h3>");
-   THead("Orario (orario dei dati)|N|% degli impulsi|Dimensione mediana %|&asymp; prezzo|% con notizia|% continua dopo 15 min|% continua dopo 60 min|Rientro mediano entro 60 min|Notizia pi&ugrave; frequente");
+   THead("Orario (orario dei dati)|N|% degli impulsi|Dimensione mediana %|&asymp; prezzo|% con notizia|% continua dopo 15 min|% continua dopo 60 min|% torna all'origine entro 60 min|Notizia pi&ugrave; frequente");
    R(g_repEv, "  [Orari esatti pi&ugrave; frequenti]");
    for(int r = 0; r < 20; r++)
      {
@@ -3453,13 +3460,16 @@ void NewsTab(CSeries &s)
      }
    SecStart("Reazione del prezzo per notizia",
             "Notizie con almeno 5 uscite, ordinate per impatto (range dei 60 minuti rispetto allo stesso orario nei giorni senza " +
-            "notizie). Movimento mediano (in valore assoluto) dopo 1, 5, 15 e 60 minuti dall'uscita; quante volte i minuti 5-60 " +
-            "proseguono la direzione dei primi 5 minuti (tratti separati: senza legame sarebbe circa 50%); direzione a 60 minuti " +
-            "quando il dato esce sopra o sotto le attese.");
+            "notizie). Le notizie che escono sempre insieme sono unite in una riga (la reazione &egrave; la stessa); nelle colonne " +
+            "'sopra/sotto le attese' c'&egrave; un valore per ogni notizia, nello stesso ordine dei nomi. Movimento mediano (in valore " +
+            "assoluto) dopo 1, 5, 15 e 60 minuti; quante volte i minuti 5-60 proseguono la direzione dei primi 5 (tratti separati: " +
+            "senza legame sarebbe circa 50%). Le attese sono il 'forecast' del calendario MT5, che pu&ograve; differire dal consenso di mercato.");
    THead("Notizia|N|Mossa 1 min %|5 min %|15 min %|60 min %|Range 60 min %|&asymp; prezzo|vs stessa ora senza notizie|% i minuti 5-60 proseguono i primi 5|Sopra le attese: % rialzo a 60 min|Sotto le attese: % rialzo a 60 min");
-   R(g_repEv, "  [Per notizia, ordinate per impatto]");
-   string rowS[], repS[];
+   R(g_repEv, "  [Per notizia, ordinate per impatto; le notizie che escono sempre insieme sono unite]");
+   string rNm[], rCore[], rRep[], rSa[], rSb[];
    double scr[];
+   long rSig[];
+   int rQ[];
    int nr = 0;
    for(int bi = 0; bi < nn; bi++)
      {
@@ -3469,6 +3479,7 @@ void NewsTab(CSeries &s)
       ArrayResize(a1, nc[bi]); ArrayResize(a5, nc[bi]); ArrayResize(a15, nc[bi]); ArrayResize(a60, nc[bi]);
       ArrayResize(ag, nc[bi]); ArrayResize(ar, nc[bi]);
       int q = 0, qr = 0, hold = 0, holdN = 0, abN = 0, abU = 0, beN = 0, beU = 0;
+      long sig = 0;
       for(int i = 0; i < nN; i++)
         {
          if(!ok[i] || g_nName[i] != nm[bi])
@@ -3479,6 +3490,7 @@ void NewsTab(CSeries &s)
          a60[q] = MathAbs(r60[i]);
          ag[q] = rg[i];
          q++;
+         sig += (long)g_nT[i] % 1000003;
          for(int z = 0; z < ns; z++)
             if(slots[z] == sl[i])
               {
@@ -3512,40 +3524,58 @@ void NewsTab(CSeries &s)
          continue;
       double mg = MedianOf(ag, q), mr = qr >= 3 ? MedianOf(ar, qr) : Nan();
       double ph = holdN > 0 ? (double)hold / holdN : Nan();
-      string sa = abN >= 3 ? FP((double)abU / abN, 0) + "% (" + I2S(abN) + ")" : "-";
-      string sb = beN >= 3 ? FP((double)beU / beN, 0) + "% (" + I2S(beN) + ")" : "-";
       nr++;
-      ArrayResize(rowS, nr);
-      ArrayResize(repS, nr);
-      ArrayResize(scr, nr);
-      rowS[nr - 1] = "<tr>" + TD(nm[bi]) + TD(I2S(q)) + TD(FP(MedianOf(a1, q), 3)) + TD(FP(MedianOf(a5, q), 3)) + TD(FP(MedianOf(a15, q), 3)) +
-                     TD(FP(MedianOf(a60, q), 3)) + TD(FP(mg, 3)) + TD(PX(mg * g_last)) + TDc(F(mr, 2) + "&times;", PCol(mr, 1.0, 1.0)) +
-                     TDc(FP(ph, 0), PCol(ph, 0.5, 0.15)) + TD(sa) + TD(sb) + "</tr>";
-      repS[nr - 1] = "  " + nm[bi] + " (N " + I2S(q) + "): range 60 min " + FP(mg, 3) + "% (circa " + PX(mg * g_last) + ") = " + F(mr, 2) +
-                     " volte lo stesso orario senza notizie; mossa mediana 1 min " + FP(MedianOf(a1, q), 3) + "%, 5 min " + FP(MedianOf(a5, q), 3) +
-                     "%, 15 min " + FP(MedianOf(a15, q), 3) + "%, 60 min " + FP(MedianOf(a60, q), 3) + "%; i minuti 5-60 proseguono la " +
-                     "direzione dei primi 5 nel " + FP(ph, 0) + "%; dato sopra le attese: rialzo a 60 min " + sa + "; sotto le attese: " + sb + ".";
-      scr[nr - 1] = MathIsValidNumber(mr) ? mr : -1;
+      ArrayResize(rNm, nr); ArrayResize(rCore, nr); ArrayResize(rRep, nr); ArrayResize(rSa, nr); ArrayResize(rSb, nr);
+      ArrayResize(scr, nr); ArrayResize(rSig, nr); ArrayResize(rQ, nr);
+      int x = nr - 1;
+      rNm[x] = nm[bi];
+      rQ[x] = q;
+      rSig[x] = sig;
+      rSa[x] = abN >= 3 ? FP((double)abU / abN, 0) + "% (" + I2S(abN) + ")" : "-";
+      rSb[x] = beN >= 3 ? FP((double)beU / beN, 0) + "% (" + I2S(beN) + ")" : "-";
+      rCore[x] = TD(I2S(q)) + TD(FP(MedianOf(a1, q), 3)) + TD(FP(MedianOf(a5, q), 3)) + TD(FP(MedianOf(a15, q), 3)) +
+                 TD(FP(MedianOf(a60, q), 3)) + TD(FP(mg, 3)) + TD(PX(mg * g_last)) + TDc(F(mr, 2) + "&times;", PCol(mr, 1.0, 1.0)) +
+                 TDc(FP(ph, 0), PCol(ph, 0.5, 0.15));
+      rRep[x] = " (N " + I2S(q) + "): range 60 min " + FP(mg, 3) + "% (circa " + PX(mg * g_last) + ") = " + F(mr, 2) +
+                " volte lo stesso orario senza notizie; mossa mediana 1 min " + FP(MedianOf(a1, q), 3) + "%, 5 min " + FP(MedianOf(a5, q), 3) +
+                "%, 15 min " + FP(MedianOf(a15, q), 3) + "%, 60 min " + FP(MedianOf(a60, q), 3) + "%; i minuti 5-60 proseguono la " +
+                "direzione dei primi 5 nel " + FP(ph, 0) + "%";
+      scr[x] = MathIsValidNumber(mr) ? mr : -1;
      }
    bool usedR[];
    ArrayResize(usedR, nr);
    for(int z = 0; z < nr; z++)
       usedR[z] = false;
-   for(int r = 0; r < 40 && r < nr; r++)
+   for(int r = 0; r < 40; r++)
      {
       int bi = -1;
       for(int z = 0; z < nr; z++)
          if(!usedR[z] && (bi < 0 || scr[z] > scr[bi]))
             bi = z;
-      usedR[bi] = true;
-      W(rowS[bi]);
-      R(g_repEv, repS[bi]);
+      if(bi < 0)
+         break;
+      string names = "", sas = "", sbs = "", both = "";
+      int cnt = 0;
+      for(int z = 0; z < nr; z++)
+         if(!usedR[z] && rQ[z] == rQ[bi] && rSig[z] == rSig[bi])
+           {
+            usedR[z] = true;
+            names += (cnt > 0 ? "<br>" : "") + rNm[z];
+            sas += (cnt > 0 ? "<br>" : "") + rSa[z];
+            sbs += (cnt > 0 ? "<br>" : "") + rSb[z];
+            both += (cnt > 0 ? "; " : "") + rNm[z] + " " + rSa[z] + " / " + rSb[z];
+            cnt++;
+           }
+      W("<tr>" + TD(names) + rCore[bi] + TD(sas) + TD(sbs) + "</tr>");
+      string plain = names;
+      StringReplace(plain, "<br>", " / ");
+      R(g_repEv, "  " + plain + rRep[bi] + "; rialzo a 60 min con dato sopra / sotto le attese: " + both + ".");
      }
    TEnd();
    SecEnd();
    //--- per orario di uscita
    SecStart("Reazione per orario di uscita", "Tutte le notizie che escono allo stesso orario, confrontate con lo stesso orario nei giorni senza notizie.");
-   THead("Orario (orario dei dati)|N notizie|Notizia pi&ugrave; frequente|Mossa 5 min %|Range 60 min %|Stesso orario senza notizie %|Rapporto");
+   THead("Orario (orario dei dati)|Uscite (minuti distinti)|Notizia pi&ugrave; frequente|Mossa 5 min %|Range 60 min %|Stesso orario senza notizie %|Rapporto");
    R(g_repEv, "  [Per orario di uscita]");
    for(int z = 0; z < ns; z++)
      {
@@ -3559,9 +3589,6 @@ void NewsTab(CSeries &s)
         {
          if(!ok[i] || sl[i] != slots[z])
             continue;
-         a5[q] = MathAbs(r5[i]);
-         ag[q] = rg[i];
-         q++;
          if(g_nName[i] != bestN)
            {
             int c = 0;
@@ -3574,13 +3601,18 @@ void NewsTab(CSeries &s)
                bestN = g_nName[i];
               }
            }
+         if(i > 0 && g_nT[i] == g_nT[i - 1])
+            continue;  // piu' notizie nello stesso minuto = una sola uscita
+         a5[q] = MathAbs(r5[i]);
+         ag[q] = rg[i];
+         q++;
         }
       if(q < 5)
          continue;
       double mg = MedianOf(ag, q), rt = Dv(mg, base[z]);
       W("<tr>" + TD(SlotLab(slots[z])) + TD(I2S(q)) + TD(bestN + " (" + I2S(bestC) + ")") + TD(FP(MedianOf(a5, q), 3)) + TD(FP(mg, 3)) +
         TD(FP(base[z], 3)) + TDc(F(rt, 2) + "&times;", PCol(rt, 1.0, 1.0)) + "</tr>");
-      R(g_repEv, "    " + SlotLab(slots[z]) + ": " + I2S(q) + " notizie (pi&ugrave; frequente " + bestN + "), mossa mediana 5 min " +
+      R(g_repEv, "    " + SlotLab(slots[z]) + ": " + I2S(q) + " uscite (pi&ugrave; frequente " + bestN + "), mossa mediana 5 min " +
         FP(MedianOf(a5, q), 3) + "%, range 60 min " + FP(mg, 3) + "% contro " + FP(base[z], 3) + "% senza notizie (" + F(rt, 2) + " volte).");
      }
    TEnd();
@@ -3765,13 +3797,295 @@ void HotMinutes(CSeries &s, const int barSec)
    SecEnd();
   }
 
+datetime KeyTime(const long day, const int mkt, const int mins)
+  {
+   if(mkt < 0)
+      return (datetime)(day * 86400 + (long)mins * 60);
+   return LocalToData(day, mkt, mins);
+  }
+
+// Misura la finestra che parte all'orario T e scrive in g_se*[g_seN] (g_seN lo incrementa chi chiama).
+bool SeWindow(CSeries &s, const datetime T, const int ORm, const int H, const int barSec, const bool useNews, double &vOr, int &kOut)
+  {
+   int minPre = MathMax(1, 3600 / barSec / 2), minOR = MathMax(1, ORm * 60 / barSec / 2), minH = MathMax(2, H * 3600 / barSec / 2);
+   int k = LowerBound(s.t, s.n, T);
+   if(k <= 0 || k >= s.n || (long)s.t[k] - (long)T >= 120)
+      return false;
+   int kp = LowerBound(s.t, s.n, T - 3600);
+   int kor = LowerBound(s.t, s.n, T + ORm * 60);
+   int k60 = LowerBound(s.t, s.n, T + 3600);
+   int kh = LowerBound(s.t, s.n, T + H * 3600);
+   if(k - kp < minPre || kor - k < minOR || kh - k < minH || kh <= kor || k60 <= k)
+      return false;
+   double op = s.o[k];
+   if(!(op > 0))
+      return false;
+   int i = g_seN;
+   kOut = k;
+   //--- ora prima / ora dopo
+   double pH = s.h[kp], pL = s.l[kp], aH = s.h[k], aL = s.l[k];
+   for(int q = kp; q < k; q++)
+     {
+      if(s.h[q] > pH)
+         pH = s.h[q];
+      if(s.l[q] < pL)
+         pL = s.l[q];
+     }
+   for(int q = k; q < k60; q++)
+     {
+      if(s.h[q] > aH)
+         aH = s.h[q];
+      if(s.l[q] < aL)
+         aL = s.l[q];
+     }
+   g_seAct[i] = pH > pL ? (aH - aL) / (pH - pL) : Nan();
+   double pre = s.c[k - 1] - s.o[kp], post = s.c[k60 - 1] - op;
+   g_seInv[i] = (pre != 0 && post != 0) ? ((pre > 0) != (post > 0) ? 1 : 0) : -1;
+   //--- range iniziale (OR)
+   double oH = s.h[k], oL = s.l[k];
+   vOr = 0;
+   for(int q = k; q < kor; q++)
+     {
+      if(s.h[q] > oH)
+         oH = s.h[q];
+      if(s.l[q] < oL)
+         oL = s.l[q];
+      vOr += s.v[q];
+     }
+   g_seOr[i] = (oH - oL) / op;
+   double orMv = s.c[kor - 1] - op, rest = s.c[kh - 1] - s.c[kor - 1];
+   g_seCont[i] = (orMv != 0 && rest != 0) ? ((orMv > 0) == (rest > 0) ? 1 : 0) : -1;
+   //--- rottura dell'OR, rottura falsa (poi tocca anche l'altro lato), estremi della finestra
+   int br = 0;
+   bool fl = false;
+   double wH = oH, wL = oL;
+   for(int q = kor; q < kh; q++)
+     {
+      bool u = s.h[q] > oH, dn = s.l[q] < oL;
+      if(br == 0)
+        {
+         if(u && dn)
+           {
+            br = s.c[q] >= s.o[q] ? 1 : -1;
+            fl = true;
+           }
+         else
+            if(u)
+               br = 1;
+            else
+               if(dn)
+                  br = -1;
+        }
+      else
+         if(!fl && ((br == 1 && dn) || (br == -1 && u)))
+            fl = true;
+      if(s.h[q] > wH)
+         wH = s.h[q];
+      if(s.l[q] < wL)
+         wL = s.l[q];
+     }
+   g_seBrk[i] = br;
+   g_seF[i] = fl;
+   g_seHold[i] = (br == 1 && s.c[kh - 1] > oH) || (br == -1 && s.c[kh - 1] < oL);
+   g_seExt[i] = oH >= wH || oL <= wL;
+   g_seAbs[i] = MathAbs(s.c[kh - 1] - op) / op;
+   g_seRng[i] = (wH - wL) / op;
+   g_seNw[i] = useNews && g_nN > 0 && NewsNear(T - 900, T + 900) >= 0;
+   //--- VWAP ancorato all'orario chiave (senza volume: media semplice dei prezzi tipici)
+   double cpv = 0, cv = 0, dmax = 0;
+   int side = 0, sOr = 0, sLast = 0, xs = 0;
+   bool tch = false;
+   for(int q = k; q < kh; q++)
+     {
+      double tp = (s.h[q] + s.l[q] + s.c[q]) / 3.0;
+      double w = s.hasVol ? s.v[q] : 1.0;
+      cpv += tp * w;
+      cv += w;
+      double vw = cv > 0 ? cpv / cv : tp;
+      double dd = MathAbs(s.c[q] - vw) / op;
+      if(dd > dmax)
+         dmax = dd;
+      int sd = s.c[q] > vw ? 1 : (s.c[q] < vw ? -1 : 0);
+      if(q == kor - 1)
+         sOr = sd;
+      if(q >= kor)
+        {
+         if(s.l[q] <= vw && s.h[q] >= vw)
+            tch = true;
+         if(sd != 0 && side != 0 && sd != side)
+            xs++;
+        }
+      if(sd != 0)
+         side = sd;
+      sLast = sd;
+     }
+   g_seVwS[i] = (sOr != 0 && sLast != 0) ? (sOr == sLast ? 1 : 0) : -1;
+   g_seTch[i] = sOr != 0 ? (tch ? 1 : 0) : -1;
+   g_seX[i] = xs;
+   g_seDist[i] = dmax;
+   g_seRv[i] = Nan();
+   return true;
+  }
+
+// Tutti i giorni feriali (della piazza) per un orario chiave; kd = barra di partenza di ogni giorno valido.
+int SeCollect(CSeries &s, const int mk, const int mn, const long d0, const long d1, const int ORm, const int H, const int barSec, int &kd[])
+  {
+   g_seN = 0;
+   int hN = 0, hP = 0;
+   double hist[20];
+   for(long day = d0; day <= d1; day++)
+     {
+      if(DowMon((datetime)(day * 86400)) >= 5)
+         continue;
+      double vOr = 0;
+      int kk = 0;
+      if(!SeWindow(s, KeyTime(day, mk, mn), ORm, H, barSec, true, vOr, kk))
+         continue;
+      kd[g_seN] = kk;
+      if(s.hasVol)  // volume dei primi minuti rispetto agli ultimi 20 giorni validi
+        {
+         if(hN >= 10)
+           {
+            double mv = 0;
+            for(int z = 0; z < hN; z++)
+               mv += hist[z];
+            g_seRv[g_seN] = Dv(vOr, mv / hN);
+           }
+         hist[hP] = vOr;
+         hP = (hP + 1) % 20;
+         if(hN < 20)
+            hN++;
+        }
+      g_seN++;
+     }
+   return g_seN;
+  }
+
+void SeAll(SeSt &r)
+  {
+   bool m[];
+   ArrayResize(m, g_seN);
+   for(int z = 0; z < g_seN; z++)
+      m[z] = true;
+   SeCalc(m, r);
+  }
+
+// Riferimento: le stesse barre degli stessi giorni (stessa volatilita' minuto per minuto, stesso volume), ma la direzione
+// di ogni barra e' estratta a caso (movimento invertito con probabilita' 1/2). Cio' che resta e' l'effetto della sola volatilita'.
+void SeSurrogate(CSeries &s, const int &kd[], const int nk, const int ORm, const int H, const int barSec, SeSt &z)
+  {
+   int preB = 3600 / barSec, hB = H * 3600 / barSec, L = preB + hB + 2, G = L + 10;
+   CSeries sim;
+   sim.hasVol = s.hasVol;
+   int tot = nk * G;
+   ArrayResize(sim.t, tot); ArrayResize(sim.o, tot); ArrayResize(sim.h, tot);
+   ArrayResize(sim.l, tot); ArrayResize(sim.c, tot); ArrayResize(sim.v, tot);
+   datetime Tp[];
+   ArrayResize(Tp, nk);
+   int n = 0, np = 0;
+   datetime tb = D'2001.01.01';
+   for(int p = 0; p < nk; p++)
+     {
+      int q0 = kd[p] - preB;
+      if(q0 < 1 || q0 + L >= s.n)
+         continue;
+      double pc = s.c[q0 - 1];
+      datetime t0 = (datetime)((long)tb + (long)np * G * barSec);
+      for(int j = 0; j < L; j++)
+        {
+         int q = q0 + j;
+         double ref = s.c[q - 1];
+         double ro = s.o[q] / ref, rh = s.h[q] / ref, rl = s.l[q] / ref, rc = s.c[q] / ref;
+         if((MathRand() & 1) == 1)
+           {
+            double a = 1.0 / rl;
+            rl = 1.0 / rh;
+            rh = a;
+            ro = 1.0 / ro;
+            rc = 1.0 / rc;
+           }
+         sim.t[n] = (datetime)((long)t0 + (long)j * barSec);
+         sim.o[n] = pc * ro;
+         sim.h[n] = pc * rh;
+         sim.l[n] = pc * rl;
+         sim.c[n] = pc * rc;
+         sim.v[n] = s.v[q];
+         pc = sim.c[n];
+         n++;
+        }
+      Tp[np++] = (datetime)((long)t0 + (long)preB * barSec);
+     }
+   sim.n = n;
+   g_seN = 0;
+   for(int p = 0; p < np; p++)
+     {
+      double vo = 0;
+      int kk = 0;
+      if(SeWindow(sim, Tp[p], ORm, H, barSec, false, vo, kk))
+         g_seN++;
+     }
+   SeAll(z);
+  }
+
+string SeBaseTxt(SeSt &z)
+  {
+   int nb = z.bu + z.bd;
+   return "OR contiene il massimo o il minimo " + Share(z.ext, z.n) + "%, rotture false " + Share(z.fl, nb) + "%, chiude oltre il lato rotto " +
+          Share(z.hd, nb) + "%, prosegue " + Share(z.cY, z.cN) + "%, l'ora dopo contro l'ora prima " + Share(z.iY, z.iN) +
+          "%, stesso lato del VWAP " + Share(z.vY, z.vN) + "%, torna al VWAP " + Share(z.tY, z.tN) + "%, incroci " + F(z.xs, 0);
+  }
+
+void SessionGrid(CSeries &s, const int barSec, const int ORm, const int H, const long d0, const long d1, const long dayA, const long dayB, int &kd[])
+  {
+   int mk = g_ref;
+   string where = mk >= 0 ? "ora di " + MKT_NAME[mk] : "orario dei dati";
+   string rows = "";
+   R(g_repEv, "  [Tutta la giornata a passi di 30 minuti (" + where + "): tra parentesi il valore atteso con la stessa volatilita' e direzione casuale]");
+   for(int mn = 0; mn < 1440 && !IsStopped(); mn += 30)
+     {
+      int nk = SeCollect(s, mk, mn, d0, d1, ORm, H, barSec, kd);
+      if(nk < 30)
+         continue;
+      SeSt r;
+      SeAll(r);
+      SeSt z;
+      SeSurrogate(s, kd, nk, ORm, H, barSec, z);
+      string loc = mk >= 0 ? MKT_SHORT[mk] + " " + HM(mn) : HM(mn);
+      int ta = MinOfDay(KeyTime(dayA, mk, mn)), tb = MinOfDay(KeyTime(dayB, mk, mn));
+      string dt = HM(ta) + (ta != tb ? " / " + HM(tb) : "");
+      int nb = r.bu + r.bd, zb = z.bu + z.bd;
+      double fr = Frac(r.fl, nb), fz = Frac(z.fl, zb), er = Frac(r.ext, r.n), ez = Frac(z.ext, z.n), vr = Frac(r.vY, r.vN), vz = Frac(z.vY, z.vN);
+      rows += "<tr>" + TD(loc) + TD(dt) + TD(I2S(r.n)) + TDc(F(r.act, 2) + "&times;", PCol(r.act, 1.0, 1.0)) + TD(FP(r.orr, 3)) +
+              TDc(FP(er, 1) + " (" + FP(ez, 1) + ")", PCol(er, ez, 0.15)) + TDc(FP(fr, 1) + " (" + FP(fz, 1) + ")", PCol(-fr, -fz, 0.15)) +
+              TDc(Share(r.cY, r.cN), PCol(Frac(r.cY, r.cN), 0.5, 0.15)) + TDc(Share(r.iY, r.iN), PCol(Frac(r.iY, r.iN), 0.5, 0.15)) +
+              TD(FP(r.rng, 3)) + TD(PX(r.rng * g_last)) + TDc(FP(vr, 1) + " (" + FP(vz, 1) + ")", PCol(vr, vz, 0.15)) +
+              TD(g_nN > 0 ? Share(r.nw, r.n) : "-") + "</tr>";
+      R(g_repEv, "    " + loc + " (dati " + dt + "), " + I2S(r.n) + " giorni: attivita' " + F(r.act, 2) + "x l'ora prima, range iniziale " +
+        FP(r.orr, 3) + "%, OR contiene max o min " + FP(er, 1) + "% (" + FP(ez, 1) + "%), false " + FP(fr, 1) + "% (" + FP(fz, 1) +
+        "%), prosegue " + Share(r.cY, r.cN) + "%, l'ora dopo contro l'ora prima " + Share(r.iY, r.iN) + "%, range " + I2S(H) + " ore " +
+        FP(r.rng, 3) + "%, stesso lato del VWAP " + FP(vr, 1) + "% (" + FP(vz, 1) + "%), con notizia " + (g_nN > 0 ? Share(r.nw, r.n) : "-") + "%");
+     }
+   string wl = I2S(ORm) + " min";
+   SecStart("Tutta la giornata a passi di 30 minuti (" + where + ")",
+            "Le stesse misure degli orari chiave, ripetute per ogni mezz'ora della giornata: si vede quali orari hanno un comportamento " +
+            "proprio senza sceglierli prima. Tra parentesi il valore <b>atteso</b> ricostruendo gli stessi giorni con le stesse barre " +
+            "(stessa volatilit&agrave; minuto per minuto) ma con la direzione di ogni barra estratta a caso: la differenza tra reale e " +
+            "atteso &egrave; ci&ograve; che non si spiega con la sola volatilit&agrave;. Blu = pi&ugrave; dell'atteso, rosso = meno " +
+            "(per le rotture false: blu = meno false).");
+   THead("Ora locale|Orario dei dati (inverno / estate)|Giorni|Attivit&agrave; ora dopo / ora prima|Range iniziale %|% OR contiene max o min (atteso)|% rottura falsa (atteso)|% prosegue la direzione dei primi " + wl + "|% l'ora dopo va contro l'ora prima|Range mediano " + I2S(H) + " ore %|&asymp; prezzo|% stesso lato del VWAP (atteso)|% con notizia");
+   W(rows);
+   TEnd();
+   SecEnd();
+  }
+
 void SessionTab(CSeries &s, const int barSec)
   {
    int H = InpSessionHours < 1 ? 1 : InpSessionHours;
    int ORm = InpORMinutes < barSec / 60 ? barSec / 60 : InpORMinutes;
    R(g_repEv, "");
    R(g_repEv, "=== SESSIONI: cosa succede dopo gli orari chiave delle piazze (orari locali convertiti giorno per giorno; OR = range dei " +
-     "primi " + I2S(ORm) + " minuti; finestra = " + I2S(H) + " ore dall'orario chiave; solo giorni feriali della piazza) ===");
+     "primi " + I2S(ORm) + " minuti; finestra = " + I2S(H) + " ore dall'orario chiave; solo giorni feriali della piazza; 'atteso' = " +
+     "stessi giorni e stesse barre con la direzione di ogni barra estratta a caso) ===");
    if(s.n < 5000)
      {
       SecStart("Sessioni", "");
@@ -3779,6 +4093,7 @@ void SessionTab(CSeries &s, const int barSec)
       SecEnd();
       return;
      }
+   MathSrand(20240601);
    long d0 = (long)s.t[0] / 86400 + 1, d1 = (long)s.t[s.n - 1] / 86400;
    int nd = (int)(d1 - d0 + 1);
    if(nd < 60)
@@ -3787,6 +4102,8 @@ void SessionTab(CSeries &s, const int barSec)
    ArrayResize(g_seRv, nd); ArrayResize(g_seCont, nd); ArrayResize(g_seInv, nd); ArrayResize(g_seBrk, nd); ArrayResize(g_seVwS, nd);
    ArrayResize(g_seX, nd); ArrayResize(g_seTch, nd); ArrayResize(g_seF, nd); ArrayResize(g_seHold, nd); ArrayResize(g_seExt, nd);
    ArrayResize(g_seNw, nd);
+   int kd[];
+   ArrayResize(kd, nd);
    bool m[];
    ArrayResize(m, nd);
    //--- giorni di riferimento per l'orario dei dati: 15 gennaio e 15 luglio dell'ultimo anno completo
@@ -3816,156 +4133,16 @@ void SessionTab(CSeries &s, const int barSec)
         }
       ord[y + 1] = v;
      }
-   int minPre = MathMax(1, 3600 / barSec / 2), minOR = MathMax(1, ORm * 60 / barSec / 2), minH = MathMax(2, H * 3600 / barSec / 2);
    string rowsA = "", rowsB = "", rowsC = "";
-   double hist[20];
+   string baseLab = "&nbsp;&nbsp;&#8627; atteso: stessa volatilit&agrave;, direzione casuale";
    for(int oi = 0; oi < NSE && !IsStopped(); oi++)
      {
       int e = ord[oi], mk = SE_MKT[e], mn = SE_MIN[e];
-      g_seN = 0;
-      int hN = 0, hP = 0;
-      for(long day = d0; day <= d1; day++)
-        {
-         if(DowMon((datetime)(day * 86400)) >= 5)
-            continue;
-         datetime T = LocalToData(day, mk, mn);
-         int k = LowerBound(s.t, s.n, T);
-         if(k <= 0 || k >= s.n || (long)s.t[k] - (long)T >= 120)
-            continue;
-         int kp = LowerBound(s.t, s.n, T - 3600);
-         int kor = LowerBound(s.t, s.n, T + ORm * 60);
-         int k60 = LowerBound(s.t, s.n, T + 3600);
-         int kh = LowerBound(s.t, s.n, T + H * 3600);
-         if(k - kp < minPre || kor - k < minOR || kh - k < minH || kh <= kor || k60 <= k)
-            continue;
-         int i = g_seN;
-         double op = s.o[k];
-         if(!(op > 0))
-            continue;
-         //--- ora prima / ora dopo
-         double pH = s.h[kp], pL = s.l[kp], aH = s.h[k], aL = s.l[k];
-         for(int q = kp; q < k; q++)
-           {
-            if(s.h[q] > pH)
-               pH = s.h[q];
-            if(s.l[q] < pL)
-               pL = s.l[q];
-           }
-         for(int q = k; q < k60; q++)
-           {
-            if(s.h[q] > aH)
-               aH = s.h[q];
-            if(s.l[q] < aL)
-               aL = s.l[q];
-           }
-         g_seAct[i] = pH > pL ? (aH - aL) / (pH - pL) : Nan();
-         double pre = s.c[k - 1] - s.o[kp], post = s.c[k60 - 1] - op;
-         g_seInv[i] = (pre != 0 && post != 0) ? ((pre > 0) != (post > 0) ? 1 : 0) : -1;
-         //--- range iniziale (OR)
-         double oH = s.h[k], oL = s.l[k], vOr = 0;
-         for(int q = k; q < kor; q++)
-           {
-            if(s.h[q] > oH)
-               oH = s.h[q];
-            if(s.l[q] < oL)
-               oL = s.l[q];
-            vOr += s.v[q];
-           }
-         g_seOr[i] = (oH - oL) / op;
-         double orMv = s.c[kor - 1] - op, rest = s.c[kh - 1] - s.c[kor - 1];
-         g_seCont[i] = (orMv != 0 && rest != 0) ? ((orMv > 0) == (rest > 0) ? 1 : 0) : -1;
-         //--- rottura dell'OR, rottura falsa (tocca poi anche l'altro lato), estremi della finestra
-         int br = 0;
-         bool fl = false;
-         double wH = oH, wL = oL;
-         for(int q = kor; q < kh; q++)
-           {
-            bool u = s.h[q] > oH, dn = s.l[q] < oL;
-            if(br == 0)
-              {
-               if(u && dn)
-                 {
-                  br = s.c[q] >= s.o[q] ? 1 : -1;
-                  fl = true;
-                 }
-               else
-                  if(u)
-                     br = 1;
-                  else
-                     if(dn)
-                        br = -1;
-              }
-            else
-               if(!fl && ((br == 1 && dn) || (br == -1 && u)))
-                  fl = true;
-            if(s.h[q] > wH)
-               wH = s.h[q];
-            if(s.l[q] < wL)
-               wL = s.l[q];
-           }
-         g_seBrk[i] = br;
-         g_seF[i] = fl;
-         g_seHold[i] = (br == 1 && s.c[kh - 1] > oH) || (br == -1 && s.c[kh - 1] < oL);
-         g_seExt[i] = oH >= wH || oL <= wL;
-         g_seAbs[i] = MathAbs(s.c[kh - 1] - op) / op;
-         g_seRng[i] = (wH - wL) / op;
-         g_seNw[i] = g_nN > 0 && NewsNear(T - 900, T + 900) >= 0;
-         //--- VWAP ancorato all'orario chiave (senza volume: media semplice dei prezzi tipici)
-         double cpv = 0, cv = 0, dmax = 0;
-         int side = 0, sOr = 0, sLast = 0, xs = 0;
-         bool tch = false;
-         for(int q = k; q < kh; q++)
-           {
-            double tp = (s.h[q] + s.l[q] + s.c[q]) / 3.0;
-            double w = s.hasVol ? s.v[q] : 1.0;
-            cpv += tp * w;
-            cv += w;
-            double vw = cv > 0 ? cpv / cv : tp;
-            double dd = MathAbs(s.c[q] - vw) / op;
-            if(dd > dmax)
-               dmax = dd;
-            int sd = s.c[q] > vw ? 1 : (s.c[q] < vw ? -1 : 0);
-            if(q == kor - 1)
-               sOr = sd;
-            if(q >= kor)
-              {
-               if(s.l[q] <= vw && s.h[q] >= vw)
-                  tch = true;
-               if(sd != 0 && side != 0 && sd != side)
-                  xs++;
-              }
-            if(sd != 0)
-               side = sd;
-            sLast = sd;
-           }
-         g_seVwS[i] = (sOr != 0 && sLast != 0) ? (sOr == sLast ? 1 : 0) : -1;
-         g_seTch[i] = sOr != 0 ? (tch ? 1 : 0) : -1;
-         g_seX[i] = xs;
-         g_seDist[i] = dmax;
-         //--- volume relativo dei primi minuti rispetto agli ultimi 20 giorni validi
-         g_seRv[i] = Nan();
-         if(s.hasVol)
-           {
-            if(hN >= 10)
-              {
-               double mv = 0;
-               for(int z = 0; z < hN; z++)
-                  mv += hist[z];
-               g_seRv[i] = Dv(vOr, mv / hN);
-              }
-            hist[hP] = vOr;
-            hP = (hP + 1) % 20;
-            if(hN < 20)
-               hN++;
-           }
-         g_seN++;
-        }
-      if(g_seN < 30)
+      int nk = SeCollect(s, mk, mn, d0, d1, ORm, H, barSec, kd);
+      if(nk < 30)
          continue;
-      for(int z = 0; z < g_seN; z++)
-         m[z] = true;
       SeSt r;
-      SeCalc(m, r);
+      SeAll(r);
       string loc = MKT_SHORT[mk] + " " + HM(mn);
       int ta = MinOfDay(LocalToData(dayA, mk, mn)), tb = MinOfDay(LocalToData(dayB, mk, mn));
       string dt = HM(ta) + (ta != tb ? " / " + HM(tb) : "");
@@ -4008,15 +4185,25 @@ void SessionTab(CSeries &s, const int barSec)
               "%, movimento mediano " + FP(q.absm, 3) + "%, range mediano " + FP(q.rng, 3) + "%, stesso lato del VWAP " + Share(q.vY, q.vN) + "%");
            }
         }
+      //--- riferimento: stessi giorni, stessa volatilita', direzione casuale (sovrascrive g_se*, quindi per ultimo)
+      SeSt z;
+      SeSurrogate(s, kd, nk, ORm, H, barSec, z);
+      int zb = z.bu + z.bd;
+      rowsA += "<tr class='base'>" + TD(baseLab) + TD("") + TD("") + TD(I2S(z.n)) + TD(F(z.act, 2) + "&times;") + TD(FP(z.orr, 3)) +
+               TD(Share(z.bu, z.n) + " / " + Share(z.bd, z.n)) + TD(Share(z.fl, zb)) + TD(Share(z.hd, zb)) + TD(Share(z.cY, z.cN)) +
+               TD(Share(z.iY, z.iN)) + TD(Share(z.ext, z.n)) + TD(FP(z.absm, 3)) + TD(FP(z.rng, 3)) + TD(PX(z.rng * g_last)) + TD("") + "</tr>";
+      rowsB += "<tr class='base'>" + TD(baseLab) + TD("") + TD(I2S(z.vN)) + TD(Share(z.vY, z.vN)) + TD(Share(z.tY, z.tN)) + TD(F(z.xs, 0)) +
+               TD(FP(z.dist, 3)) + TD(PX(z.dist * g_last)) + "</tr>";
+      R(g_repEv, "    Atteso con la stessa volatilita' e direzione casuale: " + SeBaseTxt(z) + ".");
      }
    string wl = I2S(ORm) + " min";
    SecStart("Orari chiave delle piazze: cosa succede dopo",
-            "Per ogni orario chiave (ora locale della piazza, convertita giorno per giorno nell'orologio dei dati) si osservano i " +
+            "Per ogni orario chiave (ora locale della piazza, convertita giorno per giorno nell'orologio dei dati) si osservano le " +
             I2S(H) + " ore successive. <b>Attivit&agrave;</b> = range dei 60 minuti dopo diviso il range dei 60 minuti prima. " +
             "<b>OR</b> = range dei primi " + wl + ". <b>Rottura falsa</b> = dopo aver rotto un lato dell'OR il prezzo tocca anche l'altro. " +
-            "<b>Prosegue</b> = il resto della finestra va nella stessa direzione dei primi " + wl + " (tratti separati: senza legame " +
-            "sarebbe circa 50%). <b>L'ora dopo va contro l'ora prima</b>: circa 50% senza legame. Le righe sono in ordine di orario " +
-            "dei dati (inverno). Orari che per lo strumento non contano mostrano attivit&agrave; vicina a 1.");
+            "<b>Prosegue</b> = il resto della finestra va nella stessa direzione dei primi " + wl + ". Sotto ogni orario, in grigio, " +
+            "l'<b>atteso</b>: gli stessi giorni ricostruiti con le stesse barre (stessa volatilit&agrave; minuto per minuto e stesso volume) " +
+            "ma con la direzione di ogni barra estratta a caso. Quello che differisce dall'atteso non si spiega con la sola volatilit&agrave;.");
    THead("Evento|Ora locale|Orario dei dati (inverno / estate)|Giorni|Attivit&agrave; ora dopo / ora prima|Range iniziale %|Rompe l'OR: % su / % gi&ugrave;|% rottura falsa|% chiude oltre il lato rotto|% prosegue la direzione dei primi " + wl + "|% l'ora dopo va contro l'ora prima|% OR contiene max o min della finestra|Movimento mediano " + I2S(H) + " ore %|Range mediano " + I2S(H) + " ore %|&asymp; prezzo|% con notizia");
    W(rowsA);
    TEnd();
@@ -4026,7 +4213,7 @@ void SessionTab(CSeries &s, const int barSec)
             "variazioni di prezzo, non il controvalore, ma segue bene l'attivit&agrave;" : "senza volume: media semplice dei prezzi") +
             "). <b>Stesso lato</b> = a fine finestra il prezzo &egrave; dalla stessa parte del VWAP in cui era alla fine dell'OR. " +
             "<b>Torna al VWAP</b> = dopo l'OR il prezzo tocca di nuovo il VWAP. <b>Incroci</b> = quante volte la chiusura passa da un " +
-            "lato all'altro (pochi = giornata direzionale, tanti = giornata in rotazione).");
+            "lato all'altro (pochi = giornata direzionale, tanti = giornata in rotazione). In grigio l'atteso con direzione casuale.");
    THead("Evento|Ora locale|Giorni|% stesso lato del VWAP a fine finestra|% torna a toccare il VWAP dopo l'OR|Incroci mediani|Distanza massima mediana dal VWAP %|&asymp; prezzo");
    W(rowsB);
    TEnd();
@@ -4041,6 +4228,7 @@ void SessionTab(CSeries &s, const int barSec)
       TEnd();
       SecEnd();
      }
+   SessionGrid(s, barSec, ORm, H, d0, d1, dayA, dayB, kd);
    HotMinutes(s, barSec);
   }
 
@@ -4211,7 +4399,7 @@ string Css(void)
           ".tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:12.5px;font-variant-numeric:tabular-nums}" +
           "th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}" +
           "th:first-child,td:first-child{text-align:left}th{color:var(--mut);font-weight:600}" +
-          "tr.grp td{color:var(--acc);font-weight:600;padding-top:12px;text-align:left}" +
+          "tr.grp td{color:var(--acc);font-weight:600;padding-top:12px;text-align:left}tr.base td{color:var(--mut);font-style:italic}" +
           ".kpi{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:10px}" +
           ".kpi div{background:#0f172a;border:1px solid var(--line);border-radius:8px;padding:10px}.kpi b{display:block;font-size:18px}" +
           ".kpi span{color:var(--mut);font-size:12px}.kpi small{display:block;color:var(--mut);font-size:11px}" +
