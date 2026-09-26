@@ -12,7 +12,9 @@
 //|    secondo estremo -> chiusura      MEAN REVERSION (restituito)   |
 //|  e per ogni tratto misura QUANTO (% e prezzo) e QUANDO avviene.   |
 //|                                                                  |
-//|  Orari = ora del server (FP Markets EET/EEST).                    |
+//|  Usa in automatico tutto lo storico del simbolo, dalla prima       |
+//|  all'ultima barra (anche simboli personalizzati, es. Dukascopy).  |
+//|  Orari = ora delle barre (server, o fuso dei dati importati).     |
 //|  Sui CFD il volume e' tick volume (attivita', non controvalore).  |
 //+------------------------------------------------------------------+
 #property copyright   "vtrls"
@@ -20,11 +22,13 @@
 #property description "Analisi descrittiva per timeframe: spostamento piu' ampio, mean reversion, quando avvengono."
 #property script_show_inputs
 
-input string InpSymbols   = "";      // Simboli (vuoto = grafico corrente, altrimenti separati da virgola)
-input int    InpBarsM1    = 500000;  // Barre M1 (0 = salta Minuto)
-input int    InpBarsH1    = 100000;  // Barre H1
-input int    InpBarsD1    = 20000;   // Barre D1
-input bool   InpCommonDir = false;   // Salva in Common\Files invece di MQL5\Files
+input string InpSymbols     = "";    // Simboli (vuoto = simbolo del grafico, altrimenti separati da virgola)
+input int    InpMinuteYears = 3;     // Scheda Minuto: ultimi N anni di M1 (0 = tutto lo storico)
+input bool   InpUseM1       = true;  // Usa M1 (scheda Minuto e 'quando' dentro l'ora)
+input int    InpMaxBarsM1   = 0;     // Limite barre M1 (0 = tutto lo storico disponibile)
+input int    InpMaxBarsH1   = 0;     // Limite barre H1 (0 = tutto lo storico disponibile)
+input int    InpMaxBarsD1   = 0;     // Limite barre D1 (0 = tutto lo storico disponibile)
+input bool   InpCommonDir   = false; // Salva in Common\Files invece di MQL5\Files
 
 #define NTF     13
 #define NX_ROWS 28
@@ -43,6 +47,7 @@ int    TF_K[NTF]     = {0, 0, 4, 6, 8, 12, 0, 0, 0, 0, 0, 0, 0};
 int    TF_SRC1[NTF]  = {0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2};
 int    TF_SRC2[NTF]  = {-1, 1, 0, 0, 0, 0, 0, 2, -1, -1, -1, -1, -1};
 string DOW[7]  = {"Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"};
+string DOWS[7] = {"Dom", "Lun", "Mar", "Mer", "Gio", "Ven", "Sab"};  // settimana che parte la domenica
 string MON[12] = {"Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"};
 string CLS_NAME[3] = {"Trend", "Parziale", "Mean reversion"};
 string CLS_COL[3]  = {C_BLUE, C_GREY, C_RED};
@@ -59,6 +64,8 @@ int    g_digits = 5;
 double g_last = 0;
 string g_curRows = "";
 string g_sumRows = "";
+string g_warn = "";
+string g_minNote = "";
 
 struct NxAcc
   {
@@ -83,20 +90,19 @@ public:
    datetime          t[];
    double            o[], h[], l[], c[], v[];
    int               n;
-   bool              hasVol;
-                     CSeries(void) { n = 0; hasVol = false; }
+   bool              hasVol, truncated;
+                     CSeries(void) { n = 0; hasVol = false; truncated = false; }
    void              Free(void)
      {
       ArrayFree(t); ArrayFree(o); ArrayFree(h); ArrayFree(l); ArrayFree(c); ArrayFree(v);
-      n = 0; hasVol = false;
+      n = 0; hasVol = false; truncated = false;
      }
-   bool              Load(const string sym, const ENUM_TIMEFRAMES tf, const int want)
+   // carica dalla prima all'ultima barra disponibile (o le ultime maxBars), a blocchi di chunkDays giorni
+   bool              Load(const string sym, const ENUM_TIMEFRAMES tf, const int maxBars, const int chunkDays)
      {
       Free();
-      if(want <= 0)
-         return false;
       int avail = 0;
-      for(int k = 0; k < 30; k++)
+      for(int k = 0; k < 50 && !IsStopped(); k++)
         {
          avail = Bars(sym, tf);
          if(avail > 0 && SeriesInfoInteger(sym, tf, SERIES_SYNCHRONIZED) != 0)
@@ -105,32 +111,56 @@ public:
         }
       if(avail < 3)
          return false;
-      int cnt = want < avail ? want : avail;
-      MqlRates r[];
-      int got = 0;
-      for(int k = 0; k < 10; k++)
+      truncated = (long)avail >= TerminalInfoInteger(TERMINAL_MAXBARS);  // storico tagliato da 'Barre massime nel grafico'
+      datetime first = (datetime)SeriesInfoInteger(sym, tf, SERIES_FIRSTDATE);
+      datetime last = (datetime)SeriesInfoInteger(sym, tf, SERIES_LASTBAR_DATE);
+      if(maxBars > 0 && maxBars < avail)
         {
-         got = CopyRates(sym, tf, 0, cnt, r);
-         if(got > 0)
-            break;
-         Sleep(500);
+         datetime tt[];
+         if(CopyTime(sym, tf, maxBars - 1, 1, tt) == 1)
+            first = tt[0];
         }
-      if(got < 3)
+      if(first <= 0 || last < first)
          return false;
-      n = got;  // l'ultima barra e' quella in formazione: entra solo nel "periodo in corso"
-      ArrayResize(t, n); ArrayResize(o, n); ArrayResize(h, n); ArrayResize(l, n); ArrayResize(c, n); ArrayResize(v, n);
-      int withReal = 0;  // volume reale solo se c'e' su quasi tutte le barre, altrimenti tick volume
-      for(int i = 0; i < n; i++)
-         if(r[i].real_volume > 0)
-            withReal++;
-      bool useReal = withReal >= 0.95 * n;
-      for(int i = 0; i < n; i++)
+      int reserve = avail + 16;
+      double vr[];
+      int withReal = 0;
+      long span = (long)chunkDays * 86400;
+      MqlRates r[];
+      for(long cs = (long)first; cs <= (long)last && !IsStopped(); cs += span)
         {
-         t[i] = r[i].time; o[i] = r[i].open; h[i] = r[i].high; l[i] = r[i].low; c[i] = r[i].close;
-         v[i] = useReal ? (double)r[i].real_volume : (double)r[i].tick_volume;
+         int got = -1;
+         for(int k = 0; k < 3 && got < 0; k++)
+           {
+            got = CopyRates(sym, tf, (datetime)cs, (datetime)(cs + span - 1), r);
+            if(got < 0)
+               Sleep(200);
+           }
+         if(got <= 0)
+            continue;
+         int base = n;
+         n += got;
+         ArrayResize(t, n, reserve); ArrayResize(o, n, reserve); ArrayResize(h, n, reserve); ArrayResize(l, n, reserve);
+         ArrayResize(c, n, reserve); ArrayResize(v, n, reserve); ArrayResize(vr, n, reserve);
+         for(int i = 0; i < got; i++)
+           {
+            int k = base + i;
+            t[k] = r[i].time; o[k] = r[i].open; h[k] = r[i].high; l[k] = r[i].low; c[k] = r[i].close;
+            v[k] = (double)r[i].tick_volume;
+            vr[k] = (double)r[i].real_volume;
+            if(r[i].real_volume > 0)
+               withReal++;
+           }
+        }
+      ArrayFree(r);
+      if(n < 3)
+         return false;
+      // volume reale solo se c'e' su quasi tutte le barre, altrimenti tick volume
+      if(withReal >= 0.95 * n)
+         ArrayCopy(v, vr, 0, 0, n);
+      for(int i = 0; i < n && !hasVol; i++)
          if(v[i] > 0)
             hasVol = true;
-        }
       return true;
      }
   };
@@ -146,7 +176,7 @@ public:
    double            medCnt, curO, curH, curL, curC;
    datetime          curT0;
    datetime          t0[], tH[], tL[];
-   double            O[], H[], L[], C[], V[], rng[], ret[], mfe[], mae[], ini[], retr[], rf[], pH[], pL[], rv[];
+   double            O[], H[], L[], C[], V[], rng[], ret[], rf[], pH[], pL[], rv[];
    int               cnt[], offH[], offL[], cls[], cat[], bH[], bL[], yr[];
    bool              lf[];
                      CBlocks(void) { N = 0; ok = false; tf = 0; src = 0; }
@@ -154,8 +184,8 @@ public:
      {
       ArrayResize(t0, n); ArrayResize(tH, n); ArrayResize(tL, n);
       ArrayResize(O, n); ArrayResize(H, n); ArrayResize(L, n); ArrayResize(C, n); ArrayResize(V, n);
-      ArrayResize(rng, n); ArrayResize(ret, n); ArrayResize(mfe, n); ArrayResize(mae, n); ArrayResize(ini, n);
-      ArrayResize(retr, n); ArrayResize(rf, n); ArrayResize(pH, n); ArrayResize(pL, n); ArrayResize(rv, n);
+      ArrayResize(rng, n); ArrayResize(ret, n); ArrayResize(rf, n); ArrayResize(pH, n); ArrayResize(pL, n);
+      ArrayResize(rv, n);
       ArrayResize(cnt, n); ArrayResize(offH, n); ArrayResize(offL, n); ArrayResize(cls, n); ArrayResize(cat, n);
       ArrayResize(bH, n); ArrayResize(bL, n); ArrayResize(yr, n); ArrayResize(lf, n);
      }
@@ -269,11 +299,13 @@ long BlockKey(const int tfi, const datetime t)
       return day * 100 + hour / TF_K[tfi];
    if(tfi == 6)
       return day;
-   long ws = day - (day + 3) % 7;  // lunedi' della settimana (1970-01-01 era giovedi')
+   // settimana da domenica a sabato: con dati UTC la domenica sera apre la settimana nuova,
+   // con l'orario del broker (EET) la domenica non ha barre
+   long ws = day - (day + 4) % 7;  // 1970-01-01 era giovedi'
    if(tfi == 7)
       return ws;
    if(tfi == 8)
-      return (ws - 4) / 14;        // 1970-01-05 era lunedi'
+      return (ws - 3) / 14;        // 1970-01-04 era domenica
    MqlDateTime d;
    TimeToStruct(t, d);
    long m = (long)d.year * 12 + d.mon - 1;
@@ -386,7 +418,7 @@ int TimIndex(const int tfi, const datetime te, const datetime t0, const int off)
       case 4:
       case 5:  r = d.hour % TF_K[tfi]; break;
       case 6:  r = d.hour; break;
-      case 7:  r = (d.day_of_week + 6) % 7; break;
+      case 7:  r = d.day_of_week; break;
       case 8:
       case 9:  r = off; break;
       case 10: r = (int)(((long)te / 86400 - (long)t0 / 86400) / 7); break;
@@ -410,7 +442,7 @@ string TimLabel(const int tfi, const int i)
       case 4:
       case 5:  return "+" + I2S(i) + "h";
       case 6:  return StringFormat("%02dh", i);
-      case 7:  return DOW[i];
+      case 7:  return DOWS[i];
       case 8:
       case 9:  return "G" + I2S(i + 1);
       case 10: return "S" + I2S(i + 1);
@@ -463,23 +495,23 @@ string PeriodLabel(const int tfi, const datetime t)
 //+------------------------------------------------------------------+
 //| Scompone la serie nei periodi del timeframe e misura ogni periodo |
 //+------------------------------------------------------------------+
-bool Build(const int tfi, const int srcIdx, CSeries &s, CBlocks &b)
+bool Build(const int tfi, const int srcIdx, CSeries &s, CBlocks &b, const int i0)
   {
    b.Free();
    b.tf = tfi;
    b.src = srcIdx;
    b.hasVol = s.hasVol;
    int n = s.n;
-   if(n < 50)
+   if(n - i0 < 50)
       return false;
    int st[];
-   ArrayResize(st, n);
+   ArrayResize(st, n - i0);
    int nb = 0;
    long prev = 0;
-   for(int i = 0; i < n; i++)
+   for(int i = i0; i < n; i++)
      {
       long k = BlockKey(tfi, s.t[i]);
-      if(i == 0 || k != prev)
+      if(i == i0 || k != prev)
         {
          st[nb++] = i;
          prev = k;
@@ -528,14 +560,9 @@ bool Build(const int tfi, const int srcIdx, CSeries &s, CBlocks &b)
    for(int i = 0; i < m; i++)
      {
       double R = b.H[i] - b.L[i];
-      double first  = b.lf[i] ? b.L[i] : b.H[i];
       double second = b.lf[i] ? b.H[i] : b.L[i];
       b.rng[i]  = R / b.O[i];
       b.ret[i]  = b.C[i] / b.O[i] - 1.0;
-      b.mfe[i]  = b.H[i] / b.O[i] - 1.0;
-      b.mae[i]  = 1.0 - b.L[i] / b.O[i];
-      b.ini[i]  = MathAbs(first - b.O[i]) / b.O[i];
-      b.retr[i] = MathAbs(b.C[i] - second) / b.O[i];
       b.rf[i]   = R > 0 ? MathAbs(b.C[i] - second) / R : 0.0;
       b.cls[i]  = b.rf[i] <= 0.25 ? 0 : (b.rf[i] >= 0.75 ? 2 : 1);
       MqlDateTime d;
@@ -721,11 +748,11 @@ void VBars(const string title, string &lab[], double &val[], string &col[], cons
   }
 
 // barre verticali a due serie affiancate
-void VBars2(const string title, string &lab[], double &a[], double &c2[], const int n,
+void VBars2(const string title, string &lab[], double &a[], double &c2[], const int from, const int n,
             const string colA, const string colB, const string nameA, const string nameB)
   {
    double mx = 0;
-   for(int i = 0; i < n; i++)
+   for(int i = from; i < n; i++)
      {
       if(a[i] > mx)
          mx = a[i];
@@ -735,7 +762,7 @@ void VBars2(const string title, string &lab[], double &a[], double &c2[], const 
    if(mx <= 0)
       mx = 1;
    W("<div class='ch'><div class='ct'>" + title + "</div><div class='vb'>");
-   for(int i = 0; i < n; i++)
+   for(int i = from; i < n; i++)
       W("<div class='c'><div class='bs'><i style='height:" + DoubleToString(a[i] / mx * 100, 1) + "%;background:" + colA +
         "' title='" + lab[i] + " &middot; " + nameA + ": " + DoubleToString(a[i], 1) + "%'></i><i style='height:" +
         DoubleToString(c2[i] / mx * 100, 1) + "%;background:" + colB + "' title='" + lab[i] + " &middot; " + nameB + ": " +
@@ -970,11 +997,18 @@ void TfPage(CBlocks &b)
    NxAcc acc[];
    NextStats(b, acc);
    double sameAll = acc[0].n > 0 ? (double)acc[0].same / acc[0].n : Nan();
+   double retr[];  // mean reversion: dal secondo estremo alla chiusura, in % dell'apertura
+   ArrayResize(retr, m);
+   for(int i = 0; i < m; i++)
+      retr[i] = MathAbs(b.C[i] - (b.lf[i] ? b.H[i] : b.L[i])) / b.O[i];
+   double meanRetr = Mean(retr, m);
 
    //--- sintesi
    string note = b.intra ? "Misurato su barre " + src + ": il 'quando' dentro il periodo ha la risoluzione di una barra " + src + "."
                  : "Ogni periodo &egrave; una singola barra " + src + ": si misurano ampiezza e direzione; l'ordine massimo/minimo " +
                  "&egrave; dedotto dalla candela (chiusura sopra l'apertura = prima il minimo).";
+   if(tfi == 0)
+      note += g_minNote;
    SecStart(TF_LABEL[tfi] + ": sintesi", note);
    W("<div class='kpi'>");
    Kpi("Periodi analizzati", I2S(m), TimeToString(b.t0[0], TIME_DATE) + " &rarr; " + TimeToString(b.t0[m - 1], TIME_DATE));
@@ -986,7 +1020,7 @@ void TfPage(CBlocks &b)
    Kpi("Trend (restituisce &le; 25%)", FP((double)nc[0] / m, 1) + "%", "chiude vicino all'estremo");
    Kpi("Mean reversion (restituisce &ge; 75%)", FP((double)nc[2] / m, 1) + "%", "torna indietro quasi tutto");
    Kpi("Parziale", FP((double)nc[1] / m, 1) + "%", "restituisce tra 25% e 75%");
-   Kpi("Mean reversion media", FP(Mean(b.retr, m), 3) + "%", F(Mean(b.rf, m) * 100, 0) + "% dello spostamento");
+   Kpi("Mean reversion media", FP(meanRetr, 3) + "%", F(Mean(b.rf, m) * 100, 0) + "% dello spostamento");
    Kpi("Periodo dopo nella stessa direzione", FP(sameAll, 1) + "%", "");
    if(b.intra)
      {
@@ -1017,10 +1051,18 @@ void TfPage(CBlocks &b)
    PctRow("Spostamento pi&ugrave; ampio (massimo &minus; minimo)", b.rng, m, true);
    PctRow("&nbsp;&nbsp;&hellip; dal minimo al massimo (rialzista)", up, nu, true);
    PctRow("&nbsp;&nbsp;&hellip; dal massimo al minimo (ribassista)", dn, nd, true);
-   PctRow("Escursione sopra l'apertura", b.mfe, m, true);
-   PctRow("Escursione sotto l'apertura", b.mae, m, true);
-   PctRow("Movimento iniziale (apertura &rarr; primo estremo)", b.ini, m, true);
-   PctRow("Mean reversion (secondo estremo &rarr; chiusura)", b.retr, m, true);
+   double tx[];
+   ArrayResize(tx, m);
+   for(int i = 0; i < m; i++)
+      tx[i] = b.H[i] / b.O[i] - 1.0;
+   PctRow("Escursione sopra l'apertura", tx, m, true);
+   for(int i = 0; i < m; i++)
+      tx[i] = 1.0 - b.L[i] / b.O[i];
+   PctRow("Escursione sotto l'apertura", tx, m, true);
+   for(int i = 0; i < m; i++)
+      tx[i] = MathAbs((b.lf[i] ? b.L[i] : b.H[i]) - b.O[i]) / b.O[i];
+   PctRow("Movimento iniziale (apertura &rarr; primo estremo)", tx, m, true);
+   PctRow("Mean reversion (secondo estremo &rarr; chiusura)", retr, m, true);
    PctRow("Mean reversion in % dello spostamento", b.rf, m, false);
    PctRow("Rendimento apertura &rarr; chiusura", b.ret, m, true);
    PctRow("|Rendimento| apertura &rarr; chiusura", ab, m, true);
@@ -1066,11 +1108,15 @@ void TfPage(CBlocks &b)
             cd++;
            }
         }
-      int te = 1;  // taglia le fasce finali vuote (es. giorni 24-31 del mese)
+      int ts = -1, te = 1;  // taglia le fasce vuote in testa e in coda (es. domenica, giorni 24-31)
       for(int k = 0; k < tc; k++)
         {
          if(h[k] > 0 || l[k] > 0)
+           {
             te = k + 1;
+            if(ts < 0)
+               ts = k;
+           }
          h[k] = h[k] / m * 100;
          l[k] = l[k] / m * 100;
          ru[k] = cu > 0 ? ru[k] / cu * 100 : 0;
@@ -1080,8 +1126,10 @@ void TfPage(CBlocks &b)
       SecStart("Quando avvengono", "Sinistra: in quale " + TimUnit(tfi) + " si forma il massimo e il minimo del periodo (% dei periodi). " +
                "Destra: dove finisce lo spostamento pi&ugrave; ampio, cio&egrave; il punto da cui parte il rientro (mean reversion).");
       W("<div class='g2'>");
-      VBars2("Quando si forma il massimo e il minimo", lab, h, l, te, C_BLUE, C_AMBER, "Massimo del periodo", "Minimo del periodo");
-      VBars2("Dove parte il rientro", lab, ru, rd, te, "#93c5fd", "#fcd34d", "Swing rialzista: rientro dal massimo",
+      if(ts < 0)
+         ts = 0;
+      VBars2("Quando si forma il massimo e il minimo", lab, h, l, ts, te, C_BLUE, C_AMBER, "Massimo del periodo", "Minimo del periodo");
+      VBars2("Dove parte il rientro", lab, ru, rd, ts, te, "#93c5fd", "#fcd34d", "Swing rialzista: rientro dal massimo",
              "Swing ribassista: rientro dal minimo");
       W("</div>");
       SecEnd();
@@ -1192,7 +1240,7 @@ void TfPage(CBlocks &b)
    double upr = (double)nUp / m;
    g_sumRows += "<tr>" + TD(TF_LABEL[tfi]) + TD(I2S(m)) + TD(FP(medR, 3)) + TD(PX(medR * g_last)) + TD(FP(p90, 3)) +
                 TDc(FP(upr, 1), PCol(upr, 0.5, 0.15)) + TD(FP((double)nc[0] / m, 1)) + TD(FP((double)nc[2] / m, 1)) +
-                TD(FP(Mean(b.retr, m), 3)) + TD(F(Mean(b.rf, m) * 100, 0)) + TD(b.intra ? ModeOf(b, true) : "&ndash;") +
+                TD(FP(meanRetr, 3)) + TD(F(Mean(b.rf, m) * 100, 0)) + TD(b.intra ? ModeOf(b, true) : "&ndash;") +
                 TD(b.intra ? ModeOf(b, false) : "&ndash;") + TDc(FP(sameAll, 1), PCol(sameAll, 0.5, 0.15)) + "</tr>";
   }
 
@@ -1615,9 +1663,24 @@ bool Analyze(const string sym)
       PrintFormat("[MarketProfiler] simbolo %s non trovato (controlla il suffisso del broker)", sym);
       return false;
      }
-   m1.Load(sym, PERIOD_M1, InpBarsM1);
-   h1.Load(sym, PERIOD_H1, InpBarsH1);
-   d1.Load(sym, PERIOD_D1, InpBarsD1);
+   Comment("MarketProfiler: carico lo storico di ", sym, " ...");
+   if(InpUseM1)
+      m1.Load(sym, PERIOD_M1, InpMaxBarsM1, 60);
+   h1.Load(sym, PERIOD_H1, InpMaxBarsH1, 3650);
+   d1.Load(sym, PERIOD_D1, InpMaxBarsD1, 36500);
+   if(m1.n > 0)
+      PrintFormat("[MarketProfiler] %s M1: %d barre %s -> %s", sym, m1.n, TimeToString(m1.t[0]), TimeToString(m1.t[m1.n - 1]));
+   if(h1.n > 0)
+      PrintFormat("[MarketProfiler] %s H1: %d barre %s -> %s", sym, h1.n, TimeToString(h1.t[0]), TimeToString(h1.t[h1.n - 1]));
+   if(d1.n > 0)
+      PrintFormat("[MarketProfiler] %s D1: %d barre %s -> %s", sym, d1.n, TimeToString(d1.t[0]), TimeToString(d1.t[d1.n - 1]));
+   g_warn = "";
+   if(m1.truncated || h1.truncated || d1.truncated)
+     {
+      g_warn = "Attenzione: lo storico &egrave; tagliato da 'Barre massime nel grafico' (" + I2S(TerminalInfoInteger(TERMINAL_MAXBARS)) +
+               "). Strumenti &rarr; Opzioni &rarr; Grafici &rarr; Barre massime nel grafico = Illimitato, riavvia MT5 e rilancia lo script.";
+      Print("[MarketProfiler] storico tagliato da 'Barre massime nel grafico': impostalo su Illimitato e riavvia MT5");
+     }
    if(d1.n < 50 && h1.n < 50)
      {
       PrintFormat("[MarketProfiler] %s: storico insufficiente (D1=%d, H1=%d)", sym, d1.n, h1.n);
@@ -1630,6 +1693,25 @@ bool Analyze(const string sym)
    if(m1.n > 0 && m1.t[m1.n - 1] >= lastT) { lastT = m1.t[m1.n - 1]; g_last = m1.c[m1.n - 1]; }
    g_curRows = "";
    g_sumRows = "";
+   int i0m = 0;  // scheda Minuto: solo gli ultimi InpMinuteYears anni (milioni di barre M1 altrimenti)
+   g_minNote = "";
+   if(InpMinuteYears > 0 && m1.n > 0)
+     {
+      datetime from = (datetime)((long)m1.t[m1.n - 1] - (long)InpMinuteYears * 365 * 86400);
+      int lo = 0, hi = m1.n;
+      while(lo < hi)
+        {
+         int mid = (lo + hi) / 2;
+         if(m1.t[mid] < from)
+            lo = mid + 1;
+         else
+            hi = mid;
+        }
+      i0m = lo;
+      if(i0m > 0)
+         g_minNote = " Scheda Minuto: ultimi " + I2S(InpMinuteYears) + " anni di M1 (dal " + TimeToString(m1.t[i0m], TIME_DATE) +
+                     "); le altre schede usano tutto lo storico. Per usare tutti gli anni metti 'Scheda Minuto' = 0.";
+     }
 
    string clean = sym;
    StringReplace(clean, ".", "_");
@@ -1652,8 +1734,11 @@ bool Analyze(const string sym)
       info += "D1: " + I2S(d1.n) + " barre (" + TimeToString(d1.t[0], TIME_DATE) + " &rarr; " + TimeToString(d1.t[d1.n - 1], TIME_DATE) + ") &middot; ";
    W("<!doctype html><html lang='it'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>");
    W("<title>" + sym + " &mdash; Market Profiler</title><style>" + Css() + "</style></head><body>");
-   W("<header><h1>" + sym + " &mdash; analisi descrittiva</h1><p>" + AccountInfoString(ACCOUNT_COMPANY) + " &middot; " + info +
-     "orari = ora del server &middot; generato " + TimeToString(TimeLocal(), TIME_DATE | TIME_MINUTES) + "</p><nav>");
+   bool custom = SymbolInfoInteger(sym, SYMBOL_CUSTOM) != 0;
+   string tz = custom ? "simbolo personalizzato: orari = fuso dei dati importati (Dukascopy / Quant Data Manager: di solito UTC)"
+               : "orari = ora del server " + AccountInfoString(ACCOUNT_COMPANY);
+   W("<header><h1>" + sym + " &mdash; analisi descrittiva</h1><p>" + info + tz + " &middot; generato " +
+     TimeToString(TimeLocal(), TIME_DATE | TIME_MINUTES) + "</p>" + (g_warn != "" ? "<p style='color:#f59e0b'>" + g_warn + "</p>" : "") + "<nav>");
    W("<button data-tab='overview'>Panoramica</button>");
    for(int k = 0; k < NTF; k++)
       W("<button data-tab='" + TF_KEY[k] + "'>" + TF_LABEL[k] + "</button>");
@@ -1662,6 +1747,7 @@ bool Analyze(const string sym)
    CBlocks b;
    for(int k = 0; k < NTF; k++)
      {
+      Comment("MarketProfiler ", sym, ": analizzo ", TF_LABEL[k], " ...");
       W("<div class='tab' id='tab-" + TF_KEY[k] + "' hidden>");
       bool built = false;
       int pref[2];
@@ -1670,13 +1756,13 @@ bool Analyze(const string sym)
       for(int z = 0; z < 2 && !built; z++)
         {
          if(pref[z] == 0 && m1.n > 50)
-            built = Build(k, 0, m1, b);
+            built = Build(k, 0, m1, b, k == 0 ? i0m : 0);
          else
             if(pref[z] == 1 && h1.n > 50)
-               built = Build(k, 1, h1, b);
+               built = Build(k, 1, h1, b, 0);
             else
                if(pref[z] == 2 && d1.n > 50)
-                  built = Build(k, 2, d1, b);
+                  built = Build(k, 2, d1, b, 0);
         }
       if(built)
          TfPage(b);
@@ -1684,7 +1770,7 @@ bool Analyze(const string sym)
         {
          SecStart(TF_LABEL[k], "");
          W("<p class='muted'>Dati insufficienti: servono barre " + (TF_SRC1[k] == 0 ? "M1" : (TF_SRC1[k] == 1 ? "H1" : "D1")) +
-           " (aumenta 'Barre massime nel grafico' e scorri il grafico indietro per scaricare lo storico).</p>");
+           " del simbolo (controlla che lo storico sia importato e che 'Barre massime nel grafico' sia Illimitato).</p>");
          SecEnd();
         }
       b.Free();
@@ -1698,6 +1784,7 @@ bool Analyze(const string sym)
    W("</div></main><script>" + Js() + "</script></body></html>");
    FileClose(g_fh);
    g_fh = INVALID_HANDLE;
+   Comment("");
    string path = (InpCommonDir ? TerminalInfoString(TERMINAL_COMMONDATA_PATH) : TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5") +
                  "\\Files\\" + fname;
    PrintFormat("[MarketProfiler] %s: report salvato in %s", sym, path);
