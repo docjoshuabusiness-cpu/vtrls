@@ -6981,6 +6981,19 @@ void CostSetup(const string dataSym)
       PrintFormat("[MarketProfiler] costi %s: simbolo %s; spread %s; swap %s; commissione %s; slittamento %s", nm,
                   g_cp[b].sym == "" ? "-" : g_cp[b].sym, g_cp[b].spTxt, g_cp[b].swTxt, g_cp[b].cmTxt, PX(g_cp[b].slip));
      }
+   //--- nessun broker con costi: i valori "netti" coincidono con i lordi, va detto in testa al rapporto
+   bool anyCost = false;
+   for(int b = 1; b < NPRF; b++)
+      if(g_cp[b].on)
+         anyCost = true;
+   HI_NAME[8] = anyCost ? "Coppie di contesti (aspettativa netta del broker peggiore contro zero)" :
+                "Coppie di contesti (aspettativa LORDA contro zero: costi dei broker non disponibili)";
+   if(!anyCost)
+      g_warn += (g_warn != "" ? " " : "") + "COSTI DEI BROKER NON DISPONIBILI: spread, commissione, slittamento e swap valgono 0 per " +
+                InpB1Name + " e " + InpB2Name + ", quindi ogni valore netto o 'netta peggiore' (R/R netto, ORB, coppie, strategie, regole) " +
+                "coincide con il lordo. Per averli esegui lo script una volta nel terminale del broker (conto collegato, simbolo nel Market Watch) " +
+                "con 'Solo misura dei costi' = true, che salva il profilo nella cartella comune, oppure inserisci spread, commissione e " +
+                "slittamento nei parametri del broker.";
   }
 
 double CostSpMed(const int p)
