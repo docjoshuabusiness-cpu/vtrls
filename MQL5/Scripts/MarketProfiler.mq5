@@ -362,7 +362,7 @@ double Z2(const double p1, const double n1, const double p2, const double n2)  /
 double ArcF(const double x) { return 2.0 / M_PI * MathArcsin(MathSqrt(MathMax(0.0, MathMin(1.0, x)))); }  // legge dell'arcoseno
 
 //--- riepilogo: ogni z calcolato nelle schede viene contato; quelli con |z| >= 2 sono conservati con il loro testo
-#define HI_NMOD 14
+#define HI_NMOD 18
 string HI_NAME[HI_NMOD] = {"Sessioni e orari chiave (reale contro atteso con direzione casuale)",
                            "Livelli: effetto del livello (reale contro livello finto)",
                            "Vita dei livelli (reale contro livello finto)",
@@ -374,7 +374,11 @@ string HI_NAME[HI_NMOD] = {"Sessioni e orari chiave (reale contro atteso con dir
                            "Rischio/rendimento lordo: il contesto contro la stessa ora (cosa aggiunge all'orario; D1: contro tutte le candele)",
                            "Rischio/rendimento lordo: la direzione conta (buy contro sell nello stesso istante, stesso stop e obiettivo: contro il placebo)",
                            "ORB: dopo la chiusura di conferma il prezzo va piu' a favore che contro (estensione a favore contro quella contraria: placebo)",
-                           "ORB: eventi dopo il range per candela di conferma (reale contro atteso con le stesse barre a direzione casuale)"};
+                           "ORB: eventi dopo il range per candela di conferma (reale contro atteso con le stesse barre a direzione casuale)",
+                           "Persistenza per timeframe (rapporto di varianza contro 1: sopra = i movimenti continuano, sotto = tornano indietro)",
+                           "Persistenza per ora del giorno (il movimento prima continua dopo? seguito medio contro zero)",
+                           "Timeframe alto -> basso: stati singoli della candela alta (stato contro tutte le altre candele)",
+                           "Timeframe alto -> basso: coppie di stati della candela alta (coppia contro tutte le altre candele)"};
 int    g_hiCnt[HI_NMOD];
 int    g_hiN = 0;
 int    g_hiM[];
@@ -11314,6 +11318,999 @@ void RRTab(CSeries &s, const int barSec, const string sym, const string clean)
 //+------------------------------------------------------------------+
 string g_repHi = "";
 
+//+------------------------------------------------------------------+
+//| PERSISTENZA: dove il prezzo continua e dove torna indietro        |
+//| TIMEFRAME ALTO -> BASSO: stato della candela alta e comportamento |
+//| dei timeframe inferiori al suo interno                            |
+//+------------------------------------------------------------------+
+string g_repPers = "", g_repMtf = "";
+CText  g_txMtfAll;  // appendice F: tutte le coppie di stati del timeframe alto
+
+// come RollIn, con la differenza dall'orologio NY+7 calcolata una volta per giorno dei dati
+bool RollInC(const datetime t, long &cD, long &cOff)
+  {
+   if(!InpRollSkip)
+      return false;
+   long d = (long)t / 86400;
+   if(d != cD)
+     {
+      cD = d;
+      cOff = (long)DataToNY7(t) - (long)t;
+     }
+   return RollWin((int)((((long)t + cOff) % 86400) / 60));
+  }
+
+long CdKey(const datetime t, const int sec) { return sec >= 604800 ? ((long)t / 86400 + 3) / 7 : (long)t / sec; }  // settimana da lunedi'
+datetime CdStart(const long key, const int sec) { return (datetime)(sec >= 604800 ? (key * 7 - 3) * 86400 : key * sec); }
+string TfNm(const int sec)
+  {
+   if(sec >= 604800)
+      return "W1";
+   if(sec >= 86400)
+      return "D1";
+   if(sec >= 3600)
+      return "H" + I2S(sec / 3600);
+   return "M" + I2S(sec / 60);
+  }
+
+// candele di un timeframe costruite dalle barre della serie base (allineate alla mezzanotte dei dati, settimana da lunedi');
+// con skipRoll le barre nella finestra del rollover sono ignorate
+class CCd
+  {
+public:
+   datetime          t[];
+   long              k[];
+   double            o[], h[], l[], c[];
+   int               s[], e[], qh[], ql[];  // prima barra, barra dopo l'ultima, barra del massimo e del minimo (serie base)
+   int               n, sec;
+                     CCd(void) { n = 0; sec = 0; }
+   void              Free(void)
+     {
+      ArrayFree(t); ArrayFree(k); ArrayFree(o); ArrayFree(h); ArrayFree(l); ArrayFree(c);
+      ArrayFree(s); ArrayFree(e); ArrayFree(qh); ArrayFree(ql);
+      n = 0;
+     }
+  };
+
+void CdBuild(CSeries &b, const int sec, CCd &q, const bool skipRoll)
+  {
+   q.Free();
+   q.sec = sec;
+   long cD = -1, cOff = 0, cur = LONG_MIN;
+   int n = 0;
+   for(int i = 0; i < b.n; i++)
+     {
+      if(skipRoll && RollInC(b.t[i], cD, cOff))
+         continue;
+      long key = CdKey(b.t[i], sec);
+      if(key != cur)
+        {
+         n++;
+         cur = key;
+        }
+     }
+   ArrayResize(q.t, n); ArrayResize(q.k, n); ArrayResize(q.o, n); ArrayResize(q.h, n); ArrayResize(q.l, n); ArrayResize(q.c, n);
+   ArrayResize(q.s, n); ArrayResize(q.e, n); ArrayResize(q.qh, n); ArrayResize(q.ql, n);
+   int x = -1;
+   cur = LONG_MIN;
+   cD = -1;
+   for(int i = 0; i < b.n; i++)
+     {
+      if(skipRoll && RollInC(b.t[i], cD, cOff))
+         continue;
+      long key = CdKey(b.t[i], sec);
+      if(key != cur)
+        {
+         x++;
+         cur = key;
+         q.k[x] = key;
+         q.t[x] = b.t[i];
+         q.o[x] = b.o[i];
+         q.h[x] = b.h[i];
+         q.l[x] = b.l[i];
+         q.s[x] = i;
+         q.qh[x] = i;
+         q.ql[x] = i;
+        }
+      if(b.h[i] > q.h[x])
+        {
+         q.h[x] = b.h[i];
+         q.qh[x] = i;
+        }
+      if(b.l[i] < q.l[x])
+        {
+         q.l[x] = b.l[i];
+         q.ql[x] = i;
+        }
+      q.c[x] = b.c[i];
+      q.e[x] = i + 1;
+     }
+   q.n = n;
+  }
+
+// ATR(p) come media semplice del true range delle ultime p candele (compresa la candela k)
+void CdAtr(CCd &q, const int p, double &a[])
+  {
+   ArrayResize(a, q.n);
+   double sum = 0, tr[];
+   ArrayResize(tr, q.n);
+   for(int k = 0; k < q.n; k++)
+     {
+      tr[k] = k == 0 ? q.h[k] - q.l[k] : MathMax(q.h[k], q.c[k - 1]) - MathMin(q.l[k], q.c[k - 1]);
+      sum += tr[k];
+      if(k >= p)
+         sum -= tr[k - p];
+      a[k] = k >= p - 1 ? sum / p : Nan();
+     }
+  }
+
+//--- rapporto di varianza (Lo e MacKinlay, errore robusto all'eteroschedasticita') sui rendimenti logaritmici delle chiusure
+#define VR_NL 16  // ritardi 1..15
+#define VR_NQ 4
+int VR_Q[VR_NQ] = {2, 4, 8, 16};
+struct VrAcc
+  {
+   double            n, s1, s2;
+   double            c[VR_NL], a[VR_NL], b[VR_NL], np[VR_NL], d[VR_NL];
+  };
+
+void VrPush(VrAcc &v, const double r, const double &ring[], const int run, const int pos)
+  {
+   v.n++;
+   v.s1 += r;
+   v.s2 += r * r;
+   int m = run < VR_NL - 1 ? run : VR_NL - 1;
+   for(int j = 1; j <= m; j++)
+     {
+      double rp = ring[(pos - j + VR_NL) % VR_NL];
+      v.c[j] += r * rp;
+      v.a[j] += r;
+      v.b[j] += rp;
+      v.np[j]++;
+      v.d[j] += r * r * rp * rp;
+     }
+  }
+
+// VR(q) = 1 + 2 somma (1 - j/q) rho(j); z = (VR - 1) / errore robusto (somma dei (2 (1 - j/q))^2 var(rho(j)))
+bool VrRes(VrAcc &v, const int q, double &vr, double &z)
+  {
+   vr = Nan();
+   z = Nan();
+   if(v.n < 30)
+      return false;
+   double mu = v.s1 / v.n, s0 = v.s2 - v.n * mu * mu;
+   if(!(s0 > 0))
+      return false;
+   double sm = 0, var = 0;
+   for(int j = 1; j < q && j < VR_NL; j++)
+     {
+      double cc = v.c[j] - mu * (v.a[j] + v.b[j]) + v.np[j] * mu * mu, w = 2.0 * (1.0 - (double)j / q);
+      sm += w * cc / s0;
+      var += w * w * v.d[j] / (s0 * s0);
+     }
+   vr = 1 + sm;
+   z = var > 0 ? sm / MathSqrt(var) : Nan();
+   return true;
+  }
+
+// rendimenti di chiusure consecutive del timeframe sec (candele costruite al volo dalla serie base, l'ultima in corso esclusa);
+// un buco oltre 3 candele (intraday), 4 giorni (D1) o 3 settimane (W1) interrompe la catena. v[0] = tutto, v[1], v[2] = meta'
+void VrTf(CSeries &b, const int sec, const datetime tMid, VrAcc &v[])
+  {
+   for(int x = 0; x < 3; x++)
+      ZeroMemory(v[x]);
+   long maxGap = sec < 86400 ? (long)3 * sec : (sec == 86400 ? (long)4 * 86400 : (long)21 * 86400);
+   double ring[VR_NL];
+   ArrayInitialize(ring, 0.0);
+   int run = 0, pos = 0;
+   long cD = -1, cOff = 0, cur = LONG_MIN;
+   datetime ct = 0, pt = 0;
+   double cc = 0, pc = 0;
+   bool hp = false;
+   for(int i = 0; i < b.n; i++)
+     {
+      if(InpRollSkip && RollInC(b.t[i], cD, cOff))
+         continue;
+      long key = CdKey(b.t[i], sec);
+      if(key != cur)
+        {
+         if(cur != LONG_MIN)  // candela appena finita: rendimento dalla chiusura della precedente
+           {
+            if(hp && (long)ct - (long)pt <= maxGap && pc > 0 && cc > 0)
+              {
+               double r = MathLog(cc / pc);
+               VrPush(v[0], r, ring, run, pos);
+               VrPush(v[ct < tMid ? 1 : 2], r, ring, run, pos);
+               ring[pos] = r;
+               pos = (pos + 1) % VR_NL;
+               run++;
+              }
+            else
+               run = 0;
+            pt = ct;
+            pc = cc;
+            hp = true;
+           }
+         cur = key;
+         ct = b.t[i];
+        }
+      cc = b.c[i];
+     }
+  }
+
+//--- continuazione per ora del giorno: il movimento dei L minuti prima di ogni mezz'ora prosegue nei F minuti dopo?
+#define TD_NH 5
+int TD_L[TD_NH] = {15, 30, 60, 60, 240};
+int TD_F[TD_NH] = {15, 30, 60, 240, 240};
+
+double TdPx(CSeries &b, const long x, const long tol)  // apertura della prima barra dall'istante x (0 se manca entro tol secondi)
+  {
+   int k = LowerBound(b.t, b.n, (datetime)x);
+   return (k < b.n && (long)b.t[k] - x < tol) ? b.o[k] : 0;
+  }
+
+void PersTab(CSeries &b, const int barSec)
+  {
+   g_repPers = "";
+   if(b.n < 5000)
+     {
+      SecStart("Persistenza", "");
+      W("<p class='muted'>Servono dati M1 o M5.</p>");
+      SecEnd();
+      return;
+     }
+   datetime tMid = (datetime)((long)b.t[0] + ((long)b.t[b.n - 1] - (long)b.t[0]) / 2);
+   //--- 1. rapporto di varianza per timeframe
+   int secs[8] = {60, 300, 900, 1800, 3600, 14400, 86400, 604800};
+   string d1 = "Rapporto di varianza VR(q) = varianza dei movimenti di q candele divisa per q volte la varianza dei movimenti di " +
+               "una candela (rendimenti logaritmici delle chiusure). Con un prezzo casuale VR = 1; sopra 1 i movimenti tendono a " +
+               "continuare nella stessa direzione (trend), sotto 1 a tornare indietro (mean reversion). z con errore robusto ai " +
+               "periodi pi&ugrave; e meno volatili (Lo e MacKinlay): entro +/-2 compatibile con il caso. Tra parentesi l'orizzonte " +
+               "(q candele) e le due met&agrave; dello storico (prima met&agrave; fino al " + TimeToString(tMid, TIME_DATE) + "). " +
+               "Chiusure consecutive: un buco (weekend, mercato chiuso) interrompe la catena. " + RollTxt();
+   SecStart("Persistenza per timeframe: i movimenti continuano o tornano indietro?", d1);
+   THead("Timeframe|Rendimenti|VR(2)|VR(4)|VR(8)|VR(16)|Lettura");
+   R(g_repPers, "=== PERSISTENZA PER TIMEFRAME: rapporto di varianza ===");
+   R(g_repPers, "Metodo: " + d1);
+   VrAcc v[3];
+   for(int ti = 0; ti < 8; ti++)
+     {
+      int sec = secs[ti];
+      if(sec < barSec)
+         continue;
+      VrTf(b, sec, tMid, v);
+      if(v[0].n < 30)
+         continue;
+      string row = "<tr>" + TD(TfNm(sec)) + TD(DoubleToString(v[0].n, 0));
+      string tx = "  " + TfNm(sec) + " (" + DoubleToString(v[0].n, 0) + " rendimenti):";
+      double bz = 0;
+      int bq = -1;
+      bool bst = false;
+      for(int qi = 0; qi < VR_NQ; qi++)
+        {
+         int q = VR_Q[qi];
+         double vr, z, v1, z1, v2, z2;
+         VrRes(v[0], q, vr, z);
+         VrRes(v[1], q, v1, z1);
+         VrRes(v[2], q, v2, z2);
+         bool st = MathIsValidNumber(v1) && MathIsValidNumber(v2) && MathIsValidNumber(z) && (v1 > 1) == (z > 0) && (v2 > 1) == (z > 0);
+         string hz = DurLab((double)q * sec / 3600.0);
+         row += TDc(F(vr, 3) + " <small>z " + ZS(z) + "<br>" + F(v1, 3) + " / " + F(v2, 3) + "</small>", PCol(z, 0, 5));
+         tx += " VR(" + I2S(q) + ", " + hz + ") " + F(vr, 3) + " (z " + ZS(z) + "; meta' " + F(v1, 3) + " / " + F(v2, 3) + (st ? ", stabile" : "") + ");";
+         if(MathIsValidNumber(z) && MathAbs(z) > MathAbs(bz))
+           {
+            bz = z;
+            bq = q;
+            bst = st;
+           }
+         if(HiKeep(14, z))
+            HiAdd(14, z, "Persistenza " + TfNm(sec) + ": VR(" + I2S(q) + ") = " + F(vr, 3) + " (movimenti di " + hz + ", " +
+                  DoubleToString(v[0].n, 0) + " rendimenti): " + (vr > 1 ? "i movimenti continuano (trend)" : "i movimenti tornano indietro (mean reversion)") +
+                  ", meta' " + F(v1, 3) + " / " + F(v2, 3) + (st ? " (stabile)" : " (non stabile)"));
+        }
+      string rd = "compatibile con il caso (passeggiata casuale)";
+      if(MathAbs(bz) >= 2 && bq > 0)
+         rd = (bz > 0 ? "i movimenti continuano (trend)" : "i movimenti tornano indietro (mean reversion)") + " su " +
+              DurLab((double)bq * sec / 3600.0) + (MathAbs(bz) >= 3 ? ", forte" : ", indizio") + (bst ? ", stabile nelle due meta'" : ", non stabile");
+      W(row + TD(rd) + "</tr>");
+      R(g_repPers, tx + " -> " + rd);
+     }
+   TEnd();
+   SecEnd();
+   //--- 2. per ora del giorno
+   int NS = 48, NC = 48 * TD_NH;
+   double an[], sx[], sxx[], nz[], ct[], nS[], sxS[], sxxS[], nzS[], ctS[], nH[], sxH[], ctH[], nzH[], rF[], rP[];
+   int rN[], rPos[];
+   ArrayResize(an, NC); ArrayResize(sx, NC); ArrayResize(sxx, NC); ArrayResize(nz, NC); ArrayResize(ct, NC);
+   ArrayResize(nS, NC); ArrayResize(sxS, NC); ArrayResize(sxxS, NC); ArrayResize(nzS, NC); ArrayResize(ctS, NC);
+   ArrayResize(nH, 2 * NC); ArrayResize(sxH, 2 * NC); ArrayResize(ctH, 2 * NC); ArrayResize(nzH, 2 * NC);
+   ArrayResize(rF, 20 * NC); ArrayResize(rP, 20 * NC); ArrayResize(rN, NC); ArrayResize(rPos, NC);
+   ArrayInitialize(an, 0); ArrayInitialize(sx, 0); ArrayInitialize(sxx, 0); ArrayInitialize(nz, 0); ArrayInitialize(ct, 0);
+   ArrayInitialize(nS, 0); ArrayInitialize(sxS, 0); ArrayInitialize(sxxS, 0); ArrayInitialize(nzS, 0); ArrayInitialize(ctS, 0);
+   ArrayInitialize(nH, 0); ArrayInitialize(sxH, 0); ArrayInitialize(ctH, 0); ArrayInitialize(nzH, 0);
+   ArrayInitialize(rF, 0); ArrayInitialize(rP, 0); ArrayInitialize(rN, 0); ArrayInitialize(rPos, 0);
+   long tol = (long)barSec * 2 > 120 ? (long)barSec * 2 : 120;
+   long dA = (long)DataToNY7(b.t[0]) / 86400, dB = (long)DataToNY7(b.t[b.n - 1]) / 86400;
+   for(long D = dA; D <= dB && !IsStopped(); D++)
+     {
+      datetime mid7 = (datetime)(D * 86400 + 43200);
+      if(DowMon(mid7) > 4)
+         continue;
+      long off = (long)DataToNY7(mid7) - (long)mid7;
+      for(int z = 0; z < NS; z++)
+        {
+         long T7 = D * 86400 + (long)z * 1800;
+         double pT = TdPx(b, T7 - off, tol);
+         if(!(pT > 0))
+            continue;
+         int hf = (datetime)(T7 - off) < tMid ? 0 : 1;
+         for(int hh = 0; hh < TD_NH; hh++)
+           {
+            long L = (long)TD_L[hh] * 60, Fw = (long)TD_F[hh] * 60;
+            if(RollHit7(T7 - L, T7 + Fw - 1))
+               continue;
+            double pA = TdPx(b, T7 - off - L, tol), pC = TdPx(b, T7 - off + Fw, tol);
+            if(!(pA > 0) || !(pC > 0))
+               continue;
+            double past = pT - pA, fut = pC - pT;
+            int x = z * TD_NH + hh;
+            int cnt = rN[x];
+            //--- scala: movimento assoluto medio degli ultimi 20 giorni validi a quest'ora (solo giorni precedenti)
+            double sF = 0, sP = 0;
+            for(int q = 0; q < cnt; q++)
+              {
+               sF += rF[x * 20 + q];
+               sP += rP[x * 20 + q];
+              }
+            rF[x * 20 + rPos[x]] = MathAbs(fut);
+            rP[x * 20 + rPos[x]] = MathAbs(past);
+            rPos[x] = (rPos[x] + 1) % 20;
+            if(rN[x] < 20)
+               rN[x]++;
+            if(cnt < 20 || !(sF > 0) || !(sP > 0) || past == 0)
+               continue;
+            sF /= 20;
+            sP /= 20;
+            double xv = (past > 0 ? fut : -fut) / sF;
+            bool strong = MathAbs(past) >= 1.5 * sP;
+            an[x]++;
+            sx[x] += xv;
+            sxx[x] += xv * xv;
+            nH[x * 2 + hf]++;
+            sxH[x * 2 + hf] += xv;
+            if(fut != 0)
+              {
+               bool same = (fut > 0) == (past > 0);
+               nz[x]++;
+               nzH[x * 2 + hf]++;
+               if(same)
+                 {
+                  ct[x]++;
+                  ctH[x * 2 + hf]++;
+                 }
+               if(strong)
+                 {
+                  nzS[x]++;
+                  if(same)
+                     ctS[x]++;
+                 }
+              }
+            if(strong)
+              {
+               nS[x]++;
+               sxS[x] += xv;
+               sxxS[x] += xv * xv;
+              }
+           }
+        }
+     }
+   string d2 = "Per ogni mezz'ora della giornata (ora del broker New York + 7, tra parentesi New York e Londra), giorno per giorno: " +
+               "il prezzo si &egrave; mosso nei L minuti prima; nei F minuti dopo va nella stessa direzione? Continua = % dei giorni in cui " +
+               "il movimento dopo ha lo stesso segno di quello prima (caso = 50%). Seguito medio = movimento dopo nella direzione di quello " +
+               "prima, in multipli del movimento tipico dei F minuti a quell'ora (media degli ultimi 20 giorni): positivo = continua, " +
+               "negativo = torna indietro, 0 = nessun legame. Forte = movimento prima di almeno 1,5 volte il suo tipico. z: giorni " +
+               "indipendenti, entro +/-2 compatibile con il caso; met&agrave; = seguito medio nella prima e nella seconda met&agrave; dello storico. " +
+               "Esclusi gli intervalli che toccano il rollover.";
+   R(g_repPers, "");
+   R(g_repPers, "=== PERSISTENZA PER ORA DEL GIORNO: il movimento prima continua dopo? ===");
+   R(g_repPers, "Metodo: " + d2);
+   for(int hh = 0; hh < TD_NH; hh++)
+     {
+      string hl = I2S(TD_L[hh]) + " min prima -> " + I2S(TD_F[hh]) + " min dopo";
+      SecStart("Persistenza per ora del giorno: " + hl, hh == 0 ? d2 : "");
+      THead("Broker|New York|Londra|Giorni|Continua|Seguito medio|Met&agrave; 1 / 2|Forte: giorni|Forte: continua|Forte: seguito|Lettura");
+      R(g_repPers, "");
+      R(g_repPers, "[" + hl + "]");
+      string upL = "", dnL = "";
+      for(int z = 0; z < NS; z++)
+        {
+         int x = z * TD_NH + hh;
+         if(an[x] < 30)
+            continue;
+         string lab = HM(z * 30) + " (NY " + HM(z * 30 - 420) + ", LDN " + HM(z * 30 - 120) + ")";
+         double m = sx[x] / an[x];
+         double sd = MathSqrt(MathMax(0.0, sxx[x] / an[x] - m * m));
+         double zx = sd > 0 ? m / (sd / MathSqrt(an[x])) : Nan();
+         double pc = nz[x] > 0 ? ct[x] / nz[x] : Nan();
+         double zc = ZProp(pc, 0.5, nz[x]);
+         double m1 = nH[x * 2] > 0 ? sxH[x * 2] / nH[x * 2] : Nan(), m2 = nH[x * 2 + 1] > 0 ? sxH[x * 2 + 1] / nH[x * 2 + 1] : Nan();
+         bool st = MathIsValidNumber(m1) && MathIsValidNumber(m2) && MathIsValidNumber(zx) && (m1 > 0) == (zx > 0) && (m2 > 0) == (zx > 0);
+         double mS = nS[x] > 0 ? sxS[x] / nS[x] : Nan();
+         double sdS = nS[x] > 1 ? MathSqrt(MathMax(0.0, sxxS[x] / nS[x] - mS * mS)) : Nan();
+         double zS = nS[x] >= 30 && sdS > 0 ? mS / (sdS / MathSqrt(nS[x])) : Nan();
+         double pS = nzS[x] > 0 ? ctS[x] / nzS[x] : Nan();
+         double zpS = nS[x] >= 30 ? ZProp(pS, 0.5, nzS[x]) : Nan();
+         string rd = "casuale";
+         if(MathIsValidNumber(zx) && MathAbs(zx) >= 2)
+            rd = (zx > 0 ? "continua" : "torna indietro") + (MathAbs(zx) >= 3 ? "" : " (indizio)") + (st ? ", stabile" : ", non stabile");
+         W("<tr>" + TD(HM(z * 30)) + TD(HM(z * 30 - 420)) + TD(HM(z * 30 - 120)) + TD(DoubleToString(an[x], 0)) +
+           TDc(FP(pc, 1) + "% <small>z " + ZS(zc) + "</small>", PCol(zc, 0, 5)) + TDc(SgnF(m, 3) + " <small>z " + ZS(zx) + "</small>", PCol(zx, 0, 5)) +
+           TD(SgnF(m1, 3) + " / " + SgnF(m2, 3)) + TD(DoubleToString(nS[x], 0)) + TDc(FP(pS, 1) + "% <small>z " + ZS(zpS) + "</small>", PCol(zpS, 0, 5)) +
+           TDc(SgnF(mS, 3) + " <small>z " + ZS(zS) + "</small>", PCol(zS, 0, 5)) + TD(rd) + "</tr>");
+         R(g_repPers, "  " + lab + ", " + DoubleToString(an[x], 0) + " giorni: continua " + FP(pc, 1) + "% (z " + ZS(zc) + "), seguito medio " +
+           SgnF(m, 3) + " (z " + ZS(zx) + "; meta' " + SgnF(m1, 3) + " / " + SgnF(m2, 3) + "); dopo un movimento forte (" +
+           DoubleToString(nS[x], 0) + " giorni): continua " + FP(pS, 1) + "% (z " + ZS(zpS) + "), seguito " + SgnF(mS, 3) + " (z " + ZS(zS) + ") -> " + rd);
+         string hl2 = "Persistenza alle " + HM(z * 30) + " del broker (NY " + HM(z * 30 - 420) + ", LDN " + HM(z * 30 - 120) + "), " + hl;
+         if(HiKeep(15, zx))
+            HiAdd(15, zx, hl2 + " (" + DoubleToString(an[x], 0) + " giorni): il movimento " + (zx > 0 ? "continua" : "torna indietro") +
+                  ", continua nel " + FP(pc, 1) + "% dei giorni, seguito medio " + SgnF(m, 3) + " del movimento tipico, meta' " + SgnF(m1, 3) +
+                  " / " + SgnF(m2, 3) + (st ? " (stabile)" : " (non stabile)"));
+         if(HiKeep(15, zS))
+            HiAdd(15, zS, hl2 + ", dopo un movimento forte (" + DoubleToString(nS[x], 0) + " giorni): " + (zS > 0 ? "continua" : "torna indietro") +
+                  " nel " + FP(pS, 1) + "% dei giorni, seguito medio " + SgnF(mS, 3) + " del movimento tipico");
+         if(MathIsValidNumber(zx) && zx >= 3)
+            upL += (upL != "" ? ", " : "") + HM(z * 30) + " (z " + ZS(zx) + ")";
+         if(MathIsValidNumber(zx) && zx <= -3)
+            dnL += (dnL != "" ? ", " : "") + HM(z * 30) + " (z " + ZS(zx) + ")";
+        }
+      TEnd();
+      string sm = "Continua (z >= 3): " + (upL != "" ? upL : "nessuna") + "; torna indietro (z <= -3): " + (dnL != "" ? dnL : "nessuna") + " (ora del broker).";
+      W("<p class='muted'>" + sm + "</p>");
+      SecEnd();
+      R(g_repPers, "  In breve: " + sm);
+     }
+  }
+
+//--- timeframe alto -> basso
+#define MT_ND 9
+#define MT_NSV 28
+string MT_DIM[MT_ND] = {"Candela precedente (forte = il 20% piu' forte)", "Chiusura della candela precedente nel suo range",
+                        "Apertura rispetto alla EMA50", "EMA20 rispetto alla EMA50", "Volatilita' (ATR14 / ATR100)",
+                        "Apertura rispetto alla candela precedente", "Ampiezza della candela precedente rispetto all'ATR(14)",
+                        "Candele di fila", "Apertura nel range delle ultime 20 candele"};
+string MT_DS[MT_ND] = {"Precedente", "Chiusura precedente", "Apertura/EMA50", "EMA20/EMA50", "Volatilita'", "Apertura/precedente",
+                       "Ampiezza precedente", "Di fila", "Range 20"};
+string MT_VAL[MT_ND] = {"forte rialzo|rialzo|ribasso|forte ribasso", "nel terzo basso|nel terzo centrale|nel terzo alto",
+                        "sopra la EMA50|sotto la EMA50", "EMA20 sopra la EMA50|EMA20 sotto la EMA50",
+                        "compressione (sotto 0.8)|normale (0.8-1.2)|espansione (sopra 1.2)",
+                        "sopra il massimo|dentro il range|sotto il minimo", "stretta (sotto 0.75 ATR)|normale|ampia (oltre 1.33 ATR)",
+                        "3 o piu' rialziste|2 rialziste|3 o piu' ribassiste|2 ribassiste|ultima diversa dalla penultima",
+                        "nel quinto alto|nel mezzo|nel quinto basso"};
+int    MT_NV[MT_ND] = {4, 3, 2, 2, 3, 3, 3, 5, 3};
+int    g_mtVO[MT_ND];
+string g_mtLab[MT_NSV];
+int    g_mtDimOf[MT_NSV];
+double g_mtA[], g_mtB[], g_mtAA[], g_mtAB[], g_mtBB[], g_mtAH[], g_mtBH[];
+int    g_mtNM = 0;
+
+void MtSetup(void)
+  {
+   int u = 0;
+   for(int d = 0; d < MT_ND; d++)
+     {
+      g_mtVO[d] = u;
+      string p[];
+      int k = StringSplit(MT_VAL[d], '|', p);
+      for(int v = 0; v < MT_NV[d]; v++)
+        {
+         g_mtLab[u] = v < k ? p[v] : "?";
+         g_mtDimOf[u] = d;
+         u++;
+        }
+     }
+  }
+
+// stato della candela alta k, tutto noto alla sua apertura (u[d] = valore, -1 = non definito)
+void MtState(CCd &q, const int k, const double &ret[], const double &atr[], const double &atrL[], const double &e20[], const double &e50[],
+             const int &stk[], const double p20, const double p80, int &u[])
+  {
+   for(int d = 0; d < MT_ND; d++)
+      u[d] = -1;
+   if(k < 21 || k >= q.n)
+      return;
+   int j = k - 1;
+   double rp = ret[j];
+   u[0] = rp >= p80 ? 0 : (rp <= p20 ? 3 : (rp > 0 ? 1 : 2));
+   double rg = q.h[j] - q.l[j];
+   if(rg > 0)
+      u[1] = (int)MathMin(2.0, MathFloor(3.0 * (q.c[j] - q.l[j]) / rg));
+   if(j >= 50)
+     {
+      u[2] = q.o[k] > e50[j] ? 0 : 1;
+      u[3] = e20[j] > e50[j] ? 0 : 1;
+     }
+   if(j >= 100 && MathIsValidNumber(atrL[j]) && atrL[j] > 0 && MathIsValidNumber(atr[j]))
+     {
+      double vr = atr[j] / atrL[j];
+      u[4] = vr < 0.8 ? 0 : (vr > 1.2 ? 2 : 1);
+     }
+   u[5] = q.o[k] > q.h[j] ? 0 : (q.o[k] < q.l[j] ? 2 : 1);
+   if(MathIsValidNumber(atr[j]) && atr[j] > 0)
+     {
+      double ra = rg / atr[j];
+      u[6] = ra < 0.75 ? 0 : (ra > 1.33 ? 2 : 1);
+     }
+   int dr = rp > 0 ? 1 : (rp < 0 ? -1 : 0), sk = stk[j];
+   u[7] = dr > 0 ? (sk >= 3 ? 0 : (sk == 2 ? 1 : 4)) : (dr < 0 ? (sk >= 3 ? 2 : (sk == 2 ? 3 : 4)) : 4);
+   double hh = q.h[j], ll = q.l[j];
+   for(int x = k - 20; x < k; x++)
+     {
+      if(q.h[x] > hh)
+         hh = q.h[x];
+      if(q.l[x] < ll)
+         ll = q.l[x];
+     }
+   if(hh > ll)
+     {
+      double f = (q.o[k] - ll) / (hh - ll);
+      u[8] = f >= 0.8 ? 0 : (f <= 0.2 ? 2 : 1);
+     }
+  }
+
+void MtAdd(const int cell, const double &a[], const double &b[], const int hf)
+  {
+   for(int m = 0; m < g_mtNM; m++)
+     {
+      if(!(b[m] > 0))
+         continue;
+      int x = cell * g_mtNM + m;
+      g_mtA[x] += a[m];
+      g_mtB[x] += b[m];
+      g_mtAA[x] += a[m] * a[m];
+      g_mtAB[x] += a[m] * b[m];
+      g_mtBB[x] += b[m] * b[m];
+      g_mtAH[x * 2 + hf] += a[m];
+      g_mtBH[x * 2 + hf] += b[m];
+     }
+  }
+
+// cella contro tutte le altre candele (cella 0 = tutte): quota p e degli altri p2, z con errore robusto ai casi raggruppati nella
+// stessa candela alta (stimatore del rapporto); ph1 / ph2 = quota della cella nelle due meta'; st = stesso verso nelle due meta'
+bool MtZ(const int cell, const int m, const double minB, double &p, double &p2, double &z, double &ph1, double &ph2, bool &st)
+  {
+   int x = cell * g_mtNM + m, x0 = m;
+   double sb = g_mtB[x], b2 = g_mtB[x0] - sb;
+   p = Nan();
+   p2 = Nan();
+   z = Nan();
+   ph1 = Nan();
+   ph2 = Nan();
+   st = false;
+   if(sb < minB || b2 < minB)
+      return false;
+   p = g_mtA[x] / sb;
+   p2 = (g_mtA[x0] - g_mtA[x]) / b2;
+   double v1 = (g_mtAA[x] - 2 * p * g_mtAB[x] + p * p * g_mtBB[x]) / (sb * sb);
+   double v2 = ((g_mtAA[x0] - g_mtAA[x]) - 2 * p2 * (g_mtAB[x0] - g_mtAB[x]) + p2 * p2 * (g_mtBB[x0] - g_mtBB[x])) / (b2 * b2);
+   if(!(v1 + v2 > 0))
+      return false;
+   z = (p - p2) / MathSqrt(v1 + v2);
+   bool ok = true;
+   for(int h = 0; h < 2; h++)
+     {
+      double bh = g_mtBH[x * 2 + h], bo = g_mtBH[x0 * 2 + h] - bh;
+      if(bh <= 0 || bo <= 0)
+        {
+         ok = false;
+         continue;
+        }
+      double ph = g_mtAH[x * 2 + h] / bh, po = (g_mtAH[x0 * 2 + h] - g_mtAH[x * 2 + h]) / bo;
+      if(h == 0)
+         ph1 = ph;
+      else
+         ph2 = ph;
+      if((ph > po) != (z > 0))
+         ok = false;
+     }
+   st = ok;
+   return true;
+  }
+
+string MtCell(const int cell)  // etichetta di una cella (stato singolo o coppia)
+  {
+   if(cell == 0)
+      return "Tutte le candele";
+   int u = cell - 1;
+   if(u < MT_NSV)
+      return MT_DIM[g_mtDimOf[u]] + ": " + g_mtLab[u];
+   u -= MT_NSV;
+   int u1 = u / MT_NSV, u2 = u % MT_NSV;
+   return MT_DS[g_mtDimOf[u1]] + ": " + g_mtLab[u1] + " + " + MT_DS[g_mtDimOf[u2]] + ": " + g_mtLab[u2];
+  }
+
+void MtHtf(CSeries &b, const int barSec, const int hs)
+  {
+   int ls[3], nl = 0;
+   if(hs == 14400)
+     {
+      ls[0] = 300;
+      ls[1] = 900;
+      nl = 2;
+     }
+   else
+      if(hs == 86400)
+        {
+         ls[0] = 300;
+         ls[1] = 900;
+         ls[2] = 3600;
+         nl = 3;
+        }
+      else
+        {
+         ls[0] = 3600;
+         ls[1] = 14400;
+         nl = 2;
+        }
+   int nv = 0;
+   for(int x = 0; x < nl; x++)
+      if(ls[x] >= barSec)
+         ls[nv++] = ls[x];
+   nl = nv;
+   string hn = TfNm(hs);
+   CCd q;
+   CdBuild(b, hs, q, InpRollSkip);
+   int n = q.n;
+   if(n < 150)
+     {
+      SecStart("Timeframe alto -> basso: " + hn, "");
+      W("<p class='muted'>Storico insufficiente (" + I2S(n) + " candele " + hn + ").</p>");
+      SecEnd();
+      return;
+     }
+   //--- indicatori della candela alta
+   double ret[], atr[], atrL[], e20[], e50[], rg[];
+   int stk[];
+   ArrayResize(ret, n); ArrayResize(e20, n); ArrayResize(e50, n); ArrayResize(rg, n); ArrayResize(stk, n);
+   CdAtr(q, 14, atr);
+   CdAtr(q, 100, atrL);
+   for(int k = 0; k < n; k++)
+     {
+      ret[k] = q.o[k] > 0 ? q.c[k] / q.o[k] - 1 : 0;
+      rg[k] = q.h[k] - q.l[k];
+      e20[k] = k == 0 ? q.c[0] : 2.0 / 21.0 * q.c[k] + (1 - 2.0 / 21.0) * e20[k - 1];
+      e50[k] = k == 0 ? q.c[0] : 2.0 / 51.0 * q.c[k] + (1 - 2.0 / 51.0) * e50[k - 1];
+      int dr = q.c[k] > q.o[k] ? 1 : (q.c[k] < q.o[k] ? -1 : 0), dp = k > 0 ? (q.c[k - 1] > q.o[k - 1] ? 1 : (q.c[k - 1] < q.o[k - 1] ? -1 : 0)) : 0;
+      stk[k] = dr == 0 ? 0 : ((k > 0 && dp == dr) ? stk[k - 1] + 1 : 1);
+     }
+   double srt[];
+   Sorted(ret, n - 1, srt);
+   double p20 = Pct(srt, n - 1, 20), p80 = Pct(srt, n - 1, 80);
+   datetime tMid = (datetime)((long)q.t[21] + ((long)q.t[n - 2] - (long)q.t[21]) / 2);
+   long dur = hs >= 604800 ? (long)5 * 86400 : (long)hs;
+   //--- misure: 0-3 della candela alta, poi 3 per ogni timeframe basso
+   g_mtNM = 4 + 3 * nl;
+   int NM = g_mtNM, NC = 1 + MT_NSV + MT_NSV * MT_NSV;
+   double A[], B[];
+   ArrayResize(A, n * NM);
+   ArrayResize(B, n * NM);
+   ArrayInitialize(A, 0.0);
+   ArrayInitialize(B, 0.0);
+   double w20[];
+   ArrayResize(w20, 20);
+   for(int k = 21; k < n - 1; k++)
+     {
+      int x = k * NM;
+      B[x] = 1;
+      A[x] = q.c[k] > q.o[k] ? 1 : 0;
+      for(int j = 0; j < 20; j++)
+         w20[j] = rg[k - 20 + j];
+      ArraySort(w20);
+      double md = 0.5 * (w20[9] + w20[10]);
+      if(md > 0)
+        {
+         B[x + 1] = 1;
+         A[x + 1] = rg[k] > 1.33 * md ? 1 : 0;
+        }
+      long st0 = (long)CdStart(q.k[k], hs);
+      B[x + 2] = 1;
+      A[x + 2] = (long)b.t[q.qh[k]] - st0 < dur / 3 ? 1 : 0;
+      B[x + 3] = 1;
+      A[x + 3] = (long)b.t[q.ql[k]] - st0 < dur / 3 ? 1 : 0;
+     }
+   for(int li = 0; li < nl; li++)
+     {
+      int lsec = ls[li], mi = 4 + 3 * li;
+      Comment("MarketProfiler: timeframe alto -> basso ", hn, " -> ", TfNm(lsec), " ...");
+      CCd L;
+      CdBuild(b, lsec, L, InpRollSkip);
+      double la[];
+      CdAtr(L, 14, la);
+      long gp = (long)3 * lsec;
+      int k = 0;
+      for(int j = 9; j < L.n - 1 && !IsStopped(); j++)
+        {
+         while(k < n && q.e[k] <= L.s[j])
+            k++;
+         if(k >= n - 1)
+            break;
+         if(k < 21 || L.s[j] < q.s[k])
+            continue;
+         int x = k * NM + mi;
+         //--- continua: la candela bassa va nella stessa direzione della precedente
+         if((long)L.t[j] - (long)L.t[j - 1] <= gp && (long)L.t[j - 1] - (long)L.t[j - 2] <= gp)
+           {
+            double r1 = L.c[j] - L.c[j - 1], r0 = L.c[j - 1] - L.c[j - 2];
+            if(r1 != 0 && r0 != 0)
+              {
+               B[x] += 1;
+               if((r1 > 0) == (r0 > 0))
+                  A[x] += 1;
+              }
+           }
+         //--- rottura: chiusura oltre il massimo (minimo) delle 8 candele precedenti, la precedente non oltre il suo;
+         //    prosegue = arriva prima a +1 ATR(14) che a -1 ATR entro 16 candele (stessa candela o buco: non conta)
+         if(!MathIsValidNumber(la[j]) || !(la[j] > 0))
+            continue;
+         double hh = L.h[j - 8], ll = L.l[j - 8], hp = L.h[j - 9], lp = L.l[j - 9];
+         for(int y = j - 7; y < j; y++)
+           {
+            if(L.h[y] > hh)
+               hh = L.h[y];
+            if(L.l[y] < ll)
+               ll = L.l[y];
+           }
+         for(int y = j - 8; y < j - 1; y++)
+           {
+            if(L.h[y] > hp)
+               hp = L.h[y];
+            if(L.l[y] < lp)
+               lp = L.l[y];
+           }
+         for(int sd = 0; sd < 2; sd++)
+           {
+            bool brk = sd == 0 ? (L.c[j] > hh && L.c[j - 1] <= hp) : (L.c[j] < ll && L.c[j - 1] >= lp);
+            if(!brk)
+               continue;
+            double up = L.c[j] + la[j], dn = L.c[j] - la[j];
+            int res = -1;
+            for(int y = j + 1; y <= j + 16 && y < L.n; y++)
+              {
+               if((long)L.t[y] - (long)L.t[y - 1] > gp)
+                  break;
+               bool hu = L.h[y] >= up, hd = L.l[y] <= dn;
+               if(hu && hd)
+                  break;
+               if(hu)
+                 {
+                  res = sd == 0 ? 1 : 0;
+                  break;
+                 }
+               if(hd)
+                 {
+                  res = sd == 0 ? 0 : 1;
+                  break;
+                 }
+              }
+            if(res >= 0)
+              {
+               B[x + 1 + sd] += 1;
+               A[x + 1 + sd] += res;
+              }
+           }
+        }
+      L.Free();
+     }
+   //--- somme per stato singolo e per coppia di stati
+   ArrayResize(g_mtA, NC * NM); ArrayResize(g_mtB, NC * NM); ArrayResize(g_mtAA, NC * NM); ArrayResize(g_mtAB, NC * NM);
+   ArrayResize(g_mtBB, NC * NM); ArrayResize(g_mtAH, 2 * NC * NM); ArrayResize(g_mtBH, 2 * NC * NM);
+   ArrayInitialize(g_mtA, 0.0); ArrayInitialize(g_mtB, 0.0); ArrayInitialize(g_mtAA, 0.0); ArrayInitialize(g_mtAB, 0.0);
+   ArrayInitialize(g_mtBB, 0.0); ArrayInitialize(g_mtAH, 0.0); ArrayInitialize(g_mtBH, 0.0);
+   int u[MT_ND];
+   double a[], bb[];
+   ArrayResize(a, NM);
+   ArrayResize(bb, NM);
+   for(int k = 21; k < n - 1; k++)
+     {
+      MtState(q, k, ret, atr, atrL, e20, e50, stk, p20, p80, u);
+      for(int m = 0; m < NM; m++)
+        {
+         a[m] = A[k * NM + m];
+         bb[m] = B[k * NM + m];
+        }
+      int hf = q.t[k] < tMid ? 0 : 1;
+      MtAdd(0, a, bb, hf);
+      for(int d = 0; d < MT_ND; d++)
+        {
+         if(u[d] < 0)
+            continue;
+         int u1 = g_mtVO[d] + u[d];
+         MtAdd(1 + u1, a, bb, hf);
+         for(int d2 = d + 1; d2 < MT_ND; d2++)
+            if(u[d2] >= 0)
+               MtAdd(1 + MT_NSV + u1 * MT_NSV + g_mtVO[d2] + u[d2], a, bb, hf);
+        }
+     }
+   ArrayFree(A);
+   ArrayFree(B);
+   //--- nomi delle misure
+   string mn[];
+   ArrayResize(mn, NM);
+   mn[0] = hn + " rialzista";
+   mn[1] = hn + " espansione";
+   mn[2] = hn + " massimo presto";
+   mn[3] = hn + " minimo presto";
+   for(int li = 0; li < nl; li++)
+     {
+      mn[4 + 3 * li] = TfNm(ls[li]) + " continua";
+      mn[5 + 3 * li] = TfNm(ls[li]) + " rottura su prosegue";
+      mn[6 + 3 * li] = TfNm(ls[li]) + " rottura giu' prosegue";
+     }
+   string lnm = "";
+   for(int li = 0; li < nl; li++)
+      lnm += (li > 0 ? ", " : "") + TfNm(ls[li]);
+   string desc = "Ogni candela " + hn + " riceve uno stato noto alla sua apertura (" + I2S(MT_ND) + " dimensioni, come i contesti del " +
+                 "rischio/rendimento: candela precedente, dove ha chiuso, trend, volatilit&agrave;, apertura, ampiezza, candele di fila, " +
+                 "posizione nel range delle ultime 20). Per ogni stato: cosa fa la candela " + hn + " (rialzista = chiude sopra l'apertura; " +
+                 "espansione = range oltre 1,33 volte la mediana delle 20 precedenti; massimo / minimo presto = fatto nel primo terzo della " +
+                 "candela) e cosa fanno al suo interno i timeframe " + lnm + " (continua = la candela va nella stessa direzione della " +
+                 "precedente; rottura su / gi&ugrave; prosegue = dopo una chiusura oltre il massimo / minimo delle 8 candele precedenti arriva " +
+                 "prima a +1 ATR(14) che a -1 ATR, entro 16 candele). Ogni casella: quota dello stato e z contro tutte le altre candele " + hn +
+                 " (non contro il 50%), con errore robusto ai casi raggruppati nella stessa candela; blu = pi&ugrave; degli altri, rosso = " +
+                 "meno. Candele " + hn + " complete dalla 22a: " + I2S(n - 22) + "; prima met&agrave; fino al " + TimeToString(tMid, TIME_DATE) + ". " +
+                 (InpRollSkip ? "Le barre nella finestra del rollover sono escluse da tutte le candele. " : "");
+   SecStart("Timeframe alto -> basso: " + hn + " e dentro " + lnm, desc);
+   R(g_repMtf, "");
+   R(g_repMtf, "=== " + hn + " -> " + lnm + " ===");
+   R(g_repMtf, "Metodo: " + desc);
+   //--- stato attuale: la candela in corso
+   int uc[MT_ND];
+   MtState(q, n - 1, ret, atr, atrL, e20, e50, stk, p20, p80, uc);
+   string cur = "Stato attuale (candela " + hn + " in corso dal " + TimeToString(q.t[n - 1], TIME_DATE | TIME_MINUTES) + "):";
+   W("<p><b>" + cur + "</b></p><ul>");
+   R(g_repMtf, cur);
+   for(int d = 0; d < MT_ND; d++)
+     {
+      if(uc[d] < 0)
+         continue;
+      int cell = 1 + g_mtVO[d] + uc[d];
+      string ln = MT_DIM[d] + " = " + g_mtLab[g_mtVO[d] + uc[d]] + " (" + DoubleToString(g_mtB[cell * NM], 0) + " candele):";
+      for(int m = 0; m < NM; m++)
+        {
+         double p, p2, z, ph1, ph2;
+         bool st;
+         if(!MtZ(cell, m, m < 4 ? 30 : 100, p, p2, z, ph1, ph2, st))
+            continue;
+         ln += " " + mn[m] + " " + FP(p, 1) + "% (altri " + FP(p2, 1) + "%, z " + ZS(z) + ")" + (m < NM - 1 ? ";" : "");
+        }
+      W("<li>" + ln + "</li>");
+      R(g_repMtf, "  " + ln);
+     }
+   W("</ul>");
+   //--- stati singoli: tabella completa
+   string hd = "Stato|Candele";
+   for(int m = 0; m < NM; m++)
+      hd += "|" + mn[m];
+   THead(hd);
+   R(g_repMtf, "[Stati singoli: quota dello stato, degli altri e z; meta' 1 / 2 = quota dello stato nelle due meta' (* = verso diverso)]");
+   for(int cell = 0; cell <= MT_NSV; cell++)
+     {
+      if(cell > 0)
+        {
+         int uu = cell - 1, d = g_mtDimOf[uu];
+         if(uu == g_mtVO[d])
+           {
+            Grp(MT_DIM[d], NM + 2);
+            R(g_repMtf, "  " + MT_DIM[d] + ":");
+           }
+        }
+      double nC = g_mtB[cell * NM];
+      if(nC < 30)
+         continue;
+      string lab = cell == 0 ? "Tutte le candele" : g_mtLab[cell - 1];
+      string row = "<tr>" + TD(lab) + TD(DoubleToString(nC, 0));
+      string tx = "    " + lab + " (N " + DoubleToString(nC, 0) + "):";
+      for(int m = 0; m < NM; m++)
+        {
+         double sb = g_mtB[cell * NM + m];
+         if(cell == 0)
+           {
+            double pa = sb > 0 ? g_mtA[m] / sb : Nan();
+            row += TD(FP(pa, 1) + "%");
+            tx += " " + mn[m] + " " + FP(pa, 1) + "%" + (m < NM - 1 ? ";" : "");
+            continue;
+           }
+         double p, p2, z, ph1, ph2;
+         bool st;
+         if(!MtZ(cell, m, m < 4 ? 30 : 100, p, p2, z, ph1, ph2, st))
+           {
+            row += TD("-");
+            continue;
+           }
+         row += TDc(FP(p, 1) + "% <small>z " + ZS(z) + (st ? "" : "*") + "</small>", PCol(z, 0, 5));
+         tx += " " + mn[m] + " " + FP(p, 1) + "% (altri " + FP(p2, 1) + "%, z " + ZS(z) + "; meta' " + FP(ph1, 1) + " / " + FP(ph2, 1) + (st ? "" : " *") + ")" +
+               (m < NM - 1 ? ";" : "");
+         if(HiKeep(16, z))
+            HiAdd(16, z, "[" + hn + "] " + MtCell(cell) + " (N " + DoubleToString(nC, 0) + "): " + mn[m] + " " + FP(p, 1) + "% contro " + FP(p2, 1) +
+                  "% nelle altre candele, meta' " + FP(ph1, 1) + " / " + FP(ph2, 1) + (st ? " (stabile)" : " (non stabile)"));
+        }
+      W(row + "</tr>");
+      R(g_repMtf, tx);
+     }
+   TEnd();
+   //--- coppie di stati: riepilogo, le piu' lontane dagli altri e appendice con tutte
+   double key[];
+   int nk = 0;
+   ArrayResize(key, 0, 4096);
+   g_txMtfAll.Add("");
+   g_txMtfAll.Add("[" + hn + " -> " + lnm + ": tutte le coppie di stati con almeno 30 candele; per ogni misura quota della coppia e z contro le altre candele, * = verso diverso nelle due meta']");
+   for(int cell = 1 + MT_NSV; cell < NC; cell++)
+     {
+      double nC = g_mtB[cell * NM];
+      if(nC < 30)
+         continue;
+      string tx = "  " + MtCell(cell) + " (N " + DoubleToString(nC, 0) + "):";
+      for(int m = 0; m < NM; m++)
+        {
+         double p, p2, z, ph1, ph2;
+         bool st;
+         if(!MtZ(cell, m, m < 4 ? 30 : 100, p, p2, z, ph1, ph2, st))
+            continue;
+         tx += " " + mn[m] + " " + FP(p, 1) + "% (z " + ZS(z) + (st ? "" : "*") + ");";
+         if(HiKeep(17, z))
+            HiAdd(17, z, "[" + hn + "] " + MtCell(cell) + " (N " + DoubleToString(nC, 0) + "): " + mn[m] + " " + FP(p, 1) + "% contro " + FP(p2, 1) +
+                  "% nelle altre candele, meta' " + FP(ph1, 1) + " / " + FP(ph2, 1) + (st ? " (stabile)" : " (non stabile)"));
+         if(nC >= 50 && st)
+           {
+            ArrayResize(key, nk + 1, 4096);
+            key[nk++] = MathFloor(MathMin(MathAbs(z), 999.0) * 1000.0) * 16777216.0 + (cell * NM + m);
+           }
+        }
+      g_txMtfAll.Add(tx);
+     }
+   ArraySort(key);
+   W("<h3>Coppie di stati pi&ugrave; lontane dalle altre candele (almeno 50 candele, stesso verso nelle due met&agrave;; tutte nell'appendice F)</h3>");
+   THead("Coppia di stati|Candele|Misura|Coppia|Altre candele|z|Met&agrave; 1 / 2");
+   R(g_repMtf, "[Coppie di stati piu' lontane dalle altre candele: almeno 50 candele, stesso verso nelle due meta' (tutte nell'appendice F)]");
+   int shown = 0;
+   for(int j = nk - 1; j >= 0 && shown < 40; j--)
+     {
+      shown++;
+      int id = (int)((long)key[j] % 16777216), cell = id / NM, m = id % NM;
+      double p, p2, z, ph1, ph2;
+      bool st;
+      MtZ(cell, m, m < 4 ? 30 : 100, p, p2, z, ph1, ph2, st);
+      double nC = g_mtB[cell * NM];
+      W("<tr><td style='text-align:left;white-space:normal'>" + MtCell(cell) + "</td>" + TD(DoubleToString(nC, 0)) + TD(mn[m]) + TD(FP(p, 1) + "%") +
+        TD(FP(p2, 1) + "%") + TDc(ZS(z), PCol(z, 0, 5)) + TD(FP(ph1, 1) + " / " + FP(ph2, 1)) + "</tr>");
+      R(g_repMtf, "    z " + ZS(z) + " | " + MtCell(cell) + " (N " + DoubleToString(nC, 0) + "): " + mn[m] + " " + FP(p, 1) + "% contro " +
+        FP(p2, 1) + "%, meta' " + FP(ph1, 1) + " / " + FP(ph2, 1));
+     }
+   TEnd();
+   SecEnd();
+   q.Free();
+  }
+
+void MtfTab(CSeries &b, const int barSec)
+  {
+   g_repMtf = "";
+   g_txMtfAll.Clear();
+   MtSetup();
+   if(b.n < 5000)
+     {
+      SecStart("Timeframe alto -> basso", "");
+      W("<p class='muted'>Servono dati M1 o M5.</p>");
+      SecEnd();
+      return;
+     }
+   int hs[3] = {14400, 86400, 604800};
+   for(int i = 0; i < 3 && !IsStopped(); i++)
+     {
+      MtHtf(b, barSec, hs[i]);
+      PrintFormat("[MarketProfiler] timeframe alto -> basso %s fatto", TfNm(hs[i]));
+     }
+   ArrayFree(g_mtA); ArrayFree(g_mtB); ArrayFree(g_mtAA); ArrayFree(g_mtAB); ArrayFree(g_mtBB); ArrayFree(g_mtAH); ArrayFree(g_mtBH);
+  }
+
 void HiTab(void)
   {
    g_repHi = "";
@@ -11455,7 +12452,12 @@ string RepLegend(void)
           "(M1, M5, M15, M30, H1) che deve chiudere fuori dal range; eventi = cosa fa il prezzo sulle candele di conferma (nessun tocco, solo " +
           "tocchi, continua, rientra e resta, rientra e riparte, rientra e si gira).\n" +
           "  rollover = NY 17:00, mezzanotte del broker: lo spread si allarga e sui dati bid compaiono punte in basso senza scambi veri; " +
-          "ora buca = attivita' e volume sotto 0.6 del normale.\n";
+          "ora buca = attivita' e volume sotto 0.6 del normale.\n" +
+          "  VR = rapporto di varianza: 1 = prezzo casuale; sopra 1 i movimenti continuano (trend), sotto tornano indietro (mean " +
+          "reversion); VR(q) = movimenti di q candele.\n" +
+          "  seguito medio = movimento dopo, nella direzione del movimento prima, in multipli del movimento tipico di quell'orario " +
+          "(0 = nessun legame, positivo = continua, negativo = torna indietro).\n" +
+          "  stato (alto -> basso) = condizione della candela del timeframe alto nota alla sua apertura; z contro tutte le altre candele.\n";
   }
 
 // indice del rapporto completo
@@ -11470,11 +12472,13 @@ string RepIndex(void)
    for(int p = 1; p < NPRF; p++)
       t += "    9." + I2S(p) + " Rischio/rendimento netto " + g_cp[p].name + ": costi, riepilogo, contesti migliori e peggiori\n";
    t += "    10. Strategie una posizione alla volta e regole per lo Strategy Tester\n    11. Coppie di contesti: le piu' solide e le piu' negative\n" +
-        "    12. Volume\n  APPENDICI (tutti i risultati per esteso, da consultare: sono molto lunghe)\n" +
+        "    12. Volume\n    13. Persistenza: dove il prezzo continua e dove torna indietro (per timeframe e per ora del giorno)\n" +
+        "    14. Dal timeframe alto al basso: stato della candela H4, D1 e settimanale e comportamento dei timeframe inferiori\n" +
+        "  APPENDICI (tutti i risultati per esteso, da consultare: sono molto lunghe)\n" +
         "    A. Riepilogo: tutti i risultati oltre |z| 2\n    B. Rischio/rendimento lordo: tutti i contesti\n";
    for(int p = 1; p < NPRF; p++)
       t += "    C." + I2S(p) + " Rischio/rendimento netto " + g_cp[p].name + ": tutti i contesti\n";
-   t += "    D. ORB: tutte le combinazioni\n    E. Coppie di contesti: tutte\n\n";
+   t += "    D. ORB: tutte le combinazioni\n    E. Coppie di contesti: tutte\n    F. Dal timeframe alto al basso: tutte le coppie di stati\n\n";
    return t + RepLegend();
   }
 
@@ -11693,6 +12697,7 @@ bool Analyze(const string sym)
    for(int k = 0; k < NTF; k++)
       W("<button data-tab='" + TF_KEY[k] + "'>" + TF_LABEL[k] + "</button>");
    W("<button data-tab='sess'>Sessioni</button><button data-tab='orb'>ORB</button><button data-tab='lev'>Livelli</button><button data-tab='dir'>Direzione</button>" +
+     "<button data-tab='pers'>Persistenza</button><button data-tab='mtf'>Alto &rarr; basso</button>" +
      "<button data-tab='rr'>R/R lordo</button><button data-tab='rrb1'>R/R " + g_cp[1].name + "</button><button data-tab='rrb2'>R/R " +
      g_cp[2].name + "</button><button data-tab='combo'>Coppie di contesti</button><button data-tab='seq'>Strategie</button>" +
      "<button data-tab='swing'>Swing</button><button data-tab='break'>Rotture</button><button data-tab='imp'>Impulsi</button>" +
@@ -11700,13 +12705,13 @@ bool Analyze(const string sym)
    W("<button data-tab='volume'>Volume</button></nav>");
    W("<nav class='tx'><span>Testi da copiare:</span><button data-tab='report'>Rapporto completo</button><button data-tab='txsum'>Riepilogo</button>" +
      "<button data-tab='txtf'>Timeframe</button><button data-tab='txev'>Eventi e sessioni</button><button data-tab='txorb'>ORB</button><button data-tab='txlv'>Livelli</button>" +
-     "<button data-tab='txdir'>Direzione</button><button data-tab='txrr'>R/R lordo</button><button data-tab='txb1'>R/R " + g_cp[1].name +
+     "<button data-tab='txdir'>Direzione</button><button data-tab='txpers'>Persistenza</button><button data-tab='txmtf'>Alto &rarr; basso</button><button data-tab='txrr'>R/R lordo</button><button data-tab='txb1'>R/R " + g_cp[1].name +
      "</button><button data-tab='txb2'>R/R " + g_cp[2].name + "</button><button data-tab='txcb'>Coppie</button><button data-tab='txsq'>Strategie e regole</button>" +
      "<button data-tab='txvol'>Volume</button></nav>" +
      "<nav class='tx'><span>Tutti i risultati:</span><button data-tab='txhia'>Riepilogo (tutti gli z oltre 2)</button>" +
      "<button data-tab='txrr'>R/R lordo: tutti i contesti</button><button data-tab='txb1'>R/R " + g_cp[1].name + ": tutti i contesti</button>" +
      "<button data-tab='txb2'>R/R " + g_cp[2].name + ": tutti i contesti</button><button data-tab='txorba'>ORB: tutte le combinazioni</button>" +
-     "<button data-tab='txcba'>Coppie: tutte</button></nav></header><main>");
+     "<button data-tab='txcba'>Coppie: tutte</button><button data-tab='txmtfa'>Alto &rarr; basso: tutte le coppie di stati</button></nav></header><main>");
 
    CBlocks b;
    for(int k = 0; k < NTF; k++)
@@ -11809,6 +12814,21 @@ bool Analyze(const string sym)
    else
       DirTab(m5);
    W("</div>");
+   Comment("MarketProfiler ", sym, ": persistenza ...");
+   W("<div class='tab' id='tab-pers' hidden>");
+   if(m1.n > 5000)
+      PersTab(m1, 60);
+   else
+      PersTab(m5, 300);
+   W("</div>");
+   PrintFormat("[MarketProfiler] %s: persistenza fatta", sym);
+   Comment("MarketProfiler ", sym, ": timeframe alto -> basso ...");
+   W("<div class='tab' id='tab-mtf' hidden>");
+   if(m1.n > 5000)
+      MtfTab(m1, 60);
+   else
+      MtfTab(m5, 300);
+   W("</div>");
    Comment("MarketProfiler ", sym, ": rischio/rendimento ...");
    W("<div class='tab' id='tab-rr' hidden>");
    if(m1.n > 5000)
@@ -11846,9 +12866,9 @@ bool Analyze(const string sym)
    HiTab();
    W("</div><div class='tab' id='tab-report' hidden>");
    SecStart("Rapporto completo", "Tutti i risultati in forma di testo, in ordine: indice e legenda, la parte principale (riepilogo, " +
-            "timeframe, eventi e sessioni, ORB, livelli, direzione, rischio/rendimento lordo e netto, strategie e regole, coppie, volume) e " +
-            "le appendici con tutti i risultati per esteso (tutti gli z oltre 2, tutti i contesti lordi e netti, tutte le combinazioni ORB, " +
-            "tutte le coppie). Premi 'Copia tutto'. Il testo &egrave; molto lungo: per l'analisi in chat incolla la parte principale (fino " +
+            "timeframe, eventi e sessioni, ORB, livelli, direzione, rischio/rendimento lordo e netto, strategie e regole, coppie, volume, " +
+            "persistenza, timeframe alto -> basso) e le appendici con tutti i risultati per esteso (tutti gli z oltre 2, tutti i contesti " +
+            "lordi e netti, tutte le combinazioni ORB, tutte le coppie, tutte le coppie di stati). Premi 'Copia tutto'. Il testo &egrave; molto lungo: per l'analisi in chat incolla la parte principale (fino " +
             "alle appendici) e le appendici solo quando serve cercare un risultato; ogni parte &egrave; anche nelle schede 'Testi da " +
             "copiare' e 'Tutti i risultati'.");
    W("<button class='cp' onclick='cp(this)'>Copia tutto</button><textarea id='rep' readonly>");
@@ -11890,6 +12910,11 @@ bool Analyze(const string sym)
    W(g_cbTx);
    W("\n=== 12. VOLUME ===\n");
    W(g_repVol);
+   W("\n=== 13. PERSISTENZA: dove il prezzo continua e dove torna indietro (per timeframe e per ora del giorno) ===\n");
+   W(g_repPers);
+   W("\n=== 14. DAL TIMEFRAME ALTO AL BASSO: stato della candela H4, D1 e settimanale e cosa fanno al suo interno i timeframe " +
+     "inferiori (tutte le coppie di stati nell'appendice F) ===\n");
+   W(g_repMtf);
    W("\n\n############################## APPENDICI: TUTTI I RISULTATI ##############################\n");
    W("\n=== APPENDICE A. RIEPILOGO: tutti i risultati oltre |z| 2 di ogni analisi, ordinati per |z| ===\n");
    WT(g_txHiAll);
@@ -11905,6 +12930,8 @@ bool Analyze(const string sym)
    WT(g_txOrbAll);
    W("\n=== APPENDICE E. COPPIE DI CONTESTI: tutte quelle con almeno 30 casi ===\n");
    WT(g_txCbAll);
+   W("\n=== APPENDICE F. DAL TIMEFRAME ALTO AL BASSO: tutte le coppie di stati con almeno 30 candele ===\n");
+   WT(g_txMtfAll);
    W("</textarea>");
    SecEnd();
    W("</div>");
@@ -11931,6 +12958,10 @@ bool Analyze(const string sym)
    TxTab("txsq", "Testo: strategie e regole", "Simulazione una posizione alla volta dei contesti migliori (serie di perdite, drawdown) e " +
          "regole esportate per lo Strategy Tester.", "STRATEGIE - " + sym + " - una posizione alla volta\n" + g_sqTx + "\n" + g_ruTx);
    TxTab("txvol", "Testo: volume", "Volume per ora, giorno e periodo.", "VOLUME - " + sym + "\n" + g_repVol);
+   TxTab("txpers", "Testo: persistenza", "Rapporto di varianza per timeframe e continuazione del movimento a ogni mezz'ora.",
+         "PERSISTENZA - " + sym + "\n" + g_repPers);
+   TxTab("txmtf", "Testo: timeframe alto -> basso", "Stato della candela H4, D1 e settimanale, cosa fanno al suo interno i timeframe " +
+         "inferiori, stato attuale e coppie di stati pi&ugrave; lontane dalle altre candele.", "TIMEFRAME ALTO -> BASSO - " + sym + "\n" + g_repMtf);
    TxTabT("txhia", "Tutti i risultati: riepilogo", "Tutti i risultati oltre |z| 2 di ogni analisi, senza limiti, ordinati per |z| (nella scheda " +
           "Riepilogo solo i primi di ogni sezione).", "RIEPILOGO - TUTTI I RISULTATI OLTRE |z| 2 - " + sym + "\n" + RepLegend(), g_txHiAll);
    TxTabT("txorba", "Tutti i risultati: ORB", "Tutte le combinazioni ORB (orario, range, finestra) con una riga per ogni candela di conferma: " +
@@ -11938,6 +12969,8 @@ bool Analyze(const string sym)
           "ORB - TUTTE LE COMBINAZIONI - " + sym + "\n" + OrbAllHead(), g_txOrbAll);
    TxTabT("txcba", "Tutti i risultati: coppie di contesti", "Tutte le coppie di contesti con almeno 30 casi, ogni timeframe, tutte le " +
           "operazioni (lorde e nette del broker peggiore).", "COPPIE DI CONTESTI - TUTTE - " + sym + "\n", g_txCbAll);
+   TxTabT("txmtfa", "Tutti i risultati: timeframe alto -> basso", "Tutte le coppie di stati della candela H4, D1 e settimanale con almeno " +
+          "30 candele, con tutte le misure.", "TIMEFRAME ALTO -> BASSO - TUTTE LE COPPIE DI STATI - " + sym + "\n", g_txMtfAll);
    W("</main><script>" + Js() + "</script></body></html>");
    FileClose(g_fh);
    g_fh = INVALID_HANDLE;
