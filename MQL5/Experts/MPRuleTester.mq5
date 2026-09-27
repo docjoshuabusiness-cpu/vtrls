@@ -9,7 +9,8 @@
 //|  - chiusura a mercato dopo L candele                             |
 //| Regole ORB (scheda ORB): range dall'orario locale della piazza   |
 //| (convertito con il fuso del server), entrata alla chiusura della |
-//| prima candela M1 fuori dal range, stop all'altro lato o a meta', |
+//| prima candela di conferma (M1, M5, M15, M30, H1) fuori dal range,|
+//| stop all'altro lato o a meta',                                   |
 //| obiettivo in multipli del rischio, chiusura a fine finestra.     |
 //| Contesti calcolati con le stesse definizioni dello script.       |
 //| Risultati in R (profitto netto / rischio del trade) nel diario e |
@@ -72,6 +73,7 @@ input int    InpOrbTarget = 1;      // Obiettivo in multipli del rischio (0 = ne
 input bool   InpOrbFade   = false;  // Fade: contro la rottura (false = segui la rottura)
 input int    InpOrbSides  = 2;      // Lati: 2 = entrambi, 0 = solo rotture al rialzo, 1 = solo al ribasso
 input int    InpOrbDay    = -1;     // Giorno: 0 = lunedi' ... 4 = venerdi' (orologio dei dati), -1 = tutti
+input int    InpOrbConfirm = 1;     // Candela di conferma in minuti: 1 = prima chiusura M1 fuori dal range, 5 / 15 / 30 / 60 = M5 / M15 / M30 / H1
 
 //--- nomi con cui i broker chiamano lo stesso strumento (come nello script)
 string ALIAS_GRP[11] = {"US100,USTEC,NAS100,NDX100,USTECH,NQ100,NASDAQ100,NASDAQ",
@@ -110,7 +112,7 @@ int      g_vCnt[], g_vPos[];
 
 //--- ORB: regola e stato della giornata
 bool     g_isOrb = false;
-int      g_oMkt = 0, g_oStart = 570, g_oRange = 15, g_oWin = 120, g_oMid = 0, g_oK = 1, g_oMode = 1, g_oSides = 2, g_oDay = -1;
+int      g_oMkt = 0, g_oStart = 570, g_oRange = 15, g_oWin = 120, g_oMid = 0, g_oK = 1, g_oMode = 1, g_oSides = 2, g_oDay = -1, g_oConf = 1;
 datetime g_oS0 = 0, g_oE = 0, g_oX = 0, g_oBar = 0;  // inizio del range, fine del range, fine della finestra (orario del server)
 int      g_oPh = 3;                                   // 0 range in corso, 1 attesa della chiusura fuori dal range, 2 in posizione, 3 finita
 double   g_oHi = 0, g_oLo = 0;
@@ -247,6 +249,7 @@ bool LoadRule(const int id, const bool allDesc)
          g_oMode = (int)StringToInteger(f[26]);
          g_oSides = (int)StringToInteger(f[27]);
          g_oDay = (int)StringToInteger(f[28]);
+         g_oConf = ArraySize(f) >= 30 ? (int)StringToInteger(f[29]) : 1;  // regole senza il campo: conferma M1
         }
       found = true;
      }
@@ -276,6 +279,7 @@ int OnInit(void)
          g_oMode = InpOrbFade ? -1 : 1;
          g_oSides = InpOrbSides;
          g_oDay = InpOrbDay;
+         g_oConf = InpOrbConfirm;
          g_desc = "regola ORB manuale";
          g_ok = true;
         }
@@ -303,14 +307,15 @@ int OnInit(void)
    if(g_isOrb)
      {
       if(g_oMkt < 0 || g_oMkt > 3 || g_oStart < 0 || g_oStart >= 1440 || g_oRange < 1 || g_oWin < 1 || g_oK < 0 ||
-         (g_oMode != 1 && g_oMode != -1) || (g_oMode == -1 && g_oK < 1) || g_oSides < 0 || g_oSides > 2 || g_oDay > 6)
+         (g_oMode != 1 && g_oMode != -1) || (g_oMode == -1 && g_oK < 1) || g_oSides < 0 || g_oSides > 2 || g_oDay > 6 ||
+         g_oConf < 1 || g_oConf > 60 || 60 % g_oConf != 0)
         {
          Print("[MPRuleTester] regola ORB non valida");
          return INIT_PARAMETERS_INCORRECT;
         }
-      PrintFormat("[MPRuleTester] regola %d: %s (ORB %s %02d:%02d, range %d min, finestra %d min, stop %s, obiettivo %s, %s, lati %d, giorno %d, " +
-                  "fuso del server %s)", InpRule, g_desc, MKT_SHORT[g_oMkt], g_oStart / 60, g_oStart % 60, g_oRange, g_oWin,
-                  g_oMid == 1 ? "a meta' range" : "all'altro lato", g_oK > 0 ? IntegerToString(g_oK) + " volte il rischio" : "nessuno (fine finestra)",
+      PrintFormat("[MPRuleTester] regola %d: %s (ORB %s %02d:%02d, range %d min, finestra %d min, conferma %d min, stop %s, obiettivo %s, %s, " +
+                  "lati %d, giorno %d, fuso del server %s)", InpRule, g_desc, MKT_SHORT[g_oMkt], g_oStart / 60, g_oStart % 60, g_oRange, g_oWin,
+                  g_oConf, g_oMid == 1 ? "a meta' range" : "all'altro lato", g_oK > 0 ? IntegerToString(g_oK) + " volte il rischio" : "nessuno (fine finestra)",
                   g_oMode > 0 ? "segui la rottura" : "fade", g_oSides, g_oDay, EnumToString(InpSrvTZ));
       return INIT_SUCCEEDED;
      }
@@ -712,7 +717,8 @@ void OrbNext(const datetime now)
      }
   }
 
-// ORB: range dall'inizio, entrata all'apertura della candela M1 dopo la prima chiusura fuori dal range, chiusura a fine finestra
+// ORB: range dall'inizio, entrata all'apertura della candela M1 dopo la prima chiusura fuori dal range della candela di conferma
+// (M1, M5, M15, M30, H1: allineate all'orologio come sul grafico), chiusura a fine finestra
 void OrbTick(void)
   {
    datetime now = TimeCurrent();
@@ -762,7 +768,8 @@ void OrbTick(void)
      }
    if(g_oPh != 1)
       return;
-   //--- a ogni nuova candela M1: la precedente ha chiuso fuori dal range?
+   //--- a ogni nuova candela M1: la precedente ha chiuso la candela di conferma, fuori dal range? (come nello script: la barra M1
+   //--- chiude la candela di conferma se la barra successiva appartiene a un'altra candela)
    datetime b0 = iTime(_Symbol, PERIOD_M1, 0);
    if(b0 == 0 || b0 == g_oBar)
       return;
@@ -773,7 +780,9 @@ void OrbTick(void)
       return;
      }
    double c1 = iClose(_Symbol, PERIOD_M1, 1);
-   if(iTime(_Symbol, PERIOD_M1, 1) < g_oE || !(c1 > g_oHi || c1 < g_oLo))
+   datetime t1 = iTime(_Symbol, PERIOD_M1, 1);
+   long cs = (long)g_oConf * 60;
+   if(t1 < g_oE || (long)t1 / cs == (long)b0 / cs || !(c1 > g_oHi || c1 < g_oLo))
       return;
    int d = c1 > g_oHi ? 1 : -1;
    g_oPh = 3;
