@@ -7969,7 +7969,7 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
      {
       int k = g_qK[q], j0 = cs[k], fl = g_qF[q];
       double O = s.o[j0], S = g_qS[q], invS = 1.0 / S, u = 1e-4 * O * invS;
-      int hf = cd.t[k] < tMid ? 0 : 1, hc = g_qC[q * RR_NDIM + 1], hs = g_rrIntra && hc < RR_NH ? hc : 0;
+      int hf = cd.t[k] < tMid ? 0 : 1, hc = g_qC[q * RR_NDIM + 1], hSl = g_rrIntra && hc < RR_NH ? hc : 0;
       for(int i = 0; i < 2 * RR_NR; i++)
         {
          o[i] = g_qO[q * 2 * RR_NR + i];
@@ -7982,7 +7982,7 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
          if(g_cp[p].on)
             for(int i = 0; i < 2 * RR_NR; i++)
                cst[p * 2 * RR_NR + i] = RRCost1(s, p, i, j0, O, g_qX[q * 2 * RR_NR + i]);
-      RRAcc(0, o, wn, tm, am, du, invS, cst, hf, hs, u);
+      RRAcc(0, o, wn, tm, am, du, invS, cst, hf, hSl, u);
       RRGap(0, k, ring, rN, rP);
       int m = 0;
       for(int d = CB_D0; d <= CB_D1; d++)
@@ -7998,7 +7998,7 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
          for(int y = x + 1; y < m; y++)
            {
             int r = 1 + pb[da[x]][da[y]] + va[x] * C[da[y]] + va[y];
-            RRAcc(r, o, wn, tm, am, du, invS, cst, hf, hs, u);
+            RRAcc(r, o, wn, tm, am, du, invS, cst, hf, hSl, u);
             RRGap(r, k, ring, rN, rP);
            }
      }
@@ -8847,11 +8847,11 @@ void RRTf(CSeries &s, const int barSec, const int ti)
       for(int d = 0; d < RR_NDIM; d++)
          g_qC[qq * RR_NDIM + d] = (uchar)((cls[d] >= 0 && cls[d] < g_rrDimC[d]) ? cls[d] : 255);
       double invS = 1.0 / S, u = 1e-4 * O * invS;
-      int hs = intra && cls[1] >= 0 && cls[1] < RR_NH ? cls[1] : 0;
+      int hSl = intra && cls[1] >= 0 && cls[1] < RR_NH ? cls[1] : 0;  // ora della candela per il confronto con la stessa ora
       for(int d = 0; d < RR_NDIM; d++)
          if(cls[d] >= 0 && cls[d] < g_rrDimC[d])
            {
-            RRAcc(g_rrDimB[d] + cls[d], o, wn, tm, am, du, invS, cst, hf, hs, u);
+            RRAcc(g_rrDimB[d] + cls[d], o, wn, tm, am, du, invS, cst, hf, hSl, u);
             RRGap(g_rrDimB[d] + cls[d], k, ring, rN, rP);
            }
       for(int sd = 0; sd < 2; sd++)
