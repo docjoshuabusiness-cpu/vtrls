@@ -83,7 +83,7 @@ input int    InpDataGMT      = 2;     // Solo per fuso 'Fisso': ore da GMT
 input ENUM_REF_MKT InpRefMarket = REF_AUTO; // Piazza di riferimento per le etichette orarie
 input int    InpSessionHours = 4;     // Sessioni: ore osservate dopo ogni orario chiave
 input int    InpORMinutes    = 30;    // Sessioni: minuti del range iniziale
-input bool   InpSkipIncomplete = true; // Escludi dalle analisi intraday i primi anni con copertura oraria incompleta
+input bool   InpSkipIncomplete = false; // Escludi i primi anni con copertura oraria incompleta (false = analizza tutto lo storico)
 input double InpLevelR       = 0.10;  // Livelli: distanza di reazione r (frazione del range mediano del periodo)
 input ENUM_LV_LOW InpLevelLowTF = LV_LOW_NONE; // Livelli: timeframe sotto le 4 ore
 input int    InpLvFollow     = 3;     // Livelli: candele osservate dopo una chiusura oltre il livello (conferma, falsa, ritest)
@@ -1904,6 +1904,9 @@ int      g_ref = 0, g_refOffA = 0, g_refOffB = 0;  // piazza di riferimento e su
 string   g_newsCur[];
 int      g_nCurN = 0;
 string   g_covInfo = "";
+int      g_covY0 = 0, g_covY1 = 0;   // primi anni con copertura oraria incompleta (g_covY0 = 0: nessuno)
+double   g_covHrs = 0, g_covRef = 0;  // ore al giorno coperte in quegli anni e negli anni recenti
+bool     g_covMiss[24];               // ore della giornata che in quegli anni mancano spesso
 // notizie (orari gia' allineati ai dati)
 datetime g_nT[];
 int      g_nImp[];
@@ -2173,10 +2176,13 @@ void ResolveNewsCur(const string sym)
      }
   }
 
-// primo anno con copertura oraria completa: in alcuni storici i primi anni coprono solo parte della giornata
+// primo anno con copertura oraria completa: in alcuni storici i primi anni coprono solo parte della giornata;
+// g_covY0-g_covY1 = anni incompleti, g_covHrs / g_covRef = ore al giorno coperte, g_covMiss = ore che mancano spesso
 datetime CoverageStart(CSeries &h)
   {
-   g_covInfo = "";
+   g_covY0 = 0;
+   g_covY1 = 0;
+   ArrayInitialize(g_covMiss, false);
    if(h.n < 2000)
       return 0;
    MqlDateTime d;
@@ -2185,11 +2191,13 @@ datetime CoverageStart(CSeries &h)
    TimeToStruct(h.t[h.n - 1], d);
    int y1 = d.year;
    int ny = y1 - y0 + 1;
-   double hrs[], days[];
+   double hrs[], days[], hy[];  // hy = giorni con almeno una barra H1 in quell'ora, per anno e ora
    ArrayResize(hrs, ny);
    ArrayResize(days, ny);
+   ArrayResize(hy, ny * 24);
    ArrayInitialize(hrs, 0.0);
    ArrayInitialize(days, 0.0);
+   ArrayInitialize(hy, 0.0);
    long cur = -1;
    int yc = y0;
    for(int i = 0; i < h.n; i++)
@@ -2203,13 +2211,19 @@ datetime CoverageStart(CSeries &h)
          cur = dd;
         }
       hrs[yc - y0] += 1;
+      hy[(yc - y0) * 24 + HourOf(h.t[i])] += 1;
      }
-   double ref = 0;
+   double ref = 0, rd = 0;
+   double rh[24];
+   ArrayInitialize(rh, 0.0);
    int nr = 0;
    for(int y = y1; y >= y0 && nr < 3; y--)
       if(days[y - y0] >= 50)
         {
          ref += hrs[y - y0] / days[y - y0];
+         rd += days[y - y0];
+         for(int k = 0; k < 24; k++)
+            rh[k] += hy[(y - y0) * 24 + k];
          nr++;
         }
    if(nr == 0)
@@ -2220,14 +2234,54 @@ datetime CoverageStart(CSeries &h)
       ys++;
    if(ys <= y0 || ys > y1)
       return 0;
-   g_covInfo = "Anni " + I2S(y0) + (ys - 1 > y0 ? "-" + I2S(ys - 1) : "") + " esclusi dall'analisi: coprono in media " +
-               F(hrs[0] / MathMax(days[0], 1.0), 1) + " ore al giorno contro " + F(ref, 1) + " degli anni recenti.";
+   double th = 0, td = 0;
+   double ih[24];
+   ArrayInitialize(ih, 0.0);
+   for(int y = y0; y < ys; y++)
+     {
+      th += hrs[y - y0];
+      td += days[y - y0];
+      for(int k = 0; k < 24; k++)
+         ih[k] += hy[(y - y0) * 24 + k];
+     }
+   g_covY0 = y0;
+   g_covY1 = ys - 1;
+   g_covHrs = th / MathMax(td, 1.0);
+   g_covRef = ref;
+   // manca spesso = presente in meno della meta' dei giorni rispetto agli anni recenti (solo ore di solito aperte)
+   for(int k = 0; k < 24; k++)
+      g_covMiss[k] = rh[k] / rd >= 0.5 && ih[k] / MathMax(td, 1.0) < 0.5 * rh[k] / rd;
    MqlDateTime a;
    ZeroMemory(a);
    a.year = ys;
    a.mon = 1;
    a.day = 1;
    return StructToTime(a);
+  }
+
+// testo sugli anni incompleti (dopo RefSetup: le ore hanno l'etichetta della piazza di riferimento)
+string CoverageText(const bool excluded)
+  {
+   if(g_covY0 <= 0)
+      return "";
+   string yrs = I2S(g_covY0) + (g_covY1 > g_covY0 ? "-" + I2S(g_covY1) : "");
+   string miss = "";
+   for(int k = 0; k < 24; k++)
+     {
+      if(!g_covMiss[k] || (k > 0 && g_covMiss[k - 1]))
+         continue;
+      int e = k;
+      while(e < 23 && g_covMiss[e + 1])
+         e++;
+      miss += (miss != "" ? ", " : "") + HourLab(k) + (e > k ? " - " + HourLab(e) : "");
+     }
+   string s = "Anni " + yrs + (excluded ? " esclusi dall'analisi" : " inclusi ma incompleti") + ": coprono in media " +
+              F(g_covHrs, 1) + " ore al giorno contro " + F(g_covRef, 1) + " degli anni recenti" +
+              (miss != "" ? " (mancano spesso le ore " + miss + ")" : "") + ".";
+   if(excluded)
+      return s + " Per includerli: parametro 'Escludi i primi anni con copertura oraria incompleta' = false.";
+   return s + " Nelle ore mancanti il prezzo salta da una barra all'altra: in quegli anni impulsi, gap, statistiche per ora, sessioni " +
+          "e livelli di 4 e 8 ore sono meno affidabili (per escluderli: parametro 'Escludi i primi anni con copertura oraria incompleta' = true).";
   }
 
 void TrimFrom(CSeries &s, const datetime from)
@@ -8851,21 +8905,17 @@ bool Analyze(const string sym)
                "). Strumenti &rarr; Opzioni &rarr; Grafici &rarr; Barre massime nel grafico = Illimitato, riavvia MT5 e rilancia lo script.";
       Print("[MarketProfiler] storico tagliato da 'Barre massime nel grafico': impostalo su Illimitato e riavvia MT5");
      }
-   //--- nei primi anni di alcuni storici mancano ore della giornata: esclusi (parametro)
+   //--- nei primi anni di alcuni storici mancano ore della giornata: segnalati e, solo se chiesto dal parametro, esclusi
    g_covInfo = "";
-   if(InpSkipIncomplete && h1.n > 0)
+   datetime cov = CoverageStart(h1);
+   if(InpSkipIncomplete && cov > 0)
      {
-      datetime cov = CoverageStart(h1);
-      if(cov > 0)
-        {
-         TrimFrom(m1, cov);
-         TrimFrom(m5, cov);
-         TrimFrom(m15, cov);
-         TrimFrom(h1, cov);
-         TrimFrom(h4, cov);
-         TrimFrom(d1, cov);
-         PrintFormat("[MarketProfiler] %s: %s", sym, g_covInfo);
-        }
+      TrimFrom(m1, cov);
+      TrimFrom(m5, cov);
+      TrimFrom(m15, cov);
+      TrimFrom(h1, cov);
+      TrimFrom(h4, cov);
+      TrimFrom(d1, cov);
      }
    if(d1.n < 50 && h1.n < 50)
      {
@@ -8885,6 +8935,9 @@ bool Analyze(const string sym)
       PrintFormat("[MarketProfiler] %s: i dati finiscono il %s", sym, TimeToString(lastT, TIME_DATE));
      }
    RefSetup(sym, lastT);
+   g_covInfo = CoverageText(InpSkipIncomplete);
+   if(g_covInfo != "")
+      PrintFormat("[MarketProfiler] %s: %s", sym, g_covInfo);
    ResolveNewsCur(sym);
    g_hiN = 0;
    ArrayInitialize(g_hiCnt, 0);
