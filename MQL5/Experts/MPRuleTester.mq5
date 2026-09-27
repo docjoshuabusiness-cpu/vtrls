@@ -7,6 +7,10 @@
 //|  - stop K x ATR(14) (o range della candela precedente, o % del   |
 //|    prezzo) dal prezzo bid di apertura, obiettivo R x stop        |
 //|  - chiusura a mercato dopo L candele                             |
+//| Regole ORB (scheda ORB): range dall'orario locale della piazza   |
+//| (convertito con il fuso del server), entrata alla chiusura della |
+//| prima candela M1 fuori dal range, stop all'altro lato o a meta', |
+//| obiettivo in multipli del rischio, chiusura a fine finestra.     |
 //| Contesti calcolati con le stesse definizioni dello script.       |
 //| Risultati in R (profitto netto / rischio del trade) nel diario e |
 //| in Common\Files\MarketProfiler_tester_<strumento>.csv            |
@@ -21,6 +25,20 @@ enum ENUM_MP_STOP
    MP_STOP_ATR = 0,  // K x ATR(14) del timeframe
    MP_STOP_PREV = 1, // K x range della candela precedente
    MP_STOP_PCT = 2   // K % del prezzo
+  };
+enum ENUM_MP_SRV
+  {
+   SRV_NY7 = 0,    // New York + 7: GMT+2/+3 con ora legale USA (FP Markets, IC Markets)
+   SRV_UTC = 1,    // UTC
+   SRV_EUROPE = 2, // Europa centrale: CET/CEST
+   SRV_FIXED = 3   // Fisso: GMT + ore indicate sotto
+  };
+enum ENUM_MP_MKT
+  {
+   MKT_NY = 0,  // New York
+   MKT_LON = 1, // Londra
+   MKT_FRA = 2, // Francoforte
+   MKT_TKY = 3  // Tokyo
   };
 
 input int    InpRule      = 1;      // Regola (numero nel file; 0 = regola manuale qui sotto)
@@ -41,6 +59,19 @@ input int    InpDimB      = -1;     // Contesto B (-1 = nessuno)
 input int    InpValB      = -1;     // Valore del contesto B
 input double InpP20       = -0.001; // Candela precedente: rendimento sotto cui e' 'forte ribasso' (dal file delle regole)
 input double InpP80       = 0.001;  // Candela precedente: rendimento sopra cui e' 'forte rialzo'
+input group  "ORB (regole della scheda ORB)"
+input ENUM_MP_SRV InpSrvTZ = SRV_NY7; // Fuso orario del server del broker
+input int    InpSrvGMT    = 2;      // Solo per fuso 'Fisso': ore da GMT
+input bool   InpOrbManual = false;  // Regola manuale ORB (con Regola = 0): usa i parametri qui sotto
+input ENUM_MP_MKT InpOrbMkt = MKT_NY; // Piazza dell'orario di inizio
+input string InpOrbStart  = "09:30"; // Inizio del range, ora locale della piazza (HH:MM)
+input int    InpOrbRange  = 15;     // Durata del range in minuti
+input int    InpOrbWindow = 120;    // Finestra dopo il range in minuti (poi chiusura a mercato)
+input bool   InpOrbMid    = false;  // Stop a meta' range (false = all'altro lato del range)
+input int    InpOrbTarget = 1;      // Obiettivo in multipli del rischio (0 = nessuno, chiude a fine finestra)
+input bool   InpOrbFade   = false;  // Fade: contro la rottura (false = segui la rottura)
+input int    InpOrbSides  = 2;      // Lati: 2 = entrambi, 0 = solo rotture al rialzo, 1 = solo al ribasso
+input int    InpOrbDay    = -1;     // Giorno: 0 = lunedi' ... 4 = venerdi' (orologio dei dati), -1 = tutti
 
 //--- nomi con cui i broker chiamano lo stesso strumento (come nello script)
 string ALIAS_GRP[11] = {"US100,USTEC,NAS100,NDX100,USTECH,NQ100,NASDAQ100,NASDAQ",
@@ -54,6 +85,8 @@ string ALIAS_GRP[11] = {"US100,USTEC,NAS100,NDX100,USTECH,NQ100,NASDAQ100,NASDAQ
                         "AUS200,AU200,ASX200",
                         "US2000,RUSSELL2000,RTY",
                         "XAUUSD,GOLD"};
+
+string MKT_SHORT[4] = {"NY", "LDN", "FRA", "TKY"};
 
 //--- regola
 ENUM_TIMEFRAMES g_tf = PERIOD_H1;
@@ -74,6 +107,13 @@ double   g_lo = 0, g_lh = 0, g_ll = 0, g_lc = 0;
 int      g_ns = 1;
 double   g_vBuf[], g_vSum[];
 int      g_vCnt[], g_vPos[];
+
+//--- ORB: regola e stato della giornata
+bool     g_isOrb = false;
+int      g_oMkt = 0, g_oStart = 570, g_oRange = 15, g_oWin = 120, g_oMid = 0, g_oK = 1, g_oMode = 1, g_oSides = 2, g_oDay = -1;
+datetime g_oS0 = 0, g_oE = 0, g_oX = 0, g_oBar = 0;  // inizio del range, fine del range, fine della finestra (orario del server)
+int      g_oPh = 3;                                   // 0 range in corso, 1 attesa della chiusura fuori dal range, 2 in posizione, 3 finita
+double   g_oHi = 0, g_oLo = 0;
 
 //--- posizione
 datetime g_lastT = 0, g_entryT = 0;
@@ -195,6 +235,19 @@ bool LoadRule(const int id, const bool allDesc)
       g_p20 = StringToDouble(f[11]);
       g_p80 = StringToDouble(f[12]);
       g_desc = f[13];
+      g_isOrb = ArraySize(f) >= 29 && StringToInteger(f[19]) == 1;
+      if(g_isOrb)
+        {
+         g_oMkt = (int)StringToInteger(f[20]);
+         g_oStart = (int)StringToInteger(f[21]);
+         g_oRange = (int)StringToInteger(f[22]);
+         g_oWin = (int)StringToInteger(f[23]);
+         g_oMid = (int)StringToInteger(f[24]);
+         g_oK = (int)StringToInteger(f[25]);
+         g_oMode = (int)StringToInteger(f[26]);
+         g_oSides = (int)StringToInteger(f[27]);
+         g_oDay = (int)StringToInteger(f[28]);
+        }
       found = true;
      }
    FileClose(fh);
@@ -209,32 +262,64 @@ int OnInit(void)
    if(InpRule > 0)
       g_ok = LoadRule(InpRule, false);
    else
-     {
-      g_tf = InpTF;
-      g_side = InpSide;
-      g_R = InpR;
-      g_stop = (int)InpStop;
-      g_K = InpK;
-      g_L = InpL;
-      g_dA = InpDimA;
-      g_vA = InpValA;
-      g_dB = InpDimB;
-      g_vB = InpValB;
-      g_p20 = InpP20;
-      g_p80 = InpP80;
-      g_desc = "regola manuale";
-      g_ok = true;
-     }
+      if(InpOrbManual)
+        {
+         string hm[];
+         int k = StringSplit(InpOrbStart, ':', hm);
+         g_isOrb = true;
+         g_oMkt = (int)InpOrbMkt;
+         g_oStart = k >= 2 ? (int)StringToInteger(hm[0]) * 60 + (int)StringToInteger(hm[1]) : -1;
+         g_oRange = InpOrbRange;
+         g_oWin = InpOrbWindow;
+         g_oMid = InpOrbMid ? 1 : 0;
+         g_oK = InpOrbTarget;
+         g_oMode = InpOrbFade ? -1 : 1;
+         g_oSides = InpOrbSides;
+         g_oDay = InpOrbDay;
+         g_desc = "regola ORB manuale";
+         g_ok = true;
+        }
+      else
+        {
+         g_tf = InpTF;
+         g_side = InpSide;
+         g_R = InpR;
+         g_stop = (int)InpStop;
+         g_K = InpK;
+         g_L = InpL;
+         g_dA = InpDimA;
+         g_vA = InpValA;
+         g_dB = InpDimB;
+         g_vB = InpValB;
+         g_p20 = InpP20;
+         g_p80 = InpP80;
+         g_desc = "regola manuale";
+         g_ok = true;
+        }
    if(!g_ok)
       return INIT_PARAMETERS_INCORRECT;
+   g_trade.SetExpertMagicNumber(InpMagic);
+   g_trade.SetTypeFillingBySymbol(_Symbol);
+   if(g_isOrb)
+     {
+      if(g_oMkt < 0 || g_oMkt > 3 || g_oStart < 0 || g_oStart >= 1440 || g_oRange < 1 || g_oWin < 1 || g_oK < 0 ||
+         (g_oMode != 1 && g_oMode != -1) || (g_oMode == -1 && g_oK < 1) || g_oSides < 0 || g_oSides > 2 || g_oDay > 6)
+        {
+         Print("[MPRuleTester] regola ORB non valida");
+         return INIT_PARAMETERS_INCORRECT;
+        }
+      PrintFormat("[MPRuleTester] regola %d: %s (ORB %s %02d:%02d, range %d min, finestra %d min, stop %s, obiettivo %s, %s, lati %d, giorno %d, " +
+                  "fuso del server %s)", InpRule, g_desc, MKT_SHORT[g_oMkt], g_oStart / 60, g_oStart % 60, g_oRange, g_oWin,
+                  g_oMid == 1 ? "a meta' range" : "all'altro lato", g_oK > 0 ? IntegerToString(g_oK) + " volte il rischio" : "nessuno (fine finestra)",
+                  g_oMode > 0 ? "segui la rottura" : "fade", g_oSides, g_oDay, EnumToString(InpSrvTZ));
+      return INIT_SUCCEEDED;
+     }
    g_tfSec = PeriodSeconds(g_tf);
    if(g_tfSec <= 0 || g_R < 1 || g_L < 1 || g_K <= 0 || g_dA < 0 || g_dA > 19)
      {
       Print("[MPRuleTester] regola non valida");
       return INIT_PARAMETERS_INCORRECT;
      }
-   g_trade.SetExpertMagicNumber(InpMagic);
-   g_trade.SetTypeFillingBySymbol(_Symbol);
    g_ns = g_tfSec >= 86400 ? 1 : 86400 / g_tfSec;
    ArrayResize(g_vBuf, g_ns * 20);
    ArrayResize(g_vSum, g_ns);
@@ -508,10 +593,229 @@ double NormPrice(const double p)
    return NormalizeDouble(p, _Digits);
   }
 
+// lotti per rischiare InpRiskMoney con lo stop a 'dist' di prezzo; risk = perdita allo stop con i lotti arrotondati
+bool LotsFor(const double dist, double &lots, double &risk)
+  {
+   double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE), ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double vst = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(!(tv > 0) || !(ts > 0) || !(vst > 0) || !(dist > 0))
+      return false;
+   double lossPerLot = dist / ts * tv;
+   lots = MathFloor(InpRiskMoney / lossPerLot / vst) * vst;
+   if(lots < vmin)
+      lots = vmin;
+   if(lots > vmax)
+      lots = vmax;
+   lots = NormalizeDouble(lots, (int)MathMax(0.0, MathCeil(-MathLog10(vst) - 1e-9)));
+   risk = lots * lossPerLot;
+   return true;
+  }
+
+//--- ORB: orari locali delle piazze convertiti giorno per giorno nell'orologio del server (come nello script)
+datetime NthSunday(const int y, const int mon, const int nth)
+  {
+   MqlDateTime d;
+   ZeroMemory(d);
+   d.year = y;
+   d.mon = mon;
+   d.day = 1;
+   datetime t = StructToTime(d);
+   TimeToStruct(t, d);
+   int add = (7 - d.day_of_week) % 7;
+   return t + (add + 7 * (nth - 1)) * 86400;
+  }
+
+datetime LastSunday(const int y, const int mon)
+  {
+   MqlDateTime d;
+   ZeroMemory(d);
+   d.year = mon == 12 ? y + 1 : y;
+   d.mon = mon == 12 ? 1 : mon + 1;
+   d.day = 1;
+   datetime t = StructToTime(d) - 86400;
+   TimeToStruct(t, d);
+   return t - d.day_of_week * 86400;
+  }
+
+bool IsUSDST(const datetime t)
+  {
+   MqlDateTime d;
+   TimeToStruct(t, d);
+   datetime a, b;
+   if(d.year >= 2007)
+     {
+      a = NthSunday(d.year, 3, 2);
+      b = NthSunday(d.year, 11, 1);
+     }
+   else
+     {
+      a = NthSunday(d.year, 4, 1);
+      b = LastSunday(d.year, 10);
+     }
+   return t >= a && t < b;
+  }
+
+bool IsEUDST(const datetime t)
+  {
+   MqlDateTime d;
+   TimeToStruct(t, d);
+   return t >= LastSunday(d.year, 3) && t < LastSunday(d.year, 10);
+  }
+
+// ore di differenza da UTC di una piazza (0 New York, 1 Londra, 2 Francoforte, 3 Tokyo)
+int MktOffset(const int mkt, const datetime t)
+  {
+   if(mkt == 0)
+      return IsUSDST(t) ? -4 : -5;
+   if(mkt == 1)
+      return IsEUDST(t) ? 1 : 0;
+   if(mkt == 2)
+      return IsEUDST(t) ? 2 : 1;
+   return 9;
+  }
+
+// ore di differenza da UTC dell'orologio del server
+int SrvOffset(const datetime t)
+  {
+   if(InpSrvTZ == SRV_NY7)
+      return IsUSDST(t) ? 3 : 2;
+   if(InpSrvTZ == SRV_UTC)
+      return 0;
+   if(InpSrvTZ == SRV_EUROPE)
+      return IsEUDST(t) ? 2 : 1;
+   return InpSrvGMT;
+  }
+
+datetime LocalToServer(const long day, const int mkt, const int mins)
+  {
+   datetime t = (datetime)(day * 86400 + (long)mins * 60);
+   return t + (SrvOffset(t) - MktOffset(mkt, t)) * 3600;
+  }
+
+int DowMon(const datetime t) { return (int)(((long)t / 86400 + 3) % 7); }  // 0 = lunedi'
+
+// prossima giornata ORB: la prima la cui finestra finisce dopo 'now', diversa dall'ultima
+void OrbNext(const datetime now)
+  {
+   long dl = ((long)now - (long)(SrvOffset(now) - MktOffset(g_oMkt, now)) * 3600) / 86400;
+   for(long d = dl - 1; d <= dl + 1; d++)
+     {
+      datetime s0 = LocalToServer(d, g_oMkt, g_oStart);
+      if(s0 <= g_oS0 || (long)s0 + (long)(g_oRange + g_oWin) * 60 <= (long)now)
+         continue;
+      g_oS0 = s0;
+      g_oE = (datetime)((long)s0 + g_oRange * 60);
+      g_oX = (datetime)((long)g_oE + g_oWin * 60);
+      g_oPh = now < g_oE ? 0 : 3;  // EA avviato a range gia' finito: la giornata si salta
+      return;
+     }
+  }
+
+// ORB: range dall'inizio, entrata all'apertura della candela M1 dopo la prima chiusura fuori dal range, chiusura a fine finestra
+void OrbTick(void)
+  {
+   datetime now = TimeCurrent();
+   ulong tk = 0;
+   if(g_oPh == 2)
+     {
+      if(!MyPosition(tk))
+         g_oPh = 3;  // chiusa da stop o obiettivo
+      else
+        {
+         if(now >= g_oX)
+           {
+            g_trade.PositionClose(tk);
+            g_oPh = 3;
+           }
+         return;
+        }
+     }
+   if(g_oPh == 3)
+      OrbNext(now);
+   if(g_oPh == 0)
+     {
+      if(now < g_oE)
+         return;
+      //--- range: candele M1 dall'inizio alla fine del range (almeno meta', la prima entro 2 minuti dall'inizio), come nello script
+      g_oPh = 3;
+      if(g_oDay >= 0 && DowMon((datetime)((long)g_oS0 + (long)InpHourShift * 3600)) != g_oDay)
+         return;
+      MqlRates r[];
+      int n = CopyRates(_Symbol, PERIOD_M1, g_oS0, (datetime)((long)g_oE - 1), r);
+      if(n < MathMax(1, g_oRange / 2) || (long)r[0].time - (long)g_oS0 >= 120)
+         return;
+      g_oHi = r[0].high;
+      g_oLo = r[0].low;
+      for(int i = 1; i < n; i++)
+        {
+         if(r[i].high > g_oHi)
+            g_oHi = r[i].high;
+         if(r[i].low < g_oLo)
+            g_oLo = r[i].low;
+        }
+      if(!(g_oHi > g_oLo))
+         return;
+      g_oBar = iTime(_Symbol, PERIOD_M1, 0);
+      g_oPh = 1;
+      return;
+     }
+   if(g_oPh != 1)
+      return;
+   //--- a ogni nuova candela M1: la precedente ha chiuso fuori dal range?
+   datetime b0 = iTime(_Symbol, PERIOD_M1, 0);
+   if(b0 == 0 || b0 == g_oBar)
+      return;
+   g_oBar = b0;
+   if(b0 >= g_oX)
+     {
+      g_oPh = 3;  // finestra finita senza chiusure fuori dal range
+      return;
+     }
+   double c1 = iClose(_Symbol, PERIOD_M1, 1);
+   if(iTime(_Symbol, PERIOD_M1, 1) < g_oE || !(c1 > g_oHi || c1 < g_oLo))
+      return;
+   int d = c1 > g_oHi ? 1 : -1;
+   g_oPh = 3;
+   if((g_oSides == 0 && d != 1) || (g_oSides == 1 && d != -1))
+      return;
+   //--- stop all'altro lato o a meta' range; obiettivo K volte il rischio dal bid di entrata (fade: stop e obiettivo scambiati)
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID), ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double sp = g_oMid == 1 ? 0.5 * (g_oHi + g_oLo) : (d > 0 ? g_oLo : g_oHi);
+   double rr = d * (bid - sp);
+   if(!(rr > 0))
+      return;
+   int dir = d * g_oMode;
+   double sl = g_oMode > 0 ? sp : bid + d * g_oK * rr;
+   double tp = g_oMode > 0 ? (g_oK > 0 ? bid + d * g_oK * rr : 0) : sp;
+   double lots = 0, risk = 0;
+   if(!LotsFor(g_oMode > 0 ? rr : g_oK * rr, lots, risk))
+      return;
+   sl = NormPrice(sl);
+   if(tp > 0)
+      tp = NormPrice(tp);
+   double lvl = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   double ref = dir > 0 ? bid : ask;
+   if(MathAbs(ref - sl) < lvl || (tp > 0 && MathAbs(ref - tp) < lvl))
+     {
+      g_skip++;
+      return;
+     }
+   string cm = "MP r=" + DoubleToString(risk, 2);
+   bool ok = dir > 0 ? g_trade.Buy(lots, _Symbol, 0, sl, tp, cm) : g_trade.Sell(lots, _Symbol, 0, sl, tp, cm);
+   if(ok)
+      g_oPh = 2;
+  }
+
 void OnTick(void)
   {
    if(!g_ok)
       return;
+   if(g_isOrb)
+     {
+      OrbTick();
+      return;
+     }
    datetime t0 = iTime(_Symbol, g_tf, 0);
    if(t0 == 0 || t0 == g_lastT)
       return;
@@ -540,19 +844,9 @@ void OnTick(void)
       return;
    if(g_dB >= 0 && Ctx(g_dB, t0, O, S) != g_vB)
       return;
-   double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE), ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double vst = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   if(!(tv > 0) || !(ts > 0) || !(vst > 0))
+   double lots = 0, risk = 0;
+   if(!LotsFor(S, lots, risk))
       return;
-   double lossPerLot = S / ts * tv;
-   double lots = MathFloor(InpRiskMoney / lossPerLot / vst) * vst;
-   if(lots < vmin)
-      lots = vmin;
-   if(lots > vmax)
-      lots = vmax;
-   lots = NormalizeDouble(lots, (int)MathMax(0.0, MathCeil(-MathLog10(vst) - 1e-9)));
-   double risk = lots * lossPerLot;
    double sl = NormPrice(g_side == 0 ? O - S : O + S), tp = NormPrice(g_side == 0 ? O + g_R * S : O - g_R * S);
    double lvl = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);

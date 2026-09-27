@@ -5,10 +5,10 @@
 //|                                                                  |
 //|  Schede: Panoramica, Riepilogo, Minuto, Ora, 4/6/8/12 ore,        |
 //|  Giorno, Settimana, 2 settimane, Mese, Trimestre, Semestre, Anno,|
-//|  Sessioni, Livelli, Direzione, Rischio/rendimento lordo e netto  |
-//|  per broker, Coppie di contesti, Strategie, Swing, Rotture,      |
-//|  Impulsi, Notizie, Gap, Volume, Testi da copiare. File: CSV dei  |
-//|  contesti e regole per l'EA MPRuleTester (Strategy Tester).      |
+//|  Sessioni, ORB a tutti gli orari, Livelli, Direzione, R/R lordo  |
+//|  e netto per broker, Coppie di contesti, Strategie, Swing,        |
+//|  Rotture, Impulsi, Notizie, Gap, Volume, Testi da copiare. File:  |
+//|  CSV dei contesti e dell'ORB, regole per l'EA MPRuleTester.       |
 //|  Orari chiave di New York, Londra, Francoforte e Tokyo           |
 //|  convertiti giorno per giorno: vale per indici USA ed europei,    |
 //|  forex e materie prime (imposta il fuso orario dei dati).         |
@@ -83,6 +83,13 @@ input int    InpDataGMT      = 2;     // Solo per fuso 'Fisso': ore da GMT
 input ENUM_REF_MKT InpRefMarket = REF_AUTO; // Piazza di riferimento per le etichette orarie
 input int    InpSessionHours = 4;     // Sessioni: ore osservate dopo ogni orario chiave
 input int    InpORMinutes    = 30;    // Sessioni: minuti del range iniziale
+input bool   InpOrb          = true;  // ORB: rottura del range iniziale a tutti gli orari (quando rompe, quanto corre, segui o fade)
+input int    InpOrbStep      = 15;    // ORB: passo degli orari di inizio in minuti, su tutta la giornata
+input string InpOrbRanges    = "5,15,30,60";  // ORB: durate del range iniziale in minuti (separate da virgola, al massimo 6)
+input string InpOrbWindows   = "60,120,240";  // ORB: finestre dopo il range in minuti, poi chiusura a mercato (al massimo 6)
+input bool   InpOrbAllClocks = true;  // ORB: orari locali di tre piazze (ora legale USA, europea, nessuna) invece della sola piazza di riferimento
+input double InpOrbRuleZ     = 3.0;   // ORB: z minimo netto del broker peggiore per esportare una regola (le combinazioni sono decine di migliaia)
+input int    InpOrbRules     = 10;    // ORB: regole esportate per lo Strategy Tester al massimo
 input bool   InpSkipIncomplete = false; // Escludi i primi anni con copertura oraria incompleta (false = analizza tutto lo storico)
 input double InpLevelR       = 0.10;  // Livelli: distanza di reazione r (frazione del range mediano del periodo)
 input ENUM_LV_LOW InpLevelLowTF = LV_LOW_NONE; // Livelli: timeframe sotto le 4 ore
@@ -312,14 +319,15 @@ double Z2(const double p1, const double n1, const double p2, const double n2)  /
 double ArcF(const double x) { return 2.0 / M_PI * MathArcsin(MathSqrt(MathMax(0.0, MathMin(1.0, x)))); }  // legge dell'arcoseno
 
 //--- riepilogo: ogni z calcolato nelle schede viene contato; quelli con |z| >= 2 sono conservati con il loro testo
-#define HI_NMOD 9
+#define HI_NMOD 10
 string HI_NAME[HI_NMOD] = {"Sessioni e orari chiave (reale contro atteso con direzione casuale)",
                            "Livelli: effetto del livello (reale contro livello finto)",
                            "Vita dei livelli (reale contro livello finto)",
                            "Livelli letti sui timeframe inferiori (reale contro livello finto)",
                            "Direzione (condizione contro tutti i periodi)",
                            "Rischio/rendimento lordo (aspettativa contro zero)", "", "",
-                           "Coppie di contesti (aspettativa netta del broker peggiore contro zero)"};
+                           "Coppie di contesti (aspettativa netta del broker peggiore contro zero)",
+                           "ORB a tutti gli orari (segui la rottura 1:1, aspettativa lorda contro zero; z negativo = la rottura fallisce: fade)"};
 int    g_hiCnt[HI_NMOD];
 int    g_hiN = 0;
 int    g_hiM[];
@@ -8570,6 +8578,1012 @@ void RRTf(CSeries &s, const int barSec, const int ti)
    RRPost(s, cs, cd, ti, tMid, p20, p80, L);
   }
 
+//+------------------------------------------------------------------+
+//| ORB: rottura del range iniziale a tutti gli orari                 |
+//| Nessun orario scelto prima: ogni inizio a passi di InpOrbStep     |
+//| minuti nell'ora locale di tre piazze (ora legale USA, europea e   |
+//| nessuna, convertite giorno per giorno), ogni durata del range e   |
+//| ogni finestra. Rottura = primo tocco oltre il range (quando rompe,|
+//| quanto corre, rotture false); operazione = entrata alla chiusura  |
+//| della prima candela che chiude fuori dal range: con i soli dati   |
+//| M1 il prezzo esatto del tocco non si conosce e un ordine stop     |
+//| riempito proprio sul livello darebbe un vantaggio finto.          |
+//+------------------------------------------------------------------+
+#define OB_NT   7           // operazioni: 0-3 segui la rottura, 4-6 fade delle prime tre
+#define OB_NB   19          // gruppi: 0 tutti, 1-2 rottura su/giu', 3-4 meta' del periodo, 5-11 giorno, 12-14 ampiezza, 15-18 lato x meta'
+#define OB_NF   (3 + NPRF)  // campi: trade, somma R, somma R^2, vinti, netta di ogni broker (1..NPRF-1)
+#define OB_NX   101         // istogramma dell'estensione: caselle da 0,1 range (l'ultima = oltre 10)
+#define OB_MAXL 6           // durate del range e finestre al massimo
+string OB_OP[OB_NT] = {"Segui 1:1 (stop all'altro lato)", "Segui 1:2 (stop all'altro lato)", "Segui 1:2 (stop a meta' range)",
+                       "Segui a tempo (stop all'altro lato, chiude a fine finestra)", "Fade 1:1 (obiettivo l'altro lato)",
+                       "Fade 1:0,5 (obiettivo l'altro lato, stop a 2 volte)", "Fade 1:0,5 (obiettivo meta' range, stop a 2 volte)"
+                      };
+string OB_SIDE[3] = {"entrambi i lati", "solo rotture al rialzo", "solo rotture al ribasso"};
+double OB_K[4]    = {1, 2, 2, 0};  // obiettivo in multipli del rischio (0 = nessuno, chiusura a fine finestra)
+bool   OB_MID[4]  = {false, false, true, false};
+
+int    g_obNC = 0, g_obNS = 0, g_obND = 0, g_obNW = 0, g_obStep = 15, g_obMaxW = 240, g_obBar = 60;
+int    g_obClk[3];                 // piazze degli orologi
+int    g_obD[], g_obW[], g_obKW[]; // durate del range, finestre (minuti), fine di ogni finestra nella giornata
+bool   g_obOk[];
+double g_obA[];                    // accumulatori di un orario di inizio: durata, finestra, operazione, gruppo, campo
+int    g_obE[];                    // obiettivi e stop per durata, finestra, operazione e lati
+int    g_obS[];                    // per durata e finestra: giorni, rotture, al rialzo, tocca l'altro lato, chiude oltre
+int    g_obHb[], g_obHx[];         // istogrammi: minuti alla rottura, estensione oltre il lato rotto
+int    g_osKey[];                  // per orologio e inizio: minuto dei dati il 15 gennaio * 1440 + il 15 luglio
+bool   g_osDup[];                  // stesso orario dei dati di un orologio precedente (cambia solo nelle settimane del cambio d'ora)
+int    g_osDay[], g_osBrk[], g_osUp[], g_osFl[], g_osHd[];  // per combinazione (orologio, inizio, durata, finestra)
+double g_osBm[], g_osEx[];
+int    g_otN[], g_otU[], g_otL[];  // per combinazione, operazione e lati: trade, obiettivi, stop
+double g_otE[], g_otZ[], g_otE1[], g_otE2[], g_otEw[], g_otZw[];
+bool   g_otSt[];
+int    g_orN = 0;                  // regole ORB da esportare
+int    g_orX[];
+string g_repOrb = "", g_obEvTx = "";
+int    g_obCsv = INVALID_HANDLE;
+
+struct ObSt
+  {
+   int               n, nU, nL;
+   double            e, z, win, e1, e2, ew, zw;
+   bool              st;  // positiva (o negativa) in entrambe le meta' per tutti i broker
+  };
+
+int ObCfg(const int c, const int sI, const int i, const int x) { return ((c * g_obNS + sI) * g_obND + i) * g_obNW + x; }
+int ObTr(const int cfg, const int t, const int sd) { return (cfg * OB_NT + t) * 3 + sd; }
+int ObA(const int i, const int x, const int t, const int b) { return (((i * g_obNW + x) * OB_NT + t) * OB_NB + b) * OB_NF; }
+
+// elenco di minuti separati da virgola, senza doppioni, in ordine crescente
+int OrbList(const string txt, int &out[], const int lo, const int hi)
+  {
+   string p[];
+   int k = StringSplit(txt, ',', p), n = 0;
+   ArrayResize(out, 0);
+   for(int i = 0; i < k && n < OB_MAXL; i++)
+     {
+      string t = p[i];
+      StringTrimLeft(t);
+      StringTrimRight(t);
+      int v = (int)StringToInteger(t);
+      if(t == "" || v < lo || v > hi)
+         continue;
+      bool dup = false;
+      for(int j = 0; j < n; j++)
+         if(out[j] == v)
+            dup = true;
+      if(dup)
+         continue;
+      ArrayResize(out, n + 1);
+      out[n++] = v;
+     }
+   ArraySort(out);
+   return n;
+  }
+
+string ObLoc(const int cs) { return MKT_SHORT[g_obClk[cs / g_obNS]] + " " + HM((cs % g_obNS) * g_obStep); }
+string ObDat(const int cs)
+  {
+   int a = g_osKey[cs] / 1440, b = g_osKey[cs] % 1440;
+   return HM(a) + (a != b ? " / " + HM(b) : "");
+  }
+string ObCfgLab(const int cfg)
+  {
+   int x = cfg % g_obNW, i = (cfg / g_obNW) % g_obND, cs = cfg / (g_obNW * g_obND);
+   return ObLoc(cs) + " (dati " + ObDat(cs) + "), range " + I2S(g_obD[i]) + " min, finestra " + I2S(g_obW[x]) + " min";
+  }
+
+int ObBest(const int cfg)  // operazione con lo z netto del broker peggiore piu' alto (entrambi i lati)
+  {
+   int bt = 0;
+   for(int t = 1; t < OB_NT; t++)
+     {
+      int a = ObTr(cfg, t, 0), b = ObTr(cfg, bt, 0);
+      if(g_otN[a] >= 30 && MathIsValidNumber(g_otZw[a]) && (g_otN[b] < 30 || !MathIsValidNumber(g_otZw[b]) || g_otZw[a] > g_otZw[b]))
+         bt = t;
+     }
+   return bt;
+  }
+
+void OrbAdd(const int i, const int x, const int t, const int b, const double rv, const double &nt[], const int ev)
+  {
+   int a = ObA(i, x, t, b);
+   g_obA[a] += 1;
+   g_obA[a + 1] += rv;
+   g_obA[a + 2] += rv * rv;
+   if(rv > 0)
+      g_obA[a + 3] += 1;
+   for(int p = 1; p < NPRF; p++)
+      g_obA[a + 3 + p] += nt[p];
+   if(b < 3 && ev != 0)
+      g_obE[(((i * g_obNW + x) * OB_NT + t) * 3 + b) * 2 + (ev > 0 ? 0 : 1)]++;
+  }
+
+// statistiche di un gruppo: lorda e z contro zero, meta' del periodo, netta e z del broker peggiore (lorda se non ci sono costi)
+bool ObStat(const int i, const int x, const int t, const int b, ObSt &q)
+  {
+   ZeroMemory(q);
+   q.e = Nan();
+   q.z = Nan();
+   q.win = Nan();
+   q.e1 = Nan();
+   q.e2 = Nan();
+   q.ew = Nan();
+   q.zw = Nan();
+   int a = ObA(i, x, t, b);
+   q.n = (int)g_obA[a];
+   if(b < 3)
+     {
+      int ie = (((i * g_obNW + x) * OB_NT + t) * 3 + b) * 2;
+      q.nU = g_obE[ie];
+      q.nL = g_obE[ie + 1];
+     }
+   if(q.n < 2)
+      return false;
+   q.e = g_obA[a + 1] / q.n;
+   double var = g_obA[a + 2] / q.n - q.e * q.e, se = var > 0 ? MathSqrt(var / q.n) : 0;
+   q.z = se > 0 ? q.e / se : Nan();
+   q.win = g_obA[a + 3] / q.n;
+   q.ew = q.e;
+   q.zw = q.z;
+   int h1 = b == 0 ? 3 : (b == 1 ? 15 : (b == 2 ? 17 : -1));
+   if(h1 < 0)
+      return true;
+   int a1 = ObA(i, x, t, h1), a2 = ObA(i, x, t, h1 + 1);
+   double n1 = g_obA[a1], n2 = g_obA[a2];
+   q.e1 = n1 > 0 ? g_obA[a1 + 1] / n1 : Nan();
+   q.e2 = n2 > 0 ? g_obA[a2 + 1] / n2 : Nan();
+   bool any = false, st = n1 >= 30 && n2 >= 30;
+   for(int p = 1; p < NPRF; p++)
+     {
+      if(!g_cp[p].on)
+         continue;
+      double en = g_obA[a + 3 + p] / q.n, zn = se > 0 ? en / se : Nan();
+      if(!any || zn < q.zw)
+         q.zw = zn;
+      if(!any || en < q.ew)
+         q.ew = en;
+      double f1 = n1 > 0 ? g_obA[a1 + 3 + p] / n1 : Nan(), f2 = n2 > 0 ? g_obA[a2 + 3 + p] / n2 : Nan();
+      st = st && f1 * en > 0 && f2 * en > 0;
+      any = true;
+     }
+   if(!any)
+      st = st && q.e1 * q.e > 0 && q.e2 * q.e > 0;
+   q.st = st;
+   return true;
+  }
+
+// una giornata: range [T, T+D), poi le finestre dalla fine del range; ritorna l'ampiezza del range (0 = giorno non valido)
+double OrbDay(CSeries &s, const int k, const datetime T, const int i, const datetime tMid, const int dw, const long off7, const double wMean)
+  {
+   int D = g_obD[i];
+   long E0 = (long)T + D * 60;
+   int kor = LowerBound(s.t, s.n, (datetime)E0);
+   if(kor >= s.n || kor - k < MathMax(1, D * 60 / g_obBar / 2) || (long)s.t[kor] - E0 >= 900)
+      return 0;
+   double hi = s.h[k], lo = s.l[k];
+   for(int q = k + 1; q < kor; q++)
+     {
+      if(s.h[q] > hi)
+         hi = s.h[q];
+      if(s.l[q] < lo)
+         lo = s.l[q];
+     }
+   double w = hi - lo;
+   if(!(w > 0))
+      return 0;
+   //--- finestre coperte: nessun buco oltre 15 minuti e barre fino alla fine della finestra (venerdi' sera, festivi)
+   int kEnd = kor, gap = s.n, qStop = 0;
+   for(int x = 0; x < g_obNW; x++)
+     {
+      g_obKW[x] = LowerBound(s.t, s.n, (datetime)(E0 + g_obW[x] * 60));
+      if(g_obKW[x] > kEnd)
+         kEnd = g_obKW[x];
+     }
+   for(int q = kor + 1; q < kEnd; q++)
+      if((long)s.t[q] - (long)s.t[q - 1] > 900)
+        {
+         gap = q;
+         break;
+        }
+   for(int x = 0; x < g_obNW; x++)
+     {
+      int kx = g_obKW[x];
+      g_obOk[x] = kx > kor + 1 && kx <= gap && (long)s.t[kx - 1] >= E0 + g_obW[x] * 60 - 900;
+      if(g_obOk[x] && kx > qStop)
+         qStop = kx;
+     }
+   if(qStop == 0)
+      return w;
+   int hf = T < tMid ? 0 : 1;
+   int wc = wMean > 0 ? (w / wMean < 0.75 ? 0 : (w / wMean > 1.33 ? 2 : 1)) : -1;
+   double mid = 0.5 * (hi + lo), LT = 0, mxT = 0, Ep = 0, nu = DBL_MAX, nl = -DBL_MAX;
+   double r[4], rx[4], P[4], nt[NPRF];
+   int res[4], rq[4];
+   for(int j = 0; j < 4; j++)
+     {
+      r[j] = 0;
+      rx[j] = 0;
+      res[j] = 0;
+      rq[j] = 0;
+     }
+   int dT = 0, qT = -1, d = 0, qe = -1, x = 0;
+   bool ft = false;
+   for(int q = kor; q < qStop; q++)
+     {
+      double o = s.o[q], h = s.h[q], l = s.l[q], c = s.c[q];
+      //--- percorso dentro la barra come il tester (1 minuto OHLC): rialzista O-L-H-C, ribassista O-H-L-C
+      bool lowFirst = c > o || (c == o && o - l < h - o);
+      P[0] = o;
+      P[1] = lowFirst ? l : h;
+      P[2] = lowFirst ? h : l;
+      P[3] = c;
+      //--- rottura = primo tocco oltre il range; poi estensione e tocco dell'altro lato
+      if(dT == 0)
+        {
+         for(int z = 0; z < 4; z++)
+           {
+            if(dT == 0)
+              {
+               if(P[z] > hi)
+                 {
+                  dT = 1;
+                  LT = hi;
+                  qT = q;
+                  mxT = P[z] - hi;
+                 }
+               else
+                  if(P[z] < lo)
+                    {
+                     dT = -1;
+                     LT = lo;
+                     qT = q;
+                     mxT = lo - P[z];
+                    }
+              }
+            else
+              {
+               double xx = dT * (P[z] - LT);
+               if(xx > mxT)
+                  mxT = xx;
+               if(xx <= -w)
+                  ft = true;
+              }
+           }
+        }
+      else
+        {
+         double xH = dT > 0 ? h - LT : LT - l, xL = dT > 0 ? l - LT : LT - h;
+         if(xH > mxT)
+            mxT = xH;
+         if(xL <= -w)
+            ft = true;
+        }
+      //--- operazione: aperta alla chiusura della prima candela fuori dal range; stop e obiettivi misurati da li'
+      if(d != 0)
+        {
+         double xH = d > 0 ? h - Ep : Ep - l, xL = d > 0 ? l - Ep : Ep - h;
+         if(xH >= nu || xL <= nl)
+           {
+            double a = d * (o - Ep);
+            for(int j = 0; j < 4; j++)  // apertura gia' oltre un livello: eseguito all'apertura
+               if(res[j] == 0)
+                 {
+                  if(OB_K[j] > 0 && a >= OB_K[j] * r[j])
+                    {
+                     res[j] = 1;
+                     rx[j] = a;
+                     rq[j] = q;
+                    }
+                  else
+                     if(a <= -r[j])
+                       {
+                        res[j] = -1;
+                        rx[j] = a;
+                        rq[j] = q;
+                       }
+                 }
+            for(int z = 1; z < 4; z++)
+              {
+               double b = d * (P[z] - Ep);
+               for(int j = 0; j < 4; j++)
+                 {
+                  if(res[j] != 0)
+                     continue;
+                  if(b > a && OB_K[j] > 0 && b >= OB_K[j] * r[j])
+                    {
+                     res[j] = 1;
+                     rx[j] = OB_K[j] * r[j];
+                     rq[j] = q;
+                    }
+                  else
+                     if(b < a && b <= -r[j])
+                       {
+                        res[j] = -1;
+                        rx[j] = -r[j];
+                        rq[j] = q;
+                       }
+                 }
+               a = b;
+              }
+            nu = DBL_MAX;
+            nl = -DBL_MAX;
+            for(int j = 0; j < 4; j++)
+               if(res[j] == 0)
+                 {
+                  if(OB_K[j] > 0 && OB_K[j] * r[j] < nu)
+                     nu = OB_K[j] * r[j];
+                  if(-r[j] > nl)
+                     nl = -r[j];
+                 }
+           }
+        }
+      else
+         if(c > hi || c < lo)
+           {
+            d = c > hi ? 1 : -1;
+            qe = q;
+            Ep = c;
+            for(int j = 0; j < 4; j++)
+              {
+               r[j] = d * (Ep - (OB_MID[j] ? mid : (d > 0 ? lo : hi)));
+               if(OB_K[j] > 0 && OB_K[j] * r[j] < nu)
+                  nu = OB_K[j] * r[j];
+               if(-r[j] > nl)
+                  nl = -r[j];
+              }
+           }
+      //--- fine di una finestra: cosa e' successo fin qui
+      while(x < g_obNW && g_obKW[x] - 1 <= q)
+        {
+         if(g_obKW[x] - 1 == q && g_obOk[x])
+           {
+            int bs = i * g_obNW + x;
+            g_obS[bs * 5]++;
+            if(dT != 0)
+              {
+               g_obS[bs * 5 + 1]++;
+               if(dT > 0)
+                  g_obS[bs * 5 + 2]++;
+               if(ft)
+                  g_obS[bs * 5 + 3]++;
+               if(dT * (c - LT) > 0)
+                  g_obS[bs * 5 + 4]++;
+               int bm = (int)(((long)s.t[qT] - E0) / 60);
+               g_obHb[bs * (g_obMaxW + 1) + MathMax(0, MathMin(g_obMaxW, bm))]++;
+               g_obHx[bs * OB_NX + (int)MathMax(0.0, MathMin(OB_NX - 1.0, MathFloor(mxT / w * 10.0)))]++;
+              }
+            if(d != 0 && qe < q)
+              {
+               int sdF = d > 0 ? 0 : 1, sdB = d > 0 ? 1 : 2;
+               datetime tE = (datetime)((long)s.t[qe] + g_obBar + off7);
+               int hE = HourOf(tE);
+               long dE = (long)tE / 86400;
+               double xc = d * (c - Ep);
+               for(int j = 0; j < 4; j++)
+                 {
+                  bool hit = res[j] != 0 && rq[j] <= q;
+                  double xx = hit ? rx[j] : xc;
+                  int ev = hit ? res[j] : 0;
+                  datetime tX = (datetime)((long)s.t[hit ? rq[j] : q] + (hit ? 0 : g_obBar) + off7);
+                  int hX = HourOf(tX);
+                  long dX = (long)tX / 86400;
+                  for(int m = 0; m < 2; m++)
+                    {
+                     if(m == 1 && OB_K[j] <= 0)
+                        break;
+                     int t = m == 0 ? j : 4 + j, sd = m == 0 ? sdF : 1 - sdF;
+                     double risk = m == 0 ? r[j] : OB_K[j] * r[j];
+                     double rv = (m == 0 ? xx : -xx) / risk;
+                     nt[0] = rv;
+                     for(int p = 1; p < NPRF; p++)
+                       {
+                        if(!g_cp[p].on)
+                          {
+                           nt[p] = rv;
+                           continue;
+                          }
+                        double sw = dX > dE ? CostNights(dE, dX, g_cp[p].triple) * (g_cp[p].swA[sd] + g_cp[p].swP[sd] * Ep) : 0;
+                        nt[p] = rv - ((sd == 0 ? g_cp[p].sp[hE] : g_cp[p].sp[hX]) + g_cp[p].comm + g_cp[p].slip - sw) / risk;
+                       }
+                     int ue = m == 0 ? ev : -ev;  // per il fade l'obiettivo e' lo stop della rottura e viceversa
+                     OrbAdd(i, x, t, 0, rv, nt, ue);
+                     OrbAdd(i, x, t, sdB, rv, nt, ue);
+                     OrbAdd(i, x, t, 3 + hf, rv, nt, 0);
+                     OrbAdd(i, x, t, 5 + dw, rv, nt, 0);
+                     if(wc >= 0)
+                        OrbAdd(i, x, t, 12 + wc, rv, nt, 0);
+                     OrbAdd(i, x, t, 15 + (sdB - 1) * 2 + hf, rv, nt, 0);
+                    }
+                 }
+              }
+           }
+         x++;
+        }
+     }
+   return w;
+  }
+
+// tutte le giornate per un orario di inizio (orologio c, inizio sI): accumulatori di tutte le durate e finestre
+void OrbScan(CSeries &s, const int c, const int sI, const long d0, const long d1, const datetime tMid)
+  {
+   ArrayInitialize(g_obA, 0.0);
+   ArrayInitialize(g_obE, 0);
+   ArrayInitialize(g_obS, 0);
+   ArrayInitialize(g_obHb, 0);
+   ArrayInitialize(g_obHx, 0);
+   int mk = g_obClk[c], mn = sI * g_obStep;
+   double wBuf[], wSum[];
+   int wCnt[], wPos[];
+   ArrayResize(wBuf, g_obND * 20);
+   ArrayResize(wSum, g_obND);
+   ArrayResize(wCnt, g_obND);
+   ArrayResize(wPos, g_obND);
+   ArrayInitialize(wSum, 0.0);
+   ArrayInitialize(wCnt, 0);
+   ArrayInitialize(wPos, 0);
+   for(long day = d0; day <= d1; day++)
+     {
+      datetime T = LocalToData(day, mk, mn);
+      int k = LowerBound(s.t, s.n, T);
+      if(k >= s.n || (long)s.t[k] - (long)T >= 120)
+         continue;
+      int dw = DowMon(T);
+      long off7 = (long)DataToNY7(T) - (long)T;
+      for(int i = 0; i < g_obND; i++)
+        {
+         //--- ampiezza del range rispetto alla media dei 20 giorni validi precedenti (stesso orario e durata)
+         double wm = wCnt[i] >= 10 ? wSum[i] / wCnt[i] : 0;
+         double w = OrbDay(s, k, T, i, tMid, dw, off7, wm);
+         if(!(w > 0))
+            continue;
+         int z = i * 20 + wPos[i];
+         if(wCnt[i] >= 20)
+            wSum[i] -= wBuf[z];
+         else
+            wCnt[i]++;
+         wBuf[z] = w;
+         wSum[i] += w;
+         wPos[i] = (wPos[i] + 1) % 20;
+        }
+     }
+  }
+
+string ObNet(const int i, const int x, const int t, const int b, const int p)  // netta del profilo p e il suo z
+  {
+   int a = ObA(i, x, t, b);
+   double n = g_obA[a];
+   if(n < 2 || !g_cp[p].on)
+      return "-";
+   double e = g_obA[a + 1] / n, var = g_obA[a + 2] / n - e * e, se = var > 0 ? MathSqrt(var / n) : 0;
+   double en = g_obA[a + 3 + p] / n;
+   return SgnF(en, 3) + " (z " + ZS(se > 0 ? en / se : Nan()) + ")";
+  }
+
+// riassunto di un orario di inizio: combinazioni, CSV, riepilogo, mappa e tabella degli eventi
+void OrbStore(const int c, const int sI, const int iRef, const int xRef, string &heat, string &evRows)
+  {
+   int cs = c * g_obNS + sI;
+   heat += "<tr>" + TD(ObLoc(cs)) + TD(ObDat(cs));
+   for(int i = 0; i < g_obND; i++)
+      for(int x = 0; x < g_obNW; x++)
+        {
+         int cfg = ObCfg(c, sI, i, x), bs = i * g_obNW + x;
+         g_osDay[cfg] = g_obS[bs * 5];
+         g_osBrk[cfg] = g_obS[bs * 5 + 1];
+         g_osUp[cfg] = g_obS[bs * 5 + 2];
+         g_osFl[cfg] = g_obS[bs * 5 + 3];
+         g_osHd[cfg] = g_obS[bs * 5 + 4];
+         g_osBm[cfg] = HistMed(g_obHb, bs * (g_obMaxW + 1), g_obMaxW + 1, 1.0);
+         g_osEx[cfg] = HistMed(g_obHx, bs * OB_NX, OB_NX, 10.0);
+         for(int t = 0; t < OB_NT; t++)
+           {
+            ObSt q[3];
+            for(int sd = 0; sd < 3; sd++)
+              {
+               ObStat(i, x, t, sd, q[sd]);
+               int tr = ObTr(cfg, t, sd);
+               g_otN[tr] = q[sd].n;
+               g_otU[tr] = q[sd].nU;
+               g_otL[tr] = q[sd].nL;
+               g_otE[tr] = q[sd].e;
+               g_otZ[tr] = q[sd].z;
+               g_otE1[tr] = q[sd].e1;
+               g_otE2[tr] = q[sd].e2;
+               g_otEw[tr] = q[sd].ew;
+               g_otZw[tr] = q[sd].zw;
+               g_otSt[tr] = q[sd].st;
+              }
+            if(g_obCsv != INVALID_HANDLE && g_osDay[cfg] > 0)
+              {
+               int nr = q[0].n, tm = nr - q[0].nU - q[0].nL;
+               string ln = MKT_SHORT[g_obClk[c]] + ";" + HM(sI * g_obStep) + ";" + HM(g_osKey[cs] / 1440) + ";" + HM(g_osKey[cs] % 1440) + ";" +
+                           I2S(g_obD[i]) + ";" + I2S(g_obW[x]) + ";" + I2S(g_osDay[cfg]) + ";" + CN(100.0 * Frac(g_osBrk[cfg], g_osDay[cfg]), 2) + ";" +
+                           CN(100.0 * Frac(g_osUp[cfg], g_osBrk[cfg]), 2) + ";" + CN(g_osBm[cfg], 1) + ";" + CN(100.0 * Frac(g_osFl[cfg], g_osBrk[cfg]), 2) + ";" +
+                           CN(100.0 * Frac(g_osHd[cfg], g_osBrk[cfg]), 2) + ";" + CN(g_osEx[cfg], 2) + ";" + Plain(OB_OP[t]) + ";" + I2S(nr) + ";" +
+                           CN(100.0 * Frac(q[0].nU, nr), 2) + ";" + CN(100.0 * Frac(q[0].nL, nr), 2) + ";" + CN(100.0 * Frac(tm, nr), 2) + ";" +
+                           CN(q[0].win * 100, 2) + ";" + CN(q[0].e, 4) + ";" + CN(q[0].z, 2) + ";" + CN(q[0].e1, 4) + ";" + CN(q[0].e2, 4) + ";" +
+                           I2S(q[1].n) + ";" + CN(q[1].e, 4) + ";" + CN(q[1].z, 2) + ";" + I2S(q[2].n) + ";" + CN(q[2].e, 4) + ";" + CN(q[2].z, 2);
+               for(int p = 1; p < NPRF; p++)
+                 {
+                  int a = ObA(i, x, t, 0);
+                  if(!g_cp[p].on || nr < 2)
+                    {
+                     ln += ";;";
+                     continue;
+                    }
+                  double e = g_obA[a + 1] / nr, var = g_obA[a + 2] / nr - e * e, se = var > 0 ? MathSqrt(var / nr) : 0, en = g_obA[a + 3 + p] / nr;
+                  ln += ";" + CN(en, 4) + ";" + CN(se > 0 ? en / se : Nan(), 2);
+                 }
+               FileWriteString(g_obCsv, ln + "\n");
+              }
+           }
+         //--- riepilogo: segui 1:1, entrambi i lati (obiettivo e stop alla stessa distanza: nessuna distorsione del percorso nella barra)
+         int t0 = ObTr(cfg, 0, 0), nr0 = g_otN[t0];
+         double cont = Frac(g_otU[t0], g_otU[t0] + g_otL[t0]);
+         if(!g_osDup[cs] && nr0 >= 30)
+            Hi(9, g_otZ[t0], "ORB " + ObCfgLab(cfg) + ", " + I2S(nr0) + " trade: dopo la chiusura fuori dal range arriva prima a +1R " + FP(cont, 1) +
+               "% contro 50% (chiusi a tempo " + Share(nr0 - g_otU[t0] - g_otL[t0], nr0) + "%), aspettativa lorda " + SgnF(g_otE[t0], 3) + " R" +
+               (g_cp[1].on || g_cp[2].on ? ", netta del broker peggiore " + SgnF(g_otEw[t0], 3) + " R" : "") +
+               (g_otZ[t0] < 0 ? " (la rottura fallisce piu' del caso: fade)" : " (la rottura prosegue piu' del caso)"));
+         //--- mappa: % che arriva prima a +1R tra i trade chiusi a obiettivo o stop, colore = z
+         if(nr0 < 30)
+            heat += TD("-");
+         else
+           {
+            string tip = "N " + I2S(nr0) + ", rompe " + Share(g_osBrk[cfg], g_osDay[cfg]) + "% dopo " + F(g_osBm[cfg], 0) + " min, tocca l'altro lato " +
+                         Share(g_osFl[cfg], g_osBrk[cfg]) + "%, chiude oltre " + Share(g_osHd[cfg], g_osBrk[cfg]) + "%, estensione " + F(g_osEx[cfg], 1) +
+                         " range; 1:1 obiettivo " + Share(g_otU[t0], nr0) + "% stop " + Share(g_otL[t0], nr0) + "% a tempo " +
+                         Share(nr0 - g_otU[t0] - g_otL[t0], nr0) + "%; lorda " + SgnF(g_otE[t0], 3) + " R z " + ZS(g_otZ[t0]) + "; netta peggiore " +
+                         SgnF(g_otEw[t0], 3) + " R";
+            StringReplace(tip, "'", "&#39;");
+            string bg = PCol(g_otZ[t0], 0, 4);
+            heat += "<td title='" + tip + "'" + (bg != "" ? " style='background:" + bg + "'" : "") + ">" + FP(cont, 0) + "</td>";
+           }
+         //--- tabella degli eventi a ogni orario (orologio principale, durata e finestra di riferimento)
+         if(c == 0 && i == iRef && x == xRef && g_osDay[cfg] >= 30)
+           {
+            int bt = ObBest(cfg), tb = ObTr(cfg, bt, 0);
+            double hd = Frac(g_osHd[cfg], g_osBrk[cfg]);
+            evRows += "<tr>" + TD(ObLoc(cs)) + TD(ObDat(cs)) + TD(I2S(g_osDay[cfg])) + TD(Share(g_osBrk[cfg], g_osDay[cfg]) + " (" +
+                      Share(g_osUp[cfg], g_osBrk[cfg]) + " / " + Share(g_osBrk[cfg] - g_osUp[cfg], g_osBrk[cfg]) + ")") + TD(F(g_osBm[cfg], 0)) +
+                      TD(Share(g_osFl[cfg], g_osBrk[cfg])) + TDc(FP(hd, 1), PCol(hd, 0.5, 0.15)) + TD(F(g_osEx[cfg], 2)) +
+                      TD(Share(g_otU[t0], nr0) + " / " + Share(g_otL[t0], nr0) + " / " + Share(nr0 - g_otU[t0] - g_otL[t0], nr0)) +
+                      TDc(SgnF(g_otE[t0], 3) + " (" + ZS(g_otZ[t0]) + ")", PCol(g_otZ[t0], 0, 4)) + TD(SgnF(g_otEw[t0], 3) + " (" + ZS(g_otZw[t0]) + ")") +
+                      TD(OB_OP[bt] + " " + SgnF(g_otEw[tb], 3) + " (" + ZS(g_otZw[tb]) + ")") + "</tr>";
+            R(g_obEvTx, "    " + ObLoc(cs) + " (dati " + ObDat(cs) + "), " + I2S(g_osDay[cfg]) + " giorni: rompe " + Share(g_osBrk[cfg], g_osDay[cfg]) +
+              "% (su " + Share(g_osUp[cfg], g_osBrk[cfg]) + "%) dopo " + F(g_osBm[cfg], 0) + " min, tocca l'altro lato " + Share(g_osFl[cfg], g_osBrk[cfg]) +
+              "%, chiude oltre " + FP(hd, 1) + "%, estensione " + F(g_osEx[cfg], 2) + " range; segui 1:1 obiettivo/stop/tempo " + Share(g_otU[t0], nr0) +
+              "/" + Share(g_otL[t0], nr0) + "/" + Share(nr0 - g_otU[t0] - g_otL[t0], nr0) + "%, lorda " + SgnF(g_otE[t0], 3) + " R (z " + ZS(g_otZ[t0]) +
+              "), netta peggiore " + SgnF(g_otEw[t0], 3) + "; migliore netta: " + OB_OP[bt] + " " + SgnF(g_otEw[tb], 3) + " R (z " + ZS(g_otZw[tb]) + ")");
+           }
+        }
+   heat += "</tr>";
+  }
+
+// dettaglio di una combinazione: quando rompe, quanto corre, tutte le operazioni, giorni e ampiezza del range
+void OrbDetail(CSeries &s, const int cfg, const int rank, const long d0, const long d1, const datetime tMid)
+  {
+   int x = cfg % g_obNW, i = (cfg / g_obNW) % g_obND, cs = cfg / (g_obNW * g_obND);
+   OrbScan(s, cs / g_obNS, cs % g_obNS, d0, d1, tMid);
+   int bs = i * g_obNW + x, nb = g_obS[bs * 5 + 1];
+   string lab = ObCfgLab(cfg);
+   //--- quando rompe (minuti dalla fine del range) e quanto corre oltre il lato rotto (in range)
+   int bl[7] = {0, 5, 15, 30, 60, 120, 240};
+   string bn[7] = {"entro 5 min", "5-15 min", "15-30 min", "30-60 min", "1-2 ore", "2-4 ore", "oltre 4 ore"};
+   string tb = "";
+   for(int z = 0; z < 7; z++)
+     {
+      int a = bl[z], b = z < 6 ? bl[z + 1] : g_obMaxW + 1, cnt = 0;
+      if(a > g_obW[x])
+         break;
+      for(int m = a; m < b && m <= g_obMaxW; m++)
+         cnt += g_obHb[bs * (g_obMaxW + 1) + m];
+      tb += (tb != "" ? ", " : "") + bn[z] + " " + Share(cnt, nb) + "%";
+     }
+   double el[6] = {0, 0.5, 1, 2, 3, 1e9};
+   string en[5] = {"meno di 0,5", "0,5-1", "1-2", "2-3", "oltre 3"};
+   string te = "";
+   for(int z = 0; z < 5; z++)
+     {
+      int cnt = 0;
+      for(int m = 0; m < OB_NX; m++)
+        {
+         double v = m / 10.0;
+         if(v >= el[z] && v < el[z + 1])
+            cnt += g_obHx[bs * OB_NX + m];
+        }
+      te += (te != "" ? ", " : "") + en[z] + " " + Share(cnt, nb) + "%";
+     }
+   W("<h3>" + I2S(rank) + ". " + lab + "</h3><p class='muted'>Quando rompe (dalla fine del range): " + tb + ".<br>Quanto corre oltre il lato " +
+     "rotto, in multipli del range: " + te + ".</p>");
+   R(g_repOrb, "  " + I2S(rank) + ". " + lab);
+   R(g_repOrb, "     quando rompe: " + tb);
+   R(g_repOrb, "     quanto corre (range): " + te);
+   //--- tutte le operazioni
+   string hb = "";
+   for(int p = 1; p < NPRF; p++)
+      hb += "|Netta " + g_cp[p].name + " R (z)";
+   THead("Operazione|Trade|% obiettivo / stop / a tempo|Obiettivo tra i chiusi (atteso con prezzo casuale)|Lorda R (z)" + hb +
+         "|Met&agrave; 1 / met&agrave; 2 lorda|Solo rotture al rialzo lorda (z)|Solo al ribasso lorda (z)");
+   for(int t = 0; t < OB_NT; t++)
+     {
+      ObSt q, qu, qd;
+      ObStat(i, x, t, 0, q);
+      ObStat(i, x, t, 1, qu);
+      ObStat(i, x, t, 2, qd);
+      int j = t < 4 ? t : t - 4;
+      double p0 = OB_K[j] > 0 ? (t < 4 ? 1.0 / (1 + OB_K[j]) : OB_K[j] / (1 + OB_K[j])) : Nan();
+      string nets = "", netT = "";
+      for(int p = 1; p < NPRF; p++)
+        {
+         nets += TD(ObNet(i, x, t, 0, p));
+         netT += ", netta " + g_cp[p].name + " " + ObNet(i, x, t, 0, p);
+        }
+      string ev = Share(q.nU, q.n) + " / " + Share(q.nL, q.n) + " / " + Share(q.n - q.nU - q.nL, q.n);
+      string ct = OB_K[j] > 0 ? Share(q.nU, q.nU + q.nL) + " (" + FP(p0, 0) + ")" : "-";
+      W("<tr>" + TD(OB_OP[t]) + TD(I2S(q.n)) + TD(ev) + TD(ct) + TDc(SgnF(q.e, 3) + " (" + ZS(q.z) + ")", PCol(q.z, 0, 4)) + nets +
+        TD(SgnF(q.e1, 2) + " / " + SgnF(q.e2, 2)) + TD(SgnF(qu.e, 3) + " (" + ZS(qu.z) + ", N " + I2S(qu.n) + ")") +
+        TD(SgnF(qd.e, 3) + " (" + ZS(qd.z) + ", N " + I2S(qd.n) + ")") + "</tr>");
+      R(g_repOrb, "     " + OB_OP[t] + ": " + I2S(q.n) + " trade, obiettivo/stop/tempo " + ev + "%, obiettivo tra i chiusi " + ct + "%, lorda " +
+        SgnF(q.e, 3) + " R (z " + ZS(q.z) + ")" + netT + "; meta' " + SgnF(q.e1, 2) + " / " + SgnF(q.e2, 2) + "; solo rialzo " + SgnF(qu.e, 3) +
+        " (z " + ZS(qu.z) + "), solo ribasso " + SgnF(qd.e, 3) + " (z " + ZS(qd.z) + ")");
+     }
+   TEnd();
+   //--- segui 1:1 per giorno della settimana e per ampiezza del range
+   string wd = "", wa = "";
+   for(int g = 0; g < 7; g++)
+     {
+      ObSt q;
+      if(ObStat(i, x, 0, 5 + g, q) && q.n >= 30)
+         wd += (wd != "" ? ", " : "") + DOW[g] + " " + SgnF(q.e, 2) + " (z " + ZS(q.z) + ", N " + I2S(q.n) + ")";
+     }
+   string wn[3] = {"stretto (sotto 0,75 volte la media dei 20 giorni prima)", "normale", "ampio (oltre 1,33 volte)"};
+   for(int g = 0; g < 3; g++)
+     {
+      ObSt q;
+      if(ObStat(i, x, 0, 12 + g, q) && q.n >= 30)
+         wa += (wa != "" ? ", " : "") + wn[g] + " " + SgnF(q.e, 2) + " (z " + ZS(q.z) + ", N " + I2S(q.n) + ")";
+     }
+   W("<p class='muted'>Segui 1:1, lorda per giorno (orologio dei dati): " + wd + ".<br>Per ampiezza del range: " + wa + ".</p>");
+   R(g_repOrb, "     segui 1:1 per giorno: " + wd);
+   R(g_repOrb, "     segui 1:1 per ampiezza del range: " + wa);
+  }
+
+// tabella delle anomalie (segui 1:1, entrambi i lati)
+void OrbTable(const int &lst[], const int nl, const string title, const string desc)
+  {
+   SecStart(title, desc);
+   THead("#|Ora locale|Orario dei dati (inverno / estate)|Range|Finestra|Giorni|% rompe (su / gi&ugrave;)|Minuti alla rottura (mediana)|" +
+         "% tocca l'altro lato|% chiude oltre il lato rotto|Estensione mediana (range)|Segui 1:1: % obiettivo / stop / a tempo|Lorda 1:1 R (z)|" +
+         "Netta peggiore 1:1 R (z)|Met&agrave; 1 / met&agrave; 2|Operazione migliore (netta del broker peggiore)");
+   for(int r = 0; r < nl; r++)
+     {
+      int cfg = lst[r], x = cfg % g_obNW, i = (cfg / g_obNW) % g_obND, cs = cfg / (g_obNW * g_obND);
+      int t0 = ObTr(cfg, 0, 0), n0 = g_otN[t0], bt = ObBest(cfg), tb = ObTr(cfg, bt, 0);
+      string ev = Share(g_otU[t0], n0) + " / " + Share(g_otL[t0], n0) + " / " + Share(n0 - g_otU[t0] - g_otL[t0], n0);
+      double hd = Frac(g_osHd[cfg], g_osBrk[cfg]);
+      W("<tr>" + TD(I2S(r + 1)) + TD(ObLoc(cs)) + TD(ObDat(cs)) + TD(I2S(g_obD[i]) + " min") + TD(I2S(g_obW[x]) + " min") + TD(I2S(g_osDay[cfg])) +
+        TD(Share(g_osBrk[cfg], g_osDay[cfg]) + " (" + Share(g_osUp[cfg], g_osBrk[cfg]) + " / " + Share(g_osBrk[cfg] - g_osUp[cfg], g_osBrk[cfg]) + ")") +
+        TD(F(g_osBm[cfg], 0)) + TD(Share(g_osFl[cfg], g_osBrk[cfg])) + TDc(FP(hd, 1), PCol(hd, 0.5, 0.15)) + TD(F(g_osEx[cfg], 2)) + TD(ev) +
+        TDc(SgnF(g_otE[t0], 3) + " (" + ZS(g_otZ[t0]) + ")", PCol(g_otZ[t0], 0, 4)) + TD(SgnF(g_otEw[t0], 3) + " (" + ZS(g_otZw[t0]) + ")") +
+        TD(SgnF(g_otE1[t0], 2) + " / " + SgnF(g_otE2[t0], 2)) + TD(OB_OP[bt] + " " + SgnF(g_otEw[tb], 3) + " (" + ZS(g_otZw[tb]) + ")" +
+                                                                  (g_otSt[tb] ? "" : "*")) + "</tr>");
+      R(g_repOrb, "  " + I2S(r + 1) + ". " + ObCfgLab(cfg) + ", " + I2S(g_osDay[cfg]) + " giorni: rompe " + Share(g_osBrk[cfg], g_osDay[cfg]) + "% (su " +
+        Share(g_osUp[cfg], g_osBrk[cfg]) + "%) dopo " + F(g_osBm[cfg], 0) + " min (mediana), tocca l'altro lato " + Share(g_osFl[cfg], g_osBrk[cfg]) +
+        "%, chiude oltre il lato rotto " + FP(hd, 1) + "% (atteso 50%), estensione mediana " + F(g_osEx[cfg], 2) + " range; segui 1:1 obiettivo/stop/tempo " +
+        ev + "%, lorda " + SgnF(g_otE[t0], 3) + " R (z " + ZS(g_otZ[t0]) + "), netta peggiore " + SgnF(g_otEw[t0], 3) + " R (z " + ZS(g_otZw[t0]) +
+        "), meta' " + SgnF(g_otE1[t0], 2) + " / " + SgnF(g_otE2[t0], 2) + "; migliore netta: " + OB_OP[bt] + " " + SgnF(g_otEw[tb], 3) + " R (z " +
+        ZS(g_otZw[tb]) + (g_otSt[tb] ? ", stabile" : ", non stabile") + ")");
+     }
+   TEnd();
+   SecEnd();
+  }
+
+void OrbTab(CSeries &s, const int barSec, const string clean)
+  {
+   g_repOrb = "";
+   g_obEvTx = "";
+   g_orN = 0;
+   R(g_repOrb, "=== ORB: ROTTURA DEL RANGE INIZIALE A TUTTI GLI ORARI ===");
+   if(!InpOrb)
+     {
+      SecStart("ORB", "");
+      W("<p class='muted'>Disattivato dal parametro 'ORB'.</p>");
+      SecEnd();
+      R(g_repOrb, "  disattivato dal parametro 'ORB'");
+      return;
+     }
+   int bm = barSec / 60 < 1 ? 1 : barSec / 60;
+   g_obBar = barSec;
+   g_obStep = MathMax(5, MathMin(240, InpOrbStep));
+   g_obNS = 1440 / g_obStep;
+   g_obND = OrbList(InpOrbRanges, g_obD, bm, 240);
+   g_obNW = OrbList(InpOrbWindows, g_obW, MathMax(5, 2 * bm), 720);
+   if(s.n < 5000 || g_obND == 0 || g_obNW == 0)
+     {
+      SecStart("ORB", "");
+      W("<p class='muted'>" + (s.n < 5000 ? "Servono dati M1 o M5." : "Controlla i parametri 'ORB: durate' e 'ORB: finestre' (minuti separati da virgola).") + "</p>");
+      SecEnd();
+      R(g_repOrb, "  non calcolato (servono dati M1 o M5 e durate e finestre valide)");
+      return;
+     }
+   g_obMaxW = g_obW[g_obNW - 1];
+   //--- orologi: la piazza di riferimento e le altre regole dell'ora legale (USA = New York, Europa = Londra, nessuna = Tokyo)
+   int ref = g_ref >= 0 ? g_ref : 0;
+   g_obNC = 0;
+   g_obClk[g_obNC++] = ref;
+   if(InpOrbAllClocks)
+     {
+      if(ref != 0)
+         g_obClk[g_obNC++] = 0;
+      if(ref != 1 && ref != 2)
+         g_obClk[g_obNC++] = 1;
+      if(ref != 3)
+         g_obClk[g_obNC++] = 3;
+     }
+   int ncs = g_obNC * g_obNS, ncf = ncs * g_obND * g_obNW, ntr = ncf * OB_NT * 3;
+   ArrayResize(g_obKW, g_obNW);
+   ArrayResize(g_obOk, g_obNW);
+   ArrayResize(g_obA, g_obND * g_obNW * OB_NT * OB_NB * OB_NF);
+   ArrayResize(g_obE, g_obND * g_obNW * OB_NT * 3 * 2);
+   ArrayResize(g_obS, g_obND * g_obNW * 5);
+   ArrayResize(g_obHb, g_obND * g_obNW * (g_obMaxW + 1));
+   ArrayResize(g_obHx, g_obND * g_obNW * OB_NX);
+   ArrayResize(g_osKey, ncs);
+   ArrayResize(g_osDup, ncs);
+   ArrayResize(g_osDay, ncf); ArrayResize(g_osBrk, ncf); ArrayResize(g_osUp, ncf); ArrayResize(g_osFl, ncf); ArrayResize(g_osHd, ncf);
+   ArrayResize(g_osBm, ncf); ArrayResize(g_osEx, ncf);
+   ArrayResize(g_otN, ntr); ArrayResize(g_otU, ntr); ArrayResize(g_otL, ntr); ArrayResize(g_otE, ntr); ArrayResize(g_otZ, ntr);
+   ArrayResize(g_otE1, ntr); ArrayResize(g_otE2, ntr); ArrayResize(g_otEw, ntr); ArrayResize(g_otZw, ntr); ArrayResize(g_otSt, ntr);
+   //--- orario dei dati di ogni inizio il 15 gennaio e il 15 luglio dell'ultimo anno completo (per riconoscere gli orari equivalenti)
+   MqlDateTime dl;
+   TimeToStruct(s.t[s.n - 1], dl);
+   MqlDateTime a;
+   ZeroMemory(a);
+   a.year = dl.year - 1;
+   a.mon = 1;
+   a.day = 15;
+   long dayA = (long)StructToTime(a) / 86400;
+   a.mon = 7;
+   long dayB = (long)StructToTime(a) / 86400;
+   for(int cs = 0; cs < ncs; cs++)
+     {
+      int mk = g_obClk[cs / g_obNS], mn = (cs % g_obNS) * g_obStep;
+      g_osKey[cs] = MinOfDay(LocalToData(dayA, mk, mn)) * 1440 + MinOfDay(LocalToData(dayB, mk, mn));
+      g_osDup[cs] = false;
+      for(int z = 0; z < (cs / g_obNS) * g_obNS && !g_osDup[cs]; z++)
+         if(g_osKey[z] == g_osKey[cs])
+            g_osDup[cs] = true;
+     }
+   //--- durata e finestra di riferimento per la tabella di tutti gli orari: la durata piu' vicina a 'Sessioni: minuti del range', la finestra di mezzo
+   int iRef = 0, xRef = g_obNW / 2;
+   for(int i = 1; i < g_obND; i++)
+      if(MathAbs(g_obD[i] - InpORMinutes) < MathAbs(g_obD[iRef] - InpORMinutes))
+         iRef = i;
+   //--- CSV di tutte le combinazioni
+   string csvName = "MarketProfiler_" + clean + "_orb.csv";
+   g_obCsv = FileOpen(csvName, FILE_WRITE | FILE_TXT | FILE_ANSI | (InpCommonDir ? FILE_COMMON : 0));
+   bool csvOk = g_obCsv != INVALID_HANDLE;
+   string csvPath = (InpCommonDir ? TerminalInfoString(TERMINAL_COMMONDATA_PATH) : TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5") + "\\Files\\" + csvName;
+   if(g_obCsv != INVALID_HANDLE)
+     {
+      string hd = "Piazza;Ora locale;Orario dati inverno;Orario dati estate;Range min;Finestra min;Giorni;% rompe;% rompe al rialzo;" +
+                  "Minuti alla rottura (mediana);% tocca l'altro lato;% chiude oltre il lato rotto;Estensione mediana (range);Operazione;Trade;" +
+                  "% obiettivo;% stop;% a tempo;% vinti;Lorda R;z lorda;Meta 1 lorda R;Meta 2 lorda R;Solo rialzo trade;Solo rialzo lorda R;" +
+                  "z solo rialzo;Solo ribasso trade;Solo ribasso lorda R;z solo ribasso";
+      for(int p = 1; p < NPRF; p++)
+         hd += ";Netta " + Plain(g_cp[p].name) + " R;z " + Plain(g_cp[p].name);
+      FileWriteString(g_obCsv, hd + "\n");
+     }
+   long d0 = (long)s.t[0] / 86400 - 1, d1 = (long)s.t[s.n - 1] / 86400 + 1;
+   datetime tMid = (datetime)((long)s.t[0] + ((long)s.t[s.n - 1] - (long)s.t[0]) / 2);
+   string heat[3];
+   string evRows = "", clk = "";
+   for(int c = 0; c < g_obNC; c++)
+      clk += (c > 0 ? ", " : "") + MKT_NAME[g_obClk[c]];
+   string lists = "", wl = "";
+   for(int i = 0; i < g_obND; i++)
+      lists += (i > 0 ? ", " : "") + I2S(g_obD[i]);
+   for(int x = 0; x < g_obNW; x++)
+      wl += (x > 0 ? ", " : "") + I2S(g_obW[x]);
+   R(g_repOrb, "Metodo: per ogni orario di inizio (ogni " + I2S(g_obStep) + " minuti di tutta la giornata, nell'ora locale di " + clk + ", convertita " +
+     "giorno per giorno nell'orologio dei dati), range iniziale di " + lists + " minuti, finestre di " + wl + " minuti dopo la fine del range. " +
+     "Rottura = primo tocco oltre il massimo o il minimo del range (su candele M1, percorso dentro la candela come il tester: rialzista " +
+     "apertura-minimo-massimo-chiusura, ribassista apertura-massimo-minimo-chiusura). Operazione = entrata alla chiusura della prima candela " +
+     "che chiude fuori dal range (non al tocco: con i soli dati M1 il prezzo esatto del tocco non si conosce e un ordine stop riempito sul " +
+     "livello darebbe un vantaggio finto); stop all'altro lato del range o a meta'; obiettivo 1 o 2 volte il rischio o chiusura a fine " +
+     "finestra; fade = la stessa operazione al contrario. Con un prezzo casuale l'aspettativa e' zero e 'arriva prima a +1R' e' il 50%: z = " +
+     "distanza da zero in deviazioni standard (un trade al giorno, giorni indipendenti). Netta = con spread per ora, commissione, slittamento e " +
+     "swap dei broker; netta peggiore = il broker con il risultato piu' basso. Orari equivalenti (stesso orario dei dati a gennaio e a luglio, " +
+     "per esempio NY 09:30 e LDN 14:30: cambiano solo nelle settimane in cui l'ora legale cambia in date diverse) sono mostrati una volta sola.");
+   int tot = ncs, done = 0;
+   for(int c = 0; c < g_obNC && !IsStopped(); c++)
+     {
+      heat[c] = "";
+      for(int sI = 0; sI < g_obNS && !IsStopped(); sI++)
+        {
+         if(done % 8 == 0)
+            Comment("MarketProfiler: ORB ", MKT_SHORT[g_obClk[c]], " ", HM(sI * g_obStep), " (", I2S(done * 100 / tot), "%) ...");
+         done++;
+         OrbScan(s, c, sI, d0, d1, tMid);
+         OrbStore(c, sI, iRef, xRef, heat[c], evRows);
+        }
+     }
+   if(g_obCsv != INVALID_HANDLE)
+     {
+      FileClose(g_obCsv);
+      g_obCsv = INVALID_HANDLE;
+      PrintFormat("[MarketProfiler] ORB: tutte le combinazioni salvate in %s", csvPath);
+     }
+   //--- anomalie: segui 1:1 entrambi i lati, almeno 100 trade; per orario dei dati e durata del range solo il risultato con |z| piu' alto
+   double key[];
+   ArrayResize(key, ncf);
+   int nk = 0;
+   for(int cfg = 0; cfg < ncf; cfg++)
+     {
+      int t0 = ObTr(cfg, 0, 0);
+      if(g_otN[t0] >= 100 && MathIsValidNumber(g_otZ[t0]))
+         key[nk++] = MathFloor(MathMin(MathAbs(g_otZ[t0]), 999.0) * 1000.0) * 1048576.0 + cfg;
+     }
+   ArrayResize(key, nk);
+   ArraySort(key);
+   int lp[], ln[];
+   int top = 20, np = 0, nn = 0;
+   ArrayResize(lp, top);
+   ArrayResize(ln, top);
+   for(int j = nk - 1; j >= 0 && (np < top || nn < top); j--)
+     {
+      int cfg = (int)((long)key[j] % 1048576), i = (cfg / g_obNW) % g_obND, cs = cfg / (g_obNW * g_obND);
+      bool pos = g_otZ[ObTr(cfg, 0, 0)] > 0;
+      if((pos && np >= top) || (!pos && nn >= top))
+         continue;
+      bool seen = false;
+      int m = pos ? np : nn;
+      for(int z = 0; z < m && !seen; z++)
+        {
+         int o = pos ? lp[z] : ln[z];
+         int oi = (o / g_obNW) % g_obND, ocs = o / (g_obNW * g_obND);
+         seen = oi == i && g_osKey[ocs] == g_osKey[cs];
+        }
+      if(seen)
+         continue;
+      if(pos)
+         lp[np++] = cfg;
+      else
+         ln[nn++] = cfg;
+     }
+   //--- regole per lo Strategy Tester: netta del broker peggiore, stabile nelle due meta', una per orario dei dati e durata del range
+   ArrayResize(key, ntr);
+   nk = 0;
+   for(int tr = 0; tr < ntr; tr++)
+      if(g_otN[tr] >= 100 && g_otSt[tr] && MathIsValidNumber(g_otZw[tr]) && g_otEw[tr] > 0 && g_otZw[tr] >= InpOrbRuleZ)
+         key[nk++] = MathFloor(MathMin(g_otZw[tr], 999.0) * 1000.0) * 1048576.0 + tr;
+   ArrayResize(key, nk);
+   ArraySort(key);
+   ArrayResize(g_orX, MathMax(0, InpOrbRules));
+   for(int j = nk - 1; j >= 0 && g_orN < InpOrbRules; j--)
+     {
+      int tr = (int)((long)key[j] % 1048576), cfg = tr / (3 * OB_NT), i = (cfg / g_obNW) % g_obND, cs = cfg / (g_obNW * g_obND);
+      bool seen = false;
+      for(int z = 0; z < g_orN && !seen; z++)
+        {
+         int o = g_orX[z] / (3 * OB_NT);
+         seen = (o / g_obNW) % g_obND == i && g_osKey[o / (g_obNW * g_obND)] == g_osKey[cs];
+        }
+      if(!seen)
+         g_orX[g_orN++] = tr;
+     }
+   int nCand = nk;
+   //--- pagina
+   string br = "";
+   for(int p = 1; p < NPRF; p++)
+      br += (p > 1 ? " e " : "") + g_cp[p].name;
+   SecStart("ORB a tutti gli orari: come si legge",
+            "Nessun orario scelto prima: il range iniziale (ORB) &egrave; misurato a <b>ogni orario di inizio</b>, ogni " + I2S(g_obStep) +
+            " minuti di tutta la giornata, nell'ora locale di " + clk + " (convertita giorno per giorno: ora legale USA, europea e nessuna), " +
+            "con range di " + lists + " minuti e finestre di " + wl + " minuti dopo la fine del range: " + I2S(ncf) + " combinazioni, " +
+            I2S(ncf * OB_NT * 3) + " con operazioni e lati. <b>Rottura</b> = primo tocco oltre il massimo o il minimo del range. " +
+            "<b>Quando rompe</b> = minuti dalla fine del range. <b>Tocca l'altro lato</b> = rottura falsa: dopo la rottura il prezzo arriva " +
+            "anche all'altro lato. <b>Chiude oltre</b> = a fine finestra il prezzo &egrave; oltre il lato rotto (con un prezzo casuale il " +
+            "50%). <b>Estensione</b> = quanto corre oltre il lato rotto, in multipli del range. <b>Operazione</b>: entrata alla chiusura della " +
+            "prima candela da 1 minuto che chiude fuori dal range (non al tocco: con i soli dati M1 il prezzo esatto del tocco non si conosce e " +
+            "un ordine stop riempito proprio sul livello darebbe un vantaggio finto, da +0,02 a +0,07 R su prezzi casuali); stop all'altro lato " +
+            "del range o a met&agrave;; obiettivo 1 o 2 volte il rischio o chiusura a fine finestra; <b>fade</b> = la stessa operazione al " +
+            "contrario (vende la rottura al rialzo). Con un prezzo casuale l'aspettativa &egrave; zero e 'segui 1:1' arriva prima " +
+            "all'obiettivo nel 50% dei trade chiusi: <b>z</b> = distanza da zero in deviazioni standard (un trade al giorno). Netta = spread " +
+            "per ora, commissione, slittamento e swap di " + br + "; netta peggiore = il broker con il risultato pi&ugrave; basso. " +
+            "Stop e obiettivi sono eseguiti al prezzo esatto: lo slittamento reale degli stop &egrave; nel parametro di ogni broker. " +
+            "<b>Attenzione ai confronti multipli</b>: su migliaia di combinazioni correlate molte superano |z| 2 per caso; conta ci&ograve; " +
+            "che &egrave; stabile nelle due met&agrave;, ritorna a orari e durate vicini e resta positivo con i costi. Orari equivalenti " +
+            "(stesso orario dei dati a gennaio e a luglio, per esempio NY 09:30 e LDN 14:30, diversi solo nelle settimane del cambio d'ora " +
+            "sfasato) sono mostrati una volta. Tutte le combinazioni sono nel CSV " + (csvOk ? "<b>" + csvPath + "</b>" : "(non creato)") + ". Il testo &egrave; in Testi &rarr; ORB.");
+   SecEnd();
+   R(g_repOrb, "");
+   R(g_repOrb, "[Dove la rottura prosegue piu' del caso (segui la rottura): segui 1:1 entrambi i lati, ordinati per z lordo]");
+   OrbTable(lp, np, "Dove la rottura prosegue pi&ugrave; del caso (segui la rottura)",
+           "Le combinazioni in cui, dopo la chiusura fuori dal range, il prezzo arriva a +1R prima dell'altro lato pi&ugrave; spesso del 50% " +
+           "(segui 1:1, entrambi i lati, almeno 100 trade), ordinate per z. Un risultato per orario dei dati e durata del range (la finestra " +
+           "con lo z pi&ugrave; alto). Ultima colonna: l'operazione con lo z netto del broker peggiore pi&ugrave; alto per quella combinazione " +
+           "(* = segno diverso in una delle due met&agrave;).");
+   R(g_repOrb, "");
+   R(g_repOrb, "[Dove la rottura fallisce piu' del caso (fade): segui 1:1 entrambi i lati, ordinati per z lordo]");
+   OrbTable(ln, nn, "Dove la rottura fallisce pi&ugrave; del caso (fade)",
+           "Le combinazioni in cui, dopo la chiusura fuori dal range, il prezzo torna all'altro lato prima di arrivare a +1R pi&ugrave; spesso " +
+           "del 50%: qui la rottura &egrave; spesso falsa e conviene l'operazione contraria (fade). Stesse colonne della tabella sopra.");
+   SecStart("Dettaglio delle anomalie pi&ugrave; forti",
+            "Per le prime 5 di ogni tabella: quando rompe, quanto corre, tutte le operazioni (lordo, netto per broker, due met&agrave;, lati) e " +
+            "segui 1:1 per giorno e per ampiezza del range rispetto ai 20 giorni precedenti.");
+   R(g_repOrb, "");
+   R(g_repOrb, "[Dettaglio delle anomalie piu' forti]");
+   int rank = 0;
+   for(int r = 0; r < 5 && r < np && !IsStopped(); r++)
+      OrbDetail(s, lp[r], ++rank, d0, d1, tMid);
+   for(int r = 0; r < 5 && r < nn && !IsStopped(); r++)
+      OrbDetail(s, ln[r], ++rank, d0, d1, tMid);
+   SecEnd();
+   SecStart("Cosa capita a ogni orario (" + MKT_NAME[g_obClk[0]] + ", range " + I2S(g_obD[iRef]) + " min, finestra " + I2S(g_obW[xRef]) + " min)",
+            "Tutti gli orari di inizio della giornata con la stessa durata del range e la stessa finestra: quale evento capita pi&ugrave; spesso " +
+            "a ogni orario. Chiude oltre: blu = pi&ugrave; del 50% (la rottura tiene), rosso = meno. Lorda 1:1: colore = z. Le altre durate e " +
+            "finestre sono nella mappa sotto e nel CSV.");
+   THead("Ora locale|Orario dei dati (inverno / estate)|Giorni|% rompe (su / gi&ugrave;)|Minuti alla rottura|% tocca l'altro lato|" +
+         "% chiude oltre il lato rotto|Estensione mediana (range)|Segui 1:1: % obiettivo / stop / a tempo|Lorda 1:1 R (z)|Netta peggiore 1:1 R (z)|" +
+         "Operazione migliore (netta peggiore)");
+   W(evRows);
+   TEnd();
+   SecEnd();
+   string hh = "Ora locale|Orario dei dati";
+   for(int i = 0; i < g_obND; i++)
+      for(int x = 0; x < g_obNW; x++)
+         hh += "|" + I2S(g_obD[i]) + "&rarr;" + I2S(g_obW[x]);
+   for(int c = 0; c < g_obNC; c++)
+     {
+      SecStart("Mappa: " + MKT_NAME[g_obClk[c]] + (c == 0 ? "" : " (orologio con un'altra ora legale)"),
+               "Ogni cella: range &rarr; finestra (minuti). Numero = % dei trade 'segui 1:1' che arrivano prima all'obiettivo che allo stop " +
+               "(atteso 50); colore = z dell'aspettativa lorda (blu = la rottura prosegue, rosso = fallisce). Passa sopra una cella per i dettagli.");
+      if(c > 0)
+         W("<details><summary class='muted'>Mostra la mappa</summary>");
+      THead(hh);
+      W(heat[c]);
+      TEnd();
+      if(c > 0)
+         W("</details>");
+      SecEnd();
+      heat[c] = "";
+     }
+   R(g_repOrb, "");
+   R(g_repOrb, "[Cosa capita a ogni orario (" + MKT_NAME[g_obClk[0]] + "), range " + I2S(g_obD[iRef]) + " min, finestra " + I2S(g_obW[xRef]) +
+     " min: rompe (su), minuti alla rottura, tocca l'altro lato, chiude oltre il lato rotto (atteso 50%), estensione, segui 1:1]");
+   g_repOrb += g_obEvTx;
+   g_obEvTx = "";
+   R(g_repOrb, "");
+   R(g_repOrb, "Combinazioni: " + I2S(ncf) + " (" + I2S(ncf * OB_NT * 3) + " con operazioni e lati); candidate a regola (netta peggiore con z >= " +
+     F(InpOrbRuleZ, 1) + ", stabile, almeno 100 trade): " + I2S(nCand) + ", esportate " + I2S(g_orN) + " (una per orario e durata). CSV: " + csvPath);
+   PrintFormat("[MarketProfiler] ORB: %d combinazioni, %d candidate a regola, %d esportate", ncf, nCand, g_orN);
+  }
+
+// regole ORB nel file dell'EA (chiamata da RRTab prima di chiudere il file delle regole)
+void OrbRulesWrite(void)
+  {
+   for(int r = 0; r < g_orN; r++)
+     {
+      int tr = g_orX[r], sd = tr % 3, t = (tr / 3) % OB_NT, cfg = tr / (3 * OB_NT);
+      int x = cfg % g_obNW, i = (cfg / g_obNW) % g_obND, cs = cfg / (g_obNW * g_obND);
+      int j = t < 4 ? t : t - 4, id = ++g_ruN;
+      g_ruReal++;
+      string ctx = ObLoc(cs) + " (dati " + ObDat(cs) + "), range " + I2S(g_obD[i]) + " min, finestra " + I2S(g_obW[x]) + " min, " + OB_SIDE[sd];
+      if(g_ruH != INVALID_HANDLE)
+         FileWriteString(g_ruH, I2S(id) + ";1;2;" + I2S((int)OB_K[j]) + ";0;0;" + I2S(g_obW[x]) + ";0;0;-1;-1;0;0;" + Plain("ORB " + OB_OP[t] + " | " + ctx) +
+                         ";" + I2S(g_otN[tr]) + ";" + DoubleToString(g_otEw[tr], 4) + ";" + DoubleToString(g_otZw[tr], 2) + ";" + I2S(g_otN[tr]) + ";" +
+                         DoubleToString(g_otEw[tr], 4) + ";1;" + I2S(g_obClk[cs / g_obNS]) + ";" + I2S((cs % g_obNS) * g_obStep) + ";" + I2S(g_obD[i]) + ";" +
+                         I2S(g_obW[x]) + ";" + (OB_MID[j] ? "1" : "0") + ";" + I2S((int)OB_K[j]) + ";" + (t < 4 ? "1" : "-1") + ";" +
+                         I2S(sd == 0 ? 2 : sd - 1) + ";-1\n");
+      g_ruHtml += "<tr>" + TD(I2S(id)) + TD("ORB (M1)") + TD(OB_OP[t]) + TD(ctx) + TD(I2S(g_otN[tr])) + TD(SgnF(g_otEw[tr], 3)) + TD(ZS(g_otZw[tr])) +
+                  TD(I2S(g_otN[tr])) + TD(SgnF(g_otEw[tr], 3)) + "</tr>";
+      R(g_ruTx, "  Regola " + I2S(id) + ": ORB " + OB_OP[t] + " | " + ctx + " (analisi: N " + I2S(g_otN[tr]) + ", netta peggiore " + SgnF(g_otEw[tr], 3) +
+        " R, z " + ZS(g_otZw[tr]) + ", meta' lorde " + SgnF(g_otE1[tr], 2) + " / " + SgnF(g_otE2[tr], 2) + "; un trade al giorno)");
+     }
+  }
+
 void RRTab(CSeries &s, const int barSec, const string sym, const string clean)
   {
    for(int p = 0; p < NPRF; p++)
@@ -8610,7 +9624,8 @@ void RRTab(CSeries &s, const int barSec, const string sym, const string clean)
    g_ruH = FileOpen(g_ruFile, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
    if(g_ruH != INVALID_HANDLE)
       FileWriteString(g_ruH, "id;tf_minuti;lato;R;stop_tipo;stop_K;max_candele;dimA;valA;dimB;valB;p20;p80;descrizione;N;netta_peggiore_R;z;" +
-                      "trade_una_alla_volta;R_una_alla_volta\n");
+                      "trade_una_alla_volta;R_una_alla_volta;orb;orb_piazza;orb_inizio;orb_range;orb_finestra;orb_stop;orb_obiettivo;" +
+                      "orb_modo;orb_lati;orb_giorno\n");
    g_buf = true;
    g_bufS = "";
    SecStart("Coppie di contesti: come si legge",
@@ -8679,6 +9694,7 @@ void RRTab(CSeries &s, const int barSec, const string sym, const string clean)
       g_csvH = INVALID_HANDLE;
       PrintFormat("[MarketProfiler] contesti e coppie salvati in %s", csvPath);
      }
+   OrbRulesWrite();  // regole della scheda ORB, numerate dopo quelle dei contesti
    if(g_ruH != INVALID_HANDLE)
      {
       FileClose(g_ruH);
@@ -8702,7 +9718,9 @@ void RRTab(CSeries &s, const int barSec, const string sym, const string clean)
             "Common\\Files\\MarketProfiler_tester_" + al[0] + ".csv e nel diario.<br>Il file delle regole &egrave; nella cartella " +
             "comune: lo leggono gli agenti locali del tester, non quelli remoti o del cloud. L'EA riconosce i contesti con le stesse " +
             "definizioni dello script sulle candele del broker: piccole differenze (volume del broker invece di quello dei dati, " +
-            "giorni del server) sono normali.");
+            "giorni del server) sono normali. Le regole <b>ORB</b> (scheda ORB) entrano alla chiusura della prima candela M1 fuori dal " +
+            "range dell'orario locale della piazza: l'EA converte l'orario con il fuso del server (parametro 'Fuso orario del server', " +
+            "New York + 7 per FP Markets e IC Markets).");
    if(g_ruReal == 0)
       W("<p style='color:#f59e0b'>Nessuna regola supera i filtri (z netto del broker peggiore &ge; " + F(InpRuleMinZ, 1) + ", stabile " +
         "nelle due met&agrave;, positiva una posizione alla volta): sono esportati solo i riferimenti. Puoi abbassare 'z minimo' nei " +
@@ -9019,14 +10037,14 @@ bool Analyze(const string sym)
      "nel 10% dei periodi.");
    for(int k = 0; k < NTF; k++)
       W("<button data-tab='" + TF_KEY[k] + "'>" + TF_LABEL[k] + "</button>");
-   W("<button data-tab='sess'>Sessioni</button><button data-tab='lev'>Livelli</button><button data-tab='dir'>Direzione</button>" +
+   W("<button data-tab='sess'>Sessioni</button><button data-tab='orb'>ORB</button><button data-tab='lev'>Livelli</button><button data-tab='dir'>Direzione</button>" +
      "<button data-tab='rr'>R/R lordo</button><button data-tab='rrb1'>R/R " + g_cp[1].name + "</button><button data-tab='rrb2'>R/R " +
      g_cp[2].name + "</button><button data-tab='combo'>Coppie di contesti</button><button data-tab='seq'>Strategie</button>" +
      "<button data-tab='swing'>Swing</button><button data-tab='break'>Rotture</button><button data-tab='imp'>Impulsi</button>" +
      "<button data-tab='news'>Notizie</button><button data-tab='gap'>Gap</button>");
    W("<button data-tab='volume'>Volume</button></nav>");
    W("<nav class='tx'><span>Testi da copiare:</span><button data-tab='report'>Rapporto completo</button><button data-tab='txsum'>Riepilogo</button>" +
-     "<button data-tab='txtf'>Timeframe</button><button data-tab='txev'>Eventi e sessioni</button><button data-tab='txlv'>Livelli</button>" +
+     "<button data-tab='txtf'>Timeframe</button><button data-tab='txev'>Eventi e sessioni</button><button data-tab='txorb'>ORB</button><button data-tab='txlv'>Livelli</button>" +
      "<button data-tab='txdir'>Direzione</button><button data-tab='txrr'>R/R lordo</button><button data-tab='txb1'>R/R " + g_cp[1].name +
      "</button><button data-tab='txb2'>R/R " + g_cp[2].name + "</button><button data-tab='txcb'>Coppie</button><button data-tab='txsq'>Strategie e regole</button>" +
      "<button data-tab='txvol'>Volume</button></nav></header><main>");
@@ -9100,6 +10118,14 @@ bool Analyze(const string sym)
    else
       SessionTab(m5, 300);
    W("</div>");
+   Comment("MarketProfiler ", sym, ": ORB a tutti gli orari ...");
+   W("<div class='tab' id='tab-orb' hidden>");
+   if(m1.n > 5000)
+      OrbTab(m1, 60, clean);
+   else
+      OrbTab(m5, 300, clean);
+   W("</div>");
+   PrintFormat("[MarketProfiler] %s: ORB fatto", sym);
    Comment("MarketProfiler ", sym, ": livelli chiave e direzione ...");
    g_repLv = "";
    g_repDir = "";
@@ -9154,7 +10180,7 @@ bool Analyze(const string sym)
    W("</div><div class='tab' id='tab-sum' hidden>");
    HiTab();
    W("</div><div class='tab' id='tab-report' hidden>");
-   SecStart("Rapporto completo", "Tutti i risultati in forma di testo: riepilogo, timeframe, eventi, livelli, direzione, rischio/rendimento " +
+   SecStart("Rapporto completo", "Tutti i risultati in forma di testo: riepilogo, timeframe, eventi, ORB, livelli, direzione, rischio/rendimento " +
             "lordo e il riepilogo netto di ogni broker. Premi 'Copia tutto' e incollalo in chat per l'analisi. Le parti singole (e i " +
             "contesti completi del rischio/rendimento) sono nelle altre schede 'Testi da copiare'.");
    W("<button class='cp' onclick='cp(this)'>Copia tutto</button><textarea id='rep' readonly>");
@@ -9166,6 +10192,8 @@ bool Analyze(const string sym)
    W(g_rep);
    W("\n=== EVENTI ===\n");
    W(g_repEv);
+   W("\n");
+   W(g_repOrb);
    W("\n=== LIVELLI CHIAVE (massimo, minimo, chiusura del periodo precedente e apertura del periodo; dopo il tocco, dalla chiusura " +
      "della barra che tocca: prosegue di r oltre o respinto di r, r = " + F(InpLevelR * 100, 0) + "% del range mediano; livello finto = " +
      "massimo/minimo spostati di +/-25% del range mediano, stessa misura; effetto del livello = (prosegue - respinto) vero meno finto; " +
@@ -9201,6 +10229,8 @@ bool Analyze(const string sym)
    TxTab("txtf", "Testo: timeframe e periodo in corso", "Le schede dei timeframe (da 1 minuto a 1 anno) e lo stato del periodo in corso.",
          g_repHead + "\n=== PERIODO IN CORSO ===\n" + g_repCur + g_rep);
    TxTab("txev", "Testo: eventi e sessioni", "Swing, rotture, impulsi, notizie, gap, orari chiave e sessioni.", "EVENTI E SESSIONI - " + sym + "\n" + g_repEv);
+   TxTab("txorb", "Testo: ORB a tutti gli orari", "Rottura del range iniziale a ogni orario, durata e finestra: anomalie, dettagli, " +
+         "cosa capita a ogni orario (tutte le combinazioni nel CSV).", "ORB - " + sym + "\n" + g_repOrb);
    TxTab("txlv", "Testo: livelli", "Livelli chiave, vita del livello e lettura sui timeframe inferiori.", lvHead + g_repLv);
    TxTab("txdir", "Testo: direzione", "Movimenti forti, cosa li precede, quando si formano, cosa succede dopo.", "DIREZIONE - " + sym + "\n" + g_repDir);
    TxTab("txrr", "Testo: rischio/rendimento lordo", "Riepilogo di ogni timeframe, contesti migliori e peggiori e tutti i contesti, senza costi.",
