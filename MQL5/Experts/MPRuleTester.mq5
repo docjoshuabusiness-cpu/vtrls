@@ -13,6 +13,9 @@
 //| stop all'altro lato o a meta',                                   |
 //| obiettivo in multipli del rischio, chiusura a fine finestra.     |
 //| Contesti calcolati con le stesse definizioni dello script.       |
+//| Rollover (NY 17:00) come nello script: timeframe fino a H1 senza |
+//| entrate nella finestra e chiusura a mercato al suo inizio; ORB   |
+//| saltato nei giorni in cui range o finestra la toccano.           |
 //| Risultati in R (profitto netto / rischio del trade) nel diario e |
 //| in Common\Files\MarketProfiler_tester_<strumento>.csv            |
 //+------------------------------------------------------------------+
@@ -74,6 +77,10 @@ input bool   InpOrbFade   = false;  // Fade: contro la rottura (false = segui la
 input int    InpOrbSides  = 2;      // Lati: 2 = entrambi, 0 = solo rotture al rialzo, 1 = solo al ribasso
 input int    InpOrbDay    = -1;     // Giorno: 0 = lunedi' ... 4 = venerdi' (orologio dei dati), -1 = tutti
 input int    InpOrbConfirm = 1;     // Candela di conferma in minuti: 1 = prima chiusura M1 fuori dal range, 5 / 15 / 30 / 60 = M5 / M15 / M30 / H1
+input group  "Rollover (come nello script)"
+input bool   InpRollSkip  = true;   // Rollover (NY 17:00): niente entrate nella finestra, chiusura prima (timeframe fino a H1, ORB)
+input int    InpRollPre   = 15;     // Rollover: minuti della finestra prima di NY 17:00
+input int    InpRollPost  = 60;     // Rollover: minuti della finestra dopo NY 17:00
 
 //--- nomi con cui i broker chiamano lo stesso strumento (come nello script)
 string ALIAS_GRP[11] = {"US100,USTEC,NAS100,NDX100,USTECH,NQ100,NASDAQ100,NASDAQ",
@@ -118,7 +125,7 @@ int      g_oPh = 3;                                   // 0 range in corso, 1 att
 double   g_oHi = 0, g_oLo = 0;
 
 //--- posizione
-datetime g_lastT = 0, g_entryT = 0;
+datetime g_lastT = 0, g_entryT = 0, g_rollX = 0;  // g_rollX = chiusura per il rollover (0 = nessuna)
 int      g_skip = 0;
 CTrade   g_trade;
 
@@ -698,6 +705,30 @@ datetime LocalToServer(const long day, const int mkt, const int mins)
    return t + (SrvOffset(t) - MktOffset(mkt, t)) * 3600;
   }
 
+//--- rollover: NY 17:00 = mezzanotte dell'orologio New York + 7; finestra da InpRollPre minuti prima a InpRollPost minuti dopo
+datetime SrvToNY7(const datetime t)
+  {
+   long u = (long)t - (long)SrvOffset(t) * 3600;
+   return (datetime)(u + (IsUSDST((datetime)u) ? 3 : 2) * 3600);
+  }
+int RollPre(void) { return InpRollPre < 0 ? 0 : (InpRollPre > 600 ? 600 : InpRollPre); }
+int RollPost(void) { return InpRollPost < 0 ? 0 : (InpRollPost > 600 ? 600 : InpRollPost); }
+bool RollIn(const datetime t)
+  {
+   if(!InpRollSkip)
+      return false;
+   int m = (int)(((long)SrvToNY7(t) % 86400) / 60);
+   return m >= 1440 - RollPre() || m < RollPost();
+  }
+datetime RollNext(const datetime t)  // inizio della prossima finestra dopo t (orario del server)
+  {
+   long t7 = (long)SrvToNY7(t), st = (t7 / 86400 + 1) * 86400 - (long)RollPre() * 60;
+   if(st <= t7)
+      st += 86400;
+   return (datetime)((long)t + st - t7);
+  }
+bool RollHit(const datetime a, const datetime b) { return InpRollSkip && (RollIn(a) || (long)RollNext(a) <= (long)b); }
+
 int DowMon(const datetime t) { return (int)(((long)t / 86400 + 3) % 7); }  // 0 = lunedi'
 
 // prossima giornata ORB: la prima la cui finestra finisce dopo 'now', diversa dall'ultima
@@ -746,6 +777,8 @@ void OrbTick(void)
       //--- range: candele M1 dall'inizio alla fine del range (almeno meta', la prima entro 2 minuti dall'inizio), come nello script
       g_oPh = 3;
       if(g_oDay >= 0 && DowMon((datetime)((long)g_oS0 + (long)InpHourShift * 3600)) != g_oDay)
+         return;
+      if(RollHit(g_oS0, (datetime)((long)g_oX - 1)))  // range o finestra nel rollover: giornata saltata come nello script
          return;
       MqlRates r[];
       int n = CopyRates(_Symbol, PERIOD_M1, g_oS0, (datetime)((long)g_oE - 1), r);
@@ -825,6 +858,14 @@ void OnTick(void)
       OrbTick();
       return;
      }
+   //--- rollover (timeframe fino a H1): chiusura a mercato all'inizio della finestra
+   ulong tk = 0;
+   if(g_rollX > 0 && TimeCurrent() >= g_rollX)
+     {
+      if(MyPosition(tk))
+         g_trade.PositionClose(tk);
+      g_rollX = 0;
+     }
    datetime t0 = iTime(_Symbol, g_tf, 0);
    if(t0 == 0 || t0 == g_lastT)
       return;
@@ -833,7 +874,6 @@ void OnTick(void)
    g_lastT = t0;
    FeedNew();
    //--- chiusura a tempo: dopo L candele dalla candela di entrata
-   ulong tk = 0;
    if(MyPosition(tk))
      {
       int sh = iBarShift(_Symbol, g_tf, g_entryT, false);
@@ -843,6 +883,9 @@ void OnTick(void)
          return;
      }
    if(g_k < 20 || MyPosition(tk))
+      return;
+   bool rollTf = InpRollSkip && g_tfSec <= 3600;
+   if(rollTf && RollIn(t0))  // nessuna entrata nella finestra del rollover
       return;
    //--- entrata: prezzo bid all'apertura della candela, stop e obiettivo misurati da li' (come nello script)
    double O = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -868,7 +911,10 @@ void OnTick(void)
    string cm = "MP r=" + DoubleToString(risk, 2);
    bool ok = g_side == 0 ? g_trade.Buy(lots, _Symbol, 0, sl, tp, cm) : g_trade.Sell(lots, _Symbol, 0, sl, tp, cm);
    if(ok)
+     {
       g_entryT = t0;
+      g_rollX = rollTf ? RollNext(t0) : 0;
+     }
   }
 
 //--- risultati in R dalla storia delle operazioni

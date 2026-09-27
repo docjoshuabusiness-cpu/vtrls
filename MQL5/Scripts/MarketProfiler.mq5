@@ -102,6 +102,9 @@ input bool   InpOrbAllClocks = true;  // ORB: orari locali di tre piazze (ora le
 input double InpOrbRuleZ     = 3.0;   // ORB: z minimo netto del broker peggiore per esportare una regola (le combinazioni sono decine di migliaia)
 input int    InpOrbRules     = 10;    // ORB: regole esportate per lo Strategy Tester al massimo
 input bool   InpSkipIncomplete = false; // Escludi i primi anni con copertura oraria incompleta (false = analizza tutto lo storico)
+input bool   InpRollSkip     = true;  // Rollover (NY 17:00 = mezzanotte del broker): niente entrate nella finestra, operazioni intraday chiuse prima (R/R fino a H1, ORB)
+input int    InpRollPre      = 15;    // Rollover: minuti della finestra prima di NY 17:00
+input int    InpRollPost     = 60;    // Rollover: minuti della finestra dopo NY 17:00
 input double InpLevelR       = 0.10;  // Livelli: distanza di reazione r (frazione del range mediano del periodo)
 input ENUM_LV_LOW InpLevelLowTF = LV_LOW_NONE; // Livelli: timeframe sotto le 4 ore
 input int    InpLvFollow     = 3;     // Livelli: candele osservate dopo una chiusura oltre il livello (conferma, falsa, ritest)
@@ -198,12 +201,13 @@ class CSeries
 public:
    datetime          t[];
    double            o[], h[], l[], c[], v[];
+   int               sp[];  // spread della barra in punti (0 se non registrato)
    int               n;
    bool              hasVol, truncated;
                      CSeries(void) { n = 0; hasVol = false; truncated = false; }
    void              Free(void)
      {
-      ArrayFree(t); ArrayFree(o); ArrayFree(h); ArrayFree(l); ArrayFree(c); ArrayFree(v);
+      ArrayFree(t); ArrayFree(o); ArrayFree(h); ArrayFree(l); ArrayFree(c); ArrayFree(v); ArrayFree(sp);
       n = 0; hasVol = false; truncated = false;
      }
    // carica dalla prima all'ultima barra disponibile (o le ultime maxBars), a blocchi di chunkDays giorni
@@ -250,13 +254,14 @@ public:
          int base = n;
          n += got;
          ArrayResize(t, n, reserve); ArrayResize(o, n, reserve); ArrayResize(h, n, reserve); ArrayResize(l, n, reserve);
-         ArrayResize(c, n, reserve); ArrayResize(v, n, reserve); ArrayResize(vr, n, reserve);
+         ArrayResize(c, n, reserve); ArrayResize(v, n, reserve); ArrayResize(vr, n, reserve); ArrayResize(sp, n, reserve);
          for(int i = 0; i < got; i++)
            {
             int k = base + i;
             t[k] = r[i].time; o[k] = r[i].open; h[k] = r[i].high; l[k] = r[i].low; c[k] = r[i].close;
             v[k] = (double)r[i].tick_volume;
             vr[k] = (double)r[i].real_volume;
+            sp[k] = r[i].spread;
             if(r[i].real_volume > 0)
                withReal++;
            }
@@ -2350,13 +2355,19 @@ void TrimFrom(CSeries &s, const datetime from)
    ArrayCopy(l2, s.l, 0, k, m);
    ArrayCopy(c2, s.c, 0, k, m);
    ArrayCopy(v2, s.v, 0, k, m);
-   ArrayFree(s.t); ArrayFree(s.o); ArrayFree(s.h); ArrayFree(s.l); ArrayFree(s.c); ArrayFree(s.v);
+   int sp2[];
+   bool hasSp = ArraySize(s.sp) == s.n;
+   if(hasSp)
+      ArrayCopy(sp2, s.sp, 0, k, m);
+   ArrayFree(s.t); ArrayFree(s.o); ArrayFree(s.h); ArrayFree(s.l); ArrayFree(s.c); ArrayFree(s.v); ArrayFree(s.sp);
    ArrayCopy(s.t, t2);
    ArrayCopy(s.o, o2);
    ArrayCopy(s.h, h2);
    ArrayCopy(s.l, l2);
    ArrayCopy(s.c, c2);
    ArrayCopy(s.v, v2);
+   if(hasSp)
+      ArrayCopy(s.sp, sp2);
    s.n = m;
   }
 
@@ -6554,6 +6565,215 @@ datetime DataToNY7(const datetime t)  // orario dei dati -> orologio New York + 
    return (datetime)(u + (IsUSDST((datetime)u) ? 3 : 2) * 3600);
   }
 
+//--- rollover: NY 17:00 = mezzanotte dell'orologio New York + 7; finestra da InpRollPre minuti prima a InpRollPost minuti dopo
+int RollPre(void) { return InpRollPre < 0 ? 0 : (InpRollPre > 600 ? 600 : InpRollPre); }
+int RollPost(void) { return InpRollPost < 0 ? 0 : (InpRollPost > 600 ? 600 : InpRollPost); }
+bool RollWin(const int m7) { return m7 >= 1440 - RollPre() || m7 < RollPost(); }  // minuto dell'orologio NY+7 dentro la finestra
+bool RollIn(const datetime t) { return InpRollSkip && RollWin((int)(((long)DataToNY7(t) % 86400) / 60)); }
+datetime RollNext(const datetime t)  // inizio della prossima finestra del rollover dopo t (orario dei dati)
+  {
+   long t7 = (long)DataToNY7(t), st = (t7 / 86400 + 1) * 86400 - (long)RollPre() * 60;
+   if(st <= t7)
+      st += 86400;
+   return (datetime)((long)t + st - t7);
+  }
+bool RollHit7(const long a7, const long b7)  // l'intervallo [a7, b7] dell'orologio NY+7 tocca la finestra
+  {
+   if(!InpRollSkip)
+      return false;
+   if(RollWin((int)((a7 % 86400) / 60)))
+      return true;
+   long st = (a7 / 86400 + 1) * 86400 - (long)RollPre() * 60;
+   if(st <= a7)
+      st += 86400;
+   return st <= b7;
+  }
+string RollTxt(void)
+  {
+   string w = HM(1440 - RollPre()) + "-" + HM(RollPost()) + " del broker (NY " + HM(1440 - RollPre() - 420) + "-" + HM(RollPost() - 420) + ")";
+   if(!InpRollSkip)
+      return "Rollover (NY 17:00, finestra " + w + "): incluso in tutte le analisi (parametro 'Rollover' = false).";
+   return "Rollover (NY 17:00 = mezzanotte del broker, finestra " + w + "): lo spread si allarga e sui dati bid il prezzo scende senza " +
+          "scambi veri, poi torna. Nel rischio/rendimento fino a H1 nessuna entrata nella finestra e le operazioni si chiudono a mercato " +
+          "prima; nell'ORB esclusi i giorni in cui il range o la finestra la toccano. Le altre analisi la includono (vedi Ore buche e rollover).";
+  }
+
+// sequenze di fasce da 15 minuti con f[] vero, sulla giornata circolare: "23:45-01:00, 05:00-05:30"
+string SlotRuns(const bool &f[])
+  {
+   int z0 = -1;
+   for(int z = 0; z < 96 && z0 < 0; z++)
+      if(!f[z])
+         z0 = z;
+   if(z0 < 0)
+      return "tutta la giornata";
+   string t = "";
+   int a = -1;
+   for(int k = 1; k <= 96; k++)
+     {
+      int z = (z0 + k) % 96;
+      if(f[z] && a < 0)
+         a = z;
+      if(!f[z] && a >= 0)
+        {
+         t += (t != "" ? ", " : "") + HM(a * 15) + "-" + HM(z * 15);
+         a = -1;
+        }
+     }
+   return t == "" ? "nessuna" : t;
+  }
+
+//--- ore buche e rollover: la giornata a passi di 15 minuti sull'orologio New York + 7 (mezzanotte = NY 17:00): mercato aperto,
+//    attivita', volume, spread registrato nelle barre, punte del bid (lo spread che si allarga abbassa il bid senza scambi) e movimento medio
+void DeadHours(CSeries &s, const int barSec)
+  {
+   int dayN[96], barN[96], aN[96], spN[96], dnS[96], upS[96];
+   double act[96], vol[96], spS[96], rt[96], rt2[96];
+   long lastDay[96];
+   for(int z = 0; z < 96; z++)
+     {
+      dayN[z] = 0;
+      barN[z] = 0;
+      aN[z] = 0;
+      spN[z] = 0;
+      dnS[z] = 0;
+      upS[z] = 0;
+      act[z] = 0;
+      vol[z] = 0;
+      spS[z] = 0;
+      rt[z] = 0;
+      rt2[z] = 0;
+      lastDay[z] = -1;
+     }
+   bool hasSp = ArraySize(s.sp) == s.n;
+   int st = barSec / 60 < 1 ? 1 : barSec / 60;
+   double ew = 0, al = 2.0 / (1440.0 / st + 1.0), volAll = 0;
+   bool init = false;
+   long days = 0, cur7 = -1, curD = -1, off = 0;
+   int nAll = 0;
+   for(int i = 0; i < s.n; i++)
+     {
+      long dd = (long)s.t[i] / 86400;
+      if(dd != curD)  // differenza dall'orologio NY+7 una volta per giorno dei dati
+        {
+         curD = dd;
+         off = (long)DataToNY7(s.t[i]) - (long)s.t[i];
+        }
+      long t7 = (long)s.t[i] + off, d7 = t7 / 86400;
+      if(d7 != cur7)
+        {
+         cur7 = d7;
+         days++;
+        }
+      int z = (int)((t7 % 86400) / 900);
+      if(lastDay[z] != d7)
+        {
+         lastDay[z] = d7;
+         dayN[z]++;
+        }
+      barN[z]++;
+      if(hasSp && s.sp[i] > 0)
+        {
+         spS[z] += s.sp[i];
+         spN[z]++;
+        }
+      vol[z] += s.v[i];
+      volAll += s.v[i];
+      nAll++;
+      double r = s.h[i] - s.l[i];
+      if(init && ew > 0)
+        {
+         aN[z]++;
+         act[z] += r / ew;
+         if(MathMin(s.o[i], s.c[i]) - s.l[i] >= 2.0 * ew)
+            dnS[z]++;
+         if(s.h[i] - MathMax(s.o[i], s.c[i]) >= 2.0 * ew)
+            upS[z]++;
+         double x = (s.c[i] - s.o[i]) / ew;
+         rt[z] += x;
+         rt2[z] += x * x;
+        }
+      ew = init ? al * r + (1 - al) * ew : r;
+      init = true;
+     }
+   if(days < 20)
+      return;
+   double volMean = nAll > 0 ? volAll / nAll : 0;
+   double spv[];
+   int ns = 0;
+   ArrayResize(spv, 96);
+   for(int z = 0; z < 96; z++)
+      if(spN[z] >= 50)
+         spv[ns++] = spS[z] / spN[z];
+   double spRef = ns > 0 ? MedianOf(spv, ns) : 0;
+   bool fC[96], fT[96], fW[96], fD[96], fR[96];
+   string note[96];
+   double sh[96], av[96], vv[96], sr[96], zA[96], zR[96];
+   for(int z = 0; z < 96; z++)
+     {
+      sh[z] = (double)dayN[z] / days;
+      av[z] = aN[z] > 0 ? act[z] / aN[z] : Nan();
+      vv[z] = s.hasVol && volMean > 0 && barN[z] > 0 ? vol[z] / barN[z] / volMean : Nan();
+      sr[z] = spN[z] >= 50 && spRef > 0 ? spS[z] / spN[z] / spRef : Nan();
+      zA[z] = dnS[z] + upS[z] >= 20 ? (dnS[z] - upS[z]) / MathSqrt((double)(dnS[z] + upS[z])) : Nan();
+      zR[z] = rt2[z] > 0 ? rt[z] / MathSqrt(rt2[z]) : Nan();
+      fC[z] = sh[z] < 0.5;
+      fT[z] = !fC[z] && MathIsValidNumber(av[z]) && av[z] < 0.6 && (!MathIsValidNumber(vv[z]) || vv[z] < 0.6);
+      fW[z] = !fC[z] && MathIsValidNumber(sr[z]) && sr[z] >= 2.0;
+      fD[z] = !fC[z] && MathIsValidNumber(zA[z]) && zA[z] >= 3.0;
+      fR[z] = RollWin(z * 15);
+      string nt = "";
+      if(fR[z])
+         nt += InpRollSkip ? "rollover (escluso da R/R e ORB)" : "rollover";
+      if(fC[z])
+         nt += (nt != "" ? ", " : "") + "mercato chiuso";
+      if(fT[z])
+         nt += (nt != "" ? ", " : "") + "ora buca";
+      if(fW[z])
+         nt += (nt != "" ? ", " : "") + "spread alto";
+      if(fD[z])
+         nt += (nt != "" ? ", " : "") + "punte del bid";
+      note[z] = nt;
+     }
+   string spTxt = spRef > 0 ? "spread = media dello spread registrato nelle barre, in volte la mediana delle fasce (1 = normale; mediana " +
+                  F(spRef, 1) + " punti = " + PX(spRef * MathPow(10.0, -g_digits)) + ")" :
+                  "spread non registrato nelle barre di questo simbolo";
+   string desc = "Ogni fascia di 15 minuti dell'orologio del broker (New York + 7: la mezzanotte &egrave; NY 17:00, il rollover). " +
+                 "Aperto = % dei giorni di mercato con barre nella fascia (sotto 50% = mercato chiuso); attivit&agrave; = range della barra " +
+                 "diviso il range medio delle ultime 24 ore (1 = normale); volume = volume medio della barra in volte la media; " + spTxt +
+                 "; punte gi&ugrave; / su = barre con una coda di almeno 2 volte il range normale sotto o sopra il corpo, per 1000 barre: " +
+                 "molte pi&ugrave; punte in basso (z &ge; 3) = lo spread che si allarga abbassa il bid (i dati sono prezzi bid) senza scambi " +
+                 "veri; movimento z = direzione media delle barre della fascia (entro +/-2 compatibile con il caso). Ora buca = attivit&agrave; e " +
+                 "volume sotto 0.6 del normale. Londra = New York + 5 (tranne le settimane in cui l'ora legale cambia in date diverse).";
+   SecStart("Ore buche e rollover: la giornata a passi di 15 minuti", desc + " " + RollTxt());
+   THead("Broker (NY+7)|New York|Londra|Aperto|Attivit&agrave;|Volume|Spread|Punte gi&ugrave; / su|z punte|Movimento z|Note");
+   R(g_repEv, "");
+   R(g_repEv, "=== ORE BUCHE E ROLLOVER: la giornata a passi di 15 minuti (orologio del broker New York + 7; mezzanotte = NY 17:00) ===");
+   R(g_repEv, "Metodo: " + desc);
+   R(g_repEv, RollTxt());
+   R(g_repEv, "  Mercato chiuso: " + SlotRuns(fC) + "; ore buche: " + SlotRuns(fT) + "; spread alto: " + SlotRuns(fW) + "; punte del bid: " +
+     SlotRuns(fD) + "; finestra del rollover: " + SlotRuns(fR) + " (ora del broker).");
+   for(int z = 0; z < 96; z++)
+     {
+      string pk = barN[z] > 0 ? F(1000.0 * dnS[z] / barN[z], 1) + " / " + F(1000.0 * upS[z] / barN[z], 1) : "-";
+      string spc = MathIsValidNumber(sr[z]) ? F(sr[z], 2) + "&times;" : "-";
+      W("<tr>" + TD(HM(z * 15)) + TD(HM(z * 15 - 420)) + TD(HM(z * 15 - 120)) + TDc(FP(sh[z], 1) + "%", fC[z] ? "rgba(148,163,184,0.35)" : "") +
+        TDc(F(av[z], 2), PCol(av[z], 1.0, 1.0)) + TD(F(vv[z], 2)) + TDc(spc, fW[z] ? "rgba(239,68,68,0.30)" : "") + TD(pk) +
+        TDc(SgnF(zA[z], 1), fD[z] ? "rgba(239,68,68,0.30)" : "") + TDc(SgnF(zR[z], 1), PCol(zR[z], 0.0, 4.0)) + TD(note[z]) + "</tr>");
+      R(g_repEv, "  " + HM(z * 15) + " (NY " + HM(z * 15 - 420) + ", LDN " + HM(z * 15 - 120) + "): aperto " + FP(sh[z], 1) + "%, attivita' " +
+        F(av[z], 2) + ", volume " + F(vv[z], 2) + ", spread " + spc + ", punte giu'/su " + pk + " per 1000 barre (z " + SgnF(zA[z], 1) +
+        "), movimento z " + SgnF(zR[z], 1) + (note[z] != "" ? " -> " + note[z] : ""));
+     }
+   TEnd();
+   W("<p class='muted'>Orari tipici (ora del broker New York + 7), da verificare sui tuoi dati con la tabella: forex e oro fanno il " +
+     "rollover a mezzanotte (NY 17:00), con lo spread largo di solito tra le 23:55 e le 00:15 e a volte fino all'01:00; le ore pi&ugrave; " +
+     "sottili sono tra la chiusura di New York e l'apertura di Tokyo (circa 23:00-02:00); il weekend chiude venerd&igrave; a mezzanotte e " +
+     "riapre luned&igrave; alle 00:00. Oro e indici USA hanno di solito una pausa giornaliera di circa un'ora dopo la mezzanotte " +
+     "(manutenzione dei future CME, NY 17:00-18:00); gli indici europei sono molto pi&ugrave; sottili fuori dall'orario cash (DAX 09:00-17:30 " +
+     "di Francoforte = 10:00-18:30 del broker). Gli orari esatti cambiano da broker a broker.</p>");
+   SecEnd();
+  }
+
 // notti di swap tra due giorni dell'orologio del broker: ogni mezzanotte da lunedi' a venerdi', tripla nel giorno 'triple'
 double CostNights(const long d0, const long d1, const int triple)
   {
@@ -6989,11 +7209,7 @@ void CostSetup(const string dataSym)
    HI_NAME[8] = anyCost ? "Coppie di contesti (aspettativa netta del broker peggiore contro zero)" :
                 "Coppie di contesti (aspettativa LORDA contro zero: costi dei broker non disponibili)";
    if(!anyCost)
-      g_warn += (g_warn != "" ? " " : "") + "COSTI DEI BROKER NON DISPONIBILI: spread, commissione, slittamento e swap valgono 0 per " +
-                InpB1Name + " e " + InpB2Name + ", quindi ogni valore netto o 'netta peggiore' (R/R netto, ORB, coppie, strategie, regole) " +
-                "coincide con il lordo. Per averli esegui lo script una volta nel terminale del broker (conto collegato, simbolo nel Market Watch) " +
-                "con 'Solo misura dei costi' = true, che salva il profilo nella cartella comune, oppure inserisci spread, commissione e " +
-                "slittamento nei parametri del broker.";
+      g_warn += (g_warn != "" ? " " : "") + "Costi dei broker non impostati: ogni valore netto o 'netta peggiore' coincide con il lordo.";
   }
 
 double CostSpMed(const int p)
@@ -7181,12 +7397,14 @@ void RRWalk(CSeries &s, const int &cs[], const int &ce[], const int k, const int
       tm[i] = false;
      }
    int kk = k;
+   double tLast = L;
    for(int q = cs[k]; q <= jEnd && !(done[0] && done[1]); q++)
      {
       while(q >= ce[kk])
          kk++;
       double fr = ((double)((long)s.t[q] - (long)s.t[cs[kk]]) + barSec) / tfSec;
       double tq = (kk - k) + (fr < 1 ? fr : 1);
+      tLast = tq;
       for(int sd = 0; sd < 2; sd++)
         {
          if(done[sd])
@@ -7244,7 +7462,7 @@ void RRWalk(CSeries &s, const int &cs[], const int &ce[], const int k, const int
               {
                o[i] = mark;
                tm[i] = true;
-               du[i] = L;
+               du[i] = jEnd < ce[k + L - 1] - 1 ? tLast : L;  // chiusa prima delle L candele (rollover)
                ex[i] = jEnd;
               }
         }
@@ -8778,6 +8996,8 @@ void RRTf(CSeries &s, const int barSec, const int ti)
    for(int p = 1; p < NPRF; p++)
       if(g_cp[p].on)
          anyCost = true;
+   bool rollTf = InpRollSkip && tfSec <= 3600;
+   int rollSkip = 0, rollCut = 0;
    for(int k = 1; k + L - 1 < nc && !IsStopped(); k++)
      {
       //--- statistiche del giorno con le barre prima dell'apertura della candela
@@ -8809,6 +9029,29 @@ void RRTf(CSeries &s, const int barSec, const int ti)
       if(!(S > 0) || !(O > 0))
          continue;
       int jEnd = ce[k + L - 1] - 1;
+      if(rollTf)  // rollover: nessuna entrata nella finestra, chiusura a mercato prima della prossima
+        {
+         if(RollIn(cd.t[k]))
+           {
+            rollSkip++;
+            continue;
+           }
+         datetime rs = RollNext(cd.t[k]);
+         if(s.t[jEnd] >= rs)
+           {
+            int j = LowerBound(s.t, s.n, rs) - 1;
+            if(j < cs[k])
+              {
+               rollSkip++;
+               continue;
+              }
+            if(j < jEnd)
+              {
+               jEnd = j;
+               rollCut++;
+              }
+           }
+        }
       RRWalk(s, cs, ce, k, jEnd, O, S, tfSec, barSec, L, o, wn, tm, am, du, ex);
       sv[nS++] = S;
       datetime t0 = cd.t[k];
@@ -8955,7 +9198,9 @@ void RRTf(CSeries &s, const int barSec, const int ti)
    string head = I2S(g_rrN[0]) + " candele dal " + TimeToString(tA, TIME_DATE) + " al " + TimeToString(tB, TIME_DATE) +
                  " (prima met&agrave; fino al " + TimeToString(tMid, TIME_DATE) + ": " + I2S(g_rrNH[0]) + " candele, seconda: " + I2S(g_rrNH[1]) +
                  "); stop = " + stopTxt + ", mediano " + PX(medS) + " (" + FP(medS / g_last, 3) + "% del prezzo attuale); chiusura a mercato " +
-                 "dopo " + I2S(L) + " candele (" + DurLab(L * tfH) + ").";
+                 "dopo " + I2S(L) + " candele (" + DurLab(L * tfH) + ")" +
+                 (rollTf ? "; rollover: " + I2S(rollSkip) + " entrate escluse nella finestra " + HM(1440 - RollPre()) + "-" + HM(RollPost()) +
+                  " del broker, " + I2S(rollCut) + " operazioni chiuse a mercato prima della finestra" : "") + ".";
    RRRender(0, ti, head, tfH, hw, hs, HB);
    for(int p = 1; p < NPRF; p++)
      {
@@ -9492,6 +9737,8 @@ double OrbDay(CSeries &s, const int k, const datetime T, const int i, const date
   {
    int D = g_obD[i];
    long E0 = (long)T + D * 60;
+   if(RollHit7((long)T + off7, E0 - 1 + off7))  // il range tocca la finestra del rollover
+      return 0;
    int kor = LowerBound(s.t, s.n, (datetime)E0);
    if(kor >= s.n || kor - k < MathMax(1, D * 60 / g_obBar / 2) || (long)s.t[kor] - E0 >= 900)
       return 0;
@@ -9523,7 +9770,8 @@ double OrbDay(CSeries &s, const int k, const datetime T, const int i, const date
    for(int x = 0; x < g_obNW; x++)
      {
       int kx = g_obKW[x];
-      g_obOk[x] = kx > kor + 1 && kx <= gap && (long)s.t[kx - 1] >= E0 + g_obW[x] * 60 - 900;
+      g_obOk[x] = kx > kor + 1 && kx <= gap && (long)s.t[kx - 1] >= E0 + g_obW[x] * 60 - 900 &&
+                  !RollHit7(E0 + off7, E0 + g_obW[x] * 60 - 1 + off7);
       if(g_obOk[x] && kx > qStop)
          qStop = kx;
      }
@@ -10623,7 +10871,7 @@ void OrbTab(CSeries &s, const int barSec, const string clean)
      "prezzo (1 pb = 0,01%) che azzera l'aspettativa lorda; lorda a " + BpLab() + " = aspettativa con quel costo per trade (" + CostBpTxt() +
      "). Orari coperti in meno di " + I2S(g_obMinDay) + " giorni (meta' dei giorni con dati: mercato chiuso o finestra oltre la chiusura) sono " +
      "esclusi da tabelle, riepilogo e regole (restano nel CSV). Orari equivalenti (stesso orario dei dati a gennaio e a luglio, per esempio " +
-     "NY 09:30 e LDN 14:30: cambiano solo nelle settimane in cui l'ora legale cambia in date diverse) sono mostrati una volta sola.");
+     "NY 09:30 e LDN 14:30: cambiano solo nelle settimane in cui l'ora legale cambia in date diverse) sono mostrati una volta sola. " + RollTxt());
    int tot = ncs, done = 0;
    for(int c = 0; c < g_obNC && !IsStopped(); c++)
      {
@@ -11205,7 +11453,9 @@ string RepLegend(void)
           "  N = trade o giorni; N effettivo = corretto per i trade che si sovrappongono nel tempo.\n" +
           "  ORB: range = minuti del range iniziale dall'orario di inizio, finestra = minuti osservati dopo il range, conferma = candela " +
           "(M1, M5, M15, M30, H1) che deve chiudere fuori dal range; eventi = cosa fa il prezzo sulle candele di conferma (nessun tocco, solo " +
-          "tocchi, continua, rientra e resta, rientra e riparte, rientra e si gira).\n";
+          "tocchi, continua, rientra e resta, rientra e riparte, rientra e si gira).\n" +
+          "  rollover = NY 17:00, mezzanotte del broker: lo spread si allarga e sui dati bid compaiono punte in basso senza scambi veri; " +
+          "ora buca = attivita' e volume sotto 0.6 del normale.\n";
   }
 
 // indice del rapporto completo
@@ -11214,7 +11464,7 @@ string RepIndex(void)
    string t = "\nINDICE\n  PARTE PRINCIPALE (da leggere; per l'analisi in chat basta questa)\n" +
               "    1. Riepilogo: i risultati piu' lontani dal caso di tutte le analisi\n    2. Periodo in corso\n" +
               "    3. Timeframe: dal minuto all'anno (movimento iniziale, spostamento piu' ampio, mean reversion, quando avvengono)\n" +
-              "    4. Eventi e sessioni: swing, rotture, impulsi, notizie, gap, orari chiave e sessioni\n" +
+              "    4. Eventi e sessioni: swing, rotture, impulsi, notizie, gap, ore buche e rollover, orari chiave e sessioni\n" +
               "    5. ORB: rottura del range iniziale a tutti gli orari, candele di conferma, continuazione ed eventi\n" +
               "    6. Livelli chiave\n    7. Direzione\n    8. Rischio/rendimento lordo: riepilogo per timeframe, contesti migliori e peggiori\n";
    for(int p = 1; p < NPRF; p++)
@@ -11439,6 +11689,7 @@ bool Analyze(const string sym)
      "primo -> secondo estremo (spostamento pi&ugrave; ampio = massimo - minimo) e secondo estremo -> chiusura (mean reversion, " +
      "quanto viene restituito). Percentuali in % del prezzo di apertura del periodo. Mediana = valore tipico, P90 = superato " +
      "nel 10% dei periodi.");
+   R(g_repHead, RollTxt());
    for(int k = 0; k < NTF; k++)
       W("<button data-tab='" + TF_KEY[k] + "'>" + TF_LABEL[k] + "</button>");
    W("<button data-tab='sess'>Sessioni</button><button data-tab='orb'>ORB</button><button data-tab='lev'>Livelli</button><button data-tab='dir'>Direzione</button>" +
@@ -11522,9 +11773,15 @@ bool Analyze(const string sym)
    Comment("MarketProfiler ", sym, ": sessioni ...");
    W("<div class='tab' id='tab-sess' hidden>");
    if(m1.n > 5000)
+     {
+      DeadHours(m1, 60);
       SessionTab(m1, 60);
+     }
    else
+     {
+      DeadHours(m5, 300);
       SessionTab(m5, 300);
+     }
    W("</div>");
    Comment("MarketProfiler ", sym, ": ORB a tutti gli orari ...");
    W("<div class='tab' id='tab-orb' hidden>");
@@ -11603,7 +11860,7 @@ bool Analyze(const string sym)
    W(g_repCur);
    W("\n=== 3. TIMEFRAME: dal minuto all'anno ===\n");
    W(g_rep);
-   W("\n=== 4. EVENTI E SESSIONI: swing, rotture, impulsi, notizie, gap, orari chiave e sessioni ===\n");
+   W("\n=== 4. EVENTI E SESSIONI: swing, rotture, impulsi, notizie, gap, ore buche e rollover, orari chiave e sessioni ===\n");
    W(g_repEv);
    W("\n=== 5. ORB: rottura del range iniziale a tutti gli orari, conferme ed eventi (tutte le combinazioni nell'appendice D) ===\n");
    W(g_repOrb);
@@ -11658,7 +11915,7 @@ bool Analyze(const string sym)
    TxTab("txsum", "Testo: riepilogo", "I risultati lontani dal caso di tutte le schede, con il numero di confronti.", g_repHead + "\n" + g_repHi);
    TxTab("txtf", "Testo: timeframe e periodo in corso", "Le schede dei timeframe (da 1 minuto a 1 anno) e lo stato del periodo in corso.",
          g_repHead + "\n=== PERIODO IN CORSO ===\n" + g_repCur + g_rep);
-   TxTab("txev", "Testo: eventi e sessioni", "Swing, rotture, impulsi, notizie, gap, orari chiave e sessioni.", "EVENTI E SESSIONI - " + sym + "\n" + g_repEv);
+   TxTab("txev", "Testo: eventi e sessioni", "Swing, rotture, impulsi, notizie, gap, ore buche e rollover, orari chiave e sessioni.", "EVENTI E SESSIONI - " + sym + "\n" + g_repEv);
    TxTab("txorb", "Testo: ORB a tutti gli orari", "Rottura del range iniziale a ogni orario, durata e finestra: anomalie, dettagli, " +
          "cosa capita a ogni orario (tutte le combinazioni nel CSV).", "ORB - " + sym + "\n" + g_repOrb);
    TxTab("txlv", "Testo: livelli", "Livelli chiave, vita del livello e lettura sui timeframe inferiori.", lvHead + g_repLv);
