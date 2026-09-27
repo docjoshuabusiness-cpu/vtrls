@@ -3,11 +3,13 @@
 //|  Analisi descrittiva di uno strumento, timeframe per timeframe.   |
 //|  Output: report HTML a schede in MQL5\Files (o Common\Files).     |
 //|                                                                  |
-//|  Schede: Panoramica, Minuto, Ora, 4/6/8/12 ore, Giorno,           |
-//|  Settimana, 2 settimane, Mese, Trimestre, Semestre, Anno,        |
-//|  Sessioni, Livelli, Direzione, Rischio/rendimento, Swing,        |
-//|  Rotture, Impulsi, Notizie, Gap, Volume,                         |
-//|  Rapporto. Orari chiave di New York, Londra, Francoforte e Tokyo  |
+//|  Schede: Panoramica, Riepilogo, Minuto, Ora, 4/6/8/12 ore,        |
+//|  Giorno, Settimana, 2 settimane, Mese, Trimestre, Semestre, Anno,|
+//|  Sessioni, Livelli, Direzione, Rischio/rendimento lordo e netto  |
+//|  per broker, Coppie di contesti, Strategie, Swing, Rotture,      |
+//|  Impulsi, Notizie, Gap, Volume, Testi da copiare. File: CSV dei  |
+//|  contesti e regole per l'EA MPRuleTester (Strategy Tester).      |
+//|  Orari chiave di New York, Londra, Francoforte e Tokyo           |
 //|  convertiti giorno per giorno: vale per indici USA ed europei,    |
 //|  forex e materie prime (imposta il fuso orario dei dati).         |
 //|                                                                  |
@@ -105,6 +107,10 @@ input double InpB2Comm       = 0.0;   // Broker 2: commissione per lotto, andata
 input double InpB2SwapL      = 0.0;   // Broker 2: swap buy per notte in prezzo, manuale
 input double InpB2SwapS      = 0.0;   // Broker 2: swap sell per notte in prezzo, manuale
 input double InpB2Slip       = 0.0;   // Broker 2: slittamento per trade in prezzo
+input bool   InpRRCombo      = true;  // Rischio/rendimento: coppie di contesti (tabella, riepilogo, CSV)
+input int    InpComboMinTF   = 15;    // Coppie di contesti: timeframe minimo in minuti (5 = anche M5, molto piu' lento)
+input int    InpSeqTop       = 5;     // Strategie: contesti singoli e coppie migliori simulati una posizione alla volta, per timeframe
+input double InpRuleMinZ     = 2.0;   // Regole per lo Strategy Tester: z minimo dell'aspettativa netta del broker peggiore
 input int    InpSpreadDays   = 20;    // Costi: giorni di tick per lo spread per ora (0 = spread delle barre M1)
 input bool   InpCostsOnly    = false; // Solo misura dei costi del broker di questo terminale (salva il profilo e termina)
 
@@ -306,13 +312,14 @@ double Z2(const double p1, const double n1, const double p2, const double n2)  /
 double ArcF(const double x) { return 2.0 / M_PI * MathArcsin(MathSqrt(MathMax(0.0, MathMin(1.0, x)))); }  // legge dell'arcoseno
 
 //--- riepilogo: ogni z calcolato nelle schede viene contato; quelli con |z| >= 2 sono conservati con il loro testo
-#define HI_NMOD 8
+#define HI_NMOD 9
 string HI_NAME[HI_NMOD] = {"Sessioni e orari chiave (reale contro atteso con direzione casuale)",
                            "Livelli: effetto del livello (reale contro livello finto)",
                            "Vita dei livelli (reale contro livello finto)",
                            "Livelli letti sui timeframe inferiori (reale contro livello finto)",
                            "Direzione (condizione contro tutti i periodi)",
-                           "Rischio/rendimento lordo (aspettativa contro zero)", "", ""};
+                           "Rischio/rendimento lordo (aspettativa contro zero)", "", "",
+                           "Coppie di contesti (aspettativa netta del broker peggiore contro zero)"};
 int    g_hiCnt[HI_NMOD];
 int    g_hiN = 0;
 int    g_hiM[];
@@ -6929,6 +6936,14 @@ double g_rrS[], g_rrS2[], g_rrD[];            // esiti lordi (R), quadrati, dura
 double g_rrSN[], g_rrCP[], g_rrSH[];          // per profilo: esiti netti (R), costo (prezzo), esiti netti per meta' del campione
 int    g_rrGap[];                             // per riga: coppie di entrate a distanza g candele (1..L), per la sovrapposizione
 int    g_rrL = 1;
+//--- ogni trade simulato del timeframe in corso (indice q; lato e obiettivo i: q * 2 * RR_NR + i; dimensione d: q * RR_NDIM + d)
+int    g_qN = 0;
+int    g_qK[], g_qF[], g_qX[];                // candela di entrata, bit vinto / chiuso a tempo / ambiguo, barra di uscita
+float  g_qS[], g_qO[], g_qD[];                // stop (prezzo), esito lordo (R), durata (candele)
+uchar  g_qC[];                                // classe del contesto (255 = nessuna)
+string g_cbHtml = "", g_sqHtml = "", g_ruHtml = "", g_cbTx = "", g_sqTx = "", g_ruTx = "";
+int    g_csvH = INVALID_HANDLE, g_ruH = INVALID_HANDLE, g_ruN = 0, g_ruReal = 0;
+string g_ruFile = "";
 
 void RRDim(const int d, const string name, const string labs)
   {
@@ -7379,6 +7394,774 @@ void RRRender(const int p, const int ti, const string head, const double tfH, co
    SecEnd();
   }
 
+//+------------------------------------------------------------------+
+//| Dopo i contesti singoli: CSV, coppie di contesti, simulazione una |
+//| posizione alla volta (serie di perdite, drawdown) e regole per lo |
+//| Strategy Tester                                                   |
+//+------------------------------------------------------------------+
+#define CB_D0 1   // dimensioni usate nelle coppie: dall'ora (1) all'RSI (18); escluse 'tutte' e l'anno
+#define CB_D1 18
+#define SQ_SH 200 // rimescolamenti casuali per il drawdown atteso
+
+void RRAlloc(const int L, int &ring[], int &rN[], int &rP[])
+  {
+   int nx = g_rrNR * 2 * RR_NR;
+   ArrayResize(g_rrN, g_rrNR); ArrayResize(g_rrNH, 2 * g_rrNR); ArrayResize(g_rrInvS, g_rrNR);
+   ArrayResize(g_rrW, nx); ArrayResize(g_rrT, nx); ArrayResize(g_rrA, nx);
+   ArrayResize(g_rrS, nx); ArrayResize(g_rrS2, nx); ArrayResize(g_rrD, nx);
+   ArrayResize(g_rrSN, NPRF * nx); ArrayResize(g_rrCP, NPRF * nx); ArrayResize(g_rrSH, 2 * NPRF * nx);
+   ArrayInitialize(g_rrN, 0); ArrayInitialize(g_rrNH, 0); ArrayInitialize(g_rrInvS, 0.0);
+   ArrayInitialize(g_rrW, 0); ArrayInitialize(g_rrT, 0); ArrayInitialize(g_rrA, 0);
+   ArrayInitialize(g_rrS, 0.0); ArrayInitialize(g_rrS2, 0.0); ArrayInitialize(g_rrD, 0.0);
+   ArrayInitialize(g_rrSN, 0.0); ArrayInitialize(g_rrCP, 0.0); ArrayInitialize(g_rrSH, 0.0);
+   g_rrL = L;
+   ArrayResize(g_rrGap, g_rrNR * (L + 1));
+   ArrayInitialize(g_rrGap, 0);
+   ArrayResize(ring, g_rrNR * L);
+   ArrayResize(rN, g_rrNR);
+   ArrayResize(rP, g_rrNR);
+   ArrayInitialize(rN, 0);
+   ArrayInitialize(rP, 0);
+  }
+
+// costo in prezzo di un trade per il profilo p: entrata alla barra j0 al prezzo O, uscita alla barra jx
+double RRCost1(CSeries &s, const int p, const int i, const int j0, const double O, const int jx)
+  {
+   int sd = i / RR_NR;
+   datetime tE = DataToNY7(s.t[j0]), tX = DataToNY7(s.t[jx]);
+   long dE = (long)tE / 86400, dX = (long)tX / 86400;
+   double sw = dX > dE ? CostNights(dE, dX, g_cp[p].triple) * (g_cp[p].swA[sd] + g_cp[p].swP[sd] * O) : 0;
+   return (sd == 0 ? g_cp[p].sp[HourOf(tE)] : g_cp[p].sp[HourOf(tX)]) + g_cp[p].comm + g_cp[p].slip - sw;
+  }
+
+// z del broker peggiore (o lordo se non ci sono costi), stabilita' nelle due meta' per tutti, aspettativa netta peggiore
+double RRZr(const int r, const int i, bool &st, double &ew)
+  {
+   bool any = false;
+   double zr = Nan();
+   st = true;
+   ew = Nan();
+   for(int p = 1; p < NPRF; p++)
+     {
+      if(!g_cp[p].on)
+         continue;
+      RRSt q;
+      if(!RRStat(p, r, i, q))
+         return Nan();
+      if(!any || q.z < zr)
+         zr = q.z;
+      if(!any || q.en < ew)
+         ew = q.en;
+      st = st && q.st;
+      any = true;
+     }
+   if(!any)
+     {
+      RRSt q;
+      if(!RRStat(0, r, i, q))
+         return Nan();
+      zr = q.z;
+      ew = q.en;
+      st = q.st;
+     }
+   return zr;
+  }
+
+int RRWorst(const int r, const int i)  // profilo con lo z netto piu' basso (0 se non ci sono costi)
+  {
+   int w = 0;
+   double zw = 0;
+   for(int p = 1; p < NPRF; p++)
+     {
+      if(!g_cp[p].on)
+         continue;
+      RRSt q;
+      RRStat(p, r, i, q);
+      if(w == 0 || q.z < zw)
+        {
+         w = p;
+         zw = q.z;
+        }
+     }
+   return w;
+  }
+
+string Plain(const string s)  // testo senza entita' HTML (CSV e file delle regole)
+  {
+   string t = s;
+   StringReplace(t, "&agrave;", "a'");
+   StringReplace(t, "&egrave;", "e'");
+   StringReplace(t, "&eacute;", "e'");
+   StringReplace(t, "&igrave;", "i'");
+   StringReplace(t, "&ograve;", "o'");
+   StringReplace(t, "&ugrave;", "u'");
+   StringReplace(t, "&ge;", ">=");
+   StringReplace(t, "&le;", "<=");
+   StringReplace(t, "&middot;", "-");
+   StringReplace(t, "&rarr;", "->");
+   StringReplace(t, "&nbsp;", " ");
+   StringReplace(t, "&times;", "x");
+   StringReplace(t, "&amp;", "&");
+   StringReplace(t, ";", ",");
+   return t;
+  }
+
+string CN(const double x, const int d)  // numero per il CSV (virgola decimale, vuoto se non definito)
+  {
+   if(!MathIsValidNumber(x))
+      return "";
+   string t = DoubleToString(x, d);
+   StringReplace(t, ".", ",");
+   return t;
+  }
+
+//--- CSV: una riga per contesto (o coppia), lato e obiettivo, con lordo e netto di ogni broker
+string g_csvP[RR_MAXROW], g_csvD[RR_NDIM];  // etichette senza entita' HTML del timeframe in corso
+
+void RRCsvRow(const string tf, const string kind, const string dA, const string vA, const string dB, const string vB, const int r, const int i)
+  {
+   if(g_csvH == INVALID_HANDLE)
+      return;
+   RRSt q;
+   if(!RRStat(0, r, i, q))
+      return;
+   int tg = i % RR_NR + 1;
+   string ln = tf + ";" + kind + ";" + dA + ";" + vA + ";" + dB + ";" + vB + ";" + (i < RR_NR ? "Buy" : "Sell") + ";" + I2S(tg) + ";" +
+               I2S(q.n) + ";" + CN(RRNeff(r, q.n, q.dm), 0) + ";" + CN(q.win * 100, 2) + ";" + CN(100.0 / (1 + tg), 2) + ";" +
+               CN(q.tmo * 100, 2) + ";" + CN(q.dm, 2) + ";" + CN(q.eg, 4) + ";" + CN(q.z, 2) + ";" + CN(q.za, 2) + ";" + CN(q.e1, 4) + ";" +
+               CN(q.e2, 4) + ";" + CN(q.cm, g_digits);
+   for(int p = 1; p < NPRF; p++)
+     {
+      if(!g_cp[p].on)
+        {
+         ln += ";;;;;;";
+         continue;
+        }
+      RRSt b;
+      RRStat(p, r, i, b);
+      ln += ";" + CN(b.en, 4) + ";" + CN(b.z, 2) + ";" + CN(b.za, 2) + ";" + CN(b.e1, 4) + ";" + CN(b.e2, 4) + ";" + CN(b.cr, 4);
+     }
+   FileWriteString(g_csvH, ln + "\n");
+  }
+
+//--- candidati per la simulazione una posizione alla volta
+int    g_ckN = 0;
+int    g_ckKind[], g_ckDA[], g_ckVA[], g_ckDB[], g_ckVB[], g_ckI[], g_ckNn[];
+double g_ckZ[], g_ckE[];
+bool   g_ckSt[];
+string g_ckLab[];
+
+void RRCandAdd(const int kind, const int dA, const int vA, const int dB, const int vB, const int i, const int n, const double z,
+               const double e, const bool st, const string lab)
+  {
+   int c = g_ckN++;
+   ArrayResize(g_ckKind, g_ckN); ArrayResize(g_ckDA, g_ckN); ArrayResize(g_ckVA, g_ckN); ArrayResize(g_ckDB, g_ckN);
+   ArrayResize(g_ckVB, g_ckN); ArrayResize(g_ckI, g_ckN); ArrayResize(g_ckNn, g_ckN); ArrayResize(g_ckZ, g_ckN);
+   ArrayResize(g_ckE, g_ckN); ArrayResize(g_ckSt, g_ckN); ArrayResize(g_ckLab, g_ckN);
+   g_ckKind[c] = kind;
+   g_ckDA[c] = dA;
+   g_ckVA[c] = vA;
+   g_ckDB[c] = dB;
+   g_ckVB[c] = vB;
+   g_ckI[c] = i;
+   g_ckNn[c] = n;
+   g_ckZ[c] = z;
+   g_ckE[c] = e;
+   g_ckSt[c] = st;
+   g_ckLab[c] = lab;
+  }
+
+string RROpLab(const int i) { return (i < RR_NR ? "Buy" : "Sell") + " 1:" + I2S(i % RR_NR + 1); }
+
+// sceglie i migliori per z del broker peggiore tra i contesti stabili (liste parallele: riga, lato/obiettivo, z)
+void RRPickTop(const int &cr[], const int &ci[], const double &cz[], const int nc, const int want, int &pick[])
+  {
+   ArrayResize(pick, 0);
+   bool used[];
+   ArrayResize(used, nc);
+   ArrayInitialize(used, false);
+   for(int w = 0; w < want; w++)
+     {
+      int b = -1;
+      for(int c = 0; c < nc; c++)
+         if(!used[c] && (b < 0 || cz[c] > cz[b]))
+            b = c;
+      if(b < 0)
+         break;
+      used[b] = true;
+      int m = ArraySize(pick);
+      ArrayResize(pick, m + 1);
+      pick[m] = b;
+     }
+  }
+
+//--- coppie di contesti: stessi trade, due condizioni insieme
+void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datetime tMid, const int L)
+  {
+   string nm = RR_NAME[ti];
+   int C[RR_NDIM], pb[RR_NDIM][RR_NDIM];
+   ArrayInitialize(pb, 0);
+   for(int d = 0; d < RR_NDIM; d++)
+      C[d] = g_rrDimC[d];
+   int nc = 0;
+   for(int a = CB_D0; a <= CB_D1; a++)
+      for(int b = a + 1; b <= CB_D1; b++)
+        {
+         pb[a][b] = nc;
+         nc += C[a] * C[b];
+        }
+   //--- riga 0 = tutte le candele (riferimento), righe 1.. = coppie
+   g_rrNR = 1 + nc;
+   int ring[], rN[], rP[];
+   RRAlloc(L, ring, rN, rP);
+   double o[2 * RR_NR], du[2 * RR_NR], cst[NPRF * 2 * RR_NR];
+   bool wn[2 * RR_NR], tm[2 * RR_NR], am[2 * RR_NR];
+   int da[RR_NDIM], va[RR_NDIM];
+   ArrayInitialize(da, 0);
+   ArrayInitialize(va, 0);
+   ArrayInitialize(cst, 0.0);
+   for(int q = 0; q < g_qN && !IsStopped(); q++)
+     {
+      int k = g_qK[q], j0 = cs[k], fl = g_qF[q];
+      double O = s.o[j0], S = g_qS[q], invS = 1.0 / S;
+      int hf = cd.t[k] < tMid ? 0 : 1;
+      for(int i = 0; i < 2 * RR_NR; i++)
+        {
+         o[i] = g_qO[q * 2 * RR_NR + i];
+         du[i] = g_qD[q * 2 * RR_NR + i];
+         wn[i] = (fl & (1 << i)) != 0;
+         tm[i] = (fl & (1 << (10 + i))) != 0;
+         am[i] = (fl & (1 << (20 + i))) != 0;
+        }
+      for(int p = 1; p < NPRF; p++)
+         if(g_cp[p].on)
+            for(int i = 0; i < 2 * RR_NR; i++)
+               cst[p * 2 * RR_NR + i] = RRCost1(s, p, i, j0, O, g_qX[q * 2 * RR_NR + i]);
+      RRAcc(0, o, wn, tm, am, du, invS, cst, hf);
+      RRGap(0, k, ring, rN, rP);
+      int m = 0;
+      for(int d = CB_D0; d <= CB_D1; d++)
+        {
+         int c = g_qC[q * RR_NDIM + d];
+         if(c == 255)
+            continue;
+         da[m] = d;
+         va[m] = c;
+         m++;
+        }
+      for(int x = 0; x < m; x++)
+         for(int y = x + 1; y < m; y++)
+           {
+            int r = 1 + pb[da[x]][da[y]] + va[x] * C[da[y]] + va[y];
+            RRAcc(r, o, wn, tm, am, du, invS, cst, hf);
+            RRGap(r, k, ring, rN, rP);
+           }
+     }
+   //--- statistiche: CSV, riepilogo, migliori e peggiori, candidati
+   int cr[], ci[], ca[], cb[], cxa[], cxb[];
+   double cz[];
+   int ncand = 0, ntest = 0;
+   int kr[], ki[];
+   double kz[];
+   int nk = 0;
+   for(int a = CB_D0; a <= CB_D1; a++)
+      for(int b = a + 1; b <= CB_D1; b++)
+         for(int x = 0; x < C[a]; x++)
+            for(int y = 0; y < C[b]; y++)
+              {
+               int r = 1 + pb[a][b] + x * C[b] + y, n = g_rrN[r];
+               if(n < 30)
+                  continue;
+               for(int i = 0; i < 2 * RR_NR; i++)
+                 {
+                  RRCsvRow(nm, "coppia", g_csvD[a], g_csvP[g_rrDimB[a] + x], g_csvD[b], g_csvP[g_rrDimB[b] + y], r, i);
+                  if(n < 100)
+                     continue;
+                  bool st = false;
+                  double ew = 0, z = RRZr(r, i, st, ew);
+                  if(!MathIsValidNumber(z))
+                     continue;
+                  ntest++;
+                  if(ncand >= ArraySize(cr))
+                    {
+                     int ns = ncand + 4096;
+                     ArrayResize(cr, ns); ArrayResize(ci, ns); ArrayResize(cz, ns); ArrayResize(ca, ns); ArrayResize(cb, ns);
+                     ArrayResize(cxa, ns); ArrayResize(cxb, ns);
+                    }
+                  cr[ncand] = r;
+                  ci[ncand] = i;
+                  cz[ncand] = z;
+                  ca[ncand] = a;
+                  cb[ncand] = b;
+                  cxa[ncand] = x;
+                  cxb[ncand] = y;
+                  ncand++;
+                  if(st && z > 0)
+                    {
+                     if(nk >= ArraySize(kr))
+                       {
+                        ArrayResize(kr, nk + 1024);
+                        ArrayResize(ki, nk + 1024);
+                        ArrayResize(kz, nk + 1024);
+                       }
+                     kr[nk] = ncand - 1;
+                     ki[nk] = i;
+                     kz[nk] = z;
+                     nk++;
+                    }
+                  if(HiKeep(8, z))
+                    {
+                     int pw = RRWorst(r, i);
+                     RRSt w;
+                     RRStat(pw, r, i, w);
+                     HiAdd(8, z, "[" + nm + "] " + RROpLab(i) + " | " + g_rrDimN[a] + ": " + g_rrLab[g_rrDimB[a] + x] + " + " + g_rrDimN[b] + ": " +
+                           g_rrLab[g_rrDimB[b] + y] + " (N " + I2S(n) + "): obiettivo " + FP(w.win, 1) + "% (senza vantaggio " +
+                           FP(1.0 / (1 + i % RR_NR + 1), 1) + "%), lorda " + SgnF(w.eg, 3) + " R, " + (pw > 0 ? "netta " + g_cp[pw].name +
+                           " " : "") + SgnF(w.en, 3) + " R, rispetto a tutte le candele z " + ZS(w.za) + ", prima / seconda meta' " +
+                           SgnF(w.e1, 3) + " / " + SgnF(w.e2, 3) + (st ? " (stabile)" : " (non stabile)"));
+                    }
+                 }
+              }
+   //--- tabelle (scheda Coppie di contesti)
+   bool anyB = false;
+   for(int p = 1; p < NPRF; p++)
+      if(g_cp[p].on)
+         anyB = true;
+   g_buf = true;
+   g_bufS = "";
+   SecStart("Coppie di contesti " + nm,
+            I2S(nc) + " coppie possibili, " + I2S(ntest) + " confronti con almeno 100 casi (coppia x operazione): per puro caso " +
+            "ci si aspettano circa " + F(0.0027 * ntest, 0) + " risultati oltre |z| 3 e " + F(0.0428 * ntest, 0) + " tra 2 e 3. " +
+            "Ordinati per z " + (anyB ? "del broker peggiore (aspettativa netta)" : "lordo") + ". Il colore segue lo z, * = segno " +
+            "diverso in una delle due met&agrave; del campione.");
+   string hh = "Coppia di contesti|Operazione|N|% obiettivo prima dello stop|Senza vantaggio|Lorda (R) / z";
+   for(int p = 1; p < NPRF; p++)
+      if(g_cp[p].on)
+         hh += "|Netta " + g_cp[p].name + " (R) / z";
+   hh += "|z rispetto a tutte le candele|Prima / seconda met&agrave; (R)|Lettura";
+   R(g_cbTx, "");
+   R(g_cbTx, "Coppie di contesti " + nm + ": " + I2S(nc) + " coppie, " + I2S(ntest) + " confronti con N >= 100 (attesi per caso circa " +
+     F(0.0027 * ntest, 0) + " oltre |z| 3 e " + F(0.0428 * ntest, 0) + " tra 2 e 3); ordinati per z " + (anyB ? "del broker peggiore" : "lordo"));
+   for(int pass = 0; pass < 2; pass++)
+     {
+      int want = pass == 0 ? 30 : 10;
+      string tt = pass == 0 ? "Le pi&ugrave; solide" : "Le pi&ugrave; negative";
+      W("<h3>" + tt + "</h3>");
+      THead(hh);
+      R(g_cbTx, "  [" + nm + " - " + tt + "]");
+      bool used[];
+      ArrayResize(used, ncand);
+      ArrayInitialize(used, false);
+      for(int w = 0; w < want; w++)
+        {
+         int b = -1;
+         for(int c = 0; c < ncand; c++)
+            if(!used[c] && (b < 0 || (pass == 0 ? cz[c] > cz[b] : cz[c] < cz[b])))
+               b = c;
+         if(b < 0)
+            break;
+         used[b] = true;
+         int r = cr[b], i = ci[b], tg = i % RR_NR + 1;
+         string lab = g_rrDimN[ca[b]] + ": " + g_rrLab[g_rrDimB[ca[b]] + cxa[b]] + " + " + g_rrDimN[cb[b]] + ": " + g_rrLab[g_rrDimB[cb[b]] + cxb[b]];
+         RRSt q;
+         RRStat(0, r, i, q);
+         int pw = RRWorst(r, i);
+         RRSt w0;
+         RRStat(pw, r, i, w0);
+         string row = "<tr>" + TD(lab) + TD(RROpLab(i)) + TD(I2S(q.n)) + TD(FP(q.win, 1)) + TD(FP(1.0 / (1 + tg), 1)) +
+                      TDc(SgnF(q.eg, 3) + " / " + ZS(q.z), PCol(q.z, 0, 4));
+         string tx = "    " + lab + " -> " + RROpLab(i) + " (N " + I2S(q.n) + "): obiettivo " + FP(q.win, 1) + "% (senza vantaggio " +
+                     FP(1.0 / (1 + tg), 1) + "%), lorda " + SgnF(q.eg, 3) + " R (z " + ZS(q.z) + ")";
+         for(int p = 1; p < NPRF; p++)
+           {
+            if(!g_cp[p].on)
+               continue;
+            RRSt b2;
+            RRStat(p, r, i, b2);
+            row += TDc(SgnF(b2.en, 3) + (b2.st ? "" : "*") + " / " + ZS(b2.z), PCol(b2.z, 0, 4));
+            tx += ", netta " + g_cp[p].name + " " + SgnF(b2.en, 3) + " R (z " + ZS(b2.z) + (b2.st ? "" : ", non stabile") + ")";
+           }
+         row += TD(ZS(w0.za)) + TD(SgnF(w0.e1, 3) + " / " + SgnF(w0.e2, 3)) + TD(RRVerd(w0)) + "</tr>";
+         tx += ", rispetto a tutte le candele z " + ZS(w0.za) + ", prima / seconda meta' " + SgnF(w0.e1, 3) + " / " + SgnF(w0.e2, 3) +
+               " -> " + RRVerd(w0);
+         W(row);
+         R(g_cbTx, tx);
+        }
+      TEnd();
+     }
+   SecEnd();
+   g_buf = false;
+   g_cbHtml += g_bufS;
+   g_bufS = "";
+   //--- candidati: le coppie migliori stabili nelle due meta'
+   int pick[];
+   RRPickTop(kr, ki, kz, nk, InpSeqTop, pick);
+   for(int j = 0; j < ArraySize(pick); j++)
+     {
+      int c = kr[pick[j]], r = cr[c], i = ci[c];
+      bool st = false;
+      double ew = 0, z = RRZr(r, i, st, ew);
+      RRCandAdd(2, ca[c], cxa[c], cb[c], cxb[c], i, g_rrN[r], z, ew, st, g_rrDimN[ca[c]] + ": " + g_rrLab[g_rrDimB[ca[c]] + cxa[c]] + " + " +
+                g_rrDimN[cb[c]] + ": " + g_rrLab[g_rrDimB[cb[c]] + cxb[c]]);
+     }
+  }
+
+//--- simulazione una posizione alla volta di un candidato con i costi del profilo p
+struct SqR
+  {
+   int               n, nY, posY, ls;
+   double            yrs, win, e, tot, pf, dd, ddDays, lsMed, ls95, ddMed, dd95;
+  };
+
+double MaxDD(const double &x[], const int n)
+  {
+   double eq = 0, pk = 0, dd = 0;
+   for(int j = 0; j < n; j++)
+     {
+      eq += x[j];
+      if(eq > pk)
+         pk = eq;
+      else
+         if(pk - eq > dd)
+            dd = pk - eq;
+     }
+   return dd;
+  }
+
+bool RRSeq(CSeries &s, const int &cs[], CSeries &cd, const int p, const int c, SqR &r, string &svg)
+  {
+   int dA = g_ckDA[c], vA = g_ckVA[c], dB = g_ckDB[c], vB = g_ckVB[c], i = g_ckI[c];
+   double out[];
+   datetime tt[];
+   ArrayResize(out, g_qN);
+   ArrayResize(tt, g_qN);
+   int n = 0, wins = 0, lastX = -1;
+   for(int q = 0; q < g_qN; q++)
+     {
+      if(g_qC[q * RR_NDIM + dA] != vA || (dB >= 0 && g_qC[q * RR_NDIM + dB] != vB))
+         continue;
+      int k = g_qK[q], j0 = cs[k];
+      if(j0 <= lastX)
+         continue;  // la posizione precedente e' ancora aperta
+      int jx = g_qX[q * 2 * RR_NR + i];
+      double v = g_qO[q * 2 * RR_NR + i];
+      if(p > 0)
+         v -= RRCost1(s, p, i, j0, s.o[j0], jx) / g_qS[q];
+      out[n] = v;
+      tt[n] = cd.t[k];
+      if((g_qF[q] & (1 << i)) != 0)
+         wins++;
+      lastX = jx;
+      n++;
+     }
+   r.n = n;
+   svg = "";
+   if(n < 10)
+      return false;
+   double tot = 0, gp = 0, gl = 0, eq = 0, pk = 0, dd = 0, ddd = 0, mn = 0, mx = 0;
+   datetime tPk = tt[0];
+   int ls = 0, cur = 0, nl = 0;
+   MqlDateTime md;
+   TimeToStruct(tt[0], md);
+   int y0 = md.year;
+   TimeToStruct(tt[n - 1], md);
+   int ny = md.year - y0 + 1;
+   double ys[];
+   int yc[];
+   ArrayResize(ys, ny);
+   ArrayResize(yc, ny);
+   ArrayInitialize(ys, 0.0);
+   ArrayInitialize(yc, 0);
+   for(int j = 0; j < n; j++)
+     {
+      double v = out[j];
+      tot += v;
+      if(v > 0)
+         gp += v;
+      else
+         gl -= v;
+      if(v < 0)
+        {
+         nl++;
+         cur++;
+         if(cur > ls)
+            ls = cur;
+        }
+      else
+         cur = 0;
+      eq += v;
+      if(eq > pk)
+        {
+         pk = eq;
+         tPk = tt[j];
+        }
+      else
+        {
+         if(pk - eq > dd)
+            dd = pk - eq;
+         double dy = ((double)tt[j] - (double)tPk) / 86400.0;
+         if(dy > ddd)
+            ddd = dy;
+        }
+      if(eq < mn)
+         mn = eq;
+      if(eq > mx)
+         mx = eq;
+      TimeToStruct(tt[j], md);
+      int y = md.year - y0;
+      if(y >= 0 && y < ny)
+        {
+         ys[y] += v;
+         yc[y]++;
+        }
+     }
+   r.win = (double)wins / n;
+   r.e = tot / n;
+   r.tot = tot;
+   r.pf = gl > 0 ? gp / gl : Nan();
+   r.dd = dd;
+   r.ddDays = ddd;
+   r.ls = ls;
+   r.yrs = MathMax(((double)tt[n - 1] - (double)tt[0]) / (365.25 * 86400.0), 1.0 / 12);
+   r.nY = 0;
+   r.posY = 0;
+   for(int y = 0; y < ny; y++)
+      if(yc[y] > 0)
+        {
+         r.nY++;
+         if(ys[y] > 0)
+            r.posY++;
+        }
+   //--- serie di perdite attesa se l'ordine dei trade fosse casuale: P(serie massima < k) = exp(-n p q^k)
+   double qL = (double)nl / n, pW = 1 - qL;
+   r.lsMed = Nan();
+   r.ls95 = Nan();
+   if(qL > 0 && qL < 1)
+     {
+      r.lsMed = MathLog(MathLog(2.0) / (n * pW)) / MathLog(qL);
+      r.ls95 = MathLog(-MathLog(0.95) / (n * pW)) / MathLog(qL);
+     }
+   //--- drawdown atteso rimescolando l'ordine dei trade: oltre il 95% = perdite raggruppate nel tempo (fasi)
+   double tmp[], dds[];
+   ArrayResize(tmp, n);
+   ArrayResize(dds, SQ_SH);
+   ArrayCopy(tmp, out, 0, 0, n);
+   MathSrand(12345);
+   for(int h = 0; h < SQ_SH; h++)
+     {
+      for(int j = n - 1; j > 0; j--)
+        {
+         int x = (int)(((long)MathRand() * 32768 + MathRand()) % (j + 1));
+         double t = tmp[j];
+         tmp[j] = tmp[x];
+         tmp[x] = t;
+        }
+      dds[h] = MaxDD(tmp, n);
+     }
+   ArraySort(dds);
+   r.ddMed = dds[SQ_SH / 2];
+   r.dd95 = dds[(int)(0.95 * (SQ_SH - 1))];
+   //--- curva dei R cumulati (fino a 160 punti)
+   int np = n < 160 ? n : 160;
+   double lo = MathMin(0.0, mn), hi = MathMax(0.0, mx), sp = hi - lo > 0 ? hi - lo : 1;
+   string pts = "";
+   double e2 = 0;
+   int jj = 0;
+   for(int u = 0; u < np; u++)
+     {
+      int j = np > 1 ? (int)MathRound((double)(n - 1) * u / (np - 1)) : 0;
+      for(; jj <= j; jj++)
+         e2 += out[jj];
+      pts += (u > 0 ? " " : "") + DoubleToString(200.0 * u / MathMax(1, np - 1), 1) + "," + DoubleToString(38 - 36 * (e2 - lo) / sp, 1);
+     }
+   double y0l = 38 - 36 * (0 - lo) / sp;
+   svg = "<svg class='svg' width='200' height='40' viewBox='0 0 200 40'><line x1='0' y1='" + DoubleToString(y0l, 1) + "' x2='200' y2='" +
+         DoubleToString(y0l, 1) + "' stroke='#374151'/><polyline fill='none' stroke='" + (tot > 0 ? C_BLUE : C_RED) +
+         "' stroke-width='1.3' points='" + pts + "'/></svg>";
+   return true;
+  }
+
+//--- regole per lo Strategy Tester (EA MPRuleTester)
+void RRRuleWrite(const int id, const int ti, const int c, const double p20, const double p80, const int L, const double seqE, const int seqN)
+  {
+   if(g_ruH == INVALID_HANDLE)
+      return;
+   string ln = I2S(id) + ";" + I2S(RR_MIN[ti]) + ";" + I2S(g_ckI[c] / RR_NR) + ";" + I2S(g_ckI[c] % RR_NR + 1) + ";" + I2S((int)InpRRStop) + ";" +
+               DoubleToString(InpRRStopK, 4) + ";" + I2S(L) + ";" + I2S(g_ckDA[c]) + ";" + I2S(g_ckVA[c]) + ";" + I2S(g_ckDB[c]) + ";" +
+               I2S(g_ckVB[c]) + ";" + DoubleToString(p20, 8) + ";" + DoubleToString(p80, 8) + ";" +
+               Plain(RR_NAME[ti] + " " + RROpLab(g_ckI[c]) + " | " + g_ckLab[c]) + ";" + I2S(g_ckNn[c]) + ";" + DoubleToString(g_ckE[c], 4) + ";" +
+               DoubleToString(g_ckZ[c], 2) + ";" + I2S(seqN) + ";" + DoubleToString(seqE, 4);
+   FileWriteString(g_ruH, ln + "\n");
+  }
+
+void RRSeqTf(CSeries &s, const int &cs[], CSeries &cd, const int ti, const double p20, const double p80, const int L)
+  {
+   if(g_ckN == 0)
+      return;
+   string nm = RR_NAME[ti];
+   string kn[3] = {"riferimento", "contesto singolo", "coppia di contesti"};
+   bool anyB = false;
+   for(int p = 1; p < NPRF; p++)
+      if(g_cp[p].on)
+         anyB = true;
+   g_buf = true;
+   g_bufS = "";
+   SecStart("Strategie " + nm + ": una posizione alla volta",
+            "Ogni riga &egrave; una regola eseguita come farebbe un EA: si entra all'apertura della candela quando il contesto " +
+            "&egrave; vero, ma solo se non c'&egrave; gi&agrave; una posizione aperta della stessa regola. Per ogni candidato: prima " +
+            "senza costi, poi con i costi di ogni broker.");
+   THead("Costi|Trade|Trade all'anno|% obiettivo|Aspettativa (R)|R totali|R all'anno|Profit factor|Anni positivi|Serie di perdite massima (attesa: mediana / 95%)|Drawdown massimo in R (ordine casuale: mediana / 95%)|Drawdown pi&ugrave; lungo|Curva dei R cumulati");
+   R(g_sqTx, "");
+   R(g_sqTx, "Strategie " + nm + " - una posizione alla volta (serie di perdite attesa e drawdown atteso = stessi trade in ordine casuale):");
+   for(int c = 0; c < g_ckN && !IsStopped(); c++)
+     {
+      string lab = RROpLab(g_ckI[c]) + " | " + g_ckLab[c];
+      SqR rs[NPRF];
+      string svg[NPRF];
+      bool ok[NPRF];
+      double seqMin = Nan();
+      int seqN = 0;
+      for(int p = 0; p < NPRF; p++)
+        {
+         ok[p] = false;
+         svg[p] = "";
+         if(p > 0 && !g_cp[p].on)
+            continue;
+         ok[p] = RRSeq(s, cs, cd, p, c, rs[p], svg[p]);
+         bool rob = anyB ? p > 0 : p == 0;
+         if(ok[p] && rob && (!MathIsValidNumber(seqMin) || rs[p].e < seqMin))
+           {
+            seqMin = rs[p].e;
+            seqN = rs[p].n;
+           }
+        }
+      //--- regola esportata: z del broker peggiore sopra la soglia, stabile nelle due meta', positiva anche una posizione alla volta;
+      //--- il riferimento 'entra sempre' e' esportato sempre, come termine di paragone nel tester
+      int id = 0;
+      if(g_ckKind[c] == 0 || (MathIsValidNumber(g_ckZ[c]) && g_ckZ[c] >= InpRuleMinZ && g_ckSt[c] && MathIsValidNumber(seqMin) && seqMin > 0))
+        {
+         id = ++g_ruN;
+         if(g_ckKind[c] > 0)
+            g_ruReal++;
+         RRRuleWrite(id, ti, c, p20, p80, L, seqMin, seqN);
+         g_ruHtml += "<tr>" + TD(I2S(id)) + TD(nm) + TD(RROpLab(g_ckI[c])) + TD(g_ckLab[c]) + TD(I2S(g_ckNn[c])) + TD(SgnF(g_ckE[c], 3)) +
+                     TD(ZS(g_ckZ[c])) + TD(I2S(seqN)) + TD(SgnF(seqMin, 3)) + "</tr>";
+         R(g_ruTx, "  Regola " + I2S(id) + ": " + nm + " " + lab + " (analisi: N " + I2S(g_ckNn[c]) + ", netta peggiore " + SgnF(g_ckE[c], 3) +
+           " R, z " + ZS(g_ckZ[c]) + "; una posizione alla volta: " + I2S(seqN) + " trade, " + SgnF(seqMin, 3) + " R per trade)");
+        }
+      Grp(lab + " &mdash; " + kn[g_ckKind[c]] + " (analisi: N " + I2S(g_ckNn[c]) + ", aspettativa netta peggiore " + SgnF(g_ckE[c], 3) +
+          " R, z " + ZS(g_ckZ[c]) + (g_ckSt[c] ? ", stabile" : ", non stabile") + ")" + (id > 0 ? " &rarr; <b>regola " + I2S(id) + "</b>" : ""), 13);
+      R(g_sqTx, "  " + lab + " [" + kn[g_ckKind[c]] + "; analisi: N " + I2S(g_ckNn[c]) + ", netta peggiore " + SgnF(g_ckE[c], 3) + " R, z " +
+        ZS(g_ckZ[c]) + (g_ckSt[c] ? ", stabile" : ", non stabile") + "]" + (id > 0 ? " -> REGOLA " + I2S(id) : ""));
+      for(int p = 0; p < NPRF; p++)
+        {
+         if(p > 0 && !g_cp[p].on)
+            continue;
+         string pn = p == 0 ? "lordo" : g_cp[p].name;
+         if(!ok[p])
+           {
+            W("<tr>" + TD(pn) + TD(I2S(rs[p].n)) + "<td colspan='11' class='muted'>meno di 10 trade</td></tr>");
+            R(g_sqTx, "    " + pn + ": meno di 10 trade");
+            continue;
+           }
+         SqR q = rs[p];
+         double tpy = q.n / q.yrs, rpy = q.tot / q.yrs;
+         string lsT = I2S(q.ls) + " (" + F(q.lsMed, 0) + " / " + F(q.ls95, 0) + ")";
+         string ddT = F(q.dd, 1) + " (" + F(q.ddMed, 1) + " / " + F(q.dd95, 1) + ")";
+         W("<tr>" + TD(pn) + TD(I2S(q.n)) + TD(F(tpy, 0)) + TD(FP(q.win, 1)) + TDc(SgnF(q.e, 3), PCol(q.e, 0, 0.2)) + TD(SgnF(q.tot, 1)) +
+           TD(SgnF(rpy, 1)) + TD(F(q.pf, 2)) + TD(I2S(q.posY) + " su " + I2S(q.nY)) +
+           TDc(lsT, MathIsValidNumber(q.ls95) && q.ls > q.ls95 ? "rgba(239,68,68,0.35)" : "") +
+           TDc(ddT, q.dd > q.dd95 ? "rgba(239,68,68,0.35)" : "") + TD(F(q.ddDays, 0) + " giorni") + TD(svg[p]) + "</tr>");
+         R(g_sqTx, "    " + pn + ": " + I2S(q.n) + " trade (" + F(tpy, 0) + " all'anno), obiettivo " + FP(q.win, 1) + "%, " + SgnF(q.e, 3) +
+           " R per trade, totale " + SgnF(q.tot, 1) + " R (" + SgnF(rpy, 1) + " R all'anno), profit factor " + F(q.pf, 2) + ", anni positivi " +
+           I2S(q.posY) + " su " + I2S(q.nY) + ", serie di perdite massima " + I2S(q.ls) + " (attesa " + F(q.lsMed, 0) + ", 95% " + F(q.ls95, 0) +
+           "), drawdown massimo " + F(q.dd, 1) + " R (ordine casuale " + F(q.ddMed, 1) + ", 95% " + F(q.dd95, 1) + "), drawdown piu' lungo " +
+           F(q.ddDays, 0) + " giorni");
+        }
+     }
+   TEnd();
+   SecEnd();
+   g_buf = false;
+   g_sqHtml += g_bufS;
+   g_bufS = "";
+  }
+
+void RRPost(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datetime tMid, const double p20, const double p80, const int L)
+  {
+   string nm = RR_NAME[ti];
+   //--- etichette senza entita' HTML per il CSV
+   for(int d = 0; d < RR_NDIM; d++)
+      g_csvD[d] = Plain(g_rrDimN[d]);
+   for(int r = 0; r < g_rrNR && r < RR_MAXROW; r++)
+      g_csvP[r] = Plain(g_rrLab[r]);
+   //--- contesti singoli: CSV e candidati (prima di riusare gli accumulatori per le coppie)
+   g_ckN = 0;
+   int bi = -1;
+   double bz = 0;
+   for(int i = 0; i < 2 * RR_NR; i++)
+     {
+      bool st = false;
+      double ew = 0, z = RRZr(0, i, st, ew);
+      if(MathIsValidNumber(z) && (bi < 0 || z > bz))
+        {
+         bi = i;
+         bz = z;
+        }
+     }
+   if(bi >= 0)
+     {
+      bool st = false;
+      double ew = 0, z = RRZr(0, bi, st, ew);
+      RRCandAdd(0, 0, 0, -1, -1, bi, g_rrN[0], z, ew, st, "Tutte le candele (entra sempre)");
+     }
+   int kr[], ki[];
+   double kz[];
+   int nk = 0;
+   for(int d = 0; d < RR_NDIM; d++)
+      for(int r = g_rrDimB[d]; r < g_rrDimB[d] + g_rrDimC[d]; r++)
+        {
+         if(g_rrN[r] < 30)
+            continue;
+         for(int i = 0; i < 2 * RR_NR; i++)
+           {
+            RRCsvRow(nm, "singolo", g_csvD[d], g_csvP[r], "", "", r, i);
+            if(d < CB_D0 || d > CB_D1 || g_rrN[r] < 100)
+               continue;
+            bool st = false;
+            double ew = 0, z = RRZr(r, i, st, ew);
+            if(!st || !MathIsValidNumber(z) || z <= 0)
+               continue;
+            ArrayResize(kr, nk + 1);
+            ArrayResize(ki, nk + 1);
+            ArrayResize(kz, nk + 1);
+            kr[nk] = r;
+            ki[nk] = i;
+            kz[nk] = z;
+            nk++;
+           }
+        }
+   int pick[];
+   RRPickTop(kr, ki, kz, nk, InpSeqTop, pick);
+   for(int j = 0; j < ArraySize(pick); j++)
+     {
+      int r = kr[pick[j]], i = ki[pick[j]], d = g_rrDim[r];
+      bool st = false;
+      double ew = 0, z = RRZr(r, i, st, ew);
+      RRCandAdd(1, d, r - g_rrDimB[d], -1, -1, i, g_rrN[r], z, ew, st, g_rrDimN[d] + ": " + g_rrLab[r]);
+     }
+   //--- coppie di contesti
+   if(InpRRCombo && RR_MIN[ti] >= InpComboMinTF)
+     {
+      Comment("MarketProfiler: coppie di contesti ", nm, " ...");
+      RRCombo(s, cs, cd, ti, tMid, L);
+     }
+   else
+      R(g_cbTx, "Coppie di contesti " + nm + ": non calcolate (timeframe sotto il minimo impostato o coppie disattivate)");
+   //--- una posizione alla volta
+   Comment("MarketProfiler: strategie ", nm, " ...");
+   RRSeqTf(s, cs, cd, ti, p20, p80, L);
+  }
+
 void RRTf(CSeries &s, const int barSec, const int ti)
   {
    int tfSec = RR_MIN[ti] * 60;
@@ -7506,24 +8289,17 @@ void RRTf(CSeries &s, const int barSec, const int ti)
    RRDim(17, "EMA20 rispetto alla EMA50", "EMA20 sopra la EMA50|EMA20 sotto la EMA50");
    RRDim(18, "RSI(14)", "sotto 30|30-50|50-70|oltre 70");
    RRDim(19, "Anno", yl);
-   int nx = g_rrNR * 2 * RR_NR;
-   ArrayResize(g_rrN, g_rrNR); ArrayResize(g_rrNH, 2 * g_rrNR); ArrayResize(g_rrInvS, g_rrNR);
-   ArrayResize(g_rrW, nx); ArrayResize(g_rrT, nx); ArrayResize(g_rrA, nx);
-   ArrayResize(g_rrS, nx); ArrayResize(g_rrS2, nx); ArrayResize(g_rrD, nx);
-   ArrayResize(g_rrSN, NPRF * nx); ArrayResize(g_rrCP, NPRF * nx); ArrayResize(g_rrSH, 2 * NPRF * nx);
-   ArrayInitialize(g_rrN, 0); ArrayInitialize(g_rrNH, 0); ArrayInitialize(g_rrInvS, 0.0);
-   ArrayInitialize(g_rrW, 0); ArrayInitialize(g_rrT, 0); ArrayInitialize(g_rrA, 0);
-   ArrayInitialize(g_rrS, 0.0); ArrayInitialize(g_rrS2, 0.0); ArrayInitialize(g_rrD, 0.0);
-   ArrayInitialize(g_rrSN, 0.0); ArrayInitialize(g_rrCP, 0.0); ArrayInitialize(g_rrSH, 0.0);
-   g_rrL = L;
-   ArrayResize(g_rrGap, g_rrNR * (L + 1));
-   ArrayInitialize(g_rrGap, 0);
    int ring[], rN[], rP[];
-   ArrayResize(ring, g_rrNR * L);
-   ArrayResize(rN, g_rrNR);
-   ArrayResize(rP, g_rrNR);
-   ArrayInitialize(rN, 0);
-   ArrayInitialize(rP, 0);
+   RRAlloc(L, ring, rN, rP);
+   //--- ogni trade simulato resta in memoria per coppie di contesti, simulazione una posizione alla volta e regole
+   g_qN = 0;
+   ArrayResize(g_qK, nc);
+   ArrayResize(g_qF, nc);
+   ArrayResize(g_qS, nc);
+   ArrayResize(g_qO, nc * 2 * RR_NR);
+   ArrayResize(g_qD, nc * 2 * RR_NR);
+   ArrayResize(g_qX, nc * 2 * RR_NR);
+   ArrayResize(g_qC, nc * RR_NDIM);
    int HB = 4 * L + 8;
    int hw[], hs[];
    ArrayResize(hw, 2 * RR_NR * HB);
@@ -7543,8 +8319,7 @@ void RRTf(CSeries &s, const int barSec, const int ti)
    double dO = 0, dH = 0, dL = 0, cpv = 0, cvv = 0, medDay = Nan();
    double o[2 * RR_NR], du[2 * RR_NR], cst[NPRF * 2 * RR_NR];
    bool wn[2 * RR_NR], tm[2 * RR_NR], am[2 * RR_NR];
-   int ex[2 * RR_NR], hX[2 * RR_NR];
-   long dX[2 * RR_NR];
+   int ex[2 * RR_NR];
    ArrayInitialize(cst, 0.0);
    bool anyCost = false;
    for(int p = 1; p < NPRF; p++)
@@ -7587,28 +8362,10 @@ void RRTf(CSeries &s, const int barSec, const int ti)
       int hf = t0 < tMid ? 0 : 1;
       //--- costi di ogni broker: spread all'entrata (buy) o all'uscita (sell), commissione, slittamento, swap per notte
       if(anyCost)
-        {
-         datetime tE = DataToNY7(s.t[cs[k]]);
-         long dE = (long)tE / 86400;
-         int hE = HourOf(tE);
-         for(int i = 0; i < 2 * RR_NR; i++)
-           {
-            datetime tX = DataToNY7(s.t[ex[i]]);
-            hX[i] = HourOf(tX);
-            dX[i] = (long)tX / 86400;
-           }
          for(int p = 1; p < NPRF; p++)
-           {
-            if(!g_cp[p].on)
-               continue;
-            for(int i = 0; i < 2 * RR_NR; i++)
-              {
-               int sd = i / RR_NR;
-               double sw = dX[i] > dE ? CostNights(dE, dX[i], g_cp[p].triple) * (g_cp[p].swA[sd] + g_cp[p].swP[sd] * O) : 0;
-               cst[p * 2 * RR_NR + i] = (sd == 0 ? g_cp[p].sp[hE] : g_cp[p].sp[hX[i]]) + g_cp[p].comm + g_cp[p].slip - sw;
-              }
-           }
-        }
+            if(g_cp[p].on)
+               for(int i = 0; i < 2 * RR_NR; i++)
+                  cst[p * 2 * RR_NR + i] = RRCost1(s, p, i, cs[k], O, ex[i]);
       for(int d = 0; d < RR_NDIM; d++)
          cls[d] = -1;
       cls[0] = 0;
@@ -7690,7 +8447,25 @@ void RRTf(CSeries &s, const int barSec, const int ti)
          yCur = md.year;
         }
       cls[19] = yCur - y0;
-      //--- accumula
+      //--- memorizza il trade e accumula
+      int qq = g_qN++, fl = 0;
+      g_qK[qq] = k;
+      g_qS[qq] = (float)S;
+      for(int i = 0; i < 2 * RR_NR; i++)
+        {
+         g_qO[qq * 2 * RR_NR + i] = (float)o[i];
+         g_qD[qq * 2 * RR_NR + i] = (float)du[i];
+         g_qX[qq * 2 * RR_NR + i] = ex[i];
+         if(wn[i])
+            fl |= 1 << i;
+         if(tm[i])
+            fl |= 1 << (10 + i);
+         if(am[i])
+            fl |= 1 << (20 + i);
+        }
+      g_qF[qq] = fl;
+      for(int d = 0; d < RR_NDIM; d++)
+         g_qC[qq * RR_NDIM + d] = (uchar)((cls[d] >= 0 && cls[d] < g_rrDimC[d]) ? cls[d] : 255);
       double invS = 1.0 / S;
       for(int d = 0; d < RR_NDIM; d++)
          if(cls[d] >= 0 && cls[d] < g_rrDimC[d])
@@ -7738,9 +8513,10 @@ void RRTf(CSeries &s, const int barSec, const int ti)
       g_rrHtml[p] += g_bufS;
       g_bufS = "";
      }
+   RRPost(s, cs, cd, ti, tMid, p20, p80, L);
   }
 
-void RRTab(CSeries &s, const int barSec)
+void RRTab(CSeries &s, const int barSec, const string sym, const string clean)
   {
    for(int p = 0; p < NPRF; p++)
      {
@@ -7749,6 +8525,69 @@ void RRTab(CSeries &s, const int barSec)
       g_rrTxA[p] = "";
      }
    int L = InpRRMaxBars < 1 ? 1 : InpRRMaxBars;
+   g_cbHtml = "";
+   g_sqHtml = "";
+   g_ruHtml = "";
+   g_cbTx = "";
+   g_sqTx = "";
+   g_ruTx = "";
+   g_ruN = 0;
+   g_ruReal = 0;
+   //--- CSV di tutti i contesti singoli e delle coppie (virgola decimale, punto e virgola: si apre in Excel italiano)
+   string csvName = "MarketProfiler_" + clean + "_contesti.csv";
+   g_csvH = FileOpen(csvName, FILE_WRITE | FILE_TXT | FILE_ANSI | (InpCommonDir ? FILE_COMMON : 0));
+   string csvPath = (InpCommonDir ? TerminalInfoString(TERMINAL_COMMONDATA_PATH) : TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5") +
+                    "\\Files\\" + csvName;
+   if(g_csvH != INVALID_HANDLE)
+     {
+      string hd = "Timeframe;Tipo;Contesto A;Valore A;Contesto B;Valore B;Operazione;Obiettivo R;N;N effettivo;% obiettivo;Senza vantaggio %;" +
+                  "% chiusi a tempo;Durata media (candele);Lorda R;z lorda;z lorda vs tutte;Meta 1 lorda R;Meta 2 lorda R;Costo max sostenibile";
+      for(int p = 1; p < NPRF; p++)
+        {
+         string b = Plain(g_cp[p].name);
+         hd += ";Netta " + b + " R;z " + b + ";z " + b + " vs tutte;Meta 1 " + b + " R;Meta 2 " + b + " R;Costo medio " + b + " R";
+        }
+      FileWriteString(g_csvH, hd + "\n");
+     }
+   //--- regole per lo Strategy Tester nella cartella comune (le legge l'EA MPRuleTester nel terminale del broker)
+   string al[];
+   AliasList(SymBase(sym), al);
+   g_ruFile = "MarketProfiler_regole_" + al[0] + ".csv";
+   g_ruH = FileOpen(g_ruFile, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(g_ruH != INVALID_HANDLE)
+      FileWriteString(g_ruH, "id;tf_minuti;lato;R;stop_tipo;stop_K;max_candele;dimA;valA;dimB;valB;p20;p80;descrizione;N;netta_peggiore_R;z;" +
+                      "trade_una_alla_volta;R_una_alla_volta\n");
+   g_buf = true;
+   g_bufS = "";
+   SecStart("Coppie di contesti: come si legge",
+            "Gli stessi trade della scheda R/R lordo (buy e sell a ogni apertura di candela, obiettivi 1:1 - 1:5), divisi per due " +
+            "condizioni vere insieme (per esempio 'ora 16' e 'sopra il VWAP'): tutte le coppie tra ora, giorno, candela precedente, " +
+            "volatilit&agrave;, volume, livelli di ieri e della settimana, giorno finora, trend e RSI (escluso l'anno). Le coppie sono " +
+            "migliaia: <b>alcune superano |z| 3 per puro caso</b> e l'intestazione di ogni timeframe dice quante se ne aspettano. " +
+            "Fidati di quelle stabili in entrambe le met&agrave; del campione, positive con i costi di entrambi i broker e che hanno " +
+            "senso di mercato. Tutte le coppie con almeno 30 casi, e tutti i contesti singoli, sono nel file CSV " +
+            (g_csvH != INVALID_HANDLE ? "<b>" + csvPath + "</b>" : "(non creato)") + " (punto e virgola, virgola decimale; in Python: " +
+            "pandas.read_csv(file, sep=';', decimal=',')).");
+   SecEnd();
+   g_cbHtml = g_bufS;
+   g_bufS = "";
+   SecStart("Strategie: una posizione alla volta, serie di perdite e drawdown",
+            "Nelle altre schede ogni candela apre un trade, anche se il precedente &egrave; ancora aperto: va bene per misurare, ma " +
+            "non &egrave; come si opera. Qui i contesti migliori di ogni timeframe (i " + I2S(InpSeqTop) + " singoli e le " +
+            I2S(InpSeqTop) + " coppie con lo z " + (g_cp[1].on || g_cp[2].on ? "netto del broker peggiore" : "lordo") + " pi&ugrave; " +
+            "alto, tra quelli stabili nelle due met&agrave;, pi&ugrave; il riferimento 'entra sempre') sono eseguiti come farebbe " +
+            "un EA: <b>una posizione alla volta</b>, in ordine di tempo. <b>Serie di perdite massima</b>: tra parentesi quella attesa " +
+            "se l'ordine dei trade fosse casuale (mediana e 95%): se la reale supera il 95% le perdite arrivano a gruppi (fasi di " +
+            "mercato sfavorevoli). <b>Drawdown massimo</b> in R dal picco: tra parentesi lo stesso con i trade rimescolati " +
+            I2S(SQ_SH) + " volte. In rosso = oltre il 95% del caso. <b>Drawdown pi&ugrave; lungo</b> = giorni per tornare al " +
+            "massimo precedente. In R: con un rischio dell'1% per trade, 10 R di drawdown = circa -10% del conto. Le regole che " +
+            "reggono (z netto del broker peggiore &ge; " + F(InpRuleMinZ, 1) + ", stabili nelle due met&agrave; e positive anche " +
+            "una posizione alla volta) sono esportate per lo Strategy Tester, insieme al riferimento 'entra sempre' di ogni " +
+            "timeframe come termine di paragone: elenco e istruzioni in fondo alla pagina.");
+   SecEnd();
+   g_sqHtml = g_bufS;
+   g_bufS = "";
+   g_buf = false;
    string br = "";
    for(int p = 1; p < NPRF; p++)
       br += (p > 1 ? " e " : "") + g_cp[p].name;
@@ -7780,6 +8619,51 @@ void RRTab(CSeries &s, const int barSec)
       RRTf(s, barSec, ti);
       PrintFormat("[MarketProfiler] rischio/rendimento %s fatto", RR_NAME[ti]);
      }
+   if(g_csvH != INVALID_HANDLE)
+     {
+      FileClose(g_csvH);
+      g_csvH = INVALID_HANDLE;
+      PrintFormat("[MarketProfiler] contesti e coppie salvati in %s", csvPath);
+     }
+   if(g_ruH != INVALID_HANDLE)
+     {
+      FileClose(g_ruH);
+      g_ruH = INVALID_HANDLE;
+     }
+   ArrayFree(g_qK); ArrayFree(g_qF); ArrayFree(g_qX); ArrayFree(g_qS); ArrayFree(g_qO); ArrayFree(g_qD); ArrayFree(g_qC);
+   g_qN = 0;
+   //--- elenco delle regole e istruzioni per lo Strategy Tester
+   string ruPath = TerminalInfoString(TERMINAL_COMMONDATA_PATH) + "\\Files\\" + g_ruFile;
+   g_buf = true;
+   g_bufS = "";
+   SecStart("Regole per lo Strategy Tester (" + I2S(g_ruReal) + " regole e " + I2S(g_ruN - g_ruReal) + " riferimenti 'entra sempre')",
+            "Regole esportate in <b>" + ruPath + "</b>. Servono a verificarle con i <b>tick reali</b> del broker (spread vero a ogni " +
+            "istante, ordine vero di stop e obiettivo nella stessa barra, swap e commissioni del conto) e, soprattutto, sul periodo " +
+            "<b>dopo</b> la fine dei dati usati qui (fuori campione). Come fare:<br>1. Copia <b>MPRuleTester.mq5</b> in MQL5\\Experts " +
+            "del terminale del broker e compilalo.<br>2. Strategy Tester: Expert MPRuleTester, simbolo del broker (es. US100 o USTEC), " +
+            "modello <b>Ogni tick basato su tick reali</b>, date a piacere (il timeframe del grafico non conta: ogni regola usa il " +
+            "suo).<br>3. Una regola: parametro 'Regola' = il suo numero. Tutte: Ottimizzazione 'Algoritmo completo lento' con " +
+            "'Regola' da 1 a " + I2S(MathMax(1, g_ruN)) + " passo 1, criterio 'Personalizzato max' (= R medi per trade).<br>4. I " +
+            "risultati in R di ogni regola (trade, % vinti, R per trade, profit factor, serie di perdite, drawdown) finiscono in " +
+            "Common\\Files\\MarketProfiler_tester_" + al[0] + ".csv e nel diario.<br>Il file delle regole &egrave; nella cartella " +
+            "comune: lo leggono gli agenti locali del tester, non quelli remoti o del cloud. L'EA riconosce i contesti con le stesse " +
+            "definizioni dello script sulle candele del broker: piccole differenze (volume del broker invece di quello dei dati, " +
+            "giorni del server) sono normali.");
+   if(g_ruReal == 0)
+      W("<p style='color:#f59e0b'>Nessuna regola supera i filtri (z netto del broker peggiore &ge; " + F(InpRuleMinZ, 1) + ", stabile " +
+        "nelle due met&agrave;, positiva una posizione alla volta): sono esportati solo i riferimenti. Puoi abbassare 'z minimo' nei " +
+        "parametri, sapendo che aumentano i falsi positivi.</p>");
+   if(g_ruN > 0)
+     {
+      THead("Regola|Timeframe|Operazione|Contesto|N (analisi)|Aspettativa netta peggiore (R)|z|Trade una alla volta|R per trade una alla volta (peggiore)");
+      W(g_ruHtml);
+      TEnd();
+     }
+   SecEnd();
+   g_sqHtml += g_bufS;
+   g_bufS = "";
+   g_buf = false;
+   g_ruTx = "REGOLE PER LO STRATEGY TESTER (" + I2S(g_ruReal) + " regole e " + I2S(g_ruN - g_ruReal) + " riferimenti 'entra sempre', file " + ruPath + "; EA MPRuleTester, parametro Regola):\n" + g_ruTx;
   }
 
 //+------------------------------------------------------------------+
@@ -8084,13 +8968,15 @@ bool Analyze(const string sym)
       W("<button data-tab='" + TF_KEY[k] + "'>" + TF_LABEL[k] + "</button>");
    W("<button data-tab='sess'>Sessioni</button><button data-tab='lev'>Livelli</button><button data-tab='dir'>Direzione</button>" +
      "<button data-tab='rr'>R/R lordo</button><button data-tab='rrb1'>R/R " + g_cp[1].name + "</button><button data-tab='rrb2'>R/R " +
-     g_cp[2].name + "</button><button data-tab='swing'>Swing</button><button data-tab='break'>Rotture</button><button data-tab='imp'>Impulsi</button>" +
+     g_cp[2].name + "</button><button data-tab='combo'>Coppie di contesti</button><button data-tab='seq'>Strategie</button>" +
+     "<button data-tab='swing'>Swing</button><button data-tab='break'>Rotture</button><button data-tab='imp'>Impulsi</button>" +
      "<button data-tab='news'>Notizie</button><button data-tab='gap'>Gap</button>");
    W("<button data-tab='volume'>Volume</button></nav>");
    W("<nav class='tx'><span>Testi da copiare:</span><button data-tab='report'>Rapporto completo</button><button data-tab='txsum'>Riepilogo</button>" +
      "<button data-tab='txtf'>Timeframe</button><button data-tab='txev'>Eventi e sessioni</button><button data-tab='txlv'>Livelli</button>" +
      "<button data-tab='txdir'>Direzione</button><button data-tab='txrr'>R/R lordo</button><button data-tab='txb1'>R/R " + g_cp[1].name +
-     "</button><button data-tab='txb2'>R/R " + g_cp[2].name + "</button><button data-tab='txvol'>Volume</button></nav></header><main>");
+     "</button><button data-tab='txb2'>R/R " + g_cp[2].name + "</button><button data-tab='txcb'>Coppie</button><button data-tab='txsq'>Strategie e regole</button>" +
+     "<button data-tab='txvol'>Volume</button></nav></header><main>");
 
    CBlocks b;
    for(int k = 0; k < NTF; k++)
@@ -8182,9 +9068,9 @@ bool Analyze(const string sym)
    Comment("MarketProfiler ", sym, ": rischio/rendimento ...");
    W("<div class='tab' id='tab-rr' hidden>");
    if(m1.n > 5000)
-      RRTab(m1, 60);
+      RRTab(m1, 60, sym, clean);
    else
-      RRTab(m5, 300);
+      RRTab(m5, 300, sym, clean);
    W("</div>");
    for(int p = 1; p < NPRF; p++)
      {
@@ -8193,6 +9079,13 @@ bool Analyze(const string sym)
       W("</div>");
       g_rrHtml[p] = "";
      }
+   W("<div class='tab' id='tab-combo' hidden>");
+   W(g_cbHtml);
+   W("</div><div class='tab' id='tab-seq' hidden>");
+   W(g_sqHtml);
+   W("</div>");
+   g_cbHtml = "";
+   g_sqHtml = "";
    PerFree();
    W("<div class='tab' id='tab-gap' hidden>");
    if(m1.n > 1000)
@@ -8236,6 +9129,12 @@ bool Analyze(const string sym)
       W(g_rbHead[p]);
       W(g_rrTxS[p]);
      }
+   W("\n=== STRATEGIE: una posizione alla volta, serie di perdite e drawdown ===\n");
+   W(g_sqTx);
+   W("\n");
+   W(g_ruTx);
+   W("\n=== COPPIE DI CONTESTI (tutte nel CSV) ===\n");
+   W(g_cbTx);
    W("\n=== VOLUME ===\n");
    W(g_repVol);
    W("</textarea>");
@@ -8257,6 +9156,10 @@ bool Analyze(const string sym)
       TxTab("txb" + I2S(p), "Testo: rischio/rendimento netto " + g_cp[p].name, "Costi di " + g_cp[p].name + ", spread per ora, riepilogo " +
             "netto di ogni timeframe, contesti migliori e peggiori e tutti i contesti.", "RISCHIO/RENDIMENTO NETTO " + g_cp[p].name + " - " + sym +
             "\n" + g_rbHead[p] + g_rrTxS[p] + g_rrTxT[p] + g_rrTxA[p]);
+   TxTab("txcb", "Testo: coppie di contesti", "Le coppie pi&ugrave; solide e pi&ugrave; negative di ogni timeframe (tutte nel file CSV).",
+         "COPPIE DI CONTESTI - " + sym + "\n" + g_cbTx);
+   TxTab("txsq", "Testo: strategie e regole", "Simulazione una posizione alla volta dei contesti migliori (serie di perdite, drawdown) e " +
+         "regole esportate per lo Strategy Tester.", "STRATEGIE - " + sym + " - una posizione alla volta\n" + g_sqTx + "\n" + g_ruTx);
    TxTab("txvol", "Testo: volume", "Volume per ora, giorno e periodo.", "VOLUME - " + sym + "\n" + g_repVol);
    W("</main><script>" + Js() + "</script></body></html>");
    FileClose(g_fh);
