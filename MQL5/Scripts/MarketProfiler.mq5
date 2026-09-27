@@ -9,6 +9,10 @@
 //|  e netto per broker, Coppie di contesti, Strategie, Swing,        |
 //|  Rotture, Impulsi, Notizie, Gap, Volume, Testi da copiare. File:  |
 //|  CSV dei contesti e dell'ORB, regole per l'EA MPRuleTester.       |
+//|  Controlli dei trade simulati (ORB, R/R, coppie, strategie):      |
+//|  placebo con direzione a caso nello stesso istante, confronto     |
+//|  con la stessa ora, costo di pareggio e livelli di costo in punti |
+//|  base del prezzo (parametro 'Costi: livelli').                    |
 //|  Orari chiave di New York, Londra, Francoforte e Tokyo           |
 //|  convertiti giorno per giorno: vale per indici USA ed europei,    |
 //|  forex e materie prime (imposta il fuso orario dei dati).         |
@@ -114,6 +118,7 @@ input double InpB2Comm       = 0.0;   // Broker 2: commissione per lotto, andata
 input double InpB2SwapL      = 0.0;   // Broker 2: swap buy per notte in prezzo, manuale
 input double InpB2SwapS      = 0.0;   // Broker 2: swap sell per notte in prezzo, manuale
 input double InpB2Slip       = 0.0;   // Broker 2: slittamento per trade in prezzo
+input string InpCostBp       = "0.5,1,2,4"; // Costi: livelli per trade in punti base del prezzo (1 = 0,01%; virgola tra i valori, punto per i decimali): a quale costo il vantaggio sparisce
 input bool   InpRRCombo      = true;  // Rischio/rendimento: coppie di contesti (tabella, riepilogo, CSV)
 input int    InpComboMinTF   = 15;    // Coppie di contesti: timeframe minimo in minuti (5 = anche M5, molto piu' lento)
 input int    InpSeqTop       = 5;     // Strategie: contesti singoli e coppie migliori simulati una posizione alla volta, per timeframe
@@ -319,7 +324,7 @@ double Z2(const double p1, const double n1, const double p2, const double n2)  /
 double ArcF(const double x) { return 2.0 / M_PI * MathArcsin(MathSqrt(MathMax(0.0, MathMin(1.0, x)))); }  // legge dell'arcoseno
 
 //--- riepilogo: ogni z calcolato nelle schede viene contato; quelli con |z| >= 2 sono conservati con il loro testo
-#define HI_NMOD 10
+#define HI_NMOD 12
 string HI_NAME[HI_NMOD] = {"Sessioni e orari chiave (reale contro atteso con direzione casuale)",
                            "Livelli: effetto del livello (reale contro livello finto)",
                            "Vita dei livelli (reale contro livello finto)",
@@ -327,7 +332,9 @@ string HI_NAME[HI_NMOD] = {"Sessioni e orari chiave (reale contro atteso con dir
                            "Direzione (condizione contro tutti i periodi)",
                            "Rischio/rendimento lordo (aspettativa contro zero)", "", "",
                            "Coppie di contesti (aspettativa netta del broker peggiore contro zero)",
-                           "ORB a tutti gli orari (segui la rottura 1:1, aspettativa lorda contro zero; z negativo = la rottura fallisce: fade)"};
+                           "ORB a tutti gli orari (segui la rottura 1:1, aspettativa lorda contro zero, che per 1:1 e' anche il placebo; z negativo = la rottura fallisce: fade)",
+                           "Rischio/rendimento lordo: il contesto contro la stessa ora (cosa aggiunge all'orario; D1: contro tutte le candele)",
+                           "Rischio/rendimento lordo: la direzione conta (buy contro sell nello stesso istante, stesso stop e obiettivo: contro il placebo)"};
 int    g_hiCnt[HI_NMOD];
 int    g_hiN = 0;
 int    g_hiM[];
@@ -6776,10 +6783,62 @@ bool CostLoad(const int p, const string key)
    return true;
   }
 
+//--- livelli di costo per trade in punti base del prezzo (1 pb = 0,01%): proporzionali al prezzo, quindi confrontabili tra
+//--- strumenti e negli anni. Per ogni gruppo di trade: aspettativa e z a ogni livello e costo di pareggio (il costo che la azzera)
+#define BP_MAX 6
+int    g_bpN = 0;
+double g_bpV[BP_MAX];
+
+void CostBpSetup(void)
+  {
+   g_bpN = 0;
+   string p[];
+   int k = StringSplit(InpCostBp, ',', p);
+   for(int i = 0; i < k && g_bpN < BP_MAX; i++)
+     {
+      string t = p[i];
+      StringTrimLeft(t);
+      StringTrimRight(t);
+      double v = StringToDouble(t);
+      if(t == "" || !(v > 0) || v > 1000)
+         continue;
+      bool dup = false;
+      for(int j = 0; j < g_bpN; j++)
+         if(MathAbs(g_bpV[j] - v) < 1e-9)
+            dup = true;
+      if(!dup)
+         g_bpV[g_bpN++] = v;
+     }
+   if(g_bpN == 0)  // elenco vuoto o non valido: livelli predefiniti
+     {
+      double dv[4] = {0.5, 1, 2, 4};
+      for(int j = 0; j < 4; j++)
+         g_bpV[g_bpN++] = dv[j];
+     }
+   for(int a = 1; a < g_bpN; a++)
+      for(int b = a; b > 0 && g_bpV[b] < g_bpV[b - 1]; b--)
+        {
+         double x = g_bpV[b];
+         g_bpV[b] = g_bpV[b - 1];
+         g_bpV[b - 1] = x;
+        }
+  }
+
+string BpNum(const double v) { return DoubleToString(v, v == MathFloor(v) ? 0 : (v * 10 == MathFloor(v * 10) ? 1 : 2)); }
+string BpLab(void)
+  {
+   string t = "";
+   for(int j = 0; j < g_bpN; j++)
+      t += (j > 0 ? " / " : "") + BpNum(g_bpV[j]);
+   return t + " pb";
+  }
+string BpTxt(const double be) { return MathIsValidNumber(be) ? (be > 0 ? F(be, 1) + " pb" : "nessuno") : "-"; }
+
 // costi dei due broker per lo strumento dei dati: misura nel terminale del broker, altrimenti profilo salvato, altrimenti manuale
 void CostSetup(const string dataSym)
   {
    SrvClock();
+   CostBpSetup();
    string al[];
    int na = AliasList(SymBase(dataSym), al);
    string key = al[0];
@@ -6900,6 +6959,19 @@ double CostSpMed(const int p)
    return n > 0 ? MedianOf(a, n) : 0;
   }
 
+double CostBp(const int p)  // costo tipico del broker per trade in punti base: spread mediano + commissione + slittamento al prezzo attuale
+  {
+   return g_last > 0 ? (CostSpMed(p) + g_cp[p].comm + g_cp[p].slip) / g_last * 1e4 : Nan();
+  }
+string CostBpTxt(void)  // costo tipico di ogni broker in punti base, per confronto con il costo di pareggio
+  {
+   string t = "";
+   for(int p = 1; p < NPRF; p++)
+      if(g_cp[p].on)
+         t += (t != "" ? ", " : "") + g_cp[p].name + " circa " + F(CostBp(p), 2) + " pb";
+   return t != "" ? t : "costi dei broker non disponibili";
+  }
+
 // sezione iniziale della scheda di un broker: da dove vengono i costi e spread per ora (tabella e testo)
 void CostHtml(const int p)
   {
@@ -6998,6 +7070,17 @@ double g_rrS[], g_rrS2[], g_rrD[];            // esiti lordi (R), quadrati, dura
 double g_rrSN[], g_rrCP[], g_rrSH[];          // per profilo: esiti netti (R), costo (prezzo), esiti netti per meta' del campione
 int    g_rrGap[];                             // per riga: coppie di entrate a distanza g candele (1..L), per la sovrapposizione
 int    g_rrL = 1;
+//--- confronto con la stessa ora: ogni trade e' confrontato con l'aspettativa di tutti i trade della sua ora (contesti singoli
+//--- del timeframe; sul D1 con tutte le candele). Quello che resta e' cio' che il contesto aggiunge all'orario
+#define RR_NH 24
+int    g_rrHN[];                              // per riga e ora: trade
+double g_rrHS[];                              // per riga, ora e operazione: somma degli esiti lordi
+double g_rrBH[];                              // aspettativa della stessa ora per profilo, ora e operazione (riferimento)
+bool   g_rrBOk = false, g_rrIntra = true, g_rrPair = false;
+//--- placebo: buy e sell nello stesso istante con lo stesso stop e obiettivo; direzione a caso = media dei due
+double g_rrX[];                               // per riga e obiettivo: somma dei prodotti esito buy x esito sell
+//--- livelli di costo in punti base: costo di 1 pb in R (somma e quadrati per riga), prodotto con l'esito (per riga e operazione)
+double g_rrU[], g_rrU2[], g_rrOU[];
 //--- ogni trade simulato del timeframe in corso (indice q; lato e obiettivo i: q * 2 * RR_NR + i; dimensione d: q * RR_NDIM + d)
 int    g_qN = 0;
 int    g_qK[], g_qF[], g_qX[];                // candela di entrata, bit vinto / chiuso a tempo / ambiguo, barra di uscita
@@ -7120,16 +7203,22 @@ void RRWalk(CSeries &s, const int &cs[], const int &ce[], const int k, const int
      }
   }
 
-// cst = costo in prezzo per profilo, lato e obiettivo (indice p * 2 * RR_NR + i); hf = meta' del campione (0 o 1)
+// cst = costo in prezzo per profilo, lato e obiettivo (indice p * 2 * RR_NR + i); hf = meta' del campione (0 o 1);
+// hs = ora della candela (0 sul D1); u = costo di 1 punto base del prezzo in R
 void RRAcc(const int r, const double &o[], const bool &wn[], const bool &tm[], const bool &am[], const double &du[],
-           const double invS, const double &cst[], const int hf)
+           const double invS, const double &cst[], const int hf, const int hs, const double u)
   {
    if(r < 0 || r >= g_rrNR)
       return;
-   int nx = g_rrNR * 2 * RR_NR;
+   int nx = g_rrNR * 2 * RR_NR, hb = (r * RR_NH + hs) * 2 * RR_NR;
    g_rrN[r]++;
    g_rrNH[r * 2 + hf]++;
    g_rrInvS[r] += invS;
+   g_rrHN[r * RR_NH + hs]++;
+   g_rrU[r] += u;
+   g_rrU2[r] += u * u;
+   for(int tg = 0; tg < RR_NR; tg++)
+      g_rrX[r * RR_NR + tg] += o[tg] * o[RR_NR + tg];
    for(int i = 0; i < 2 * RR_NR; i++)
      {
       int x = r * 2 * RR_NR + i;
@@ -7143,6 +7232,8 @@ void RRAcc(const int r, const double &o[], const bool &wn[], const bool &tm[], c
       g_rrS2[x] += o[i] * o[i];
       g_rrD[x] += du[i];
       g_rrSN[x] += o[i];
+      g_rrHS[hb + i] += o[i];
+      g_rrOU[x] += o[i] * u;
       g_rrSH[hf * nx + x] += o[i];
       for(int p = 1; p < NPRF; p++)
         {
@@ -7188,16 +7279,32 @@ struct RRSt
   {
    int               n, n1, n2;
    double            win, eg, en, z, za, cm, tmo, amb, dm, cr, cp, e1, e2;
+   double            lh, lhn, zh;   // differenza dalla stessa ora (lorda, del profilo) e suo z
+   double            pl, pln, zp;   // placebo (direzione a caso nello stesso istante: lordo, del profilo) e z del vantaggio sul placebo
+   double            ub, cmb;       // costo di 1 punto base in R (media) e costo di pareggio in punti base
    bool              st;  // stesso segno nelle due meta' del campione
   };
 
+// riga senza confronto con la stessa ora: 'Tutte le candele' e le righe delle ore (la differenza e' zero per costruzione)
+bool RRNoLift(const int r) { return r == 0 || (!g_rrPair && g_rrIntra && r < RR_MAXROW && g_rrDim[r] == 1); }
+
 // win = % obiettivo prima dello stop, eg/en = aspettativa lorda/netta in R, z con N effettivo (i trade aperti a candele
 // vicine si sovrappongono: RRNeff), za = z della differenza dalla riga 'Tutte le candele',
-// cm = costo per trade che azzera l'aspettativa lorda (prezzo), cr/cp = costo medio in R e in prezzo, e1/e2 = meta' del campione
+// cm = costo per trade che azzera l'aspettativa lorda (prezzo), cr/cp = costo medio in R e in prezzo, e1/e2 = meta' del campione;
+// lh/zh = differenza dalla stessa ora (ogni trade meno l'aspettativa della sua ora) e z; pl/zp = placebo e z del vantaggio sul
+// placebo (buy meno sell nello stesso istante, diviso 2: z sulle differenze trade per trade); cmb = costo di pareggio in punti base
 bool RRStat(const int p, const int r, const int i, RRSt &q)
   {
    int n = g_rrN[r];
    q.n = n;
+   q.lh = Nan();
+   q.lhn = Nan();
+   q.zh = Nan();
+   q.pl = Nan();
+   q.pln = Nan();
+   q.zp = Nan();
+   q.ub = Nan();
+   q.cmb = Nan();
    if(n <= 0)
       return false;
    int nx = g_rrNR * 2 * RR_NR, x = r * 2 * RR_NR + i;
@@ -7226,6 +7333,112 @@ bool RRStat(const int p, const int r, const int i, RRSt &q)
       double v = (var > 0 ? var / neff : 0) + (v0 > 0 ? v0 / ne0 : 0);
       q.za = v > 0 ? (q.en - en0) / MathSqrt(v) : Nan();
      }
+   //--- stessa ora: somma su ogni ora dei trade della riga per l'aspettativa di quell'ora (varianza esatta dei residui)
+   if(g_rrBOk && !RRNoLift(r))
+     {
+      double sb = 0, sbb = 0, sbs = 0, sbn = 0;
+      for(int h = 0; h < RR_NH; h++)
+        {
+         int nh = g_rrHN[r * RR_NH + h];
+         if(nh <= 0)
+            continue;
+         double b0 = g_rrBH[h * 2 * RR_NR + i], bp = g_rrBH[(p * RR_NH + h) * 2 * RR_NR + i];
+         sb += nh * b0;
+         sbb += nh * b0 * b0;
+         sbs += b0 * g_rrHS[(r * RR_NH + h) * 2 * RR_NR + i];
+         sbn += nh * bp;
+        }
+      q.lh = (g_rrS[x] - sb) / n;
+      q.lhn = (g_rrSN[p * nx + x] - sbn) / n;
+      double vr = (g_rrS2[x] - 2 * sbs + sbb) / n - q.lh * q.lh;
+      q.zh = vr > 1e-9 * (var + 1e-12) ? q.lhn / MathSqrt(vr / neff) : Nan();
+     }
+   //--- placebo: direzione a caso = media di buy e sell con lo stesso obiettivo; vantaggio = operazione - placebo
+   int tg0 = i % RR_NR, xb = r * 2 * RR_NR + tg0, xs = xb + RR_NR;
+   double eb = g_rrS[xb] / n, es = g_rrS[xs] / n;
+   q.pl = 0.5 * (eb + es);
+   q.pln = 0.5 * (g_rrSN[p * nx + xb] + g_rrSN[p * nx + xs]) / n;
+   double vb = g_rrS2[xb] / n - eb * eb, vs = g_rrS2[xs] / n - es * es, cv = g_rrX[r * RR_NR + tg0] / n - eb * es;
+   double vd = 0.25 * (vb + vs - 2 * cv), ne2 = RRNeff(r, n, 0.5 * (g_rrD[xb] + g_rrD[xs]) / n);
+   q.zp = vd > 1e-9 * (vb + vs + 1e-12) ? (q.en - q.pln) / MathSqrt(vd / ne2) : Nan();
+   //--- costo di pareggio in punti base del prezzo
+   q.ub = g_rrU[r] / n;
+   q.cmb = q.ub > 0 ? q.eg / q.ub : Nan();
+   return true;
+  }
+
+// aspettativa lorda e z con un costo per trade di c punti base del prezzo (varianza esatta: il costo in R cambia da trade a trade)
+void RRNetBp(const int r, const int i, const double c, double &e, double &z)
+  {
+   e = Nan();
+   z = Nan();
+   int n = g_rrN[r];
+   if(n <= 0)
+      return;
+   int x = r * 2 * RR_NR + i;
+   double m = g_rrS[x] / n, ub = g_rrU[r] / n;
+   double vr = g_rrS2[x] / n - m * m, vu = g_rrU2[r] / n - ub * ub, cv = g_rrOU[x] / n - m * ub;
+   double v = vr - 2 * c * cv + c * c * vu, ne = RRNeff(r, n, g_rrD[x] / n);
+   e = m - c * ub;
+   z = v > 0 ? e / MathSqrt(v / ne) : Nan();
+  }
+
+string RRLev(const int r, const int i, string &zt)  // aspettativa lorda a ogni livello di costo (" / ") e i loro z in zt
+  {
+   string t = "";
+   zt = "";
+   for(int j = 0; j < g_bpN; j++)
+     {
+      double e = 0, z = 0;
+      RRNetBp(r, i, g_bpV[j], e, z);
+      t += (j > 0 ? " / " : "") + SgnF(e, 3);
+      zt += (j > 0 ? ", " : "") + BpNum(g_bpV[j]) + " pb z " + ZS(z);
+     }
+   return t;
+  }
+
+// riferimento della stessa ora, dai contesti singoli appena accumulati (righe delle ore; sul D1 la riga 'Tutte le candele')
+void RRBase(void)
+  {
+   int nx = g_rrNR * 2 * RR_NR;
+   ArrayResize(g_rrBH, NPRF * RR_NH * 2 * RR_NR);
+   ArrayInitialize(g_rrBH, 0.0);
+   for(int h = 0; h < RR_NH; h++)
+     {
+      int r = 0;
+      if(g_rrIntra && h < g_rrDimC[1] && g_rrN[g_rrDimB[1] + h] > 0)
+         r = g_rrDimB[1] + h;
+      if(g_rrN[r] <= 0)
+         continue;
+      for(int p = 0; p < NPRF; p++)
+         for(int i = 0; i < 2 * RR_NR; i++)
+            g_rrBH[(p * RR_NH + h) * 2 * RR_NR + i] = g_rrSN[p * nx + r * 2 * RR_NR + i] / g_rrN[r];
+     }
+   g_rrBOk = true;
+  }
+
+// il contesto aggiunge qualcosa alla stessa ora: differenza netta del broker peggiore (lorda senza costi) positiva
+bool RRLiftOk(const int r, const int i)
+  {
+   if(!g_rrBOk || RRNoLift(r))
+      return true;
+   bool any = false;
+   for(int p = 1; p < NPRF; p++)
+     {
+      if(!g_cp[p].on)
+         continue;
+      RRSt q;
+      RRStat(p, r, i, q);
+      if(!(q.lhn > 0))
+         return false;
+      any = true;
+     }
+   if(!any)
+     {
+      RRSt q;
+      RRStat(0, r, i, q);
+      return q.lhn > 0;
+     }
    return true;
   }
 
@@ -7235,12 +7448,26 @@ string RRVerd(RRSt &q)
       return "-";
    if(q.en <= 0)
       return q.z <= -2 ? "negativa" : "circa zero o negativa";
+   string v = "positiva ma compatibile con il caso";
    if(q.z >= 3 && q.st)
-      return "positiva, solida, stabile nelle due met&agrave;";
+      v = "positiva, solida, stabile nelle due met&agrave;";
+   else
+      if(q.z >= 2)
+         v = q.st ? "positiva, stabile nelle due met&agrave;" : "positiva, ma non in entrambe le met&agrave;";
    if(q.z >= 2)
-      return q.st ? "positiva, stabile nelle due met&agrave;" : "positiva, ma non in entrambe le met&agrave;";
-   return "positiva ma compatibile con il caso";
+     {
+      //--- i controlli: la stessa ora rende quasi lo stesso (il contesto non aggiunge nulla all'orario), oppure rende anche la
+      //--- direzione opposta (conta il movimento, non la direzione)
+      if(MathIsValidNumber(q.zh) && q.zh < 1)
+         v += "; la spiega l'orario";
+      if(MathIsValidNumber(q.zp) && q.zp < 1)
+         v += "; non dipende dalla direzione";
+     }
+   return v;
   }
+
+string RRCm(RRSt &q) { return q.cm > 0 ? PX(q.cm) + " (" + F(q.cmb, 1) + " pb)" : "-"; }  // costo massimo sostenibile: prezzo e punti base
+string ZhLab(void) { return g_rrIntra ? "z rispetto alla stessa ora" : "z rispetto a tutte le candele"; }
 
 string RRCellH(const int p, const int r, const int i)
   {
@@ -7249,8 +7476,9 @@ string RRCellH(const int p, const int r, const int i)
       return TD("-");
    string bg = PCol(q.z, 0, 4);
    string tip = "lorda " + SgnF(q.eg, 3) + (p > 0 ? ", costo " + F(q.cr, 3) + ", netta " + SgnF(q.en, 3) : "") + " R; z " + ZS(q.z) +
-                ", vs tutte " + ZS(q.za) + "; met&agrave; " + SgnF(q.e1, 2) + " / " + SgnF(q.e2, 2) + "; a tempo " + FP(q.tmo, 0) +
-                "%; durata " + F(q.dm, 1) + "; costo max " + (q.cm > 0 ? PX(q.cm) : "-");
+                ", vs tutte " + ZS(q.za) + (MathIsValidNumber(q.zh) ? ", vs stessa ora " + SgnF(q.lhn, 3) + " (z " + ZS(q.zh) + ")" : "") +
+                "; placebo " + SgnF(q.pln, 3) + ", vs placebo z " + ZS(q.zp) + "; met&agrave; " + SgnF(q.e1, 2) + " / " + SgnF(q.e2, 2) +
+                "; a tempo " + FP(q.tmo, 0) + "%; durata " + F(q.dm, 1) + "; costo max " + RRCm(q);
    return "<td title='" + tip + "'" + (bg != "" ? " style='background:" + bg + "'" : "") + ">" + FP(q.win, 1) + "% &middot; " +
           SgnF(q.en, 2) + (q.st ? "" : "*") + "</td>";
   }
@@ -7298,9 +7526,12 @@ void RRRender(const int p, const int ti, const string head, const double tfH, co
      }
    SecStart("Rischio/rendimento " + nm + " " + pn + ": un buy e un sell a ogni apertura di candela", hd);
    if(p == 0)
-      THead("Operazione|% obiettivo prima dello stop|% stop|% chiusi a tempo|Senza vantaggio sarebbe|Aspettativa (R per trade)|z|Prima / seconda met&agrave; (R)|Costo massimo sostenibile|Tempo mediano all'obiettivo|Tempo mediano allo stop|% esiti ambigui|Lettura");
+      THead("Operazione|% obiettivo prima dello stop|% stop|% chiusi a tempo|Senza vantaggio sarebbe|Aspettativa (R per trade)|z|" +
+            "Placebo: direzione a caso (R)|z contro il placebo|Prima / seconda met&agrave; (R)|Costo massimo sostenibile (prezzo e pb)|" +
+            "Aspettativa con costo di " + BpLab() + " (R)|Tempo mediano all'obiettivo|Tempo mediano allo stop|% esiti ambigui|Lettura");
    else
-      THead("Operazione|% obiettivo prima dello stop|Senza vantaggio sarebbe|Aspettativa lorda (R)|Costo medio per trade|Costo medio (R)|Aspettativa netta (R)|z|Prima / seconda met&agrave; netta (R)|Costo massimo sostenibile|Lettura");
+      THead("Operazione|% obiettivo prima dello stop|Senza vantaggio sarebbe|Aspettativa lorda (R)|Costo medio per trade|Costo medio (R)|" +
+            "Aspettativa netta (R)|z|Placebo netto (R)|z contro il placebo|Prima / seconda met&agrave; netta (R)|Costo massimo sostenibile (prezzo e pb)|Lettura");
    R(g_rrTxS[p], "");
    R(g_rrTxS[p], "Rischio/rendimento " + nm + " " + pn + ": " + hd);
    for(int sd = 0; sd < 2; sd++)
@@ -7314,22 +7545,26 @@ void RRRender(const int p, const int ti, const string head, const double tfH, co
          string op = sn[sd] + " 1:" + I2S(tg), hv = SgnF(q.e1, 3) + " / " + SgnF(q.e2, 3), vd = RRVerd(q);
          if(p == 0)
            {
+            string lz = "", lv = RRLev(0, i, lz);
             W("<tr>" + TD(op) + TDc(FP(q.win, 1), PCol(q.win, be, 0.1)) + TD(FP(stp, 1)) + TD(FP(q.tmo, 1)) + TD(FP(be, 1)) +
-              TDc(SgnF(q.en, 3), PCol(q.z, 0, 4)) + TD(ZS(q.z)) + TD(hv) + TD(q.cm > 0 ? PX(q.cm) : "-") +
-              TD(F(mW, 2) + " candele (" + DurLab(mW * tfH) + ")") + TD(F(mS, 2) + " candele (" + DurLab(mS * tfH) + ")") + TD(FP(q.amb, 1)) +
-              TD(vd) + "</tr>");
+              TDc(SgnF(q.en, 3), PCol(q.z, 0, 4)) + TD(ZS(q.z)) + TD(SgnF(q.pln, 3)) + TDc(ZS(q.zp), PCol(q.zp, 0, 4)) + TD(hv) + TD(RRCm(q)) +
+              "<td title='" + lz + "'>" + lv + "</td>" + TD(F(mW, 2) + " candele (" + DurLab(mW * tfH) + ")") +
+              TD(F(mS, 2) + " candele (" + DurLab(mS * tfH) + ")") + TD(FP(q.amb, 1)) + TD(vd) + "</tr>");
             R(g_rrTxS[p], "  " + op + ": obiettivo prima dello stop " + FP(q.win, 1) + "% (senza vantaggio " + FP(be, 1) + "%), stop " +
               FP(stp, 1) + "%, chiusi a tempo " + FP(q.tmo, 1) + "%, aspettativa " + SgnF(q.en, 3) + " R (z " + ZS(q.z) + "; prima / seconda " +
-              "meta' " + hv + "), costo massimo sostenibile " + (q.cm > 0 ? PX(q.cm) : "-") + ", tempo mediano all'obiettivo " + F(mW, 2) +
-              " candele (" + DurLab(mW * tfH) + "), allo stop " + F(mS, 2) + " candele, esiti ambigui " + FP(q.amb, 1) + "% -> " + vd);
+              "meta' " + hv + "), placebo " + SgnF(q.pln, 3) + " R (contro il placebo z " + ZS(q.zp) + "), costo massimo sostenibile " + RRCm(q) +
+              ", con costo di " + BpLab() + ": " + lv + " R (" + lz + "), tempo mediano all'obiettivo " + F(mW, 2) + " candele (" +
+              DurLab(mW * tfH) + "), allo stop " + F(mS, 2) + " candele, esiti ambigui " + FP(q.amb, 1) + "% -> " + vd);
            }
          else
            {
             W("<tr>" + TD(op) + TDc(FP(q.win, 1), PCol(q.win, be, 0.1)) + TD(FP(be, 1)) + TD(SgnF(q.eg, 3)) + TD(PX(q.cp)) + TD(F(q.cr, 3)) +
-              TDc(SgnF(q.en, 3), PCol(q.z, 0, 4)) + TD(ZS(q.z)) + TD(hv) + TD(q.cm > 0 ? PX(q.cm) : "-") + TD(vd) + "</tr>");
+              TDc(SgnF(q.en, 3), PCol(q.z, 0, 4)) + TD(ZS(q.z)) + TD(SgnF(q.pln, 3)) + TDc(ZS(q.zp), PCol(q.zp, 0, 4)) + TD(hv) + TD(RRCm(q)) +
+              TD(vd) + "</tr>");
             R(g_rrTxS[p], "  " + op + ": obiettivo prima dello stop " + FP(q.win, 1) + "% (senza vantaggio " + FP(be, 1) + "%), aspettativa " +
               "lorda " + SgnF(q.eg, 3) + " R, costo medio " + PX(q.cp) + " = " + F(q.cr, 3) + " R, netta " + SgnF(q.en, 3) + " R (z " + ZS(q.z) +
-              "; prima / seconda meta' " + hv + "), costo massimo sostenibile " + (q.cm > 0 ? PX(q.cm) : "-") + " -> " + vd);
+              "; prima / seconda meta' " + hv + "), placebo netto " + SgnF(q.pln, 3) + " R (contro il placebo z " + ZS(q.zp) + "), costo " +
+              "massimo sostenibile " + RRCm(q) + " -> " + vd);
            }
         }
    TEnd();
@@ -7363,9 +7598,11 @@ void RRRender(const int p, const int ti, const string head, const double tfH, co
                   "Contesti con " + en + " pi&ugrave; negativa (z pi&ugrave; basso, N &ge; 100)";
       W("<h3>" + tt + "</h3>");
       if(p == 0)
-         THead("Contesto|Operazione|N|% obiettivo prima dello stop|Senza vantaggio|Aspettativa (R)|z|z rispetto a tutte le candele|Prima / seconda met&agrave; (R)|Costo massimo sostenibile|Lettura");
+         THead("Contesto|Operazione|N|% obiettivo prima dello stop|Senza vantaggio|Aspettativa (R)|z|" + ZhLab() + "|z contro il placebo|" +
+               "Prima / seconda met&agrave; (R)|Costo massimo sostenibile (prezzo e pb)|Lettura");
       else
-         THead("Contesto|Operazione|N|% obiettivo prima dello stop|Senza vantaggio|Aspettativa lorda (R)|Costo medio (R)|Aspettativa netta (R)|z|z rispetto a tutte le candele|Prima / seconda met&agrave; netta (R)|Costo massimo sostenibile|Lettura");
+         THead("Contesto|Operazione|N|% obiettivo prima dello stop|Senza vantaggio|Aspettativa lorda (R)|Costo medio (R)|Aspettativa netta (R)|z|" +
+               ZhLab() + "|z contro il placebo|Prima / seconda met&agrave; netta (R)|Costo massimo sostenibile (prezzo e pb)|Lettura");
       R(g_rrTxT[p], "  [" + nm + " " + pn + " - " + tt + "]");
       bool used[];
       ArrayResize(used, ncand);
@@ -7386,12 +7623,14 @@ void RRRender(const int p, const int ti, const string head, const double tfH, co
          string op = sn[i / RR_NR] + " 1:" + I2S(tg), hv = SgnF(q.e1, 3) + " / " + SgnF(q.e2, 3);
          double be = 1.0 / (1 + tg);
          W("<tr>" + TD(lab) + TD(op) + TD(I2S(q.n)) + TD(FP(q.win, 1)) + TD(FP(be, 1)) + TD(SgnF(q.eg, 3)) +
-           (p > 0 ? TD(F(q.cr, 3)) + TDc(SgnF(q.en, 3), PCol(q.z, 0, 4)) : "") + TD(ZS(q.z)) + TD(ZS(q.za)) + TD(hv) +
-           TD(q.cm > 0 ? PX(q.cm) : "-") + TD(RRVerd(q)) + "</tr>");
+           (p > 0 ? TD(F(q.cr, 3)) + TDc(SgnF(q.en, 3), PCol(q.z, 0, 4)) : "") + TD(ZS(q.z)) +
+           TDc(ZS(q.zh) + (MathIsValidNumber(q.lhn) ? " (" + SgnF(q.lhn, 3) + ")" : ""), PCol(q.zh, 0, 4)) + TDc(ZS(q.zp), PCol(q.zp, 0, 4)) +
+           TD(hv) + TD(RRCm(q)) + TD(RRVerd(q)) + "</tr>");
          R(g_rrTxT[p], "    " + lab + " -> " + op + " (N " + I2S(q.n) + "): obiettivo " + FP(q.win, 1) + "% (senza vantaggio " + FP(be, 1) +
            "%), aspettativa " + (p > 0 ? "lorda " + SgnF(q.eg, 3) + " R, costo " + F(q.cr, 3) + " R, netta " : "") + SgnF(q.en, 3) +
-           " R, z " + ZS(q.z) + ", rispetto a tutte le candele z " + ZS(q.za) + ", prima / seconda meta' " + hv + ", costo massimo " +
-           (q.cm > 0 ? PX(q.cm) : "-") + " -> " + RRVerd(q));
+           " R, z " + ZS(q.z) + ", rispetto a tutte le candele z " + ZS(q.za) + (MathIsValidNumber(q.zh) && g_rrIntra ? ", rispetto alla stessa ora " +
+           SgnF(q.lhn, 3) + " R (z " + ZS(q.zh) + ")" : "") + ", contro il placebo z " + ZS(q.zp) + ", prima / seconda meta' " + hv +
+           ", costo massimo " + RRCm(q) + " -> " + RRVerd(q));
         }
       TEnd();
      }
@@ -7400,7 +7639,9 @@ void RRRender(const int p, const int ti, const string head, const double tfH, co
      "&middot; aspettativa " + (p > 0 ? "netta " : "") + "in R per trade; * = segno diverso in una delle due met&agrave; del campione. " +
      "Colore: blu = aspettativa positiva, rosso = negativa; pi&ugrave; intenso = z pi&ugrave; alto (pieno da |z| = 4). Passa il mouse " +
      "su una cella per: aspettativa lorda" + (p > 0 ? ", costo e netta in R" : " in R") + "; z; z rispetto a tutte le candele (vs tutte); " +
-     "prima / seconda met&agrave; del campione; % chiusi a tempo; durata media in candele; costo massimo sostenibile.</p>");
+     (g_rrIntra ? "differenza dalla stessa ora e suo z (vs stessa ora); " : "") + "placebo (direzione a caso nello stesso istante) e z " +
+     "contro il placebo; prima / seconda met&agrave; del campione; % chiusi a tempo; durata media in candele; costo massimo sostenibile " +
+     "(prezzo e punti base).</p>");
    string hh = "Contesto|N";
    for(int sd = 0; sd < 2; sd++)
       for(int tg = 1; tg <= RR_NR; tg++)
@@ -7439,14 +7680,27 @@ void RRRender(const int p, const int ti, const string head, const double tfH, co
                continue;
             RRSt q;
             RRStat(p, r, i, q);
-            if(!HiKeep(hm, q.z))
-               continue;
             int tg = i % RR_NR + 1;
-            HiAdd(hm, q.z, "[" + nm + "] " + sn[i / RR_NR] + " 1:" + I2S(tg) + " | " + (d == 0 ? g_rrLab[r] : g_rrDimN[d] + ": " + g_rrLab[r]) +
-                  " (N " + I2S(q.n) + "): obiettivo " + FP(q.win, 1) + "% (senza vantaggio " + FP(1.0 / (1 + tg), 1) + "%), " +
-                  (p > 0 ? "lorda " + SgnF(q.eg, 3) + " R, costo " + F(q.cr, 3) + " R, netta " : "aspettativa ") + SgnF(q.en, 3) +
-                  " R, rispetto a tutte le candele z " + ZS(q.za) + ", prima / seconda meta' " + SgnF(q.e1, 3) + " / " + SgnF(q.e2, 3) +
-                  (q.st ? " (stabile)" : " (non stabile)"));
+            string cl = "[" + nm + "] " + (d == 0 ? g_rrLab[r] : g_rrDimN[d] + ": " + g_rrLab[r]) + " (N " + I2S(q.n) + ")";
+            string ctl = (MathIsValidNumber(q.zh) && g_rrIntra ? ", rispetto alla stessa ora " + SgnF(q.lhn, 3) + " R (z " + ZS(q.zh) + ")" : "") +
+                         ", placebo " + SgnF(q.pln, 3) + " R (contro il placebo z " + ZS(q.zp) + ")";
+            if(HiKeep(hm, q.z))
+               HiAdd(hm, q.z, "[" + nm + "] " + sn[i / RR_NR] + " 1:" + I2S(tg) + " | " + (d == 0 ? g_rrLab[r] : g_rrDimN[d] + ": " + g_rrLab[r]) +
+                     " (N " + I2S(q.n) + "): obiettivo " + FP(q.win, 1) + "% (senza vantaggio " + FP(1.0 / (1 + tg), 1) + "%), " +
+                     (p > 0 ? "lorda " + SgnF(q.eg, 3) + " R, costo " + F(q.cr, 3) + " R, netta " : "aspettativa ") + SgnF(q.en, 3) +
+                     " R, rispetto a tutte le candele z " + ZS(q.za) + ctl + ", prima / seconda meta' " + SgnF(q.e1, 3) + " / " +
+                     SgnF(q.e2, 3) + (q.st ? " (stabile)" : " (non stabile)"));
+            if(p > 0)
+               continue;
+            //--- riepilogo, solo lordo: quello che il contesto aggiunge alla stessa ora (tutte le operazioni) e dove conta la
+            //--- direzione (buy contro sell con lo stesso obiettivo: una volta per obiettivo, il sell e' lo stesso confronto rovesciato)
+            if(HiKeep(10, q.zh))
+               HiAdd(10, q.zh, cl + " " + sn[i / RR_NR] + " 1:" + I2S(tg) + ": aspettativa " + SgnF(q.eg, 3) + " R, " +
+                     (g_rrIntra ? "la stessa ora " : "tutte le candele ") + SgnF(q.eg - q.lh, 3) + " R: il contesto " +
+                     (q.zh > 0 ? "aggiunge " : "toglie ") + SgnF(q.lh, 3) + " R, prima / seconda meta' " + SgnF(q.e1, 3) + " / " + SgnF(q.e2, 3));
+            if(i < RR_NR && HiKeep(11, q.zp))
+               HiAdd(11, q.zp, cl + " 1:" + I2S(tg) + ": buy " + SgnF(q.eg, 3) + " R, sell " + SgnF(2 * q.pl - q.eg, 3) + " R, placebo " +
+                     SgnF(q.pl, 3) + " R: " + (q.zp > 0 ? "il buy" : "il sell") + " rende di piu' con lo stesso stop e obiettivo");
            }
          W(row + "</tr>");
          R(g_rrTxA[p], "    " + g_rrLab[r] + " (N " + I2S(g_rrN[r]) + "): BUY " + tb + "; SELL " + ts);
@@ -7476,6 +7730,10 @@ void RRAlloc(const int L, int &ring[], int &rN[], int &rP[])
    ArrayInitialize(g_rrW, 0); ArrayInitialize(g_rrT, 0); ArrayInitialize(g_rrA, 0);
    ArrayInitialize(g_rrS, 0.0); ArrayInitialize(g_rrS2, 0.0); ArrayInitialize(g_rrD, 0.0);
    ArrayInitialize(g_rrSN, 0.0); ArrayInitialize(g_rrCP, 0.0); ArrayInitialize(g_rrSH, 0.0);
+   ArrayResize(g_rrHN, g_rrNR * RR_NH); ArrayResize(g_rrHS, g_rrNR * RR_NH * 2 * RR_NR); ArrayResize(g_rrX, g_rrNR * RR_NR);
+   ArrayResize(g_rrU, g_rrNR); ArrayResize(g_rrU2, g_rrNR); ArrayResize(g_rrOU, nx);
+   ArrayInitialize(g_rrHN, 0); ArrayInitialize(g_rrHS, 0.0); ArrayInitialize(g_rrX, 0.0);
+   ArrayInitialize(g_rrU, 0.0); ArrayInitialize(g_rrU2, 0.0); ArrayInitialize(g_rrOU, 0.0);
    g_rrL = L;
    ArrayResize(g_rrGap, g_rrNR * (L + 1));
    ArrayInitialize(g_rrGap, 0);
@@ -7603,6 +7861,25 @@ void RRCsvRow(const string tf, const string kind, const string dA, const string 
       RRStat(p, r, i, b);
       ln += ";" + CN(b.en, 4) + ";" + CN(b.z, 2) + ";" + CN(b.za, 2) + ";" + CN(b.e1, 4) + ";" + CN(b.e2, 4) + ";" + CN(b.cr, 4);
      }
+   //--- controlli (in fondo, per non spostare le colonne di prima): stessa ora, placebo, costo di pareggio e livelli di costo
+   ln += ";" + CN(q.lh, 4) + ";" + CN(q.zh, 2) + ";" + CN(q.pl, 4) + ";" + CN(q.zp, 2) + ";" + CN(q.cmb, 2);
+   for(int j = 0; j < g_bpN; j++)
+     {
+      double e = 0, z = 0;
+      RRNetBp(r, i, g_bpV[j], e, z);
+      ln += ";" + CN(e, 4) + ";" + CN(z, 2);
+     }
+   for(int p = 1; p < NPRF; p++)
+     {
+      if(!g_cp[p].on)
+        {
+         ln += ";;";
+         continue;
+        }
+      RRSt b;
+      RRStat(p, r, i, b);
+      ln += ";" + CN(b.zh, 2) + ";" + CN(b.zp, 2);
+     }
    FileWriteString(g_csvH, ln + "\n");
   }
 
@@ -7610,16 +7887,21 @@ void RRCsvRow(const string tf, const string kind, const string dA, const string 
 int    g_ckN = 0;
 int    g_ckKind[], g_ckDA[], g_ckVA[], g_ckDB[], g_ckVB[], g_ckI[], g_ckNn[];
 double g_ckZ[], g_ckE[];
+double g_ckZh[], g_ckZp[], g_ckBe[];  // controlli del broker peggiore: z rispetto alla stessa ora, z contro il placebo, pareggio (pb)
 bool   g_ckSt[];
 string g_ckLab[];
 
 void RRCandAdd(const int kind, const int dA, const int vA, const int dB, const int vB, const int i, const int n, const double z,
-               const double e, const bool st, const string lab)
+               const double e, const bool st, const string lab, const double zh, const double zp, const double be)
   {
    int c = g_ckN++;
    ArrayResize(g_ckKind, g_ckN); ArrayResize(g_ckDA, g_ckN); ArrayResize(g_ckVA, g_ckN); ArrayResize(g_ckDB, g_ckN);
    ArrayResize(g_ckVB, g_ckN); ArrayResize(g_ckI, g_ckN); ArrayResize(g_ckNn, g_ckN); ArrayResize(g_ckZ, g_ckN);
    ArrayResize(g_ckE, g_ckN); ArrayResize(g_ckSt, g_ckN); ArrayResize(g_ckLab, g_ckN);
+   ArrayResize(g_ckZh, g_ckN); ArrayResize(g_ckZp, g_ckN); ArrayResize(g_ckBe, g_ckN);
+   g_ckZh[c] = zh;
+   g_ckZp[c] = zp;
+   g_ckBe[c] = be;
    g_ckKind[c] = kind;
    g_ckDA[c] = dA;
    g_ckVA[c] = vA;
@@ -7672,7 +7954,8 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
          pb[a][b] = nc;
          nc += C[a] * C[b];
         }
-   //--- riga 0 = tutte le candele (riferimento), righe 1.. = coppie
+   //--- riga 0 = tutte le candele (riferimento), righe 1.. = coppie (confronto con la stessa ora: riferimento dei contesti singoli)
+   g_rrPair = true;
    g_rrNR = 1 + nc;
    int ring[], rN[], rP[];
    RRAlloc(L, ring, rN, rP);
@@ -7685,8 +7968,8 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
    for(int q = 0; q < g_qN && !IsStopped(); q++)
      {
       int k = g_qK[q], j0 = cs[k], fl = g_qF[q];
-      double O = s.o[j0], S = g_qS[q], invS = 1.0 / S;
-      int hf = cd.t[k] < tMid ? 0 : 1;
+      double O = s.o[j0], S = g_qS[q], invS = 1.0 / S, u = 1e-4 * O * invS;
+      int hf = cd.t[k] < tMid ? 0 : 1, hc = g_qC[q * RR_NDIM + 1], hs = g_rrIntra && hc < RR_NH ? hc : 0;
       for(int i = 0; i < 2 * RR_NR; i++)
         {
          o[i] = g_qO[q * 2 * RR_NR + i];
@@ -7699,7 +7982,7 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
          if(g_cp[p].on)
             for(int i = 0; i < 2 * RR_NR; i++)
                cst[p * 2 * RR_NR + i] = RRCost1(s, p, i, j0, O, g_qX[q * 2 * RR_NR + i]);
-      RRAcc(0, o, wn, tm, am, du, invS, cst, hf);
+      RRAcc(0, o, wn, tm, am, du, invS, cst, hf, hs, u);
       RRGap(0, k, ring, rN, rP);
       int m = 0;
       for(int d = CB_D0; d <= CB_D1; d++)
@@ -7715,7 +7998,7 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
          for(int y = x + 1; y < m; y++)
            {
             int r = 1 + pb[da[x]][da[y]] + va[x] * C[da[y]] + va[y];
-            RRAcc(r, o, wn, tm, am, du, invS, cst, hf);
+            RRAcc(r, o, wn, tm, am, du, invS, cst, hf, hs, u);
             RRGap(r, k, ring, rN, rP);
            }
      }
@@ -7758,7 +8041,7 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
                   cxa[ncand] = x;
                   cxb[ncand] = y;
                   ncand++;
-                  if(st && z > 0)
+                  if(st && z > 0 && RRLiftOk(r, i))  // candidata solo se aggiunge qualcosa alla stessa ora
                     {
                      if(nk >= ArraySize(kr))
                        {
@@ -7779,8 +8062,9 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
                      HiAdd(8, z, "[" + nm + "] " + RROpLab(i) + " | " + g_rrDimN[a] + ": " + g_rrLab[g_rrDimB[a] + x] + " + " + g_rrDimN[b] + ": " +
                            g_rrLab[g_rrDimB[b] + y] + " (N " + I2S(n) + "): obiettivo " + FP(w.win, 1) + "% (senza vantaggio " +
                            FP(1.0 / (1 + i % RR_NR + 1), 1) + "%), lorda " + SgnF(w.eg, 3) + " R, " + (pw > 0 ? "netta " + g_cp[pw].name +
-                           " " : "") + SgnF(w.en, 3) + " R, rispetto a tutte le candele z " + ZS(w.za) + ", prima / seconda meta' " +
-                           SgnF(w.e1, 3) + " / " + SgnF(w.e2, 3) + (st ? " (stabile)" : " (non stabile)"));
+                           " " : "") + SgnF(w.en, 3) + " R, rispetto a tutte le candele z " + ZS(w.za) + (g_rrIntra ? ", rispetto alla " +
+                           "stessa ora " + SgnF(w.lhn, 3) + " R (z " + ZS(w.zh) + ")" : "") + ", contro il placebo z " + ZS(w.zp) +
+                           ", prima / seconda meta' " + SgnF(w.e1, 3) + " / " + SgnF(w.e2, 3) + (st ? " (stabile)" : " (non stabile)"));
                     }
                  }
               }
@@ -7795,12 +8079,15 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
             I2S(nc) + " coppie possibili, " + I2S(ntest) + " confronti con almeno 100 casi (coppia x operazione): per puro caso " +
             "ci si aspettano circa " + F(0.0027 * ntest, 0) + " risultati oltre |z| 3 e " + F(0.0428 * ntest, 0) + " tra 2 e 3. " +
             "Ordinati per z " + (anyB ? "del broker peggiore (aspettativa netta)" : "lordo") + ". Il colore segue lo z, * = segno " +
-            "diverso in una delle due met&agrave; del campione.");
+            "diverso in una delle due met&agrave; del campione. " + (g_rrIntra ? "<b>Rispetto alla stessa ora</b>: la coppia contro " +
+            "l'aspettativa di tutti i trade delle stesse ore (tra parentesi la differenza in R): vicino a zero = la coppia vale quanto " +
+            "l'orario da solo. " : "") + "<b>Contro il placebo</b>: l'operazione contro la stessa con direzione a caso (buy e sell nello " +
+            "stesso istante): vicino a zero = conta il movimento, non la direzione. Colonne del broker peggiore.");
    string hh = "Coppia di contesti|Operazione|N|% obiettivo prima dello stop|Senza vantaggio|Lorda (R) / z";
    for(int p = 1; p < NPRF; p++)
       if(g_cp[p].on)
          hh += "|Netta " + g_cp[p].name + " (R) / z";
-   hh += "|z rispetto a tutte le candele|Prima / seconda met&agrave; (R)|Lettura";
+   hh += "|" + ZhLab() + "|z contro il placebo|Prima / seconda met&agrave; (R)|Lettura";
    R(g_cbTx, "");
    R(g_cbTx, "Coppie di contesti " + nm + ": " + I2S(nc) + " coppie, " + I2S(ntest) + " confronti con N >= 100 (attesi per caso circa " +
      F(0.0027 * ntest, 0) + " oltre |z| 3 e " + F(0.0428 * ntest, 0) + " tra 2 e 3); ordinati per z " + (anyB ? "del broker peggiore" : "lordo"));
@@ -7843,9 +8130,11 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
             row += TDc(SgnF(b2.en, 3) + (b2.st ? "" : "*") + " / " + ZS(b2.z), PCol(b2.z, 0, 4));
             tx += ", netta " + g_cp[p].name + " " + SgnF(b2.en, 3) + " R (z " + ZS(b2.z) + (b2.st ? "" : ", non stabile") + ")";
            }
-         row += TD(ZS(w0.za)) + TD(SgnF(w0.e1, 3) + " / " + SgnF(w0.e2, 3)) + TD(RRVerd(w0)) + "</tr>";
-         tx += ", rispetto a tutte le candele z " + ZS(w0.za) + ", prima / seconda meta' " + SgnF(w0.e1, 3) + " / " + SgnF(w0.e2, 3) +
-               " -> " + RRVerd(w0);
+         row += TDc(ZS(w0.zh) + (MathIsValidNumber(w0.lhn) ? " (" + SgnF(w0.lhn, 3) + ")" : ""), PCol(w0.zh, 0, 4)) +
+                TDc(ZS(w0.zp), PCol(w0.zp, 0, 4)) + TD(SgnF(w0.e1, 3) + " / " + SgnF(w0.e2, 3)) + TD(RRVerd(w0)) + "</tr>";
+         tx += ", rispetto a tutte le candele z " + ZS(w0.za) + (g_rrIntra ? ", rispetto alla stessa ora " + SgnF(w0.lhn, 3) + " R (z " +
+               ZS(w0.zh) + ")" : "") + ", contro il placebo z " + ZS(w0.zp) + ", prima / seconda meta' " + SgnF(w0.e1, 3) + " / " +
+               SgnF(w0.e2, 3) + " -> " + RRVerd(w0);
          W(row);
          R(g_cbTx, tx);
         }
@@ -7863,8 +8152,10 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
       int c = kr[pick[j]], r = cr[c], i = ci[c];
       bool st = false;
       double ew = 0, z = RRZr(r, i, st, ew);
+      RRSt w;
+      RRStat(RRWorst(r, i), r, i, w);
       RRCandAdd(2, ca[c], cxa[c], cb[c], cxb[c], i, g_rrN[r], z, ew, st, g_rrDimN[ca[c]] + ": " + g_rrLab[g_rrDimB[ca[c]] + cxa[c]] + " + " +
-                g_rrDimN[cb[c]] + ": " + g_rrLab[g_rrDimB[cb[c]] + cxb[c]]);
+                g_rrDimN[cb[c]] + ": " + g_rrLab[g_rrDimB[cb[c]] + cxb[c]], w.zh, w.zp, w.cmb);
      }
   }
 
@@ -7873,6 +8164,7 @@ struct SqR
   {
    int               n, nY, posY, ls;
    double            yrs, win, e, tot, pf, dd, ddDays, lsMed, ls95, ddMed, dd95;
+   double            be, cb;  // costo di pareggio dei trade eseguiti (punti base, dal lordo) e costo medio del profilo (punti base)
   };
 
 double MaxDD(const double &x[], const int n)
@@ -7898,6 +8190,7 @@ bool RRSeq(CSeries &s, const int &cs[], CSeries &cd, const int p, const int c, S
    ArrayResize(out, g_qN);
    ArrayResize(tt, g_qN);
    int n = 0, wins = 0, lastX = -1;
+   double sg = 0, su = 0, sc = 0;
    for(int q = 0; q < g_qN; q++)
      {
       if(g_qC[q * RR_NDIM + dA] != vA || (dB >= 0 && g_qC[q * RR_NDIM + dB] != vB))
@@ -7907,8 +8200,14 @@ bool RRSeq(CSeries &s, const int &cs[], CSeries &cd, const int p, const int c, S
          continue;  // la posizione precedente e' ancora aperta
       int jx = g_qX[q * 2 * RR_NR + i];
       double v = g_qO[q * 2 * RR_NR + i];
+      sg += v;
+      su += 1e-4 * s.o[j0] / g_qS[q];
       if(p > 0)
-         v -= RRCost1(s, p, i, j0, s.o[j0], jx) / g_qS[q];
+        {
+         double cp = RRCost1(s, p, i, j0, s.o[j0], jx);
+         v -= cp / g_qS[q];
+         sc += cp / (1e-4 * s.o[j0]);
+        }
       out[n] = v;
       tt[n] = cd.t[k];
       if((g_qF[q] & (1 << i)) != 0)
@@ -7917,6 +8216,8 @@ bool RRSeq(CSeries &s, const int &cs[], CSeries &cd, const int p, const int c, S
       n++;
      }
    r.n = n;
+   r.be = su > 0 ? sg / su : Nan();
+   r.cb = p > 0 && n > 0 ? sc / n : Nan();
    svg = "";
    if(n < 10)
       return false;
@@ -8071,8 +8372,11 @@ void RRSeqTf(CSeries &s, const int &cs[], CSeries &cd, const int ti, const doubl
    SecStart("Strategie " + nm + ": una posizione alla volta",
             "Ogni riga &egrave; una regola eseguita come farebbe un EA: si entra all'apertura della candela quando il contesto " +
             "&egrave; vero, ma solo se non c'&egrave; gi&agrave; una posizione aperta della stessa regola. Per ogni candidato: prima " +
-            "senza costi, poi con i costi di ogni broker.");
-   THead("Costi|Trade|Trade all'anno|% obiettivo|Aspettativa (R)|R totali|R all'anno|Profit factor|Anni positivi|Serie di perdite massima (attesa: mediana / 95%)|Drawdown massimo in R (ordine casuale: mediana / 95%)|Drawdown pi&ugrave; lungo|Curva dei R cumulati");
+            "senza costi, poi con i costi di ogni broker. Nel titolo di ogni candidato i controlli del broker peggiore: z rispetto " +
+            (g_rrIntra ? "alla stessa ora" : "a tutte le candele") + ", z contro il placebo (direzione a caso nello stesso istante) e " +
+            "costo di pareggio. Colonna 'pb': sulla riga lorda il costo per trade (punti base del prezzo) che azzera i trade eseguiti " +
+            "una alla volta, sulle righe dei broker il loro costo medio per trade: se il costo supera il pareggio la regola perde.");
+   THead("Costi|Trade|Trade all'anno|% obiettivo|Aspettativa (R)|R totali|R all'anno|Profit factor|Anni positivi|Serie di perdite massima (attesa: mediana / 95%)|Drawdown massimo in R (ordine casuale: mediana / 95%)|Drawdown pi&ugrave; lungo|Pareggio / costo (pb)|Curva dei R cumulati");
    R(g_sqTx, "");
    R(g_sqTx, "Strategie " + nm + " - una posizione alla volta (serie di perdite attesa e drawdown atteso = stessi trade in ordine casuale):");
    for(int c = 0; c < g_ckN && !IsStopped(); c++)
@@ -8107,14 +8411,20 @@ void RRSeqTf(CSeries &s, const int &cs[], CSeries &cd, const int ti, const doubl
             g_ruReal++;
          RRRuleWrite(id, ti, c, p20, p80, L, seqMin, seqN);
          g_ruHtml += "<tr>" + TD(I2S(id)) + TD(nm) + TD(RROpLab(g_ckI[c])) + TD(g_ckLab[c]) + TD(I2S(g_ckNn[c])) + TD(SgnF(g_ckE[c], 3)) +
-                     TD(ZS(g_ckZ[c])) + TD(I2S(seqN)) + TD(SgnF(seqMin, 3)) + "</tr>";
+                     TD(ZS(g_ckZ[c])) + TD((MathIsValidNumber(g_ckZh[c]) ? (g_rrIntra ? "stessa ora " : "tutte le candele ") +
+                                            ZS(g_ckZh[c]) + "; " : "") + "placebo " + ZS(g_ckZp[c])) + TD(BpTxt(g_ckBe[c])) +
+                     TD(I2S(seqN)) + TD(SgnF(seqMin, 3)) + "</tr>";
          R(g_ruTx, "  Regola " + I2S(id) + ": " + nm + " " + lab + " (analisi: N " + I2S(g_ckNn[c]) + ", netta peggiore " + SgnF(g_ckE[c], 3) +
-           " R, z " + ZS(g_ckZ[c]) + "; una posizione alla volta: " + I2S(seqN) + " trade, " + SgnF(seqMin, 3) + " R per trade)");
+           " R, z " + ZS(g_ckZ[c]) + (MathIsValidNumber(g_ckZh[c]) ? ", rispetto " + (g_rrIntra ? "alla stessa ora" : "a tutte le candele") +
+           " z " + ZS(g_ckZh[c]) : "") + ", contro il placebo z " + ZS(g_ckZp[c]) + ", costo di pareggio " + BpTxt(g_ckBe[c]) +
+           "; una posizione alla volta: " + I2S(seqN) + " trade, " + SgnF(seqMin, 3) + " R per trade)");
         }
+      string ctl = (MathIsValidNumber(g_ckZh[c]) ? ", rispetto " + (g_rrIntra ? "alla stessa ora" : "a tutte le candele") + " z " +
+                    ZS(g_ckZh[c]) : "") + ", contro il placebo z " + ZS(g_ckZp[c]) + ", pareggio " + BpTxt(g_ckBe[c]);
       Grp(lab + " &mdash; " + kn[g_ckKind[c]] + " (analisi: N " + I2S(g_ckNn[c]) + ", aspettativa netta peggiore " + SgnF(g_ckE[c], 3) +
-          " R, z " + ZS(g_ckZ[c]) + (g_ckSt[c] ? ", stabile" : ", non stabile") + ")" + (id > 0 ? " &rarr; <b>regola " + I2S(id) + "</b>" : ""), 13);
+          " R, z " + ZS(g_ckZ[c]) + (g_ckSt[c] ? ", stabile" : ", non stabile") + ctl + ")" + (id > 0 ? " &rarr; <b>regola " + I2S(id) + "</b>" : ""), 14);
       R(g_sqTx, "  " + lab + " [" + kn[g_ckKind[c]] + "; analisi: N " + I2S(g_ckNn[c]) + ", netta peggiore " + SgnF(g_ckE[c], 3) + " R, z " +
-        ZS(g_ckZ[c]) + (g_ckSt[c] ? ", stabile" : ", non stabile") + "]" + (id > 0 ? " -> REGOLA " + I2S(id) : ""));
+        ZS(g_ckZ[c]) + (g_ckSt[c] ? ", stabile" : ", non stabile") + ctl + "]" + (id > 0 ? " -> REGOLA " + I2S(id) : ""));
       for(int p = 0; p < NPRF; p++)
         {
          if(p > 0 && !g_cp[p].on)
@@ -8122,7 +8432,7 @@ void RRSeqTf(CSeries &s, const int &cs[], CSeries &cd, const int ti, const doubl
          string pn = p == 0 ? "lordo" : g_cp[p].name;
          if(!ok[p])
            {
-            W("<tr>" + TD(pn) + TD(I2S(rs[p].n)) + "<td colspan='11' class='muted'>meno di 10 trade</td></tr>");
+            W("<tr>" + TD(pn) + TD(I2S(rs[p].n)) + "<td colspan='12' class='muted'>meno di 10 trade</td></tr>");
             R(g_sqTx, "    " + pn + ": meno di 10 trade");
             continue;
            }
@@ -8133,12 +8443,13 @@ void RRSeqTf(CSeries &s, const int &cs[], CSeries &cd, const int ti, const doubl
          W("<tr>" + TD(pn) + TD(I2S(q.n)) + TD(F(tpy, 0)) + TD(FP(q.win, 1)) + TDc(SgnF(q.e, 3), PCol(q.e, 0, 0.2)) + TD(SgnF(q.tot, 1)) +
            TD(SgnF(rpy, 1)) + TD(F(q.pf, 2)) + TD(I2S(q.posY) + " su " + I2S(q.nY)) +
            TDc(lsT, MathIsValidNumber(q.ls95) && q.ls > q.ls95 ? "rgba(239,68,68,0.35)" : "") +
-           TDc(ddT, q.dd > q.dd95 ? "rgba(239,68,68,0.35)" : "") + TD(F(q.ddDays, 0) + " giorni") + TD(svg[p]) + "</tr>");
+           TDc(ddT, q.dd > q.dd95 ? "rgba(239,68,68,0.35)" : "") + TD(F(q.ddDays, 0) + " giorni") +
+           TD(p == 0 ? "pareggio " + BpTxt(q.be) : "costo " + F(q.cb, 2) + " pb") + TD(svg[p]) + "</tr>");
          R(g_sqTx, "    " + pn + ": " + I2S(q.n) + " trade (" + F(tpy, 0) + " all'anno), obiettivo " + FP(q.win, 1) + "%, " + SgnF(q.e, 3) +
            " R per trade, totale " + SgnF(q.tot, 1) + " R (" + SgnF(rpy, 1) + " R all'anno), profit factor " + F(q.pf, 2) + ", anni positivi " +
            I2S(q.posY) + " su " + I2S(q.nY) + ", serie di perdite massima " + I2S(q.ls) + " (attesa " + F(q.lsMed, 0) + ", 95% " + F(q.ls95, 0) +
            "), drawdown massimo " + F(q.dd, 1) + " R (ordine casuale " + F(q.ddMed, 1) + ", 95% " + F(q.dd95, 1) + "), drawdown piu' lungo " +
-           F(q.ddDays, 0) + " giorni");
+           F(q.ddDays, 0) + " giorni, " + (p == 0 ? "costo di pareggio " + BpTxt(q.be) : "costo medio " + F(q.cb, 2) + " pb"));
         }
      }
    TEnd();
@@ -8174,7 +8485,9 @@ void RRPost(CSeries &s, const int &cs[], CSeries &cd, const int ti, const dateti
      {
       bool st = false;
       double ew = 0, z = RRZr(0, bi, st, ew);
-      RRCandAdd(0, 0, 0, -1, -1, bi, g_rrN[0], z, ew, st, "Tutte le candele (entra sempre)");
+      RRSt w;
+      RRStat(RRWorst(0, bi), 0, bi, w);
+      RRCandAdd(0, 0, 0, -1, -1, bi, g_rrN[0], z, ew, st, "Tutte le candele (entra sempre)", w.zh, w.zp, w.cmb);
      }
    int kr[], ki[];
    double kz[];
@@ -8191,7 +8504,7 @@ void RRPost(CSeries &s, const int &cs[], CSeries &cd, const int ti, const dateti
                continue;
             bool st = false;
             double ew = 0, z = RRZr(r, i, st, ew);
-            if(!st || !MathIsValidNumber(z) || z <= 0)
+            if(!st || !MathIsValidNumber(z) || z <= 0 || !RRLiftOk(r, i))  // candidato solo se aggiunge qualcosa alla stessa ora
                continue;
             ArrayResize(kr, nk + 1);
             ArrayResize(ki, nk + 1);
@@ -8209,7 +8522,9 @@ void RRPost(CSeries &s, const int &cs[], CSeries &cd, const int ti, const dateti
       int r = kr[pick[j]], i = ki[pick[j]], d = g_rrDim[r];
       bool st = false;
       double ew = 0, z = RRZr(r, i, st, ew);
-      RRCandAdd(1, d, r - g_rrDimB[d], -1, -1, i, g_rrN[r], z, ew, st, g_rrDimN[d] + ": " + g_rrLab[r]);
+      RRSt w;
+      RRStat(RRWorst(r, i), r, i, w);
+      RRCandAdd(1, d, r - g_rrDimB[d], -1, -1, i, g_rrN[r], z, ew, st, g_rrDimN[d] + ": " + g_rrLab[r], w.zh, w.zp, w.cmb);
      }
    //--- coppie di contesti
    if(InpRRCombo && RR_MIN[ti] >= InpComboMinTF)
@@ -8351,6 +8666,9 @@ void RRTf(CSeries &s, const int barSec, const int ti)
    RRDim(17, "EMA20 rispetto alla EMA50", "EMA20 sopra la EMA50|EMA20 sotto la EMA50");
    RRDim(18, "RSI(14)", "sotto 30|30-50|50-70|oltre 70");
    RRDim(19, "Anno", yl);
+   g_rrBOk = false;
+   g_rrPair = false;
+   g_rrIntra = intra;
    int ring[], rN[], rP[];
    RRAlloc(L, ring, rN, rP);
    //--- ogni trade simulato resta in memoria per coppie di contesti, simulazione una posizione alla volta e regole
@@ -8528,11 +8846,12 @@ void RRTf(CSeries &s, const int barSec, const int ti)
       g_qF[qq] = fl;
       for(int d = 0; d < RR_NDIM; d++)
          g_qC[qq * RR_NDIM + d] = (uchar)((cls[d] >= 0 && cls[d] < g_rrDimC[d]) ? cls[d] : 255);
-      double invS = 1.0 / S;
+      double invS = 1.0 / S, u = 1e-4 * O * invS;
+      int hs = intra && cls[1] >= 0 && cls[1] < RR_NH ? cls[1] : 0;
       for(int d = 0; d < RR_NDIM; d++)
          if(cls[d] >= 0 && cls[d] < g_rrDimC[d])
            {
-            RRAcc(g_rrDimB[d] + cls[d], o, wn, tm, am, du, invS, cst, hf);
+            RRAcc(g_rrDimB[d] + cls[d], o, wn, tm, am, du, invS, cst, hf, hs, u);
             RRGap(g_rrDimB[d] + cls[d], k, ring, rN, rP);
            }
       for(int sd = 0; sd < 2; sd++)
@@ -8554,6 +8873,7 @@ void RRTf(CSeries &s, const int barSec, const int ti)
      }
    if(g_rrN[0] < 100)
       return;
+   RRBase();  // aspettativa della stessa ora: riferimento per contesti singoli e coppie
    //--- tabelle: lordo nella scheda Rischio/rendimento, netto di ogni broker nel buffer della sua scheda
    double medS = MedianOf(sv, nS);
    double tfH = tfSec / 3600.0;
@@ -8591,7 +8911,12 @@ void RRTf(CSeries &s, const int barSec, const int ti)
 //+------------------------------------------------------------------+
 #define OB_NT   7           // operazioni: 0-3 segui la rottura, 4-6 fade delle prime tre
 #define OB_NB   19          // gruppi: 0 tutti, 1-2 rottura su/giu', 3-4 meta' del periodo, 5-11 giorno, 12-14 ampiezza, 15-18 lato x meta'
-#define OB_NF   (3 + NPRF)  // campi: trade, somma R, somma R^2, vinti, netta di ogni broker (1..NPRF-1)
+#define OB_FU   (3 + NPRF)  // campi: trade, somma R, somma R^2, vinti, netta di ogni broker (1..NPRF-1), poi:
+#define OB_FU2  (OB_FU + 1) //   costo di 1 punto base in R (somma, quadrati, prodotto con l'esito) per netta e z a ogni livello di costo
+#define OB_FRU  (OB_FU + 2)
+#define OB_FD   (OB_FU + 3) //   vantaggio sul placebo (somma e quadrati): operazione meno la media tra lei e la direzione opposta
+#define OB_FD2  (OB_FU + 4)
+#define OB_NF   (OB_FU + 5)
 #define OB_NX   101         // istogramma dell'estensione: caselle da 0,1 range (l'ultima = oltre 10)
 #define OB_MAXL 6           // durate del range e finestre al massimo
 string OB_OP[OB_NT] = {"Segui 1:1 (stop all'altro lato)", "Segui 1:2 (stop all'altro lato)", "Segui 1:2 (stop a meta' range)",
@@ -8616,7 +8941,9 @@ int    g_osDay[], g_osBrk[], g_osUp[], g_osFl[], g_osHd[];  // per combinazione 
 double g_osBm[], g_osEx[];
 int    g_otN[], g_otU[], g_otL[];  // per combinazione, operazione e lati: trade, obiettivi, stop
 double g_otE[], g_otZ[], g_otE1[], g_otE2[], g_otEw[], g_otZw[];
+double g_otP[], g_otZp[], g_otBe[];  // placebo lordo, z del vantaggio sul placebo, costo di pareggio (punti base)
 bool   g_otSt[];
+int    g_obMinDay = 30;            // giorni minimi coperti: un orario coperto in meno della meta' dei giorni (mercato chiuso) e' escluso
 int    g_orN = 0;                  // regole ORB da esportare
 int    g_orX[];
 string g_repOrb = "", g_obEvTx = "";
@@ -8626,6 +8953,8 @@ struct ObSt
   {
    int               n, nU, nL;
    double            e, z, win, e1, e2, ew, zw;
+   double            pl, adv, zp;  // placebo lordo (stesso istante, direzione a caso), vantaggio sul placebo e suo z
+   double            ub, be;       // costo di 1 punto base in R (media), costo di pareggio in punti base
    bool              st;  // positiva (o negativa) in entrambe le meta' per tutti i broker
   };
 
@@ -8684,7 +9013,8 @@ int ObBest(const int cfg)  // operazione con lo z netto del broker peggiore piu'
    return bt;
   }
 
-void OrbAdd(const int i, const int x, const int t, const int b, const double rv, const double &nt[], const int ev)
+// rv = esito lordo in R, nt = netto per broker, ev = obiettivo (1) o stop (-1), u = costo di 1 punto base in R, dv = vantaggio sul placebo
+void OrbAdd(const int i, const int x, const int t, const int b, const double rv, const double &nt[], const int ev, const double u, const double dv)
   {
    int a = ObA(i, x, t, b);
    g_obA[a] += 1;
@@ -8694,6 +9024,11 @@ void OrbAdd(const int i, const int x, const int t, const int b, const double rv,
       g_obA[a + 3] += 1;
    for(int p = 1; p < NPRF; p++)
       g_obA[a + 3 + p] += nt[p];
+   g_obA[a + OB_FU] += u;
+   g_obA[a + OB_FU2] += u * u;
+   g_obA[a + OB_FRU] += rv * u;
+   g_obA[a + OB_FD] += dv;
+   g_obA[a + OB_FD2] += dv * dv;
    if(b < 3 && ev != 0)
       g_obE[(((i * g_obNW + x) * OB_NT + t) * 3 + b) * 2 + (ev > 0 ? 0 : 1)]++;
   }
@@ -8709,6 +9044,11 @@ bool ObStat(const int i, const int x, const int t, const int b, ObSt &q)
    q.e2 = Nan();
    q.ew = Nan();
    q.zw = Nan();
+   q.pl = Nan();
+   q.adv = Nan();
+   q.zp = Nan();
+   q.ub = Nan();
+   q.be = Nan();
    int a = ObA(i, x, t, b);
    q.n = (int)g_obA[a];
    if(b < 3)
@@ -8725,6 +9065,15 @@ bool ObStat(const int i, const int x, const int t, const int b, ObSt &q)
    q.win = g_obA[a + 3] / q.n;
    q.ew = q.e;
    q.zw = q.z;
+   //--- placebo: la stessa operazione nello stesso istante con direzione a caso (media tra lei e la direzione opposta, stesse
+   //--- distanze di stop e obiettivo); vantaggio = operazione - placebo, z sulle differenze giorno per giorno
+   q.adv = g_obA[a + OB_FD] / q.n;
+   q.pl = q.e - q.adv;
+   double vd = g_obA[a + OB_FD2] / q.n - q.adv * q.adv;
+   q.zp = vd > 1e-9 * (var + 1e-12) ? q.adv / MathSqrt(vd / q.n) : Nan();
+   //--- costo di pareggio: livello di costo (punti base) che porta a zero l'aspettativa lorda
+   q.ub = g_obA[a + OB_FU] / q.n;
+   q.be = q.ub > 0 ? q.e / q.ub : Nan();
    int h1 = b == 0 ? 3 : (b == 1 ? 15 : (b == 2 ? 17 : -1));
    if(h1 < 0)
       return true;
@@ -8750,6 +9099,35 @@ bool ObStat(const int i, const int x, const int t, const int b, ObSt &q)
       st = st && q.e1 * q.e > 0 && q.e2 * q.e > 0;
    q.st = st;
    return true;
+  }
+
+// aspettativa e z con un costo per trade di c punti base del prezzo (varianza esatta: il costo in R cambia da trade a trade)
+bool ObNetBp(const int i, const int x, const int t, const int b, const double c, double &e, double &z)
+  {
+   e = Nan();
+   z = Nan();
+   int a = ObA(i, x, t, b);
+   double n = g_obA[a];
+   if(n < 2)
+      return false;
+   double m = g_obA[a + 1] / n, ub = g_obA[a + OB_FU] / n;
+   double vr = g_obA[a + 2] / n - m * m, vu = g_obA[a + OB_FU2] / n - ub * ub, cv = g_obA[a + OB_FRU] / n - m * ub;
+   double v = vr - 2 * c * cv + c * c * vu;
+   e = m - c * ub;
+   z = v > 0 ? e / MathSqrt(v / n) : Nan();
+   return true;
+  }
+
+string ObLev(const int i, const int x, const int t, const int b)  // aspettativa a ogni livello di costo, separate da " / "
+  {
+   string s = "";
+   for(int j = 0; j < g_bpN; j++)
+     {
+      double e = 0, z = 0;
+      ObNetBp(i, x, t, b, g_bpV[j], e, z);
+      s += (j > 0 ? " / " : "") + SgnF(e, 3);
+     }
+   return s;
   }
 
 // una giornata: range [T, T+D), poi le finestre dalla fine del range; ritorna l'ampiezza del range (0 = giorno non valido)
@@ -8797,14 +9175,16 @@ double OrbDay(CSeries &s, const int k, const datetime T, const int i, const date
    int hf = T < tMid ? 0 : 1;
    int wc = wMean > 0 ? (w / wMean < 0.75 ? 0 : (w / wMean > 1.33 ? 2 : 1)) : -1;
    double mid = 0.5 * (hi + lo), LT = 0, mxT = 0, Ep = 0, nu = DBL_MAX, nl = -DBL_MAX;
-   double r[4], rx[4], P[4], nt[NPRF];
-   int res[4], rq[4];
+   double r[4], rx[4], mrx[4], P[4], nt[NPRF];
+   int res[4], rq[4], mres[4];  // mres/mrx = placebo: la stessa operazione nella direzione opposta (stop a +r, obiettivo a -K r)
    for(int j = 0; j < 4; j++)
      {
       r[j] = 0;
       rx[j] = 0;
+      mrx[j] = 0;
       res[j] = 0;
       rq[j] = 0;
+      mres[j] = 0;
      }
    int dT = 0, qT = -1, d = 0, qe = -1, x = 0;
    bool ft = false;
@@ -8858,7 +9238,8 @@ double OrbDay(CSeries &s, const int k, const datetime T, const int i, const date
          if(xL <= -w)
             ft = true;
         }
-      //--- operazione: aperta alla chiusura della prima candela fuori dal range; stop e obiettivi misurati da li'
+      //--- operazione: aperta alla chiusura della prima candela fuori dal range; stop e obiettivi misurati da li'.
+      //--- In parallelo il placebo: la stessa operazione nella direzione opposta (stesse distanze), stop a +r e obiettivo a -K r
       if(d != 0)
         {
          double xH = d > 0 ? h - Ep : Ep - l, xL = d > 0 ? l - Ep : Ep - h;
@@ -8866,6 +9247,7 @@ double OrbDay(CSeries &s, const int k, const datetime T, const int i, const date
            {
             double a = d * (o - Ep);
             for(int j = 0; j < 4; j++)  // apertura gia' oltre un livello: eseguito all'apertura
+              {
                if(res[j] == 0)
                  {
                   if(OB_K[j] > 0 && a >= OB_K[j] * r[j])
@@ -8882,32 +9264,63 @@ double OrbDay(CSeries &s, const int k, const datetime T, const int i, const date
                         rq[j] = q;
                        }
                  }
+               if(mres[j] == 0)
+                 {
+                  if(a >= r[j])
+                    {
+                     mres[j] = 1;
+                     mrx[j] = a;
+                    }
+                  else
+                     if(OB_K[j] > 0 && a <= -OB_K[j] * r[j])
+                       {
+                        mres[j] = -1;
+                        mrx[j] = a;
+                       }
+                 }
+              }
             for(int z = 1; z < 4; z++)
               {
                double b = d * (P[z] - Ep);
                for(int j = 0; j < 4; j++)
                  {
-                  if(res[j] != 0)
-                     continue;
-                  if(b > a && OB_K[j] > 0 && b >= OB_K[j] * r[j])
+                  if(res[j] == 0)
                     {
-                     res[j] = 1;
-                     rx[j] = OB_K[j] * r[j];
-                     rq[j] = q;
-                    }
-                  else
-                     if(b < a && b <= -r[j])
+                     if(b > a && OB_K[j] > 0 && b >= OB_K[j] * r[j])
                        {
-                        res[j] = -1;
-                        rx[j] = -r[j];
+                        res[j] = 1;
+                        rx[j] = OB_K[j] * r[j];
                         rq[j] = q;
                        }
+                     else
+                        if(b < a && b <= -r[j])
+                          {
+                           res[j] = -1;
+                           rx[j] = -r[j];
+                           rq[j] = q;
+                          }
+                    }
+                  if(mres[j] == 0)
+                    {
+                     if(b > a && b >= r[j])
+                       {
+                        mres[j] = 1;
+                        mrx[j] = r[j];
+                       }
+                     else
+                        if(b < a && OB_K[j] > 0 && b <= -OB_K[j] * r[j])
+                          {
+                           mres[j] = -1;
+                           mrx[j] = -OB_K[j] * r[j];
+                          }
+                    }
                  }
                a = b;
               }
             nu = DBL_MAX;
             nl = -DBL_MAX;
             for(int j = 0; j < 4; j++)
+              {
                if(res[j] == 0)
                  {
                   if(OB_K[j] > 0 && OB_K[j] * r[j] < nu)
@@ -8915,6 +9328,14 @@ double OrbDay(CSeries &s, const int k, const datetime T, const int i, const date
                   if(-r[j] > nl)
                      nl = -r[j];
                  }
+               if(mres[j] == 0)
+                 {
+                  if(r[j] < nu)
+                     nu = r[j];
+                  if(OB_K[j] > 0 && -OB_K[j] * r[j] > nl)
+                     nl = -OB_K[j] * r[j];
+                 }
+              }
            }
         }
       else
@@ -8930,6 +9351,10 @@ double OrbDay(CSeries &s, const int k, const datetime T, const int i, const date
                   nu = OB_K[j] * r[j];
                if(-r[j] > nl)
                   nl = -r[j];
+               if(r[j] < nu)
+                  nu = r[j];
+               if(OB_K[j] > 0 && -OB_K[j] * r[j] > nl)
+                  nl = -OB_K[j] * r[j];
               }
            }
       //--- fine di una finestra: cosa e' successo fin qui
@@ -8963,6 +9388,7 @@ double OrbDay(CSeries &s, const int k, const datetime T, const int i, const date
                  {
                   bool hit = res[j] != 0 && rq[j] <= q;
                   double xx = hit ? rx[j] : xc;
+                  double xm = mres[j] != 0 ? mrx[j] : xc;  // placebo: uscita della direzione opposta
                   int ev = hit ? res[j] : 0;
                   datetime tX = (datetime)((long)s.t[hit ? rq[j] : q] + (hit ? 0 : g_obBar) + off7);
                   int hX = HourOf(tX);
@@ -8974,6 +9400,10 @@ double OrbDay(CSeries &s, const int k, const datetime T, const int i, const date
                      int t = m == 0 ? j : 4 + j, sd = m == 0 ? sdF : 1 - sdF;
                      double risk = m == 0 ? r[j] : OB_K[j] * r[j];
                      double rv = (m == 0 ? xx : -xx) / risk;
+                     //--- vantaggio sul placebo = meta' della differenza tra l'operazione e la direzione opposta con le stesse
+                     //--- distanze (per il fade la direzione opposta segue la rottura con stop a -K r e obiettivo a +r)
+                     double dv = (m == 0 ? xx + xm : -(xx + xm)) / (2 * risk);
+                     double u = 1e-4 * Ep / risk;  // costo di 1 punto base del prezzo in R
                      nt[0] = rv;
                      for(int p = 1; p < NPRF; p++)
                        {
@@ -8986,13 +9416,13 @@ double OrbDay(CSeries &s, const int k, const datetime T, const int i, const date
                         nt[p] = rv - ((sd == 0 ? g_cp[p].sp[hE] : g_cp[p].sp[hX]) + g_cp[p].comm + g_cp[p].slip - sw) / risk;
                        }
                      int ue = m == 0 ? ev : -ev;  // per il fade l'obiettivo e' lo stop della rottura e viceversa
-                     OrbAdd(i, x, t, 0, rv, nt, ue);
-                     OrbAdd(i, x, t, sdB, rv, nt, ue);
-                     OrbAdd(i, x, t, 3 + hf, rv, nt, 0);
-                     OrbAdd(i, x, t, 5 + dw, rv, nt, 0);
+                     OrbAdd(i, x, t, 0, rv, nt, ue, u, dv);
+                     OrbAdd(i, x, t, sdB, rv, nt, ue, u, dv);
+                     OrbAdd(i, x, t, 3 + hf, rv, nt, 0, u, dv);
+                     OrbAdd(i, x, t, 5 + dw, rv, nt, 0, u, dv);
                      if(wc >= 0)
-                        OrbAdd(i, x, t, 12 + wc, rv, nt, 0);
-                     OrbAdd(i, x, t, 15 + (sdB - 1) * 2 + hf, rv, nt, 0);
+                        OrbAdd(i, x, t, 12 + wc, rv, nt, 0, u, dv);
+                     OrbAdd(i, x, t, 15 + (sdB - 1) * 2 + hf, rv, nt, 0, u, dv);
                     }
                  }
               }
@@ -9092,6 +9522,9 @@ void OrbStore(const int c, const int sI, const int iRef, const int xRef, string 
                g_otEw[tr] = q[sd].ew;
                g_otZw[tr] = q[sd].zw;
                g_otSt[tr] = q[sd].st;
+               g_otP[tr] = q[sd].pl;
+               g_otZp[tr] = q[sd].zp;
+               g_otBe[tr] = q[sd].be;
               }
             if(g_obCsv != INVALID_HANDLE && g_osDay[cfg] > 0)
               {
@@ -9114,33 +9547,47 @@ void OrbStore(const int c, const int sI, const int iRef, const int xRef, string 
                   double e = g_obA[a + 1] / nr, var = g_obA[a + 2] / nr - e * e, se = var > 0 ? MathSqrt(var / nr) : 0, en = g_obA[a + 3 + p] / nr;
                   ln += ";" + CN(en, 4) + ";" + CN(se > 0 ? en / se : Nan(), 2);
                  }
+               ln += ";" + (g_osDay[cfg] >= g_obMinDay ? "si" : "no") + ";" + CN(q[0].pl, 4) + ";" + CN(q[0].adv, 4) + ";" + CN(q[0].zp, 2) + ";" +
+                     CN(q[0].be, 2);
+               for(int j = 0; j < g_bpN; j++)
+                 {
+                  double e = 0, z = 0;
+                  ObNetBp(i, x, t, 0, g_bpV[j], e, z);
+                  ln += ";" + CN(e, 4) + ";" + CN(z, 2);
+                 }
                FileWriteString(g_obCsv, ln + "\n");
               }
            }
          //--- riepilogo: segui 1:1, entrambi i lati (obiettivo e stop alla stessa distanza: nessuna distorsione del percorso nella barra)
          int t0 = ObTr(cfg, 0, 0), nr0 = g_otN[t0];
          double cont = Frac(g_otU[t0], g_otU[t0] + g_otL[t0]);
-         if(!g_osDup[cs] && nr0 >= 30)
+         bool cov = g_osDay[cfg] >= g_obMinDay;  // orario coperto nella maggior parte dei giorni (non a mercato chiuso)
+         if(!g_osDup[cs] && nr0 >= 30 && cov)
             Hi(9, g_otZ[t0], "ORB " + ObCfgLab(cfg) + ", " + I2S(nr0) + " trade: dopo la chiusura fuori dal range arriva prima a +1R " + FP(cont, 1) +
                "% contro 50% (chiusi a tempo " + Share(nr0 - g_otU[t0] - g_otL[t0], nr0) + "%), aspettativa lorda " + SgnF(g_otE[t0], 3) + " R" +
                (g_cp[1].on || g_cp[2].on ? ", netta del broker peggiore " + SgnF(g_otEw[t0], 3) + " R" : "") +
+               (g_otZ[t0] > 0 ? ", costo di pareggio " + BpTxt(g_otBe[t0]) : "") +
                (g_otZ[t0] < 0 ? " (la rottura fallisce piu' del caso: fade)" : " (la rottura prosegue piu' del caso)"));
          //--- mappa: % che arriva prima a +1R tra i trade chiusi a obiettivo o stop, colore = z
          if(nr0 < 30)
             heat += TD("-");
          else
-           {
-            string tip = "N " + I2S(nr0) + ", rompe " + Share(g_osBrk[cfg], g_osDay[cfg]) + "% dopo " + F(g_osBm[cfg], 0) + " min, tocca l'altro lato " +
-                         Share(g_osFl[cfg], g_osBrk[cfg]) + "%, chiude oltre " + Share(g_osHd[cfg], g_osBrk[cfg]) + "%, estensione " + F(g_osEx[cfg], 1) +
-                         " range; 1:1 obiettivo " + Share(g_otU[t0], nr0) + "% stop " + Share(g_otL[t0], nr0) + "% a tempo " +
-                         Share(nr0 - g_otU[t0] - g_otL[t0], nr0) + "%; lorda " + SgnF(g_otE[t0], 3) + " R z " + ZS(g_otZ[t0]) + "; netta peggiore " +
-                         SgnF(g_otEw[t0], 3) + " R";
-            StringReplace(tip, "'", "&#39;");
-            string bg = PCol(g_otZ[t0], 0, 4);
-            heat += "<td title='" + tip + "'" + (bg != "" ? " style='background:" + bg + "'" : "") + ">" + FP(cont, 0) + "</td>";
-           }
+            if(!cov)
+               heat += "<td class='muted' title='coperto in " + I2S(g_osDay[cfg]) + " giorni su circa " + I2S(2 * g_obMinDay) +
+                       ": mercato chiuso o finestra oltre la chiusura nella maggior parte dei giorni (escluso)'>&middot;</td>";
+            else
+              {
+               string tip = "N " + I2S(nr0) + ", rompe " + Share(g_osBrk[cfg], g_osDay[cfg]) + "% dopo " + F(g_osBm[cfg], 0) + " min, tocca l'altro lato " +
+                            Share(g_osFl[cfg], g_osBrk[cfg]) + "%, chiude oltre " + Share(g_osHd[cfg], g_osBrk[cfg]) + "%, estensione " + F(g_osEx[cfg], 1) +
+                            " range; 1:1 obiettivo " + Share(g_otU[t0], nr0) + "% stop " + Share(g_otL[t0], nr0) + "% a tempo " +
+                            Share(nr0 - g_otU[t0] - g_otL[t0], nr0) + "%; lorda " + SgnF(g_otE[t0], 3) + " R z " + ZS(g_otZ[t0]) + "; netta peggiore " +
+                            SgnF(g_otEw[t0], 3) + " R; costo di pareggio " + BpTxt(g_otBe[t0]);
+               StringReplace(tip, "'", "&#39;");
+               string bg = PCol(g_otZ[t0], 0, 4);
+               heat += "<td title='" + tip + "'" + (bg != "" ? " style='background:" + bg + "'" : "") + ">" + FP(cont, 0) + "</td>";
+              }
          //--- tabella degli eventi a ogni orario (orologio principale, durata e finestra di riferimento)
-         if(c == 0 && i == iRef && x == xRef && g_osDay[cfg] >= 30)
+         if(c == 0 && i == iRef && x == xRef && g_osDay[cfg] >= 30 && cov)
            {
             int bt = ObBest(cfg), tb = ObTr(cfg, bt, 0);
             double hd = Frac(g_osHd[cfg], g_osBrk[cfg]);
@@ -9149,12 +9596,14 @@ void OrbStore(const int c, const int sI, const int iRef, const int xRef, string 
                       TD(Share(g_osFl[cfg], g_osBrk[cfg])) + TDc(FP(hd, 1), PCol(hd, 0.5, 0.15)) + TD(F(g_osEx[cfg], 2)) +
                       TD(Share(g_otU[t0], nr0) + " / " + Share(g_otL[t0], nr0) + " / " + Share(nr0 - g_otU[t0] - g_otL[t0], nr0)) +
                       TDc(SgnF(g_otE[t0], 3) + " (" + ZS(g_otZ[t0]) + ")", PCol(g_otZ[t0], 0, 4)) + TD(SgnF(g_otEw[t0], 3) + " (" + ZS(g_otZw[t0]) + ")") +
-                      TD(OB_OP[bt] + " " + SgnF(g_otEw[tb], 3) + " (" + ZS(g_otZw[tb]) + ")") + "</tr>";
+                      TD(BpTxt(g_otBe[t0])) + TD(OB_OP[bt] + " " + SgnF(g_otEw[tb], 3) + " (" + ZS(g_otZw[tb]) + "; contro il placebo " +
+                         ZS(g_otZp[tb]) + ")") + "</tr>";
             R(g_obEvTx, "    " + ObLoc(cs) + " (dati " + ObDat(cs) + "), " + I2S(g_osDay[cfg]) + " giorni: rompe " + Share(g_osBrk[cfg], g_osDay[cfg]) +
               "% (su " + Share(g_osUp[cfg], g_osBrk[cfg]) + "%) dopo " + F(g_osBm[cfg], 0) + " min, tocca l'altro lato " + Share(g_osFl[cfg], g_osBrk[cfg]) +
               "%, chiude oltre " + FP(hd, 1) + "%, estensione " + F(g_osEx[cfg], 2) + " range; segui 1:1 obiettivo/stop/tempo " + Share(g_otU[t0], nr0) +
               "/" + Share(g_otL[t0], nr0) + "/" + Share(nr0 - g_otU[t0] - g_otL[t0], nr0) + "%, lorda " + SgnF(g_otE[t0], 3) + " R (z " + ZS(g_otZ[t0]) +
-              "), netta peggiore " + SgnF(g_otEw[t0], 3) + "; migliore netta: " + OB_OP[bt] + " " + SgnF(g_otEw[tb], 3) + " R (z " + ZS(g_otZw[tb]) + ")");
+              "), netta peggiore " + SgnF(g_otEw[t0], 3) + ", costo di pareggio " + BpTxt(g_otBe[t0]) + "; migliore netta: " + OB_OP[bt] + " " +
+              SgnF(g_otEw[tb], 3) + " R (z " + ZS(g_otZw[tb]) + ", contro il placebo z " + ZS(g_otZp[tb]) + ")");
            }
         }
    heat += "</tr>";
@@ -9203,8 +9652,9 @@ void OrbDetail(CSeries &s, const int cfg, const int rank, const long d0, const l
    string hb = "";
    for(int p = 1; p < NPRF; p++)
       hb += "|Netta " + g_cp[p].name + " R (z)";
-   THead("Operazione|Trade|% obiettivo / stop / a tempo|Obiettivo tra i chiusi (atteso con prezzo casuale)|Lorda R (z)" + hb +
-         "|Met&agrave; 1 / met&agrave; 2 lorda|Solo rotture al rialzo lorda (z)|Solo al ribasso lorda (z)");
+   THead("Operazione|Trade|% obiettivo / stop / a tempo|Obiettivo tra i chiusi (atteso con prezzo casuale)|Lorda R (z)|Placebo lordo R|" +
+         "Vantaggio sul placebo R (z)" + hb + "|Costo di pareggio|Lorda con costo di " + BpLab() + " (R)|Met&agrave; 1 / met&agrave; 2 lorda|" +
+         "Solo rotture al rialzo lorda (z)|Solo al ribasso lorda (z)");
    for(int t = 0; t < OB_NT; t++)
      {
       ObSt q, qu, qd;
@@ -9221,12 +9671,21 @@ void OrbDetail(CSeries &s, const int cfg, const int rank, const long d0, const l
         }
       string ev = Share(q.nU, q.n) + " / " + Share(q.nL, q.n) + " / " + Share(q.n - q.nU - q.nL, q.n);
       string ct = OB_K[j] > 0 ? Share(q.nU, q.nU + q.nL) + " (" + FP(p0, 0) + ")" : "-";
-      W("<tr>" + TD(OB_OP[t]) + TD(I2S(q.n)) + TD(ev) + TD(ct) + TDc(SgnF(q.e, 3) + " (" + ZS(q.z) + ")", PCol(q.z, 0, 4)) + nets +
+      string lv = ObLev(i, x, t, 0), lz = "";
+      for(int k2 = 0; k2 < g_bpN; k2++)
+        {
+         double e2 = 0, z2 = 0;
+         ObNetBp(i, x, t, 0, g_bpV[k2], e2, z2);
+         lz += (k2 > 0 ? ", " : "") + BpNum(g_bpV[k2]) + " pb z " + ZS(z2);
+        }
+      W("<tr>" + TD(OB_OP[t]) + TD(I2S(q.n)) + TD(ev) + TD(ct) + TDc(SgnF(q.e, 3) + " (" + ZS(q.z) + ")", PCol(q.z, 0, 4)) + TD(SgnF(q.pl, 3)) +
+        TDc(SgnF(q.adv, 3) + " (" + ZS(q.zp) + ")", PCol(q.zp, 0, 4)) + nets + TD(BpTxt(q.be)) + "<td title='" + lz + "'>" + lv + "</td>" +
         TD(SgnF(q.e1, 2) + " / " + SgnF(q.e2, 2)) + TD(SgnF(qu.e, 3) + " (" + ZS(qu.z) + ", N " + I2S(qu.n) + ")") +
         TD(SgnF(qd.e, 3) + " (" + ZS(qd.z) + ", N " + I2S(qd.n) + ")") + "</tr>");
       R(g_repOrb, "     " + OB_OP[t] + ": " + I2S(q.n) + " trade, obiettivo/stop/tempo " + ev + "%, obiettivo tra i chiusi " + ct + "%, lorda " +
-        SgnF(q.e, 3) + " R (z " + ZS(q.z) + ")" + netT + "; meta' " + SgnF(q.e1, 2) + " / " + SgnF(q.e2, 2) + "; solo rialzo " + SgnF(qu.e, 3) +
-        " (z " + ZS(qu.z) + "), solo ribasso " + SgnF(qd.e, 3) + " (z " + ZS(qd.z) + ")");
+        SgnF(q.e, 3) + " R (z " + ZS(q.z) + "), placebo " + SgnF(q.pl, 3) + " R, vantaggio sul placebo " + SgnF(q.adv, 3) + " R (z " + ZS(q.zp) + ")" +
+        netT + "; costo di pareggio " + BpTxt(q.be) + ", lorda con costo di " + BpLab() + ": " + lv + " R (" + lz + "); meta' " + SgnF(q.e1, 2) +
+        " / " + SgnF(q.e2, 2) + "; solo rialzo " + SgnF(qu.e, 3) + " (z " + ZS(qu.z) + "), solo ribasso " + SgnF(qd.e, 3) + " (z " + ZS(qd.z) + ")");
      }
    TEnd();
    //--- segui 1:1 per giorno della settimana e per ampiezza del range
@@ -9255,7 +9714,8 @@ void OrbTable(const int &lst[], const int nl, const string title, const string d
    SecStart(title, desc);
    THead("#|Ora locale|Orario dei dati (inverno / estate)|Range|Finestra|Giorni|% rompe (su / gi&ugrave;)|Minuti alla rottura (mediana)|" +
          "% tocca l'altro lato|% chiude oltre il lato rotto|Estensione mediana (range)|Segui 1:1: % obiettivo / stop / a tempo|Lorda 1:1 R (z)|" +
-         "Netta peggiore 1:1 R (z)|Met&agrave; 1 / met&agrave; 2|Operazione migliore (netta del broker peggiore)");
+         "Netta peggiore 1:1 R (z)|Costo di pareggio 1:1|Met&agrave; 1 / met&agrave; 2|Operazione migliore (netta del broker peggiore; z contro il " +
+         "placebo; pareggio)");
    for(int r = 0; r < nl; r++)
      {
       int cfg = lst[r], x = cfg % g_obNW, i = (cfg / g_obNW) % g_obND, cs = cfg / (g_obNW * g_obND);
@@ -9266,14 +9726,16 @@ void OrbTable(const int &lst[], const int nl, const string title, const string d
         TD(Share(g_osBrk[cfg], g_osDay[cfg]) + " (" + Share(g_osUp[cfg], g_osBrk[cfg]) + " / " + Share(g_osBrk[cfg] - g_osUp[cfg], g_osBrk[cfg]) + ")") +
         TD(F(g_osBm[cfg], 0)) + TD(Share(g_osFl[cfg], g_osBrk[cfg])) + TDc(FP(hd, 1), PCol(hd, 0.5, 0.15)) + TD(F(g_osEx[cfg], 2)) + TD(ev) +
         TDc(SgnF(g_otE[t0], 3) + " (" + ZS(g_otZ[t0]) + ")", PCol(g_otZ[t0], 0, 4)) + TD(SgnF(g_otEw[t0], 3) + " (" + ZS(g_otZw[t0]) + ")") +
-        TD(SgnF(g_otE1[t0], 2) + " / " + SgnF(g_otE2[t0], 2)) + TD(OB_OP[bt] + " " + SgnF(g_otEw[tb], 3) + " (" + ZS(g_otZw[tb]) + ")" +
-                                                                  (g_otSt[tb] ? "" : "*")) + "</tr>");
+        TD(BpTxt(g_otBe[t0])) + TD(SgnF(g_otE1[t0], 2) + " / " + SgnF(g_otE2[t0], 2)) +
+        TD(OB_OP[bt] + " " + SgnF(g_otEw[tb], 3) + " (" + ZS(g_otZw[tb]) + ")" + (g_otSt[tb] ? "" : "*") + "; placebo " + ZS(g_otZp[tb]) + "; " +
+           BpTxt(g_otBe[tb])) + "</tr>");
       R(g_repOrb, "  " + I2S(r + 1) + ". " + ObCfgLab(cfg) + ", " + I2S(g_osDay[cfg]) + " giorni: rompe " + Share(g_osBrk[cfg], g_osDay[cfg]) + "% (su " +
         Share(g_osUp[cfg], g_osBrk[cfg]) + "%) dopo " + F(g_osBm[cfg], 0) + " min (mediana), tocca l'altro lato " + Share(g_osFl[cfg], g_osBrk[cfg]) +
         "%, chiude oltre il lato rotto " + FP(hd, 1) + "% (atteso 50%), estensione mediana " + F(g_osEx[cfg], 2) + " range; segui 1:1 obiettivo/stop/tempo " +
         ev + "%, lorda " + SgnF(g_otE[t0], 3) + " R (z " + ZS(g_otZ[t0]) + "), netta peggiore " + SgnF(g_otEw[t0], 3) + " R (z " + ZS(g_otZw[t0]) +
-        "), meta' " + SgnF(g_otE1[t0], 2) + " / " + SgnF(g_otE2[t0], 2) + "; migliore netta: " + OB_OP[bt] + " " + SgnF(g_otEw[tb], 3) + " R (z " +
-        ZS(g_otZw[tb]) + (g_otSt[tb] ? ", stabile" : ", non stabile") + ")");
+        "), costo di pareggio " + BpTxt(g_otBe[t0]) + ", meta' " + SgnF(g_otE1[t0], 2) + " / " + SgnF(g_otE2[t0], 2) + "; migliore netta: " +
+        OB_OP[bt] + " " + SgnF(g_otEw[tb], 3) + " R (z " + ZS(g_otZw[tb]) + (g_otSt[tb] ? ", stabile" : ", non stabile") + ", contro il placebo z " +
+        ZS(g_otZp[tb]) + ", pareggio " + BpTxt(g_otBe[tb]) + ")");
      }
    TEnd();
    SecEnd();
@@ -9335,6 +9797,24 @@ void OrbTab(CSeries &s, const int barSec, const string clean)
    ArrayResize(g_osBm, ncf); ArrayResize(g_osEx, ncf);
    ArrayResize(g_otN, ntr); ArrayResize(g_otU, ntr); ArrayResize(g_otL, ntr); ArrayResize(g_otE, ntr); ArrayResize(g_otZ, ntr);
    ArrayResize(g_otE1, ntr); ArrayResize(g_otE2, ntr); ArrayResize(g_otEw, ntr); ArrayResize(g_otZw, ntr); ArrayResize(g_otSt, ntr);
+   ArrayResize(g_otP, ntr); ArrayResize(g_otZp, ntr); ArrayResize(g_otBe, ntr);
+   //--- giorni con dati (almeno 4 ore di barre): un orario coperto in meno della meta' di questi giorni cade a mercato chiuso (o la
+   //--- finestra supera la chiusura) quasi sempre; i pochi giorni rimasti (cambio d'ora sfasato, festivi) non lo rappresentano
+   int nDay = 0, nb0 = 0;
+   long dPrev = -1;
+   for(int q = 0; q <= s.n; q++)
+     {
+      long dk = q < s.n ? (long)s.t[q] / 86400 : -2;
+      if(dk != dPrev)
+        {
+         if(dPrev >= 0 && nb0 * barSec >= 4 * 3600)
+            nDay++;
+         dPrev = dk;
+         nb0 = 0;
+        }
+      nb0++;
+     }
+   g_obMinDay = nDay / 2 > 30 ? nDay / 2 : 30;
    //--- orario dei dati di ogni inizio il 15 gennaio e il 15 luglio dell'ultimo anno completo (per riconoscere gli orari equivalenti)
    MqlDateTime dl;
    TimeToStruct(s.t[s.n - 1], dl);
@@ -9373,6 +9853,9 @@ void OrbTab(CSeries &s, const int barSec, const string clean)
                   "z solo rialzo;Solo ribasso trade;Solo ribasso lorda R;z solo ribasso";
       for(int p = 1; p < NPRF; p++)
          hd += ";Netta " + Plain(g_cp[p].name) + " R;z " + Plain(g_cp[p].name);
+      hd += ";Coperto (giorni >= " + I2S(g_obMinDay) + ");Placebo lordo R;Vantaggio sul placebo R;z vs placebo;Costo di pareggio pb";
+      for(int j = 0; j < g_bpN; j++)
+         hd += ";Lorda a " + BpNum(g_bpV[j]) + " pb R;z a " + BpNum(g_bpV[j]) + " pb";
       FileWriteString(g_obCsv, hd + "\n");
      }
    long d0 = (long)s.t[0] / 86400 - 1, d1 = (long)s.t[s.n - 1] / 86400 + 1;
@@ -9394,8 +9877,15 @@ void OrbTab(CSeries &s, const int barSec, const string clean)
      "livello darebbe un vantaggio finto); stop all'altro lato del range o a meta'; obiettivo 1 o 2 volte il rischio o chiusura a fine " +
      "finestra; fade = la stessa operazione al contrario. Con un prezzo casuale l'aspettativa e' zero e 'arriva prima a +1R' e' il 50%: z = " +
      "distanza da zero in deviazioni standard (un trade al giorno, giorni indipendenti). Netta = con spread per ora, commissione, slittamento e " +
-     "swap dei broker; netta peggiore = il broker con il risultato piu' basso. Orari equivalenti (stesso orario dei dati a gennaio e a luglio, " +
-     "per esempio NY 09:30 e LDN 14:30: cambiano solo nelle settimane in cui l'ora legale cambia in date diverse) sono mostrati una volta sola.");
+     "swap dei broker; netta peggiore = il broker con il risultato piu' basso. Placebo = la stessa operazione nello stesso istante e allo " +
+     "stesso prezzo con direzione a caso (media tra lei e la direzione opposta con le stesse distanze di stop e obiettivo): misura cio' che " +
+     "rende il solo momento (volatilita', trend in entrambi i sensi, esecuzione nella barra); vantaggio sul placebo = operazione - placebo, " +
+     "z sulle differenze giorno per giorno: e' la parte che dipende dalla direzione della rottura (per segui 1:1 coincide con lo z contro zero). " +
+     "Costo di pareggio = costo per trade in punti base del prezzo (1 pb = 0,01%) che azzera l'aspettativa lorda; lorda a " + BpLab() +
+     " = aspettativa con quel costo per trade (" + CostBpTxt() + "). Orari coperti in meno di " + I2S(g_obMinDay) + " giorni (meta' dei giorni " +
+     "con dati: mercato chiuso o finestra oltre la chiusura) sono esclusi da tabelle, riepilogo e regole (restano nel CSV). Orari equivalenti " +
+     "(stesso orario dei dati a gennaio e a luglio, per esempio NY 09:30 e LDN 14:30: cambiano solo nelle settimane in cui l'ora legale " +
+     "cambia in date diverse) sono mostrati una volta sola.");
    int tot = ncs, done = 0;
    for(int c = 0; c < g_obNC && !IsStopped(); c++)
      {
@@ -9422,7 +9912,7 @@ void OrbTab(CSeries &s, const int barSec, const string clean)
    for(int cfg = 0; cfg < ncf; cfg++)
      {
       int t0 = ObTr(cfg, 0, 0);
-      if(g_otN[t0] >= 100 && MathIsValidNumber(g_otZ[t0]))
+      if(g_otN[t0] >= 100 && g_osDay[cfg] >= g_obMinDay && MathIsValidNumber(g_otZ[t0]))
          key[nk++] = MathFloor(MathMin(MathAbs(g_otZ[t0]), 999.0) * 1000.0) * 1048576.0 + cfg;
      }
    ArrayResize(key, nk);
@@ -9456,7 +9946,8 @@ void OrbTab(CSeries &s, const int barSec, const string clean)
    ArrayResize(key, ntr);
    nk = 0;
    for(int tr = 0; tr < ntr; tr++)
-      if(g_otN[tr] >= 100 && g_otSt[tr] && MathIsValidNumber(g_otZw[tr]) && g_otEw[tr] > 0 && g_otZw[tr] >= InpOrbRuleZ)
+      if(g_otN[tr] >= 100 && g_osDay[tr / (3 * OB_NT)] >= g_obMinDay && g_otSt[tr] && MathIsValidNumber(g_otZw[tr]) && g_otEw[tr] > 0 &&
+         g_otZw[tr] >= InpOrbRuleZ)
          key[nk++] = MathFloor(MathMin(g_otZw[tr], 999.0) * 1000.0) * 1048576.0 + tr;
    ArrayResize(key, nk);
    ArraySort(key);
@@ -9493,6 +9984,17 @@ void OrbTab(CSeries &s, const int barSec, const string clean)
             "all'obiettivo nel 50% dei trade chiusi: <b>z</b> = distanza da zero in deviazioni standard (un trade al giorno). Netta = spread " +
             "per ora, commissione, slittamento e swap di " + br + "; netta peggiore = il broker con il risultato pi&ugrave; basso. " +
             "Stop e obiettivi sono eseguiti al prezzo esatto: lo slittamento reale degli stop &egrave; nel parametro di ogni broker. " +
+            "<b>Placebo</b> = la stessa operazione nello stesso istante e allo stesso prezzo ma con direzione a caso (media tra lei e la " +
+            "direzione opposta, con le stesse distanze di stop e obiettivo): &egrave; quello che rende il solo momento, senza sapere da che " +
+            "parte &egrave; uscito il prezzo (volatilit&agrave;, trend in entrambi i sensi, esecuzione dentro la barra). <b>Vantaggio sul " +
+            "placebo</b> = operazione meno placebo, con z calcolato sulle differenze giorno per giorno: &egrave; la parte che dipende davvero " +
+            "dalla direzione della rottura. Per 'segui 1:1' stop e obiettivo sono alla stessa distanza e il placebo &egrave; zero: il suo z " +
+            "contro zero &egrave; gi&agrave; il confronto con il placebo. <b>Costo di pareggio</b> = il costo per trade (spread + commissione " +
+            "+ slittamento), in punti base del prezzo (1 pb = 0,01%), che porta a zero l'aspettativa lorda; accanto, l'aspettativa con un " +
+            "costo di " + BpLab() + " (" + CostBpTxt() + "). Un vantaggio con pareggio sotto il costo del broker non &egrave; operabile. " +
+            "<b>Copertura</b>: gli orari coperti in meno di " + I2S(g_obMinDay) + " giorni (met&agrave; dei giorni con dati) cadono quasi " +
+            "sempre a mercato chiuso o con la finestra oltre la chiusura: sono esclusi da tabelle, riepilogo e regole (&middot; nella mappa) " +
+            "e restano nel CSV. " +
             "<b>Attenzione ai confronti multipli</b>: su migliaia di combinazioni correlate molte superano |z| 2 per caso; conta ci&ograve; " +
             "che &egrave; stabile nelle due met&agrave;, ritorna a orari e durate vicini e resta positivo con i costi. Orari equivalenti " +
             "(stesso orario dei dati a gennaio e a luglio, per esempio NY 09:30 e LDN 14:30, diversi solo nelle settimane del cambio d'ora " +
@@ -9527,7 +10029,7 @@ void OrbTab(CSeries &s, const int barSec, const string clean)
             "finestre sono nella mappa sotto e nel CSV.");
    THead("Ora locale|Orario dei dati (inverno / estate)|Giorni|% rompe (su / gi&ugrave;)|Minuti alla rottura|% tocca l'altro lato|" +
          "% chiude oltre il lato rotto|Estensione mediana (range)|Segui 1:1: % obiettivo / stop / a tempo|Lorda 1:1 R (z)|Netta peggiore 1:1 R (z)|" +
-         "Operazione migliore (netta peggiore)");
+         "Costo di pareggio 1:1|Operazione migliore (netta peggiore; z contro il placebo)");
    W(evRows);
    TEnd();
    SecEnd();
@@ -9539,7 +10041,8 @@ void OrbTab(CSeries &s, const int barSec, const string clean)
      {
       SecStart("Mappa: " + MKT_NAME[g_obClk[c]] + (c == 0 ? "" : " (orologio con un'altra ora legale)"),
                "Ogni cella: range &rarr; finestra (minuti). Numero = % dei trade 'segui 1:1' che arrivano prima all'obiettivo che allo stop " +
-               "(atteso 50); colore = z dell'aspettativa lorda (blu = la rottura prosegue, rosso = fallisce). Passa sopra una cella per i dettagli.");
+               "(atteso 50); colore = z dell'aspettativa lorda (blu = la rottura prosegue, rosso = fallisce); &middot; = orario coperto in " +
+               "meno di " + I2S(g_obMinDay) + " giorni (escluso). Passa sopra una cella per i dettagli.");
       if(c > 0)
          W("<details><summary class='muted'>Mostra la mappa</summary>");
       THead(hh);
@@ -9578,9 +10081,11 @@ void OrbRulesWrite(void)
                          I2S(g_obW[x]) + ";" + (OB_MID[j] ? "1" : "0") + ";" + I2S((int)OB_K[j]) + ";" + (t < 4 ? "1" : "-1") + ";" +
                          I2S(sd == 0 ? 2 : sd - 1) + ";-1\n");
       g_ruHtml += "<tr>" + TD(I2S(id)) + TD("ORB (M1)") + TD(OB_OP[t]) + TD(ctx) + TD(I2S(g_otN[tr])) + TD(SgnF(g_otEw[tr], 3)) + TD(ZS(g_otZw[tr])) +
+                  TD("placebo " + ZS(g_otZp[tr])) + TD(BpTxt(g_otBe[tr])) +
                   TD(I2S(g_otN[tr])) + TD(SgnF(g_otEw[tr], 3)) + "</tr>";
       R(g_ruTx, "  Regola " + I2S(id) + ": ORB " + OB_OP[t] + " | " + ctx + " (analisi: N " + I2S(g_otN[tr]) + ", netta peggiore " + SgnF(g_otEw[tr], 3) +
-        " R, z " + ZS(g_otZw[tr]) + ", meta' lorde " + SgnF(g_otE1[tr], 2) + " / " + SgnF(g_otE2[tr], 2) + "; un trade al giorno)");
+        " R, z " + ZS(g_otZw[tr]) + ", meta' lorde " + SgnF(g_otE1[tr], 2) + " / " + SgnF(g_otE2[tr], 2) + ", contro il placebo z " + ZS(g_otZp[tr]) +
+        ", costo di pareggio " + BpTxt(g_otBe[tr]) + "; un trade al giorno)");
      }
   }
 
@@ -9615,6 +10120,11 @@ void RRTab(CSeries &s, const int barSec, const string sym, const string clean)
          string b = Plain(g_cp[p].name);
          hd += ";Netta " + b + " R;z " + b + ";z " + b + " vs tutte;Meta 1 " + b + " R;Meta 2 " + b + " R;Costo medio " + b + " R";
         }
+      hd += ";Lorda meno stessa ora R (D1: meno tutte);z lorda vs stessa ora;Placebo lordo R;z lorda vs placebo;Costo di pareggio pb";
+      for(int j = 0; j < g_bpN; j++)
+         hd += ";Lorda a " + BpNum(g_bpV[j]) + " pb R;z a " + BpNum(g_bpV[j]) + " pb";
+      for(int p = 1; p < NPRF; p++)
+         hd += ";z " + Plain(g_cp[p].name) + " vs stessa ora;z " + Plain(g_cp[p].name) + " vs placebo";
       FileWriteString(g_csvH, hd + "\n");
      }
    //--- regole per lo Strategy Tester nella cartella comune (le legge l'EA MPRuleTester nel terminale del broker)
@@ -9644,7 +10154,8 @@ void RRTab(CSeries &s, const int barSec, const string sym, const string clean)
             "Nelle altre schede ogni candela apre un trade, anche se il precedente &egrave; ancora aperto: va bene per misurare, ma " +
             "non &egrave; come si opera. Qui i contesti migliori di ogni timeframe (i " + I2S(InpSeqTop) + " singoli e le " +
             I2S(InpSeqTop) + " coppie con lo z " + (g_cp[1].on || g_cp[2].on ? "netto del broker peggiore" : "lordo") + " pi&ugrave; " +
-            "alto, tra quelli stabili nelle due met&agrave;, pi&ugrave; il riferimento 'entra sempre') sono eseguiti come farebbe " +
+            "alto, tra quelli stabili nelle due met&agrave; e che fanno meglio della stessa ora con i costi del broker peggiore, " +
+            "pi&ugrave; il riferimento 'entra sempre') sono eseguiti come farebbe " +
             "un EA: <b>una posizione alla volta</b>, in ordine di tempo. <b>Serie di perdite massima</b>: tra parentesi quella attesa " +
             "se l'ordine dei trade fosse casuale (mediana e 95%): se la reale supera il 95% le perdite arrivano a gruppi (fasi di " +
             "mercato sfavorevoli). <b>Drawdown massimo</b> in R dal picco: tra parentesi lo stesso con i trade rimescolati " +
@@ -9675,9 +10186,19 @@ void RRTab(CSeries &s, const int barSec, const string sym, const string clean)
             "entrate sparse, per esempio una sola ora al giorno su H1: N effettivo circa N). <b>Prima / seconda met&agrave;</b> = la stessa aspettativa calcolata sulla prima e sulla seconda " +
             "met&agrave; del periodo: un vantaggio reale dovrebbe esserci in entrambe (* nelle celle = segno diverso in una delle " +
             "due). <b>z rispetto a tutte le candele</b> = se il contesto fa meglio del semplice entrare sempre: su un indice che sale " +
-            "nel tempo il buy ha un vantaggio di fondo e la riga 'Tutte le candele' &egrave; il riferimento. Nessun contesto viene " +
-            "tolto, anche quelli con pochi casi: il colore e z dicono quanto fidarsi. Il testo completo &egrave; nella scheda " +
-            "Testi &rarr; Rischio/rendimento lordo.");
+            "nel tempo il buy ha un vantaggio di fondo e la riga 'Tutte le candele' &egrave; il riferimento. <b>z rispetto alla stessa " +
+            "ora</b> = lo stesso confronto fatto ora per ora: ogni trade del contesto &egrave; confrontato con l'aspettativa di tutti i " +
+            "trade della sua ora (sul D1, con tutte le candele). Toglie l'effetto dell'orario: un contesto che capita soprattutto " +
+            "nelle ore buone sembra buono anche se non aggiunge nulla; vicino a zero = vale quanto l'orario da solo. <b>Placebo</b> = " +
+            "la stessa operazione con direzione a caso nello stesso istante (media di buy e sell con lo stesso stop e obiettivo): " +
+            "misura quanto rende il solo movimento del prezzo e le regole di esecuzione (per esempio gli esiti ambigui contati come " +
+            "stop pesano su entrambi i lati). <b>z contro il placebo</b> = buy meno sell trade per trade: quanto conta la direzione. " +
+            "Un contesto che passa z ma non questi due controlli &egrave; spiegato dall'orario o dal movimento, non dalla condizione: " +
+            "la colonna Lettura lo segnala e le strategie scartano i contesti che non aggiungono nulla alla stessa ora. " +
+            "<b>Costo massimo sostenibile</b> anche in <b>punti base</b> del prezzo (1 pb = 0,01%, " + CostBpTxt() + ") e aspettativa " +
+            "con un costo per trade di " + BpLab() + " (tabella di ogni timeframe e CSV). Nessun contesto viene tolto, anche quelli " +
+            "con pochi casi: il colore e z dicono quanto fidarsi. Il testo completo &egrave; nella scheda Testi &rarr; " +
+            "Rischio/rendimento lordo.");
    SecEnd();
    int bm = barSec / 60 < 1 ? 1 : barSec / 60;
    for(int ti = 0; ti < RR_NTF && !IsStopped(); ti++)
@@ -9727,7 +10248,8 @@ void RRTab(CSeries &s, const int barSec, const string sym, const string clean)
         "parametri, sapendo che aumentano i falsi positivi.</p>");
    if(g_ruN > 0)
      {
-      THead("Regola|Timeframe|Operazione|Contesto|N (analisi)|Aspettativa netta peggiore (R)|z|Trade una alla volta|R per trade una alla volta (peggiore)");
+      THead("Regola|Timeframe|Operazione|Contesto|N (analisi)|Aspettativa netta peggiore (R)|z|Controlli (z)|Costo di pareggio|Trade una alla volta|" +
+            "R per trade una alla volta (peggiore)");
       W(g_ruHtml);
       TEnd();
      }
@@ -9758,7 +10280,8 @@ void HiTab(void)
      }
    SecStart("Riepilogo: cosa si discosta dal caso in tutte le analisi",
             "Ogni analisi confronta il reale con un riferimento (direzione casuale con la stessa volatilit&agrave;, livello finto, " +
-            "tutti i periodi, aspettativa zero) e ne calcola z. Qui sono raccolti tutti i risultati con <b>|z| &ge; 3</b> (difficili " +
+            "tutti i periodi, aspettativa zero, stessa ora, placebo con direzione a caso nello stesso istante) e ne calcola z. " +
+            "Qui sono raccolti tutti i risultati con <b>|z| &ge; 3</b> (difficili " +
             "da ottenere per caso) e, sotto, quelli tra <b>2 e 3</b> (indizi). <b>Attenzione ai confronti multipli</b>: su molti " +
             "confronti alcuni superano la soglia per puro caso. Con confronti indipendenti se ne aspettano lo 0,27% oltre 3 e il 4,3% " +
             "tra 2 e 3 (colonne 'attesi per caso'); molti confronti sono per&ograve; correlati (stessi giorni, stessi trade con " +
