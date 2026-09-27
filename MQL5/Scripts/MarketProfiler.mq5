@@ -312,6 +312,32 @@ string FP(const double x, const int d) { return F(x * 100.0, d); }
 string PX(const double x) { if(!MathIsValidNumber(x)) return "&ndash;"; return DoubleToString(x, g_digits); }
 string I2S(const long x) { return IntegerToString(x); }
 void   R(string &dst, const string s) { dst += s + "\n"; }
+
+//--- testo lungo a blocchi (appendici del rapporto con tutti i risultati): ogni blocco resta piccolo, quindi aggiungere righe
+//--- costa poco anche con milioni di caratteri; si scrive nel file un blocco alla volta
+class CText
+  {
+public:
+   string            c[];
+   int               n, len;
+                     CText(void) { n = 0; len = 0; }
+   void              Add(const string s)
+     {
+      if(n == 0 || len > 65536)
+        {
+         if(n >= ArraySize(c))
+            ArrayResize(c, n + 64);
+         c[n] = "";
+         n++;
+         len = 0;
+        }
+      c[n - 1] += s + "\n";
+      len += StringLen(s) + 1;
+     }
+   void              Clear(void) { ArrayFree(c); n = 0; len = 0; }
+  };
+CText  g_txHiAll, g_txOrbAll, g_txCbAll;  // appendici: tutti i risultati oltre |z| 2, tutte le combinazioni ORB, tutte le coppie
+void   WT(CText &t) { for(int i = 0; i < t.n; i++) W(t.c[i]); }
 // z = di quante deviazioni standard un valore si allontana dall'atteso (|z| < 2 compatibile con il caso, |z| >= 3 difficile)
 string ZS(const double z) { if(!MathIsValidNumber(z)) return "-"; return (z >= 0 ? "+" : "") + DoubleToString(z, 1); }
 double ZProp(const double p, const double p0, const double n)  // proporzione p su n casi contro l'atteso p0
@@ -8018,6 +8044,13 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
    int kr[], ki[];
    double kz[];
    int nk = 0;
+   bool anyC = false;
+   for(int p = 1; p < NPRF; p++)
+      if(g_cp[p].on)
+         anyC = true;
+   g_txCbAll.Add("");
+   g_txCbAll.Add("[" + nm + "] coppie con almeno 30 casi: per ogni obiettivo % arrivato prima dello stop, aspettativa lorda in R e z " +
+                 "(* = segno diverso nelle due meta')" + (anyC ? "; poi la netta del broker peggiore" : ""));
    for(int a = CB_D0; a <= CB_D1; a++)
       for(int b = a + 1; b <= CB_D1; b++)
          for(int x = 0; x < C[a]; x++)
@@ -8026,6 +8059,24 @@ void RRCombo(CSeries &s, const int &cs[], CSeries &cd, const int ti, const datet
                int r = 1 + pb[a][b] + x * C[b] + y, n = g_rrN[r];
                if(n < 30)
                   continue;
+               //--- appendice del rapporto: la coppia con tutte le operazioni
+               string tbu = "", tse = "", nbu = "", nse = "";
+               for(int i = 0; i < 2 * RR_NR; i++)
+                 {
+                  string cl = RRCellT(0, r, i), cn = anyC ? RRCellT(RRWorst(r, i), r, i) : "";
+                  if(i < RR_NR)
+                    {
+                     tbu += (i > 0 ? ", " : "") + cl;
+                     nbu += (i > 0 ? ", " : "") + cn;
+                    }
+                  else
+                    {
+                     tse += (i > RR_NR ? ", " : "") + cl;
+                     nse += (i > RR_NR ? ", " : "") + cn;
+                    }
+                 }
+               g_txCbAll.Add("    " + g_csvD[a] + ": " + g_csvP[g_rrDimB[a] + x] + " + " + g_csvD[b] + ": " + g_csvP[g_rrDimB[b] + y] + " (N " +
+                             I2S(n) + "): BUY " + tbu + "; SELL " + tse + (anyC ? " | netta peggiore: BUY " + nbu + "; SELL " + nse : ""));
                for(int i = 0; i < 2 * RR_NR; i++)
                  {
                   RRCsvRow(nm, "coppia", g_csvD[a], g_csvP[g_rrDimB[a] + x], g_csvD[b], g_csvP[g_rrDimB[b] + y], r, i);
@@ -8944,6 +8995,7 @@ string OB_EV[OB_NE] = {"nessun tocco", "solo tocchi, nessuna chiusura fuori", "c
                        "chiude fuori, rientra e riparte", "chiude fuori, rientra e si gira"
                       };
 string OB_EVS[OB_NE] = {"nessun tocco", "solo tocchi", "continua", "rientra e resta", "rientra e riparte", "rientra e si gira"};
+string OB_OPS[OB_NT] = {"S1:1", "S1:2", "S1:2m", "St", "F1:1", "F1:0,5", "F1:0,5m"};  // sigle delle operazioni (appendice del rapporto)
 string OB_EVC[OB_NE] = {"#4b5563", C_AMBER, C_BLUE, "#a78bfa", C_GREEN, C_RED};
 double OB_K[4]    = {1, 2, 2, 0};  // obiettivo in multipli del rischio (0 = nessuno, chiusura a fine finestra)
 bool   OB_MID[4]  = {false, false, true, false};
@@ -9882,6 +9934,20 @@ string ObEvTxt(const int cf)  // tutti gli eventi: reale, atteso e z; tocchi sen
           ObClk(cf, g_oeTv[cf]) + " (mediane, ora locale)";
   }
 
+string ObEvCmp(const int cf)  // eventi in breve: reale / atteso (%) nell'ordine di OB_EVS, tocchi senza chiusura, orari
+  {
+   if(g_oeN[cf] <= 0)
+      return "-";
+   string t = "";
+   for(int k = 0; k < OB_NE; k++)
+     {
+      int a = cf * OB_NE + k;
+      t += (k > 0 ? " " : "") + FP(g_oeS[a], 0) + (g_obRnd ? "/" + FP(g_oeX[a], 0) : "");
+     }
+   return t + ", tocchi senza chiusura " + F(g_oeRj[cf], 1) + " al giorno, rientro " + ObClk(cf, g_oeTr[cf]) + ", riparte o si gira " +
+          ObClk(cf, g_oeTv[cf]);
+  }
+
 string ObEvTip(const int cf)  // lo stesso testo per l'attributo title (apostrofi protetti)
   {
    string t = ObEvTxt(cf);
@@ -10094,6 +10160,30 @@ void OrbStore(const int c, const int sI, const int iRef, const int xRef, string 
               " R (z " + ZS(g_otZ[t0]) + "), netta peggiore " + SgnF(g_otEw[t0], 3) + ", costo di pareggio " + BpTxt(g_otBe[t0]) + ", a favore / contro " +
               ObCont(f0) + "; migliore netta: " + OB_OP[bt] + " " + SgnF(g_otEw[tb], 3) + " R (z " + ZS(g_otZw[tb]) + ", contro il placebo z " +
               ZS(g_otZp[tb]) + ")" + othT);
+           }
+         //--- appendice del rapporto: tutte le combinazioni (esclusi orari equivalenti e orari a mercato chiuso, che restano nel CSV)
+         if(g_osDay[cfg] > 0 && cov && !g_osDup[cs])
+           {
+            g_txOrbAll.Add(ObCfgLab(cfg) + ", " + I2S(g_osDay[cfg]) + " giorni: rompe " + Share(g_osBrk[cfg], g_osDay[cfg]) + "% (su " +
+                           Share(g_osUp[cfg], g_osBrk[cfg]) + "%) dopo " + F(g_osBm[cfg], 0) + " min, tocca l'altro lato " +
+                           Share(g_osFl[cfg], g_osBrk[cfg]) + "%, chiude oltre " + Share(g_osHd[cfg], g_osBrk[cfg]) + "%, estensione " +
+                           F(g_osEx[cfg], 2) + " range");
+            for(int f = 0; f < g_obNF; f++)
+              {
+               int cf = cfg * g_obNF + f, t1 = ObTr(cf, 0, 0), bt2 = ObBest(cf), tb2 = ObTr(cf, bt2, 0);
+               string ops = "";
+               for(int t = 0; t < OB_NT; t++)
+                 {
+                  int tr = ObTr(cf, t, 0);
+                  ops += (t > 0 ? " " : "") + OB_OPS[t] + " " + SgnF(g_otE[tr], 3) + " (" + ZS(g_otZ[tr]) + ")";
+                 }
+               g_txOrbAll.Add("    " + ObTf(f) + ": conferme " + Share(g_ocN[cf], g_osDay[cfg]) + "% dopo " + F(g_ocTc[cf], 0) + " min (forza " +
+                              F(g_ocSt[cf], 2) + ") | lorde " + ops + " | S1:1 netta peggiore " + SgnF(g_otEw[t1], 3) + " (" + ZS(g_otZw[t1]) +
+                              "), pareggio " + BpTxt(g_otBe[t1]) + " | migliore netta " + OB_OPS[bt2] + " " + SgnF(g_otEw[tb2], 3) + " (z " +
+                              ZS(g_otZw[tb2]) + (g_otSt[tb2] ? "" : "*") + ", placebo " + ZS(g_otZp[tb2]) + ", pareggio " + BpTxt(g_otBe[tb2]) +
+                              ") | a favore/contro " + ObCont(cf) + ", massimo dopo " + F(g_ocTm[cf], 0) + " min, velocita' " + F(g_ocSp[cf], 1) +
+                              ", volatilita' " + F(g_ocVo[cf], 2) + " | eventi " + ObEvCmp(cf));
+              }
            }
         }
    heat += "</tr>";
@@ -10317,6 +10407,7 @@ void OrbTable(const int &lst[], const int nl, const string title, const string d
 
 void OrbTab(CSeries &s, const int barSec, const string clean)
   {
+   g_txOrbAll.Clear();
    g_repOrb = "";
    g_obEvTx = "";
    g_orN = 0;
@@ -10786,6 +10877,7 @@ void OrbRulesWrite(void)
 
 void RRTab(CSeries &s, const int barSec, const string sym, const string clean)
   {
+   g_txCbAll.Clear();
    for(int p = 0; p < NPRF; p++)
      {
       g_rrTxS[p] = "";
@@ -10964,6 +11056,7 @@ string g_repHi = "";
 void HiTab(void)
   {
    g_repHi = "";
+   g_txHiAll.Clear();
    int c3[HI_NMOD], c2[HI_NMOD];
    ArrayInitialize(c3, 0);
    ArrayInitialize(c2, 0);
@@ -11010,10 +11103,19 @@ void HiTab(void)
       ArrayResize(key, c3[m] + c2[m]);
       for(int i = 0; i < g_hiN; i++)
          if(g_hiM[i] == m)
-            key[nk++] = MathFloor(MathMin(MathAbs(g_hiZ[i]), 999.0) * 1000.0) * 1048576.0 + i;
+            key[nk++] = MathFloor(MathMin(MathAbs(g_hiZ[i]), 999.0) * 1000.0) * 16777216.0 + i;
       ArraySort(key);
       SecStart(HI_NAME[m], I2S(c3[m]) + " risultati oltre |z| 3 e " + I2S(c2[m]) + " tra 2 e 3, su " + I2S(g_hiCnt[m]) +
                " confronti. Ordinati per |z|; blu = pi&ugrave; del riferimento, rosso = meno.");
+      //--- appendice del rapporto: tutti i risultati della sezione, senza limiti, ordinati per |z|
+      g_txHiAll.Add("");
+      g_txHiAll.Add("[" + HI_NAME[m] + "] " + I2S(g_hiCnt[m]) + " confronti, oltre |z| 3: " + I2S(c3[m]) + " (attesi per caso " +
+                    F(0.0027 * g_hiCnt[m], 1) + "), tra 2 e 3: " + I2S(c2[m]) + " (attesi " + F(0.0428 * g_hiCnt[m], 1) + ")");
+      for(int j = nk - 1; j >= 0; j--)
+        {
+         int i = (int)((long)key[j] % 16777216);
+         g_txHiAll.Add("    z " + ZS(g_hiZ[i]) + " | " + g_hiT[i]);
+        }
       R(g_repHi, "");
       R(g_repHi, "[" + HI_NAME[m] + "] " + I2S(g_hiCnt[m]) + " confronti");
       for(int pass = 0; pass < 2; pass++)
@@ -11027,7 +11129,7 @@ void HiTab(void)
          R(g_repHi, "  " + tt + " (" + I2S(tot) + "):");
          for(int j = nk - 1; j >= 0 && shown < cap; j--)
            {
-            int i = (int)((long)key[j] % 1048576);
+            int i = (int)((long)key[j] % 16777216);
             double z = g_hiZ[i];
             if((pass == 0) != (MathAbs(z) >= 3))
                continue;
@@ -11038,8 +11140,9 @@ void HiTab(void)
          TEnd();
          if(tot > shown)
            {
-            W("<p class='muted'>Altri " + I2S(tot - shown) + " con |z| pi&ugrave; basso: sono nelle tabelle della scheda.</p>");
-            R(g_repHi, "    ... altri " + I2S(tot - shown) + " con |z| piu' basso nelle tabelle della scheda");
+            W("<p class='muted'>Altri " + I2S(tot - shown) + " con |z| pi&ugrave; basso: tutti in Tutti i risultati &rarr; Riepilogo e " +
+              "nell'appendice A del rapporto completo.</p>");
+            R(g_repHi, "    ... altri " + I2S(tot - shown) + " con |z| piu' basso: tutti nell'appendice A");
            }
         }
       SecEnd();
@@ -11056,6 +11159,75 @@ void TxTab(const string id, const string title, const string desc, const string 
    W("</textarea>");
    SecEnd();
    W("</div>");
+  }
+
+// scheda con un testo lungo (a blocchi)
+void TxTabT(const string id, const string title, const string desc, const string head, CText &t)
+  {
+   W("<div class='tab' id='tab-" + id + "' hidden>");
+   SecStart(title, desc);
+   W("<button class='cp' onclick=\"cp(this,'ta-" + id + "')\">Copia tutto</button><textarea id='ta-" + id + "' readonly>");
+   W(head);
+   WT(t);
+   W("</textarea>");
+   SecEnd();
+   W("</div>");
+  }
+
+// legenda dei termini usati in tutto il rapporto
+string RepLegend(void)
+  {
+   return "LEGENDA\n" +
+          "  R = multipli del rischio (1 R = distanza dello stop); aspettativa = guadagno medio per trade in R.\n" +
+          "  z = di quante deviazioni standard un risultato si allontana dal suo riferimento: entro +/-2 compatibile con il caso, oltre +/-3 " +
+          "difficile per caso. Su molti confronti alcuni superano la soglia per caso: il riepilogo dice quanti se ne aspettano.\n" +
+          "  atteso = lo stesso calcolo sulle stesse barre con la direzione di ogni barra estratta a caso (stessa volatilita' minuto per minuto).\n" +
+          "  placebo = la stessa operazione nello stesso istante con direzione a caso; vantaggio o z contro il placebo = quanto conta la direzione.\n" +
+          "  stessa ora = confronto con la media di tutti i trade della stessa ora del giorno: cosa aggiunge il contesto all'orario.\n" +
+          "  livello finto = lo stesso calcolo su un livello spostato (effetto del livello = vero meno finto).\n" +
+          "  meta' 1 / meta' 2 = lo stesso risultato nella prima e nella seconda meta' dello storico; stabile = stesso segno in entrambe; " +
+          "* = segno diverso in una delle due.\n" +
+          "  lorda / netta = senza / con spread, commissione, slittamento e swap del broker; netta peggiore = il broker con il risultato piu' basso.\n" +
+          "  pb = punti base del prezzo (1 pb = 0,01%); costo di pareggio = costo per trade che azzera l'aspettativa lorda.\n" +
+          "  N = trade o giorni; N effettivo = corretto per i trade che si sovrappongono nel tempo.\n" +
+          "  ORB: range = minuti del range iniziale dall'orario di inizio, finestra = minuti osservati dopo il range, conferma = candela " +
+          "(M1, M5, M15, M30, H1) che deve chiudere fuori dal range; eventi = cosa fa il prezzo sulle candele di conferma (nessun tocco, solo " +
+          "tocchi, continua, rientra e resta, rientra e riparte, rientra e si gira).\n";
+  }
+
+// indice del rapporto completo
+string RepIndex(void)
+  {
+   string t = "\nINDICE\n  PARTE PRINCIPALE (da leggere; per l'analisi in chat basta questa)\n" +
+              "    1. Riepilogo: i risultati piu' lontani dal caso di tutte le analisi\n    2. Periodo in corso\n" +
+              "    3. Timeframe: dal minuto all'anno (movimento iniziale, spostamento piu' ampio, mean reversion, quando avvengono)\n" +
+              "    4. Eventi e sessioni: swing, rotture, impulsi, notizie, gap, orari chiave e sessioni\n" +
+              "    5. ORB: rottura del range iniziale a tutti gli orari, candele di conferma, continuazione ed eventi\n" +
+              "    6. Livelli chiave\n    7. Direzione\n    8. Rischio/rendimento lordo: riepilogo per timeframe, contesti migliori e peggiori\n";
+   for(int p = 1; p < NPRF; p++)
+      t += "    9." + I2S(p) + " Rischio/rendimento netto " + g_cp[p].name + ": costi, riepilogo, contesti migliori e peggiori\n";
+   t += "    10. Strategie una posizione alla volta e regole per lo Strategy Tester\n    11. Coppie di contesti: le piu' solide e le piu' negative\n" +
+        "    12. Volume\n  APPENDICI (tutti i risultati per esteso, da consultare: sono molto lunghe)\n" +
+        "    A. Riepilogo: tutti i risultati oltre |z| 2\n    B. Rischio/rendimento lordo: tutti i contesti\n";
+   for(int p = 1; p < NPRF; p++)
+      t += "    C." + I2S(p) + " Rischio/rendimento netto " + g_cp[p].name + ": tutti i contesti\n";
+   t += "    D. ORB: tutte le combinazioni\n    E. Coppie di contesti: tutte\n\n";
+   return t + RepLegend();
+  }
+
+// intestazione dell'appendice ORB: come leggere una riga
+string OrbAllHead(void)
+  {
+   return "Una riga per combinazione (orario locale della piazza, orario dei dati, range, finestra, giorni, rottura al primo tocco), poi " +
+          "una riga per candela di conferma: conferme = % dei giorni con una candela chiusa fuori dal range, dopo quanti minuti, forza = " +
+          "quanto chiude oltre il livello (range); lorde = aspettativa lorda in R e (z) di ogni operazione: S1:1 segui 1:1, S1:2 segui " +
+          "1:2 con stop all'altro lato, S1:2m segui 1:2 con stop a meta' range, St segui a tempo (chiude a fine finestra), F1:1 fade " +
+          "1:1, F1:0,5 fade 1:0,5, F1:0,5m fade 1:0,5 con obiettivo a meta' range; netta peggiore e costo di pareggio di S1:1; " +
+          "migliore netta = operazione con lo z netto del broker peggiore piu' alto (placebo = z contro la stessa operazione con " +
+          "direzione a caso); a favore/contro = estensione mediana dalla chiusura di conferma (range) e z della differenza; eventi = " +
+          "reale/atteso % nell'ordine nessun tocco, solo tocchi, continua, rientra e resta, rientra e riparte, rientra e si gira, poi " +
+          "candele che toccano senza chiudere fuori e ora del rientro e dell'evento finale (mediane). Orari equivalenti e orari a " +
+          "mercato chiuso sono solo nel CSV.\n";
   }
 
 string Css(void)
@@ -11266,7 +11438,11 @@ bool Analyze(const string sym)
      "<button data-tab='txtf'>Timeframe</button><button data-tab='txev'>Eventi e sessioni</button><button data-tab='txorb'>ORB</button><button data-tab='txlv'>Livelli</button>" +
      "<button data-tab='txdir'>Direzione</button><button data-tab='txrr'>R/R lordo</button><button data-tab='txb1'>R/R " + g_cp[1].name +
      "</button><button data-tab='txb2'>R/R " + g_cp[2].name + "</button><button data-tab='txcb'>Coppie</button><button data-tab='txsq'>Strategie e regole</button>" +
-     "<button data-tab='txvol'>Volume</button></nav></header><main>");
+     "<button data-tab='txvol'>Volume</button></nav>" +
+     "<nav class='tx'><span>Tutti i risultati:</span><button data-tab='txhia'>Riepilogo (tutti gli z oltre 2)</button>" +
+     "<button data-tab='txrr'>R/R lordo: tutti i contesti</button><button data-tab='txb1'>R/R " + g_cp[1].name + ": tutti i contesti</button>" +
+     "<button data-tab='txb2'>R/R " + g_cp[2].name + ": tutti i contesti</button><button data-tab='txorba'>ORB: tutte le combinazioni</button>" +
+     "<button data-tab='txcba'>Coppie: tutte</button></nav></header><main>");
 
    CBlocks b;
    for(int k = 0; k < NTF; k++)
@@ -11399,44 +11575,66 @@ bool Analyze(const string sym)
    W("</div><div class='tab' id='tab-sum' hidden>");
    HiTab();
    W("</div><div class='tab' id='tab-report' hidden>");
-   SecStart("Rapporto completo", "Tutti i risultati in forma di testo: riepilogo, timeframe, eventi, ORB, livelli, direzione, rischio/rendimento " +
-            "lordo e il riepilogo netto di ogni broker. Premi 'Copia tutto' e incollalo in chat per l'analisi. Le parti singole (e i " +
-            "contesti completi del rischio/rendimento) sono nelle altre schede 'Testi da copiare'.");
+   SecStart("Rapporto completo", "Tutti i risultati in forma di testo, in ordine: indice e legenda, la parte principale (riepilogo, " +
+            "timeframe, eventi e sessioni, ORB, livelli, direzione, rischio/rendimento lordo e netto, strategie e regole, coppie, volume) e " +
+            "le appendici con tutti i risultati per esteso (tutti gli z oltre 2, tutti i contesti lordi e netti, tutte le combinazioni ORB, " +
+            "tutte le coppie). Premi 'Copia tutto'. Il testo &egrave; molto lungo: per l'analisi in chat incolla la parte principale (fino " +
+            "alle appendici) e le appendici solo quando serve cercare un risultato; ogni parte &egrave; anche nelle schede 'Testi da " +
+            "copiare' e 'Tutti i risultati'.");
    W("<button class='cp' onclick='cp(this)'>Copia tutto</button><textarea id='rep' readonly>");
    W(g_repHead);
-   W("\n=== RIEPILOGO ===\n");
+   W(RepIndex());
+   W("\n=== 1. RIEPILOGO: i risultati piu' lontani dal caso di tutte le analisi (tutti nell'appendice A) ===\n");
    W(g_repHi);
-   W("\n=== PERIODO IN CORSO ===\n");
+   W("\n=== 2. PERIODO IN CORSO ===\n");
    W(g_repCur);
+   W("\n=== 3. TIMEFRAME: dal minuto all'anno ===\n");
    W(g_rep);
-   W("\n=== EVENTI ===\n");
+   W("\n=== 4. EVENTI E SESSIONI: swing, rotture, impulsi, notizie, gap, orari chiave e sessioni ===\n");
    W(g_repEv);
-   W("\n");
+   W("\n=== 5. ORB: rottura del range iniziale a tutti gli orari, conferme ed eventi (tutte le combinazioni nell'appendice D) ===\n");
    W(g_repOrb);
-   W("\n=== LIVELLI CHIAVE (massimo, minimo, chiusura del periodo precedente e apertura del periodo; dopo il tocco, dalla chiusura " +
+   W("\n=== 6. LIVELLI CHIAVE (massimo, minimo, chiusura del periodo precedente e apertura del periodo; dopo il tocco, dalla chiusura " +
      "della barra che tocca: prosegue di r oltre o respinto di r, r = " + F(InpLevelR * 100, 0) + "% del range mediano; livello finto = " +
      "massimo/minimo spostati di +/-25% del range mediano, stessa misura; effetto del livello = (prosegue - respinto) vero meno finto; " +
      "z = deviazioni standard dal caso, entro +/-2 compatibile con il caso) ===\n");
    W(g_repLv);
-   W("\n=== DIREZIONE: movimenti forti, cosa li precede, quando si formano, cosa succede dopo ===\n");
+   W("\n=== 7. DIREZIONE: movimenti forti, cosa li precede, quando si formano, cosa succede dopo ===\n");
    W(g_repDir);
-   W("\n=== RISCHIO/RENDIMENTO LORDO: buy e sell a ogni apertura di candela, obiettivi 1:1 - 1:5 (tutti i contesti nei Testi) ===\n");
+   W("\n=== 8. RISCHIO/RENDIMENTO LORDO: buy e sell a ogni apertura di candela, obiettivi 1:1 - 1:5 (tutti i contesti nell'appendice B) ===\n");
    W(g_rrTxS[0]);
    W(g_rrTxT[0]);
    for(int p = 1; p < NPRF; p++)
      {
-      W("\n=== RISCHIO/RENDIMENTO NETTO " + g_cp[p].name + " (contesti nei Testi) ===\n");
+      W("\n=== 9." + I2S(p) + " RISCHIO/RENDIMENTO NETTO " + g_cp[p].name + ": costi, riepilogo, contesti migliori e peggiori (tutti " +
+        "nell'appendice C." + I2S(p) + ") ===\n");
       W(g_rbHead[p]);
       W(g_rrTxS[p]);
+      W(g_rrTxT[p]);
      }
-   W("\n=== STRATEGIE: una posizione alla volta, serie di perdite e drawdown ===\n");
+   W("\n=== 10. STRATEGIE: una posizione alla volta, serie di perdite e drawdown; regole per lo Strategy Tester ===\n");
    W(g_sqTx);
    W("\n");
    W(g_ruTx);
-   W("\n=== COPPIE DI CONTESTI (tutte nel CSV) ===\n");
+   W("\n=== 11. COPPIE DI CONTESTI: le piu' solide e le piu' negative (tutte nell'appendice E) ===\n");
    W(g_cbTx);
-   W("\n=== VOLUME ===\n");
+   W("\n=== 12. VOLUME ===\n");
    W(g_repVol);
+   W("\n\n############################## APPENDICI: TUTTI I RISULTATI ##############################\n");
+   W("\n=== APPENDICE A. RIEPILOGO: tutti i risultati oltre |z| 2 di ogni analisi, ordinati per |z| ===\n");
+   WT(g_txHiAll);
+   W("\n=== APPENDICE B. RISCHIO/RENDIMENTO LORDO: tutti i contesti ===\n");
+   W(g_rrTxA[0]);
+   for(int p = 1; p < NPRF; p++)
+     {
+      W("\n=== APPENDICE C." + I2S(p) + " RISCHIO/RENDIMENTO NETTO " + g_cp[p].name + ": tutti i contesti ===\n");
+      W(g_rrTxA[p]);
+     }
+   W("\n=== APPENDICE D. ORB: tutte le combinazioni (orario, range, finestra; una riga per candela di conferma) ===\n");
+   W(OrbAllHead());
+   WT(g_txOrbAll);
+   W("\n=== APPENDICE E. COPPIE DI CONTESTI: tutte quelle con almeno 30 casi ===\n");
+   WT(g_txCbAll);
    W("</textarea>");
    SecEnd();
    W("</div>");
@@ -11463,6 +11661,13 @@ bool Analyze(const string sym)
    TxTab("txsq", "Testo: strategie e regole", "Simulazione una posizione alla volta dei contesti migliori (serie di perdite, drawdown) e " +
          "regole esportate per lo Strategy Tester.", "STRATEGIE - " + sym + " - una posizione alla volta\n" + g_sqTx + "\n" + g_ruTx);
    TxTab("txvol", "Testo: volume", "Volume per ora, giorno e periodo.", "VOLUME - " + sym + "\n" + g_repVol);
+   TxTabT("txhia", "Tutti i risultati: riepilogo", "Tutti i risultati oltre |z| 2 di ogni analisi, senza limiti, ordinati per |z| (nella scheda " +
+          "Riepilogo solo i primi di ogni sezione).", "RIEPILOGO - TUTTI I RISULTATI OLTRE |z| 2 - " + sym + "\n" + RepLegend(), g_txHiAll);
+   TxTabT("txorba", "Tutti i risultati: ORB", "Tutte le combinazioni ORB (orario, range, finestra) con una riga per ogni candela di conferma: " +
+          "operazioni, costi, continuazione ed eventi. Orari equivalenti e orari a mercato chiuso sono solo nel CSV.",
+          "ORB - TUTTE LE COMBINAZIONI - " + sym + "\n" + OrbAllHead(), g_txOrbAll);
+   TxTabT("txcba", "Tutti i risultati: coppie di contesti", "Tutte le coppie di contesti con almeno 30 casi, ogni timeframe, tutte le " +
+          "operazioni (lorde e nette del broker peggiore).", "COPPIE DI CONTESTI - TUTTE - " + sym + "\n", g_txCbAll);
    W("</main><script>" + Js() + "</script></body></html>");
    FileClose(g_fh);
    g_fh = INVALID_HANDLE;
