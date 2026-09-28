@@ -1,0 +1,2827 @@
+<title>MarketProfiler Edge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  /* Layout: una colonna di lavoro in tre passi (incolla, applica, copia), con la diagnostica dei punti di aggancio sempre visibile */
+  :root {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --ink: #14181f;
+    --ink-2: #4a5361;
+    --line: #d9dde4;
+    --accent: #0b5cad;
+    --accent-ink: #ffffff;
+    --ok: #17794a;
+    --ok-bg: #e2f4ea;
+    --bad: #b3261e;
+    --bad-bg: #fbe4e2;
+    --warn: #8a5a00;
+    --warn-bg: #fcf0d4;
+    --code-bg: #eef0f4;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1218;
+      --panel: #161c25;
+      --ink: #e6e9ee;
+      --ink-2: #9aa4b2;
+      --line: #263041;
+      --accent: #5aa2f0;
+      --accent-ink: #08121f;
+      --ok: #59d08e;
+      --ok-bg: #12301f;
+      --bad: #ff8a80;
+      --bad-bg: #3a1815;
+      --warn: #f0c060;
+      --warn-bg: #352a10;
+      --code-bg: #0b0f15;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1218;
+    --panel: #161c25;
+    --ink: #e6e9ee;
+    --ink-2: #9aa4b2;
+    --line: #263041;
+    --accent: #5aa2f0;
+    --accent-ink: #08121f;
+    --ok: #59d08e;
+    --ok-bg: #12301f;
+    --bad: #ff8a80;
+    --bad-bg: #3a1815;
+    --warn: #f0c060;
+    --warn-bg: #352a10;
+    --code-bg: #0b0f15;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--sans); padding-inline: 16px; padding-block: 24px 48px; margin: 0; }
+  main { max-width: 980px; margin-inline: auto; display: grid; gap: 16px; }
+  h1 { font-size: 26px; line-height: 1.2; margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+  h2 { font-size: 16px; margin: 0 0 4px; letter-spacing: 0.01em; }
+  p { margin: 0; }
+  .lead { color: var(--ink-2); max-width: 68ch; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; display: grid; gap: 12px; min-width: 0; }
+  .step { font: 500 12px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); }
+  textarea { width: 100%; min-height: 150px; resize: vertical; background: var(--code-bg); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font: 12.5px/1.5 var(--mono); }
+  textarea:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button, .filebtn { font: 500 14px/1 var(--sans); border-radius: 8px; padding: 11px 16px; cursor: pointer; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .meta { color: var(--ink-2); font-size: 13px; }
+  .tw { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--ink-2); background: var(--code-bg); }
+  tr:last-child td { border-bottom: 0; }
+  .chip { display: inline-block; padding: 2px 8px; border-radius: 999px; font: 500 12px/1.4 var(--mono); }
+  .chip.ok { background: var(--ok-bg); color: var(--ok); }
+  .chip.bad { background: var(--bad-bg); color: var(--bad); }
+  .chip.warn { background: var(--warn-bg); color: var(--warn); }
+  .msg { border-radius: 8px; padding: 10px 12px; font-size: 14px; }
+  .msg.ok { background: var(--ok-bg); color: var(--ok); }
+  .msg.bad { background: var(--bad-bg); color: var(--bad); }
+  .msg.warn { background: var(--warn-bg); color: var(--warn); }
+  details { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; background: var(--panel); }
+  summary { cursor: pointer; font-weight: 500; }
+  code { font: 12.5px var(--mono); background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  ol.notes { margin: 6px 0 0; padding-left: 20px; color: var(--ink-2); display: grid; gap: 6px; }
+  ol.notes b { color: var(--ink); }
+  [hidden] { display: none !important; }
+  @media (max-width: 560px) { h1 { font-size: 22px; } .card { padding: 14px; } }
+</style>
+
+<main>
+  <header style="display:grid;gap:8px">
+    <h1>MarketProfiler Edge</h1>
+    <p class="lead">Aggiunge al tuo <code>MarketProfiler.mq5</code> la scheda <b>Sintesi edge</b> (verdetto, candidati con tutti i controlli, test multipli, bias del momento, profilo di ore e giorni) e la scheda <b>Bias e impulsi</b> (ora, blocchi di 4/6/8/12 ore, giorno, mese, trimestre, semestre; ora per giorno; massimo e minimo della settimana; ora dell'impulso pi&ugrave; forte e cosa lo precede). Incolla il file, applica, copia il risultato.</p>
+  </header>
+
+  <section class="card" aria-labelledby="s1">
+    <span class="step">Passo 1</span>
+    <h2 id="s1">Incolla il tuo MarketProfiler.mq5</h2>
+    <textarea id="src" spellcheck="false" placeholder="Incolla qui tutto il codice del file originale (Ctrl+A, Ctrl+C in MetaEditor)"></textarea>
+    <div class="row">
+      <label class="filebtn" for="fileIn">Carica da file&hellip;</label>
+      <input type="file" id="fileIn" accept=".mq5,.txt,.mqh">
+      <span class="meta" id="srcInfo">Nessun file caricato.</span>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="s2">
+    <span class="step">Passo 2</span>
+    <h2 id="s2">Applica le modifiche</h2>
+    <p class="meta">Ogni modifica agisce su un punto preciso del file e deve trovarlo esattamente una volta. Se anche uno solo manca o compare pi&ugrave; volte, non viene prodotto nessun file e la tabella dice quale.</p>
+    <div class="row"><button class="primary" id="apply" type="button">Applica</button></div>
+    <div id="status" class="msg" hidden></div>
+    <div class="tw" id="tableWrap" hidden>
+      <table>
+        <thead><tr><th>#</th><th>Modifica</th><th>Trovato</th><th>Esito</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="outCard" aria-labelledby="s3" hidden>
+    <span class="step">Passo 3</span>
+    <h2 id="s3">Copia il file completo</h2>
+    <textarea id="out" spellcheck="false" readonly style="min-height:220px"></textarea>
+    <div class="row">
+      <button class="primary" id="copyOut" type="button">Copia il file completo</button>
+      <span class="meta" id="outInfo"></span>
+    </div>
+    <ol class="notes">
+      <li><b>In MetaEditor</b>: apri <code>MarketProfiler.mq5</code>, seleziona tutto (Ctrl+A), incolla, compila con F7.</li>
+      <li><b>Se il compilatore d&agrave; errori</b>: incollameli con il numero di riga. Il modulo &egrave; stato provato su serie sintetiche in un banco di prova C++, ma non su un vero compilatore MQL5.</li>
+      <li><b>Nuove schede</b> nel report HTML: <i>Sintesi edge</i> (si apre per prima), <i>Bias e impulsi</i>, e i testi da copiare corrispondenti. Nessun nuovo parametro.</li>
+    </ol>
+  </section>
+
+  <details>
+    <summary>Solo il modulo (per incollarlo a mano) e le modifiche una per una</summary>
+    <div style="display:grid;gap:12px;margin-top:12px">
+      <p class="meta">Il modulo (<span id="modLines"></span> righe) va inserito prima del blocco <code>// Analisi di un simbolo</code>. Le altre modifiche sono elencate sotto: cerca il testo indicato e sostituiscilo.</p>
+      <textarea id="modOut" spellcheck="false" readonly style="min-height:120px"></textarea>
+      <div class="row"><button id="copyMod" type="button">Copia il modulo</button></div>
+      <div class="tw"><table><thead><tr><th>#</th><th>Modifica</th><th>Punto di aggancio (espressione regolare)</th></tr></thead><tbody id="manual"></tbody></table></div>
+    </div>
+  </details>
+</main>
+
+<script type="text/plain" id="modsrc">//+------------------------------------------------------------------+
+//| MarketProfilerEdge.mqh - modulo aggiunto a MarketProfiler.mq5     |
+//| Schede 'Sintesi edge' e 'Bias e impulsi'.                         |
+//| Versione 1.0. Testato in un banco di prova C++ (MQL5 tradotto)    |
+//| su serie sintetiche: nessun avviso del compilatore, nessun        |
+//| indice fuori limite, calibrazione dei falsi positivi verificata.  |
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| SINTESI EDGE E BIAS (modulo aggiunto)                             |
+//| - Scheda 'Sintesi edge': verdetto, scorecard delle strategie,     |
+//|   controllo dei test multipli (FDR, Bonferroni), bias robusti,    |
+//|   carattere dei timeframe.                                        |
+//| - Scheda 'Bias e impulsi': bias di ora, blocchi di 4/6/8/12 ore,  |
+//|   giorno, mese, trimestre, semestre, anno; ora x giorno; massimo  |
+//|   e minimo della settimana; ora dell'impulso piu' forte e del     |
+//|   massimo/minimo del giorno e cosa li precede.                    |
+//+------------------------------------------------------------------+
+#define ED_MB   18   // modulo del riepilogo: bias del calendario
+#define ED_MT   19   // modulo del riepilogo: impulso piu' forte, massimo e minimo del giorno
+#define BX_NA   14   // accumulatori per categoria e meta' del campione
+#define BX_NM   8    // metriche per riga di tabella
+#define TG_NT   3    // bersagli del 'quando': impulso piu' forte, massimo, minimo del giorno
+#define TG_NP   2    // bersagli del 'cosa precede': impulso piu' forte del giorno (a posteriori), impulso forte tra il 2% dei movimenti piu' ampi dell'ora (causale)
+#define TG_NF   5    // caratteristiche che precedono il bersaglio
+#define TG_NC   4    // classi al massimo per caratteristica
+
+string g_repBias = "", g_repEdge = "";
+
+//--- candidati strategia (R/R e ORB)
+int    g_edNC = 0;
+string g_edSrc[], g_edTf[], g_edOp[], g_edCx[];
+int    g_edKd[], g_edRl[], g_edN[], g_edSn[], g_edYp[], g_edYn[], g_edDk[];
+double g_edZ[], g_edE[], g_edZh[], g_edZp[], g_edBe[], g_edCb[], g_edSe[], g_edTy[], g_edPf[];
+bool   g_edSt[];
+
+//--- controllo dei test multipli sul riepilogo
+bool   g_edFdr[];
+double g_edZb[];
+int    g_edNfdr[], g_edN3[];
+
+//--- test del modulo Bias (tutti i confronti, anche quelli sotto |z| 2)
+int    g_bxNT = 0;
+double g_bxTz[];
+bool   g_bxTst[], g_bxTfd[];
+int    g_bxTm[], g_bxTk[];   // modulo del riepilogo e tipo (0 direzione, 1 volatilita', 2 timing e struttura, 3 cosa precede)
+string g_bxTtx[];
+
+//--- righe delle tabelle per timeframe
+int    g_bxRN = 0;
+int    g_bxRTf[], g_bxRCat[], g_bxRn[], g_bxRT[];
+bool   g_bxRIn[];
+string g_bxRLb[];
+double g_bxRMed[], g_bxRV[], g_bxRZ[];
+
+//--- ora x giorno della settimana (indice ora * 7 + giorno)
+int    g_bxHn[168], g_bxHtu[168], g_bxHtr[168];
+double g_bxHu[168], g_bxHr[168], g_bxHzu[168], g_bxHzr[168], g_bxHbu[24];
+int    g_bxHbn[24];
+
+//--- massimo e minimo della settimana (indice tipo * 7 + giorno; tipo 0 massimo, 1 minimo)
+int    g_bxWn = 0;
+int    g_bxWt[14];
+double g_bxWo[14], g_bxWe[14], g_bxWz[14];
+
+//--- ora dell'impulso piu' forte, del massimo e del minimo del giorno (indice tipo * 24 + ora)
+int    g_tgNd = 0;
+int    g_tgDays[24], g_tgT[72], g_tgUt[24], g_tgCases[TG_NP];
+double g_tgO[72], g_tgE[72], g_tgZ[72], g_tgUn[24], g_tgUu[24], g_tgUz[24];
+//--- caratteristiche prima del bersaglio (indice (tipo * TG_NF + caratteristica) * TG_NC + classe, tipo < TG_NP)
+double g_tgFO[TG_NP * TG_NF * TG_NC], g_tgFE[TG_NP * TG_NF * TG_NC], g_tgFZ[TG_NP * TG_NF * TG_NC], g_tgFn[TG_NP * TG_NF];
+int    g_tgFt[TG_NP * TG_NF * TG_NC];
+double g_tgAC[];
+
+double g_bxInfl[NTF];    // fattore di inflazione della varianza del range per timeframe (persistenza della volatilita')
+datetime g_bxLast = 0;   // ora dell'ultima barra dei dati (per il bias del momento)
+
+//--- varianza del rendimento di ogni ora del giorno (profilo intragiornaliero della volatilita')
+double g_bxHv[24];
+
+//--- tabelle costruite durante il calcolo
+string g_bxDig = "", g_bxDigTx = "", g_bxYr = "", g_bxYrTx = "";
+
+string TG_TN[TG_NT] = {"Impulso pi&ugrave; forte del giorno", "Massimo del giorno", "Minimo del giorno"};
+string TG_PN[TG_NP] = {"Impulso pi&ugrave; forte del giorno (scelto a posteriori)", "Impulso forte (tra il 2% dei movimenti pi&ugrave; ampi di quell'ora)"};
+string TG_FN[TG_NF] = {"Le 3 ore prima", "Compressione delle 3 ore prima", "Livelli di ieri gi&agrave; toccati oggi", "Posizione nel range di oggi",
+                       "Volume dell'ora prima (RVOL)"};
+int    TG_NCL[TG_NF] = {3, 3, 4, 3, 3};
+string TG_CL[TG_NF * TG_NC] = {"a favore (oltre 0,5 ATR)", "laterali", "contro (oltre 0,5 ATR)", "",
+                               "range basso (terzile inferiore)", "range medio", "range alto (terzile superiore)", "",
+                               "solo il livello opposto (sweep)", "solo il livello nella direzione", "entrambi", "nessuno",
+                               "nel terzo opposto", "nel mezzo", "nel terzo nella direzione", "",
+                               "sotto 0.8", "0.8-1.5", "oltre 1.5", ""};
+
+//+------------------------------------------------------------------+
+//| Statistica: coda della normale, soglie dei test multipli, FDR     |
+//+------------------------------------------------------------------+
+// complemento della funzione errore (Numerical Recipes, errore relativo < 1.2e-7 anche nelle code)
+double EdErfc(const double x)
+  {
+   double z = MathAbs(x), t = 1.0 / (1.0 + 0.5 * z);
+   double r = t * MathExp(-z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806 +
+              t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277)))))))));
+   return x >= 0 ? r : 2.0 - r;
+  }
+
+// probabilita' bilaterale di uno z
+double EdP2(const double z)
+  {
+   if(!MathIsValidNumber(z))
+      return 1.0;
+   return EdErfc(MathAbs(z) / 1.4142135623730951);
+  }
+
+// z bilaterale la cui probabilita' vale alpha / m (soglia di Bonferroni su m confronti)
+double EdZCrit(const double alpha, const double m)
+  {
+   double p = alpha / (m < 1 ? 1.0 : m), lo = 0.0, hi = 40.0;
+   for(int it = 0; it < 80; it++)
+     {
+      double mid = 0.5 * (lo + hi);
+      if(EdP2(mid) > p)
+         lo = mid;
+      else
+         hi = mid;
+     }
+   return 0.5 * (lo + hi);
+  }
+
+// indici ordinati per valore decrescente (chiave = valore * 100 + indice: ordine esatto solo al centesimo)
+void EdOrder(const double &v[], const int n, int &ord[])
+  {
+   ArrayResize(ord, n);
+   if(n <= 0)
+      return;
+   double key[];
+   ArrayResize(key, n);
+   for(int i = 0; i < n; i++)
+     {
+      double x = MathIsValidNumber(v[i]) ? v[i] : -900.0;
+      key[i] = MathFloor((MathMax(-900.0, MathMin(x, 9000.0)) + 1000.0) * 100.0) * 16777216.0 + i;
+     }
+   ArraySort(key);
+   for(int j = 0; j < n; j++)
+      ord[j] = (int)((long)key[n - 1 - j] % 16777216);
+  }
+
+// controllo FDR di Benjamini-Hochberg: z[] sono gli z dei confronti piu' forti, m il numero totale di confronti
+void EdBhFlags(const double &z[], const int n, const double m, const double q, bool &flag[])
+  {
+   ArrayResize(flag, n);
+   if(n > 0)
+      ArrayInitialize(flag, false);
+   if(n <= 0 || !(m >= 1))
+      return;
+   double az[];
+   ArrayResize(az, n);
+   for(int i = 0; i < n; i++)
+      az[i] = MathIsValidNumber(z[i]) ? MathAbs(z[i]) : 0.0;
+   int ord[];
+   EdOrder(az, n, ord);
+   int best = 0;
+   for(int j = 0; j < n; j++)
+      if(az[ord[j]] > 0 && EdP2(az[ord[j]]) <= (j + 1) * q / m)
+         best = j + 1;
+   for(int k = 0; k < best; k++)
+      flag[ord[k]] = true;
+  }
+
+// FDR per ogni sezione del riepilogo (i risultati registrati sono quelli con |z| >= 2, cioe' i piu' forti della sezione)
+void EdFdrAll(void)
+  {
+   ArrayResize(g_edFdr, g_hiN);
+   if(g_hiN > 0)
+      ArrayInitialize(g_edFdr, false);
+   ArrayResize(g_edZb, HI_NMOD);
+   ArrayResize(g_edNfdr, HI_NMOD);
+   ArrayResize(g_edN3, HI_NMOD);
+   for(int m = 0; m < HI_NMOD; m++)
+     {
+      g_edZb[m] = EdZCrit(0.05, (double)MathMax(1, g_hiCnt[m]));
+      g_edNfdr[m] = 0;
+      g_edN3[m] = 0;
+      int idx[];
+      double zz[];
+      int k = 0;
+      ArrayResize(idx, g_hiN);
+      ArrayResize(zz, g_hiN);
+      for(int i = 0; i < g_hiN; i++)
+         if(g_hiM[i] == m)
+           {
+            idx[k] = i;
+            zz[k] = MathAbs(g_hiZ[i]);
+            if(zz[k] >= 3)
+               g_edN3[m]++;
+            k++;
+           }
+      if(k == 0 || g_hiCnt[m] <= 0)
+         continue;
+      bool fl[];
+      EdBhFlags(zz, k, (double)g_hiCnt[m], 0.05, fl);
+      for(int j = 0; j < k; j++)
+         if(fl[j])
+           {
+            g_edFdr[idx[j]] = true;
+            g_edNfdr[m]++;
+           }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Candidati strategia                                               |
+//+------------------------------------------------------------------+
+void EdGrow(const int k)
+  {
+   ArrayResize(g_edSrc, k, 64); ArrayResize(g_edTf, k, 64); ArrayResize(g_edOp, k, 64); ArrayResize(g_edCx, k, 64);
+   ArrayResize(g_edKd, k, 64); ArrayResize(g_edRl, k, 64); ArrayResize(g_edN, k, 64); ArrayResize(g_edSn, k, 64);
+   ArrayResize(g_edYp, k, 64); ArrayResize(g_edYn, k, 64); ArrayResize(g_edDk, k, 64);
+   ArrayResize(g_edZ, k, 64); ArrayResize(g_edE, k, 64); ArrayResize(g_edZh, k, 64); ArrayResize(g_edZp, k, 64);
+   ArrayResize(g_edBe, k, 64); ArrayResize(g_edCb, k, 64); ArrayResize(g_edSe, k, 64); ArrayResize(g_edTy, k, 64);
+   ArrayResize(g_edPf, k, 64); ArrayResize(g_edSt, k, 64);
+  }
+
+// costo tipico per trade del broker piu' caro tra quelli con costi disponibili, in punti base (Nan se nessuno)
+double EdCostBp(void)
+  {
+   double cb = Nan();
+   for(int p = 1; p < NPRF; p++)
+      if(g_cp[p].on)
+        {
+         double x = CostBp(p);
+         if(MathIsValidNumber(x) && (!MathIsValidNumber(cb) || x > cb))
+            cb = x;
+        }
+   return cb;
+  }
+
+void EdgeReset(void)
+  {
+   g_repBias = "";
+   g_repEdge = "";
+   g_edNC = 0;
+   EdGrow(0);
+   g_bxNT = 0;
+   ArrayResize(g_bxTz, 0); ArrayResize(g_bxTst, 0); ArrayResize(g_bxTfd, 0); ArrayResize(g_bxTm, 0); ArrayResize(g_bxTk, 0); ArrayResize(g_bxTtx, 0);
+   g_bxRN = 0;
+   ArrayResize(g_bxRTf, 0); ArrayResize(g_bxRCat, 0); ArrayResize(g_bxRn, 0); ArrayResize(g_bxRT, 0); ArrayResize(g_bxRIn, 0);
+   ArrayResize(g_bxRLb, 0); ArrayResize(g_bxRMed, 0); ArrayResize(g_bxRV, 0); ArrayResize(g_bxRZ, 0);
+   ArrayInitialize(g_bxHn, 0); ArrayInitialize(g_bxHtu, -1); ArrayInitialize(g_bxHtr, -1);
+   ArrayInitialize(g_bxHu, 0.0); ArrayInitialize(g_bxHr, 0.0); ArrayInitialize(g_bxHzu, 0.0); ArrayInitialize(g_bxHzr, 0.0);
+   ArrayInitialize(g_bxHbu, 0.0); ArrayInitialize(g_bxHbn, 0);
+   g_bxWn = 0;
+   ArrayInitialize(g_bxWt, -1); ArrayInitialize(g_bxWo, 0.0); ArrayInitialize(g_bxWe, 0.0); ArrayInitialize(g_bxWz, 0.0);
+   g_tgNd = 0;
+   ArrayInitialize(g_tgDays, 0); ArrayInitialize(g_tgT, -1); ArrayInitialize(g_tgUt, -1); ArrayInitialize(g_tgCases, 0);
+   ArrayInitialize(g_tgO, 0.0); ArrayInitialize(g_tgE, 0.0); ArrayInitialize(g_tgZ, 0.0);
+   ArrayInitialize(g_tgUn, 0.0); ArrayInitialize(g_tgUu, 0.0); ArrayInitialize(g_tgUz, 0.0);
+   ArrayInitialize(g_tgFO, 0.0); ArrayInitialize(g_tgFE, 0.0); ArrayInitialize(g_tgFZ, 0.0); ArrayInitialize(g_tgFn, 0.0);
+   ArrayInitialize(g_tgFt, -1);
+   ArrayResize(g_tgAC, 0);
+   ArrayInitialize(g_bxHv, 1.0);
+   g_bxLast = 0;
+   ArrayInitialize(g_bxInfl, 1.0);
+   g_bxDig = "";
+   g_bxDigTx = "";
+   g_bxYr = "";
+   g_bxYrTx = "";
+  }
+
+// hook nella simulazione una posizione alla volta di un candidato R/R (rs[p] e ok[p] per profilo di costo, 0 = lordo)
+void EdgeAddRR(const string nm, const int c, const int id, SqR &rs[], bool &ok[])
+  {
+   int pw = -1;
+   for(int p = 1; p < NPRF; p++)
+      if(g_cp[p].on && ok[p] && (pw < 0 || rs[p].e < rs[pw].e))
+         pw = p;
+   if(pw < 0 && ok[0])
+      pw = 0;
+   int i = g_edNC++;
+   EdGrow(g_edNC);
+   g_edSrc[i] = "R/R";
+   g_edTf[i] = nm;
+   g_edOp[i] = RROpLab(g_ckI[c]);
+   g_edCx[i] = g_ckLab[c];
+   g_edKd[i] = g_ckKind[c];
+   g_edRl[i] = id;
+   g_edN[i] = g_ckNn[c];
+   g_edZ[i] = g_ckZ[c];
+   g_edE[i] = g_ckE[c];
+   g_edSt[i] = g_ckSt[c];
+   g_edZh[i] = g_ckZh[c];
+   g_edZp[i] = g_ckZp[c];
+   g_edBe[i] = g_ckBe[c];
+   g_edCb[i] = EdCostBp();
+   g_edSn[i] = 0;
+   g_edSe[i] = Nan();
+   g_edTy[i] = Nan();
+   g_edPf[i] = Nan();
+   g_edYp[i] = 0;
+   g_edYn[i] = 0;
+   g_edDk[i] = -1;
+   if(pw >= 0 && ok[pw])
+     {
+      g_edSn[i] = rs[pw].n;
+      g_edSe[i] = rs[pw].e;
+      g_edTy[i] = rs[pw].n / rs[pw].yrs;
+      g_edPf[i] = rs[pw].pf;
+      g_edYp[i] = rs[pw].posY;
+      g_edYn[i] = rs[pw].nY;
+      g_edDk[i] = rs[pw].dd <= rs[pw].dd95 ? 1 : 0;
+     }
+  }
+
+// candidati ORB: le regole scelte (netta del broker peggiore sopra la soglia, stabile, almeno 100 trade)
+void EdgeAddOrb(void)
+  {
+   if(!InpOrb || g_orN <= 0 || ArraySize(g_otN) <= 0)
+      return;
+   for(int r = 0; r < g_orN; r++)
+     {
+      int tr = g_orX[r], sd = tr % 3, t = (tr / 3) % OB_NT, cf = tr / (3 * OB_NT), f = cf % g_obNF;
+      int i = g_edNC++;
+      EdGrow(g_edNC);
+      g_edSrc[i] = "ORB";
+      g_edTf[i] = ObTf(f);
+      g_edOp[i] = OB_OP[t];
+      g_edCx[i] = ObCfLab(cf) + ", " + OB_SIDE[sd];
+      g_edKd[i] = 3;
+      g_edRl[i] = 0;
+      g_edN[i] = g_otN[tr];
+      g_edZ[i] = g_otZw[tr];
+      g_edE[i] = g_otEw[tr];
+      g_edSt[i] = g_otSt[tr];
+      g_edZh[i] = Nan();
+      g_edZp[i] = g_otZp[tr];
+      g_edBe[i] = g_otBe[tr];
+      g_edCb[i] = EdCostBp();
+      g_edSn[i] = g_otN[tr];
+      g_edSe[i] = g_otEw[tr];
+      g_edTy[i] = Nan();
+      g_edPf[i] = Nan();
+      g_edYp[i] = 0;
+      g_edYn[i] = 0;
+      g_edDk[i] = -1;
+     }
+  }
+
+// numero di confronti ORB con almeno 100 trade su orari coperti (universo da cui sono scelte le regole)
+double EdOrbTests(void)
+  {
+   double n = 0;
+   int ntr = ArraySize(g_otN);
+   if(!InpOrb || ntr <= 0)
+      return 1.0;
+   for(int tr = 0; tr < ntr; tr++)
+      if(g_otN[tr] >= 100 && MathIsValidNumber(g_otZw[tr]) && g_osDay[tr / (3 * OB_NT) / g_obNF] >= g_obMinDay)
+         n += 1;
+   return MathMax(1.0, n);
+  }
+
+// numero di confronti tra cui e' stato scelto un candidato (per la soglia di Bonferroni)
+double EdTests(const int i, const double orbT)
+  {
+   if(g_edKd[i] == 0)
+      return 1.0;
+   if(g_edKd[i] == 1)
+      return (double)MathMax(1, MathMax(g_hiCnt[5], MathMax(g_hiCnt[6], g_hiCnt[7])));
+   if(g_edKd[i] == 2)
+      return (double)MathMax(1, g_hiCnt[8]);
+   return orbT;
+  }
+
+// controlli di un candidato: 1 superato, 0 no, -1 non applicabile. Ritorna il livello: 3 robusto, 2 promettente, 1 indizio, 0 scartato
+int EdChecks(const int i, const double mTests, int &ck[])
+  {
+   ArrayResize(ck, 8);
+   ck[0] = g_edN[i] >= 100 ? 1 : 0;
+   ck[1] = MathIsValidNumber(g_edZ[i]) && g_edZ[i] >= 3 ? 1 : 0;
+   ck[2] = g_edSt[i] ? 1 : 0;
+   ck[3] = (g_edKd[i] == 1 || g_edKd[i] == 2) ? (MathIsValidNumber(g_edZh[i]) && g_edZh[i] >= 2 ? 1 : 0) : -1;
+   ck[4] = MathIsValidNumber(g_edZp[i]) ? (g_edZp[i] >= 2 ? 1 : 0) : -1;
+   if(!MathIsValidNumber(g_edCb[i]))
+      ck[5] = -1;
+   else
+      ck[5] = (MathIsValidNumber(g_edBe[i]) && g_edBe[i] >= 1.5 * g_edCb[i]) ? 1 : 0;
+   if(g_edKd[i] == 3)
+      ck[6] = g_edE[i] > 0 ? 1 : 0;
+   else
+      ck[6] = (MathIsValidNumber(g_edSe[i]) && g_edSe[i] > 0 && (g_edYn[i] < 3 || g_edYp[i] >= 0.6 * g_edYn[i])) ? 1 : 0;
+   ck[7] = (MathIsValidNumber(g_edZ[i]) && g_edZ[i] >= EdZCrit(0.05, mTests)) ? 1 : 0;
+   bool all7 = true, all8 = true;
+   for(int k = 0; k < 8; k++)
+      if(ck[k] == 0)
+        {
+         all8 = false;
+         if(k < 7)
+            all7 = false;
+        }
+   if(all8)
+      return 3;
+   if(all7)
+      return 2;
+   if(MathIsValidNumber(g_edZ[i]) && g_edZ[i] >= 2 && g_edE[i] > 0 && g_edSt[i] && ck[5] != 0 && ck[6] != 0)
+      return 1;
+   return 0;
+  }
+
+//+------------------------------------------------------------------+
+//| BIAS: test, righe per timeframe, carattere dei timeframe          |
+//+------------------------------------------------------------------+
+string BX_MN[BX_NM] = {"% rialzista", "rendimento medio", "range mediano", "massimo nel primo terzo", "minimo nel primo terzo",
+                       "% trend (restituisce al massimo il 25%)", "% mean reversion (restituisce almeno il 75%)", "restituito medio"};
+
+// registra un confronto; ritorna il suo id (-1 se z non e' definito)
+int BxAddTest(const int mod, const int kind, const double z, const bool st, const string txt)
+  {
+   if(!MathIsValidNumber(z))
+      return -1;
+   int i = g_bxNT++;
+   ArrayResize(g_bxTz, g_bxNT, 1024);
+   ArrayResize(g_bxTst, g_bxNT, 1024);
+   ArrayResize(g_bxTfd, g_bxNT, 1024);
+   ArrayResize(g_bxTm, g_bxNT, 1024);
+   ArrayResize(g_bxTk, g_bxNT, 1024);
+   ArrayResize(g_bxTtx, g_bxNT, 1024);
+   g_bxTz[i] = z;
+   g_bxTst[i] = st;
+   g_bxTfd[i] = false;
+   g_bxTm[i] = mod;
+   g_bxTk[i] = kind;
+   g_bxTtx[i] = txt;
+   return i;
+  }
+
+// stessa direzione della differenza nelle due meta' del campione
+bool BxStable(const double z, const double d0, const double d1)
+  {
+   if(!MathIsValidNumber(z) || !MathIsValidNumber(d0) || !MathIsValidNumber(d1) || z == 0 || d0 == 0 || d1 == 0)
+      return false;
+   return (d0 > 0) == (z > 0) && (d1 > 0) == (z > 0);
+  }
+
+// accumulatori: riga * 2 meta' * BX_NA
+double BxT(const double &a[], const int r, const int idx) { return a[(r * 2) * BX_NA + idx] + a[(r * 2 + 1) * BX_NA + idx]; }
+double BxH(const double &a[], const int r, const int hf, const int idx) { return a[(r * 2 + hf) * BX_NA + idx]; }
+
+// differenza di una metrica (categoria contro tutti i periodi) in una meta' del campione
+double BxDiff(const double &a[], const int r, const int rowAll, const int hf, const int m, const bool intra)
+  {
+   double n = BxH(a, r, hf, 0), nA = BxH(a, rowAll, hf, 0);
+   if(n < 20 || nA < 20)
+      return Nan();
+   switch(m)
+     {
+      case 0:
+         return BxH(a, r, hf, 1) / n - BxH(a, rowAll, hf, 1) / nA;
+      case 1:
+         return BxH(a, r, hf, 2) / n - BxH(a, rowAll, hf, 2) / nA;
+      case 2:
+        {
+         double l = BxH(a, r, hf, 4), lA = BxH(a, rowAll, hf, 4);
+         if(l < 10 || lA < 10)
+            return Nan();
+         return BxH(a, r, hf, 5) / l - BxH(a, rowAll, hf, 5) / lA;
+        }
+      case 3:
+         return intra ? (BxH(a, r, hf, 7) - BxH(a, r, hf, 9)) / n : Nan();
+      case 4:
+         return intra ? (BxH(a, r, hf, 8) - BxH(a, r, hf, 9)) / n : Nan();
+      case 5:
+         return BxH(a, r, hf, 11) / n - BxH(a, rowAll, hf, 11) / nA;
+      case 6:
+         return BxH(a, r, hf, 12) / n - BxH(a, rowAll, hf, 12) / nA;
+     }
+   return Nan();
+  }
+
+int BxRowAdd(const int tfi, const int cat, const string lab, const int n, const bool intra)
+  {
+   int r = g_bxRN++;
+   ArrayResize(g_bxRTf, g_bxRN, 256);
+   ArrayResize(g_bxRCat, g_bxRN, 256);
+   ArrayResize(g_bxRn, g_bxRN, 256);
+   ArrayResize(g_bxRIn, g_bxRN, 256);
+   ArrayResize(g_bxRLb, g_bxRN, 256);
+   ArrayResize(g_bxRMed, g_bxRN, 256);
+   ArrayResize(g_bxRV, g_bxRN * BX_NM, 2048);
+   ArrayResize(g_bxRZ, g_bxRN * BX_NM, 2048);
+   ArrayResize(g_bxRT, g_bxRN * BX_NM, 2048);
+   g_bxRTf[r] = tfi;
+   g_bxRCat[r] = cat;
+   g_bxRn[r] = n;
+   g_bxRIn[r] = intra;
+   g_bxRLb[r] = lab;
+   g_bxRMed[r] = Nan();
+   for(int m = 0; m < BX_NM; m++)
+     {
+      g_bxRV[r * BX_NM + m] = Nan();
+      g_bxRZ[r * BX_NM + m] = Nan();
+      g_bxRT[r * BX_NM + m] = -1;
+     }
+   return r;
+  }
+
+string BxPer(const double x, const int d) { return FP(x, d) + "%"; }
+
+// profilo di varianza per ora del giorno dai rendimenti chiusura-chiusura orari
+void BxVarProfile(CSeries &h1)
+  {
+   double s2[24], sn[24];
+   ArrayInitialize(s2, 0.0);
+   ArrayInitialize(sn, 0.0);
+   for(int i = 1; i < h1.n; i++)
+     {
+      if((long)h1.t[i] - (long)h1.t[i - 1] > 4 * 3600 || !(h1.c[i - 1] > 0))
+         continue;
+      double r = h1.c[i] / h1.c[i - 1] - 1.0;
+      int hr = HourOf(h1.t[i]);
+      s2[hr] += r * r;
+      sn[hr] += 1;
+     }
+   for(int h = 0; h < 24; h++)
+      g_bxHv[h] = sn[h] >= 50 && s2[h] > 0 ? s2[h] / sn[h] : 1.0;
+  }
+
+// probabilita' che massimo o minimo cadano nel primo terzo di un blocco: legge dell'arcoseno nel tempo operativo (varianza cumulata),
+// cosi' il ritmo giornaliero della volatilita' non crea differenze; blocchi da D1: tempo uniforme
+double BxExpFirst(const int tfi, const datetime t0, const int cnt, const int q3)
+  {
+   if(tfi > 6)
+      return ArcF((double)q3 / cnt);
+   int h0 = HourOf(t0);
+   double vt = 0, vq = 0;
+   for(int k = 0; k < cnt; k++)
+     {
+      double v = g_bxHv[(h0 + k) % 24];
+      vt += v;
+      if(k < q3)
+         vq += v;
+     }
+   return vt > 0 ? ArcF(vq / vt) : ArcF((double)q3 / cnt);
+  }
+
+// La volatilita' e' persistente: i range di giorni vicini non sono indipendenti e lo z sul range sarebbe troppo grande.
+// Fattore di inflazione della varianza della media (Bartlett, 5 ritardi) dai log-range di ogni categoria in ordine di tempo.
+double BxVarInfl(CBlocks &b, const int ncat)
+  {
+   double num[6];
+   double den = 0;
+   ArrayInitialize(num, 0.0);
+   double x[];
+   ArrayResize(x, b.N);
+   for(int k = 0; k < ncat; k++)
+     {
+      int q = 0;
+      double sm = 0;
+      for(int i = 0; i < b.N; i++)
+         if(b.cat[i] == k && b.rng[i] > 0)
+           {
+            x[q] = MathLog(b.rng[i]);
+            sm += x[q];
+            q++;
+           }
+      if(q < 10)
+         continue;
+      double mu = sm / q;
+      for(int j = 0; j < q; j++)
+         den += (x[j] - mu) * (x[j] - mu);
+      for(int lag = 1; lag <= 5; lag++)
+         for(int j = 0; j + lag < q; j++)
+            num[lag] += (x[j] - mu) * (x[j + lag] - mu);
+     }
+   if(!(den > 0))
+      return 1.0;
+   double f = 1.0;
+   for(int lag = 1; lag <= 5; lag++)
+      f += 2.0 * (1.0 - lag / 6.0) * num[lag] / den;
+   return MathMax(1.0, MathMin(f, 20.0));
+  }
+
+// una timeframe: bias di ogni categoria (ora, giorno, mese...) contro tutti i periodi
+void BxTf(const int tfi, CBlocks &b, const datetime tMid)
+  {
+   int ncat = CatCount(tfi), m = b.N;
+   if(ncat <= 0 || m < 60)
+      return;
+   int NA = BX_NA, rowAll = ncat;
+   double acc[];
+   ArrayResize(acc, (ncat + 1) * 2 * NA);
+   ArrayInitialize(acc, 0.0);
+   for(int i = 0; i < m; i++)
+     {
+      int k = b.cat[i];
+      if(k < 0 || k >= ncat)
+         continue;
+      int hf = b.t0[i] < tMid ? 0 : 1;
+      double ex = 0, vx = 0;
+      bool f3 = false, f3l = false;
+      if(b.intra && b.cnt[i] >= 3)
+        {
+         int q3 = b.cnt[i] / 3;
+         ex = BxExpFirst(tfi, b.t0[i], b.cnt[i], q3);
+         vx = ex * (1 - ex);
+         f3 = b.offH[i] + 1 <= q3;
+         f3l = b.offL[i] + 1 <= q3;
+        }
+      double lg = b.rng[i] > 0 ? MathLog(b.rng[i]) : 0.0;
+      for(int pass = 0; pass < 2; pass++)
+        {
+         int o = ((pass == 0 ? k : rowAll) * 2 + hf) * NA;
+         acc[o] += 1;
+         if(b.ret[i] > 0)
+            acc[o + 1] += 1;
+         acc[o + 2] += b.ret[i];
+         acc[o + 3] += b.ret[i] * b.ret[i];
+         if(b.rng[i] > 0)
+           {
+            acc[o + 4] += 1;
+            acc[o + 5] += lg;
+            acc[o + 6] += lg * lg;
+           }
+         if(f3)
+            acc[o + 7] += 1;
+         if(f3l)
+            acc[o + 8] += 1;
+         acc[o + 9] += ex;
+         acc[o + 10] += vx;
+         if(b.cls[i] == 0)
+            acc[o + 11] += 1;
+         if(b.cls[i] == 2)
+            acc[o + 12] += 1;
+         acc[o + 13] += b.rf[i];
+        }
+     }
+   //--- range mediano per categoria
+   double med[], tmp[];
+   ArrayResize(med, ncat + 1);
+   ArrayResize(tmp, m);
+   for(int k = 0; k <= ncat; k++)
+     {
+      int q = 0;
+      for(int i = 0; i < m; i++)
+         if((k == ncat || b.cat[i] == k) && b.cat[i] >= 0 && b.cat[i] < ncat && b.rng[i] > 0)
+            tmp[q++] = b.rng[i];
+      med[k] = q > 0 ? MedianOf(tmp, q) : Nan();
+     }
+   //--- riferimento: tutti i periodi
+   double nA = BxT(acc, rowAll, 0);
+   if(nA < 60)
+      return;
+   double pA = BxT(acc, rowAll, 1) / nA, mA = BxT(acc, rowAll, 2) / nA;
+   double vA = BxT(acc, rowAll, 3) / nA - mA * mA, sdA = vA > 0 ? MathSqrt(vA) : Nan();
+   double nlA = BxT(acc, rowAll, 4), mlA = Dv(BxT(acc, rowAll, 5), nlA);
+   double vlA = Dv(BxT(acc, rowAll, 6), nlA) - mlA * mlA, sdlA = vlA > 0 ? MathSqrt(vlA) : Nan();
+   double pTA = BxT(acc, rowAll, 11) / nA, pMA = BxT(acc, rowAll, 12) / nA;
+   string tf = TF_LABEL[tfi];
+   double infl = BxVarInfl(b, ncat);
+   g_bxInfl[tfi] = infl;
+   for(int k = -1; k < ncat; k++)
+     {
+      int r = k < 0 ? rowAll : k;
+      double n = BxT(acc, r, 0);
+      if(n < 10)
+         continue;
+      string lab = k < 0 ? "Tutti i periodi" : (tfi == 1 ? HourLab(k) : CatLabel(tfi, k));
+      int row = BxRowAdd(tfi, k, lab, (int)n, b.intra);
+      double v[BX_NM], z[BX_NM];
+      v[0] = BxT(acc, r, 1) / n;
+      v[1] = BxT(acc, r, 2) / n;
+      v[2] = med[r];
+      v[3] = b.intra ? BxT(acc, r, 7) / n : Nan();
+      v[4] = b.intra ? BxT(acc, r, 8) / n : Nan();
+      v[5] = BxT(acc, r, 11) / n;
+      v[6] = BxT(acc, r, 12) / n;
+      v[7] = BxT(acc, r, 13) / n;
+      for(int q = 0; q < BX_NM; q++)
+         z[q] = Nan();
+      if(k >= 0)
+        {
+         double nl = BxT(acc, r, 4), ml = Dv(BxT(acc, r, 5), nl), vx = BxT(acc, r, 10);
+         z[0] = ZProp(v[0], pA, n);
+         z[1] = (MathIsValidNumber(sdA) && sdA > 0) ? (v[1] - mA) / (sdA / MathSqrt(n)) : Nan();
+         z[2] = (nl >= 10 && MathIsValidNumber(sdlA) && sdlA > 0) ? (ml - mlA) / (sdlA / MathSqrt(nl)) / MathSqrt(infl) : Nan();
+         if(b.intra && vx > 0)
+           {
+            z[3] = (BxT(acc, r, 7) - BxT(acc, r, 9)) / MathSqrt(vx);
+            z[4] = (BxT(acc, r, 8) - BxT(acc, r, 9)) / MathSqrt(vx);
+           }
+         z[5] = ZProp(v[5], pTA, n);
+         z[6] = ZProp(v[6], pMA, n);
+        }
+      g_bxRMed[row] = med[r];
+      for(int q = 0; q < BX_NM; q++)
+        {
+         g_bxRV[row * BX_NM + q] = v[q];
+         g_bxRZ[row * BX_NM + q] = z[q];
+        }
+      if(k < 0)
+         continue;
+      for(int q = 0; q < 7; q++)
+        {
+         if(!MathIsValidNumber(z[q]))
+            continue;
+         double d0 = BxDiff(acc, r, rowAll, 0, q, b.intra), d1 = BxDiff(acc, r, rowAll, 1, q, b.intra);
+         bool st = BxStable(z[q], d0, d1);
+         string val, bas;
+         if(q == 0)
+           {
+            val = BxPer(v[0], 1);
+            bas = BxPer(pA, 1);
+           }
+         else
+            if(q == 1)
+              {
+               val = BxPer(v[1], 3);
+               bas = BxPer(mA, 3);
+              }
+            else
+               if(q == 2)
+                 {
+                  val = BxPer(v[2], 3);
+                  bas = BxPer(med[rowAll], 3);
+                 }
+               else
+                  if(q == 3 || q == 4)
+                    {
+                     val = BxPer(v[q], 1);
+                     bas = BxPer(Dv(BxT(acc, r, 9), n), 1) + " atteso";
+                    }
+                  else
+                    {
+                     val = BxPer(v[q], 1);
+                     bas = BxPer(q == 5 ? pTA : pMA, 1);
+                    }
+         string tx = "[" + tf + " per " + CatName(tfi) + "] " + lab + " (N " + I2S((int)n) + "): " + BX_MN[q] + " " + val + " contro " + bas +
+                     (st ? ", stabile nelle due met&agrave;" : ", non stabile nelle due met&agrave;");
+         g_bxRT[row * BX_NM + q] = BxAddTest(ED_MB, q <= 1 ? 0 : (q == 2 ? 1 : 2), z[q], st, tx);
+        }
+     }
+  }
+
+// carattere del timeframe: una riga per timeframe (spostamento, tipo, persistenza del periodo successivo)
+void BxDigest(const int tfi, CBlocks &b)
+  {
+   int m = b.N;
+   if(m < 30)
+      return;
+   double sr[];
+   Sorted(b.rng, m, sr);
+   double medR = Pct(sr, m, 50), sRf = 0;
+   int nUp = 0, nT = 0, nM = 0;
+   for(int i = 0; i < m; i++)
+     {
+      if(b.ret[i] > 0)
+         nUp++;
+      if(b.cls[i] == 0)
+         nT++;
+      if(b.cls[i] == 2)
+         nM++;
+      sRf += b.rf[i];
+     }
+   NxAcc acc[];
+   NextStats(b, acc);
+   double up = (double)nUp / m, base = up * up + (1 - up) * (1 - up);
+   double same = acc[0].n > 0 ? (double)acc[0].same / acc[0].n : Nan();
+   double z = ZProp(same, base, (double)acc[0].n);
+   g_bxDig += "<tr>" + TD(TF_LABEL[tfi]) + TD(I2S(m)) + TD(FP(medR, 3)) + TD(PX(medR * g_last)) + TDc(FP(up, 1), PCol(up, 0.5, 0.15)) +
+              TD(FP((double)nT / m, 1)) + TD(FP((double)nM / m, 1)) + TD(F(sRf / m * 100, 0)) +
+              TDc(FP(same, 1) + " <small>z " + ZS(z) + "</small>", PCol(z, 0, 5)) + "</tr>";
+   R(g_bxDigTx, "  " + TF_LABEL[tfi] + ": " + I2S(m) + " periodi, spostamento mediano " + FP(medR, 3) + "% (circa " + PX(medR * g_last) +
+     "), rialzisti " + FP(up, 1) + "%, trend " + FP((double)nT / m, 1) + "%, mean reversion " + FP((double)nM / m, 1) + "%, restituito " +
+     F(sRf / m * 100, 0) + "%, il periodo dopo va nella stessa direzione nel " + FP(same, 1) + "% (con la sola prevalenza dei rialzi " +
+     FP(base, 1) + "%, z " + ZS(z) + ")");
+  }
+
+//+------------------------------------------------------------------+
+//| BIAS: ora x giorno, anno per anno, massimo e minimo della         |
+//| settimana                                                         |
+//+------------------------------------------------------------------+
+// blocchi orari (Ora): ogni ora contro le stesse ore degli altri giorni della settimana
+void BxHeat(CBlocks &b, const datetime tMid)
+  {
+   int m = b.N;
+   if(m < 500)
+      return;
+   double hc[], hb[];
+   ArrayResize(hc, 24 * 7 * 2 * 5);
+   ArrayResize(hb, 24 * 2 * 5);
+   ArrayInitialize(hc, 0.0);
+   ArrayInitialize(hb, 0.0);
+   for(int i = 0; i < m; i++)
+     {
+      int h = b.cat[i];
+      if(h < 0 || h > 23)
+         continue;
+      int d = DowMon(b.t0[i]), hf = b.t0[i] < tMid ? 0 : 1;
+      double lg = b.rng[i] > 0 ? MathLog(b.rng[i]) : 0.0;
+      for(int pass = 0; pass < 2; pass++)
+        {
+         int o = pass == 0 ? ((h * 7 + d) * 2 + hf) * 5 : (h * 2 + hf) * 5;
+         if(pass == 0)
+           {
+            hc[o] += 1;
+            if(b.ret[i] > 0)
+               hc[o + 1] += 1;
+            if(b.rng[i] > 0)
+              {
+               hc[o + 2] += 1;
+               hc[o + 3] += lg;
+               hc[o + 4] += lg * lg;
+              }
+           }
+         else
+           {
+            hb[o] += 1;
+            if(b.ret[i] > 0)
+               hb[o + 1] += 1;
+            if(b.rng[i] > 0)
+              {
+               hb[o + 2] += 1;
+               hb[o + 3] += lg;
+               hb[o + 4] += lg * lg;
+              }
+           }
+        }
+     }
+   for(int h = 0; h < 24; h++)
+     {
+      double nh = hb[(h * 2) * 5] + hb[(h * 2 + 1) * 5];
+      g_bxHbn[h] = (int)nh;
+      if(nh < 100)
+         continue;
+      double uh = hb[(h * 2) * 5 + 1] + hb[(h * 2 + 1) * 5 + 1], pu = uh / nh;
+      g_bxHbu[h] = pu;
+      double nl = hb[(h * 2) * 5 + 2] + hb[(h * 2 + 1) * 5 + 2], sl = hb[(h * 2) * 5 + 3] + hb[(h * 2 + 1) * 5 + 3];
+      double ql = hb[(h * 2) * 5 + 4] + hb[(h * 2 + 1) * 5 + 4];
+      double mlh = Dv(sl, nl), vlh = Dv(ql, nl) - mlh * mlh, sdl = vlh > 0 ? MathSqrt(vlh) : Nan();
+      for(int d = 0; d < 7; d++)
+        {
+         int c = h * 7 + d;
+         double n0 = hc[((h * 7 + d) * 2) * 5], n1 = hc[((h * 7 + d) * 2 + 1) * 5], n = n0 + n1;
+         g_bxHn[c] = (int)n;
+         if(n < 30)
+            continue;
+         double u0 = hc[((h * 7 + d) * 2) * 5 + 1], u1 = hc[((h * 7 + d) * 2 + 1) * 5 + 1];
+         double pc = (u0 + u1) / n;
+         double zu = ZProp(pc, pu, n);
+         double du0 = n0 >= 15 && hb[(h * 2) * 5] >= 15 ? u0 / n0 - hb[(h * 2) * 5 + 1] / hb[(h * 2) * 5] : Nan();
+         double du1 = n1 >= 15 && hb[(h * 2 + 1) * 5] >= 15 ? u1 / n1 - hb[(h * 2 + 1) * 5 + 1] / hb[(h * 2 + 1) * 5] : Nan();
+         bool su = BxStable(zu, du0, du1);
+         double c0 = hc[((h * 7 + d) * 2) * 5 + 2], c1 = hc[((h * 7 + d) * 2 + 1) * 5 + 2], nlc = c0 + c1;
+         double s0 = hc[((h * 7 + d) * 2) * 5 + 3], s1 = hc[((h * 7 + d) * 2 + 1) * 5 + 3];
+         double mlc = Dv(s0 + s1, nlc);
+         double zr = (nlc >= 20 && MathIsValidNumber(sdl) && sdl > 0) ? (mlc - mlh) / (sdl / MathSqrt(nlc)) : Nan();
+         double dr0 = (c0 >= 10 && hb[(h * 2) * 5 + 2] >= 10) ? s0 / c0 - hb[(h * 2) * 5 + 3] / hb[(h * 2) * 5 + 2] : Nan();
+         double dr1 = (c1 >= 10 && hb[(h * 2 + 1) * 5 + 2] >= 10) ? s1 / c1 - hb[(h * 2 + 1) * 5 + 3] / hb[(h * 2 + 1) * 5 + 2] : Nan();
+         bool sr = BxStable(zr, dr0, dr1);
+         g_bxHu[c] = pc;
+         g_bxHzu[c] = zu;
+         g_bxHr[c] = MathIsValidNumber(mlc) && MathIsValidNumber(mlh) ? MathExp(mlc - mlh) : Nan();
+         g_bxHzr[c] = zr;
+         string lab = "Ora " + StringFormat("%02dh", h) + " del " + DOW[d];
+         g_bxHtu[c] = BxAddTest(ED_MB, 0, zu, su, "[Ora x giorno] " + lab + " (N " + I2S((int)n) + "): rialzista " + BxPer(pc, 1) + " contro " +
+                                BxPer(pu, 1) + " della stessa ora negli altri giorni" + (su ? ", stabile nelle due met&agrave;" : ", non stabile nelle due met&agrave;"));
+         g_bxHtr[c] = BxAddTest(ED_MB, 1, zr, sr, "[Ora x giorno] " + lab + " (N " + I2S((int)n) + "): range " + F(g_bxHr[c], 2) +
+                                " volte quello della stessa ora negli altri giorni" + (sr ? ", stabile nelle due met&agrave;" : ", non stabile nelle due met&agrave;"));
+        }
+     }
+  }
+
+// anno per anno sui blocchi giornalieri (descrittivo)
+void BxYear(CBlocks &b)
+  {
+   int m = b.N;
+   if(m < 100)
+      return;
+   int y0 = b.yr[0], y1 = b.yr[m - 1];
+   if(y1 < y0)
+      return;
+   g_buf = true;
+   g_bufS = "";
+   THead("Anno|Giorni|% rialzisti|Rendimento (somma dei giorni) %|Spostamento mediano %|% Trend|% Mean rev.|Giorno pi&ugrave; ampio %");
+   R(g_bxYrTx, "Giorno per giorno, anno per anno:");
+   double tmp[];
+   ArrayResize(tmp, m);
+   for(int y = y0; y <= y1; y++)
+     {
+      int n = 0, up = 0, nt = 0, nm = 0, q = 0;
+      double sr = 0, mx = 0;
+      for(int i = 0; i < m; i++)
+        {
+         if(b.yr[i] != y)
+            continue;
+         n++;
+         if(b.ret[i] > 0)
+            up++;
+         if(b.cls[i] == 0)
+            nt++;
+         if(b.cls[i] == 2)
+            nm++;
+         sr += b.ret[i];
+         if(b.rng[i] > mx)
+            mx = b.rng[i];
+         tmp[q++] = b.rng[i];
+        }
+      if(n < 20)
+         continue;
+      double md = MedianOf(tmp, q);
+      g_bufS += "<tr>" + TD(I2S(y)) + TD(I2S(n)) + TDc(FP((double)up / n, 1), PCol((double)up / n, 0.5, 0.15)) + TDc(FP(sr, 1), PCol(sr, 0, 0.3)) +
+                TD(FP(md, 3)) + TD(FP((double)nt / n, 1)) + TD(FP((double)nm / n, 1)) + TD(FP(mx, 2)) + "</tr>";
+      R(g_bxYrTx, "  " + I2S(y) + ": " + I2S(n) + " giorni, rialzisti " + FP((double)up / n, 1) + "%, rendimento " + FP(sr, 1) + "%, spostamento mediano " +
+        FP(md, 3) + "%, trend " + FP((double)nt / n, 1) + "%, mean reversion " + FP((double)nm / n, 1) + "%, giorno pi&ugrave; ampio " + FP(mx, 2) + "%");
+     }
+   TEnd();
+   g_buf = false;
+   g_bxYr = g_bufS;
+   g_bufS = "";
+  }
+
+// il massimo e il minimo della settimana cadono in quale giorno? Contro la legge dell'arcoseno nel tempo operativo (varianza cumulata)
+void BxWeek(CSeries &s, const datetime tMid)
+  {
+   int n = s.n;
+   if(n < 2000)
+      return;
+   int wa[];
+   int nw = 0;
+   long cur = LONG_MIN;
+   for(int i = 0; i < n; i++)
+     {
+      long key = BlockKey(7, s.t[i]);
+      if(key != cur)
+        {
+         nw++;
+         ArrayResize(wa, nw, 2048);
+         wa[nw - 1] = i;
+         cur = key;
+        }
+     }
+   nw--;  // l'ultima settimana e' in corso
+   if(nw < 52)
+      return;
+   double cnt[];
+   ArrayResize(cnt, nw);
+   for(int w = 0; w < nw; w++)
+      cnt[w] = (w + 1 < nw ? wa[w + 1] : n) - wa[w];
+   double med = MedianOf(cnt, nw);
+   double ob[28], ex[28], vr[28];
+   ArrayInitialize(ob, 0.0);
+   ArrayInitialize(ex, 0.0);
+   ArrayInitialize(vr, 0.0);
+   int used = 0;
+   for(int w = 0; w < nw; w++)
+     {
+      int a = wa[w], e = w + 1 < nw ? wa[w + 1] : n, nb = e - a;
+      if(nb < 0.8 * med)
+         continue;
+      int hf = s.t[a] < tMid ? 0 : 1, ih = a, il = a;
+      int fd[7], ld[7];
+      ArrayInitialize(fd, -1);
+      ArrayInitialize(ld, -1);
+      for(int j = a; j < e; j++)
+        {
+         if(s.h[j] > s.h[ih])
+            ih = j;
+         if(s.l[j] < s.l[il])
+            il = j;
+         int d = DowMon(s.t[j]);
+         if(fd[d] < 0)
+            fd[d] = j - a;
+         ld[d] = j - a;
+        }
+      used++;
+      double cs[];
+      ArrayResize(cs, nb + 1);
+      cs[0] = 0;
+      for(int j = a; j < e; j++)
+         cs[j - a + 1] = cs[j - a] + g_bxHv[HourOf(s.t[j])];
+      for(int d = 0; d < 7; d++)
+         if(fd[d] >= 0 && cs[nb] > 0)
+           {
+            double p = ArcF(cs[ld[d] + 1] / cs[nb]) - ArcF(cs[fd[d]] / cs[nb]);
+            for(int ty = 0; ty < 2; ty++)
+              {
+               ex[(ty * 7 + d) * 2 + hf] += p;
+               vr[(ty * 7 + d) * 2 + hf] += p * (1 - p);
+              }
+           }
+      ob[(0 * 7 + DowMon(s.t[ih])) * 2 + hf] += 1;
+      ob[(1 * 7 + DowMon(s.t[il])) * 2 + hf] += 1;
+     }
+   g_bxWn = used;
+   if(used < 52)
+      return;
+   for(int ty = 0; ty < 2; ty++)
+      for(int d = 0; d < 7; d++)
+        {
+         int c = ty * 7 + d;
+         double o0 = ob[c * 2], o1 = ob[c * 2 + 1], e0 = ex[c * 2], e1 = ex[c * 2 + 1], v = vr[c * 2] + vr[c * 2 + 1];
+         g_bxWo[c] = o0 + o1;
+         g_bxWe[c] = e0 + e1;
+         if(e0 + e1 < 10 || !(v > 0))
+            continue;
+         double z = (o0 + o1 - e0 - e1) / MathSqrt(v);
+         bool st = BxStable(z, o0 - e0, o1 - e1);
+         g_bxWz[c] = z;
+         g_bxWt[c] = BxAddTest(ED_MB, 2, z, st, "[Settimana] " + (ty == 0 ? "Il massimo" : "Il minimo") + " della settimana cade di " + DOW[d] + " nel " +
+                               FP((o0 + o1) / used, 1) + "% delle settimane contro " + FP((e0 + e1) / used, 1) + "% atteso da un prezzo casuale (N " +
+                               I2S(used) + ")" + (st ? ", stabile nelle due met&agrave;" : ", non stabile nelle due met&agrave;"));
+        }
+  }
+
+//+------------------------------------------------------------------+
+//| BIAS: impulso piu' forte, massimo e minimo del giorno: a che ora  |
+//| avvengono e cosa li precede (contro la stessa ora degli altri     |
+//| giorni)                                                           |
+//+------------------------------------------------------------------+
+#define TG_PC 98.0  // impulso forte: barra tra il 2% dei movimenti piu' ampi della sua ora
+#define TG_MC 16   // estrazioni per giorno dell'atteso dell'impulso (ogni ora estratta dalla propria distribuzione)
+
+int TgI(const int h, const int f, const int fi, const int ci) { return ((h * 2 + f) * TG_NF + fi) * TG_NC + ci; }
+
+// caratteristiche prima della barra j (solo barre precedenti), nei due versi: cl[f * TG_NF + fi], f = 0 verso l'alto, 1 verso il basso; -1 = non definita
+void TgFeat(CSeries &s, const double &atr[], const double &rvol[], const double &r3[], const double q1, const double q2, const int j,
+            const int a, const bool hasPd, const double pdh, const double pdl, const double hiT, const double loT, int &cl[])
+  {
+   for(int x = 0; x < TG_NF * 2; x++)
+      cl[x] = -1;
+   bool okp = j >= 3 && MathIsValidNumber(r3[j]) && atr[j - 1] > 0;
+   for(int f = 0; f < 2; f++)
+     {
+      double dr = f == 0 ? 1.0 : -1.0;
+      int b0 = f * TG_NF;
+      if(okp)
+        {
+         double mv = dr * (s.c[j - 1] - s.o[j - 3]) / atr[j - 1];
+         cl[b0] = mv > 0.5 ? 0 : (mv < -0.5 ? 2 : 1);
+         cl[b0 + 1] = r3[j] < q1 ? 0 : (r3[j] <= q2 ? 1 : 2);
+        }
+      if(j > a)
+        {
+         if(hasPd)
+           {
+            bool sh = hiT > pdh, sl = loT < pdl;
+            bool fav = dr > 0 ? sh : sl, opp = dr > 0 ? sl : sh;
+            cl[b0 + 2] = (opp && !fav) ? 0 : ((fav && !opp) ? 1 : ((fav && opp) ? 2 : 3));
+           }
+         if(hiT > loT)
+           {
+            double pos = MathMax(0.0, MathMin(1.0, (s.o[j] - loT) / (hiT - loT)));
+            double pf = dr > 0 ? pos : 1.0 - pos;
+            cl[b0 + 3] = pf < 1.0 / 3.0 ? 0 : (pf < 2.0 / 3.0 ? 1 : 2);
+           }
+        }
+      if(j >= 1 && MathIsValidNumber(rvol[j - 1]))
+         cl[b0 + 4] = rvol[j - 1] < 0.8 ? 0 : (rvol[j - 1] < 1.5 ? 1 : 2);
+     }
+  }
+
+// registra un caso: bersaglio pt, ora, verso, meta' del campione e caratteristiche nei due versi
+void TgCaseAdd(int &cT[], int &cH[], int &cD[], int &cF[], int &cCl[], int &nCs, const int pt, const int hr, const int dir, const int hf, const int &cl[])
+  {
+   nCs++;
+   ArrayResize(cT, nCs, 8192);
+   ArrayResize(cH, nCs, 8192);
+   ArrayResize(cD, nCs, 8192);
+   ArrayResize(cF, nCs, 8192);
+   ArrayResize(cCl, nCs * 2 * TG_NF, 8192 * 2 * TG_NF);
+   int r = nCs - 1;
+   cT[r] = pt;
+   cH[r] = hr;
+   cD[r] = dir;
+   cF[r] = hf;
+   for(int x = 0; x < 2 * TG_NF; x++)
+      cCl[r * 2 * TG_NF + x] = cl[x];
+  }
+
+void TgRun(CSeries &s, const datetime tMid)
+  {
+   int n = s.n;
+   if(n < 5000)
+      return;
+   double ret[], atr[], rvol[], r3[];
+   ArrayResize(ret, n);
+   for(int i = 0; i < n; i++)
+      ret[i] = s.o[i] > 0 ? s.c[i] / s.o[i] - 1.0 : 0.0;
+   CalcATR(s, 14, atr);
+   CalcRVOL(s, 3600, 20, rvol);
+   if(ArraySize(rvol) != n)
+     {
+      ArrayResize(rvol, n);
+      for(int i = 0; i < n; i++)
+         rvol[i] = Nan();
+     }
+   //--- compressione delle 3 barre prima (range / ATR) e sue soglie (terzili sull'intero campione)
+   ArrayResize(r3, n);
+   double smp[];
+   ArrayResize(smp, n);
+   int ns = 0;
+   for(int i = 0; i < n; i++)
+     {
+      r3[i] = Nan();
+      if(i < 3 || (long)s.t[i] - (long)s.t[i - 3] > 4 * 3600 || !(atr[i - 1] > 0))
+         continue;
+      double hh = MathMax(s.h[i - 3], MathMax(s.h[i - 2], s.h[i - 1])), ll = MathMin(s.l[i - 3], MathMin(s.l[i - 2], s.l[i - 1]));
+      r3[i] = (hh - ll) / atr[i - 1];
+      smp[ns++] = r3[i];
+     }
+   if(ns < 1000)
+      return;
+   double sv[];
+   Sorted(smp, ns, sv);
+   double q1 = Pct(sv, ns, 100.0 / 3.0), q2 = Pct(sv, ns, 200.0 / 3.0);
+   //--- rendimenti assoluti di ogni ora del giorno: per l'atteso dell'impulso ogni ora e' estratta dalla propria distribuzione
+   int pcn[24], pst[24], pfl[24];
+   ArrayInitialize(pcn, 0);
+   ArrayInitialize(pfl, 0);
+   for(int i = 0; i < n; i++)
+      pcn[HourOf(s.t[i])]++;
+   pst[0] = 0;
+   for(int h = 1; h < 24; h++)
+      pst[h] = pst[h - 1] + pcn[h - 1];
+   double pool[];
+   ArrayResize(pool, n);
+   for(int i = 0; i < n; i++)
+     {
+      int hr = HourOf(s.t[i]);
+      pool[pst[hr] + pfl[hr]] = MathAbs(ret[i]);
+      pfl[hr]++;
+     }
+   //--- forme delle barre di ogni ora (apertura, massimo, minimo, chiusura relativi alla chiusura precedente): per l'atteso ogni ora
+   //--- e' estratta dalla propria distribuzione, indipendente dalle altre (tiene conto di ritmo giornaliero, code pesanti e deriva)
+   int scn[24], sst[24], sfl[24];
+   ArrayInitialize(scn, 0);
+   ArrayInitialize(sfl, 0);
+   for(int i = 1; i < n; i++)
+      if((long)s.t[i] - (long)s.t[i - 1] <= 4 * 3600 && s.c[i - 1] > 0)
+         scn[HourOf(s.t[i])]++;
+   sst[0] = 0;
+   for(int h = 1; h < 24; h++)
+      sst[h] = sst[h - 1] + scn[h - 1];
+   double sO[], sH[], sL[], sC[];
+   ArrayResize(sO, n);
+   ArrayResize(sH, n);
+   ArrayResize(sL, n);
+   ArrayResize(sC, n);
+   for(int i = 1; i < n; i++)
+      if((long)s.t[i] - (long)s.t[i - 1] <= 4 * 3600 && s.c[i - 1] > 0)
+        {
+         int hr = HourOf(s.t[i]), q = sst[hr] + sfl[hr];
+         sO[q] = s.o[i] / s.c[i - 1] - 1.0;
+         sH[q] = s.h[i] / s.c[i - 1] - 1.0;
+         sL[q] = s.l[i] / s.c[i - 1] - 1.0;
+         sC[q] = s.c[i] / s.c[i - 1] - 1.0;
+         sfl[hr]++;
+        }
+   //--- soglia dell'impulso forte per ora: percentile dei movimenti assoluti di quell'ora sull'intero storico
+   double thr[24];
+   for(int h = 0; h < 24; h++)
+     {
+      thr[h] = 1e300;
+      if(pcn[h] < 200)
+         continue;
+      double seg[];
+      ArrayResize(seg, pcn[h]);
+      for(int q = 0; q < pcn[h]; q++)
+         seg[q] = pool[pst[h] + q];
+      ArraySort(seg);
+      thr[h] = Pct(seg, pcn[h], TG_PC);
+     }
+   //--- giorni
+   int ds[], de[];
+   int nd = 0;
+   long cur = -1;
+   for(int i = 0; i < n; i++)
+     {
+      long dk = (long)s.t[i] / 86400;
+      if(dk != cur)
+        {
+         nd++;
+         ArrayResize(ds, nd, 8192);
+         ArrayResize(de, nd, 8192);
+         ds[nd - 1] = i;
+         cur = dk;
+        }
+      de[nd - 1] = i + 1;
+     }
+   nd--;  // l'ultimo giorno e' in corso
+   if(nd < 250)
+      return;
+   double nbv[];
+   ArrayResize(nbv, nd);
+   for(int d = 0; d < nd; d++)
+      nbv[d] = de[d] - ds[d];
+   double nbMed = MedianOf(nbv, nd);
+   int cT[], cH[], cD[], cF[], cCl[];
+   int nCs = 0;
+   ArrayResize(g_tgAC, 24 * 2 * TG_NF * TG_NC);
+   ArrayInitialize(g_tgAC, 0.0);
+   double ob[TG_NT * 48], eM[TG_NT * 48], impN[48], impU[48], dayN[24];
+   ArrayInitialize(ob, 0.0);
+   ArrayInitialize(eM, 0.0);
+   ArrayInitialize(impN, 0.0);
+   ArrayInitialize(impU, 0.0);
+   ArrayInitialize(dayN, 0.0);
+   long pdDay = -1000;
+   double pdH = 0, pdL = 0;
+   int validDays = 0;
+   int cl[TG_NF * 2];
+   for(int d = 0; d < nd && !IsStopped(); d++)
+     {
+      int a = ds[d], e = de[d], nb = e - a;
+      long dk = (long)s.t[a] / 86400;
+      bool okd = nb >= 12 && nb >= 0.8 * nbMed;
+      double dh = s.h[a], dl = s.l[a];
+      for(int j = a; j < e; j++)
+        {
+         if(s.h[j] > dh)
+            dh = s.h[j];
+         if(s.l[j] < dl)
+            dl = s.l[j];
+         if(j > a && (long)s.t[j] - (long)s.t[j - 1] > 4 * 3600)
+            okd = false;
+        }
+      bool hasPd = dk > pdDay && dk - pdDay <= 4;
+      double pH = pdH, pL = pdL;
+      if(okd)
+        {
+         pdDay = dk;
+         pdH = dh;
+         pdL = dl;
+        }
+      else
+         continue;
+      int ii = a, ih = a, il = a;
+      double mx = -1;
+      for(int j = a; j < e; j++)
+        {
+         double ar = MathAbs(ret[j]);
+         if(ar > mx)
+           {
+            mx = ar;
+            ii = j;
+           }
+         if(s.h[j] > s.h[ih])
+            ih = j;
+         if(s.l[j] < s.l[il])
+            il = j;
+        }
+      int ti[TG_NT], dr[TG_NT];
+      ti[0] = ii;
+      ti[1] = ih;
+      ti[2] = il;
+      dr[0] = ret[ii] > 0 ? 1 : (ret[ii] < 0 ? -1 : 0);
+      dr[1] = 1;
+      dr[2] = -1;
+      int hf = s.t[a] < tMid ? 0 : 1;
+      validDays++;
+      //--- ora del bersaglio, osservata e attesa
+      for(int ty = 0; ty < TG_NT; ty++)
+         if(dr[ty] != 0)
+            ob[(ty * 24 + HourOf(s.t[ti[ty]])) * 2 + hf] += 1;
+      if(dr[0] != 0)
+        {
+         int hi0 = HourOf(s.t[ii]);
+         impN[hi0 * 2 + hf] += 1;
+         if(dr[0] > 0)
+            impU[hi0 * 2 + hf] += 1;
+        }
+      for(int j = a; j < e; j++)
+         dayN[HourOf(s.t[j])] += 1;
+      for(int k = 0; k < TG_MC; k++)
+        {
+         double px = 1.0, mxI = -1, hiV = -1e300, loV = 1e300;
+         int bI = 0, bH = 0, bL = 0;
+         for(int j = a; j < e; j++)
+           {
+            int hr = HourOf(s.t[j]);
+            if(scn[hr] < 50)
+               continue;
+            int q = sst[hr] + (int)(((long)MathRand() * 32768 + MathRand()) % scn[hr]);
+            double bo = px * (1.0 + sO[q]), bh = px * (1.0 + sH[q]), bl = px * (1.0 + sL[q]), bc = px * (1.0 + sC[q]);
+            double imp = bo > 0 ? MathAbs(bc / bo - 1.0) : 0.0;
+            if(imp > mxI)
+              {
+               mxI = imp;
+               bI = hr;
+              }
+            if(bh > hiV)
+              {
+               hiV = bh;
+               bH = hr;
+              }
+            if(bl < loV)
+              {
+               loV = bl;
+               bL = hr;
+              }
+            px = bc;
+           }
+         eM[(0 * 24 + bI) * 2 + hf] += 1.0 / TG_MC;
+         eM[(1 * 24 + bH) * 2 + hf] += 1.0 / TG_MC;
+         eM[(2 * 24 + bL) * 2 + hf] += 1.0 / TG_MC;
+        }
+      //--- caratteristiche prima di ogni barra del giorno (controlli) e dei bersagli (casi)
+      double hiT = -1e300, loT = 1e300;
+      for(int j = a; j < e; j++)
+        {
+         TgFeat(s, atr, rvol, r3, q1, q2, j, a, hasPd, pH, pL, hiT, loT, cl);
+         int hr = HourOf(s.t[j]);
+         for(int f = 0; f < 2; f++)
+            for(int fi = 0; fi < TG_NF; fi++)
+               if(cl[f * TG_NF + fi] >= 0)
+                  g_tgAC[TgI(hr, f, fi, cl[f * TG_NF + fi])] += 1;
+         if(j == ii && dr[0] != 0)
+            TgCaseAdd(cT, cH, cD, cF, cCl, nCs, 0, hr, dr[0], hf, cl);
+         if(ret[j] != 0 && MathAbs(ret[j]) >= thr[hr])
+            TgCaseAdd(cT, cH, cD, cF, cCl, nCs, 1, hr, ret[j] > 0 ? 1 : -1, hf, cl);
+         if(s.h[j] > hiT)
+            hiT = s.h[j];
+         if(s.l[j] < loT)
+            loT = s.l[j];
+        }
+     }
+   g_tgNd = validDays;
+   if(validDays < 250)
+      return;
+   for(int h = 0; h < 24; h++)
+      g_tgDays[h] = (int)dayN[h];
+   //--- a che ora avvengono
+   double sN = 0, sU = 0;
+   for(int x = 0; x < 48; x++)
+     {
+      sN += impN[x];
+      sU += impU[x];
+     }
+   double pUp = sN > 0 ? sU / sN : 0.5;
+   for(int h = 0; h < 24; h++)
+     {
+      double ndh = dayN[h];
+      if(ndh < 100)
+         continue;
+      for(int ty = 0; ty < TG_NT; ty++)
+        {
+         int idx = ty * 24 + h;
+         double o0 = ob[idx * 2], o1 = ob[idx * 2 + 1], e0 = eM[idx * 2], e1 = eM[idx * 2 + 1];
+         double v = (e0 + e1) * (1 - (e0 + e1) / ndh);
+         g_tgO[idx] = o0 + o1;
+         g_tgE[idx] = e0 + e1;
+         if(e0 + e1 < 5 || !(v > 0))
+            continue;
+         double z = (o0 + o1 - e0 - e1) / MathSqrt(v);
+         bool st = BxStable(z, o0 - e0, o1 - e1);
+         g_tgZ[idx] = z;
+         g_tgT[idx] = BxAddTest(ED_MT, 2, z, st, "[Quando] Ora " + HourLab(h) + ": " + TG_TN[ty] + " nel " + FP((o0 + o1) / ndh, 1) +
+                                "% dei giorni contro " + FP((e0 + e1) / ndh, 1) + "% atteso (ogni ora estratta dalla propria distribuzione, indipendente dalle altre, N " +
+                                I2S((int)ndh) + ")" +
+                                (st ? ", stabile nelle due met&agrave;" : ", non stabile nelle due met&agrave;"));
+        }
+      double in0 = impN[h * 2], in1 = impN[h * 2 + 1], iu0 = impU[h * 2], iu1 = impU[h * 2 + 1], inn = in0 + in1;
+      g_tgUn[h] = inn;
+      g_tgUu[h] = iu0 + iu1;
+      if(inn >= 30)
+        {
+         double z = ZProp((iu0 + iu1) / inn, pUp, inn);
+         double d0 = in0 >= 15 ? iu0 / in0 - pUp : Nan(), d1 = in1 >= 15 ? iu1 / in1 - pUp : Nan();
+         bool st = BxStable(z, d0, d1);
+         g_tgUz[h] = z;
+         g_tgUt[h] = BxAddTest(ED_MT, 0, z, st, "[Direzione dell'impulso] Ora " + HourLab(h) + ": l'impulso pi&ugrave; forte del giorno &egrave; rialzista nel " +
+                               FP((iu0 + iu1) / inn, 1) + "% dei casi contro " + FP(pUp, 1) + "% di tutte le ore (N " + I2S((int)inn) + ")" +
+                               (st ? ", stabile nelle due met&agrave;" : ", non stabile nelle due met&agrave;"));
+        }
+     }
+   //--- cosa precede: casi contro le altre barre della stessa ora (controlli), nello stesso verso
+   for(int pt = 0; pt < TG_NP && !IsStopped(); pt++)
+     {
+      double CT[];
+      ArrayResize(CT, ArraySize(g_tgAC));
+      ArrayCopy(CT, g_tgAC);
+      int nCases = 0;
+      for(int r = 0; r < nCs; r++)
+        {
+         if(cT[r] != pt)
+            continue;
+         nCases++;
+         for(int f = 0; f < 2; f++)
+            for(int fi = 0; fi < TG_NF; fi++)
+              {
+               int c = cCl[r * 2 * TG_NF + f * TG_NF + fi];
+               if(c >= 0)
+                  CT[TgI(cH[r], f, fi, c)] -= 1;
+              }
+        }
+      g_tgCases[pt] = nCases;
+      double Oo[TG_NF * TG_NC], Ee[TG_NF * TG_NC], Vv[TG_NF * TG_NC], Oh[TG_NF * TG_NC * 2], Eh[TG_NF * TG_NC * 2], U[TG_NF], Uh[TG_NF * 2];
+      ArrayInitialize(Oo, 0.0);
+      ArrayInitialize(Ee, 0.0);
+      ArrayInitialize(Vv, 0.0);
+      ArrayInitialize(Oh, 0.0);
+      ArrayInitialize(Eh, 0.0);
+      ArrayInitialize(U, 0.0);
+      ArrayInitialize(Uh, 0.0);
+      for(int r = 0; r < nCs; r++)
+        {
+         if(cT[r] != pt)
+            continue;
+         int h = cH[r], f = cD[r] > 0 ? 0 : 1, hf = cF[r];
+         for(int fi = 0; fi < TG_NF; fi++)
+           {
+            int c = cCl[r * 2 * TG_NF + f * TG_NF + fi];
+            if(c < 0)
+               continue;
+            double tot = 0;
+            for(int ci = 0; ci < TG_NC; ci++)
+               tot += CT[TgI(h, f, fi, ci)];
+            if(tot < 30)
+               continue;
+            U[fi] += 1;
+            Uh[fi * 2 + hf] += 1;
+            for(int ci = 0; ci < TG_NCL[fi]; ci++)
+              {
+               double p = CT[TgI(h, f, fi, ci)] / tot;
+               int x = fi * TG_NC + ci;
+               Ee[x] += p;
+               Vv[x] += p * (1 - p);
+               Eh[x * 2 + hf] += p;
+               if(c == ci)
+                 {
+                  Oo[x] += 1;
+                  Oh[x * 2 + hf] += 1;
+                 }
+              }
+           }
+        }
+      for(int fi = 0; fi < TG_NF; fi++)
+        {
+         g_tgFn[pt * TG_NF + fi] = U[fi];
+         if(U[fi] < 30)
+            continue;
+         for(int ci = 0; ci < TG_NCL[fi]; ci++)
+           {
+            int x = fi * TG_NC + ci, gx = (pt * TG_NF + fi) * TG_NC + ci;
+            g_tgFO[gx] = Oo[x];
+            g_tgFE[gx] = Ee[x];
+            if(!(Vv[x] > 0))
+               continue;
+            double z = (Oo[x] - Ee[x]) / MathSqrt(Vv[x]);
+            g_tgFZ[gx] = z;
+            if(pt == 0)
+               continue;  // scelto a posteriori: la selezione crea differenze meccaniche, niente confronto formale
+            bool st = BxStable(z, Uh[fi * 2] >= 15 ? Oh[x * 2] - Eh[x * 2] : Nan(), Uh[fi * 2 + 1] >= 15 ? Oh[x * 2 + 1] - Eh[x * 2 + 1] : Nan());
+            g_tgFt[gx] = BxAddTest(ED_MT, 3, z, st, "[" + TG_PN[pt] + "] " + TG_FN[fi] + ", " + TG_CL[fi * TG_NC + ci] + ": " + FP(Oo[x] / U[fi], 1) +
+                                   "% dei casi contro " + FP(Ee[x] / U[fi], 1) + "% delle altre barre della stessa ora (N " + I2S((int)U[fi]) +
+                                   ")" + (st ? ", stabile nelle due met&agrave;" : ", non stabile nelle due met&agrave;"));
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| BIAS: tabelle e scheda                                            |
+//+------------------------------------------------------------------+
+// dopo lo z: dagger = sopravvive al controllo FDR e ha lo stesso verso nelle due meta'; section = solo FDR
+string BxMark(const int tid)
+  {
+   if(tid < 0 || tid >= g_bxNT)
+      return "";
+   if(g_bxTfd[tid] && g_bxTst[tid])
+      return "&dagger;";
+   if(g_bxTfd[tid])
+      return "&sect;";
+   return "";
+  }
+
+string BxCell(const string val, const double z, const int tid)
+  {
+   return TDc(val + " <small>z " + ZS(z) + BxMark(tid) + "</small>", PCol(z, 0, 5));
+  }
+
+string BxReadRow(const int r)
+  {
+   string s = "";
+   bool rob = false;
+   for(int m = 0; m < 7; m++)
+     {
+      double z = g_bxRZ[r * BX_NM + m];
+      if(!MathIsValidNumber(z) || MathAbs(z) < 2)
+         continue;
+      int tid = g_bxRT[r * BX_NM + m];
+      if(tid >= 0 && g_bxTfd[tid] && g_bxTst[tid])
+         rob = true;
+      string t = "";
+      switch(m)
+        {
+         case 0:
+            t = z > 0 ? "sale piu' spesso" : "scende piu' spesso";
+            break;
+         case 1:
+            t = z > 0 ? "rendimento sopra la media" : "rendimento sotto la media";
+            break;
+         case 2:
+            t = z > 0 ? "muove di piu'" : "muove di meno";
+            break;
+         case 3:
+            t = z > 0 ? "massimo presto" : "massimo tardi";
+            break;
+         case 4:
+            t = z > 0 ? "minimo presto" : "minimo tardi";
+            break;
+         case 5:
+            t = z > 0 ? "piu' trend" : "meno trend";
+            break;
+         case 6:
+            t = z > 0 ? "piu' mean reversion" : "meno mean reversion";
+            break;
+        }
+      s += (s != "" ? "; " : "") + t;
+     }
+   if(s == "")
+      return "nessuno scostamento";
+   return s + (rob ? " [robusto]" : " [indizio]");
+  }
+
+void BxRenderTf(const int tfi)
+  {
+   bool any = false, intra = false;
+   for(int r = 0; r < g_bxRN; r++)
+      if(g_bxRTf[r] == tfi)
+        {
+         any = true;
+         intra = g_bxRIn[r];
+        }
+   if(!any)
+      return;
+   SecStart("Bias per " + CatName(tfi) + " (" + TF_LABEL[tfi] + ")",
+            "Ogni " + CatName(tfi) + " contro tutti i periodi di questo timeframe (non contro il 50%: se il prezzo sale nel tempo, quasi ovunque " +
+            "i rialzisti superano il 50%). Colore = z (blu sopra, rosso sotto); &dagger; = robusto (FDR 5% e stesso verso nelle due met&agrave;), " +
+            "&sect; = solo FDR. Lo z del range &egrave; ridotto per la persistenza della volatilit&agrave; (i range di giorni vicini non sono indipendenti; correzione prudente): " +
+            "fattore di inflazione della varianza " + F(g_bxInfl[tfi], 2) + "." + (intra ? " Massimo e minimo nel primo terzo: contro la quota attesa da un prezzo casuale con la volatilit&agrave; di ogni ora (legge dell'arcoseno nel tempo operativo)." : ""));
+   THead("Categoria|Periodi|% rialzista|Rendimento medio %|Range mediano % (volte tutti)|Massimo nel primo terzo|Minimo nel primo terzo|% Trend|" +
+         "% Mean rev.|Restituito medio %|Lettura");
+   R(g_repBias, "");
+   R(g_repBias, "[" + TF_LABEL[tfi] + " per " + CatName(tfi) + "]");
+   double medAll = Nan();
+   for(int r = 0; r < g_bxRN; r++)
+      if(g_bxRTf[r] == tfi && g_bxRCat[r] < 0)
+         medAll = g_bxRMed[r];
+   for(int r = 0; r < g_bxRN; r++)
+     {
+      if(g_bxRTf[r] != tfi)
+         continue;
+      int b0 = r * BX_NM;
+      string ratio = (g_bxRCat[r] >= 0 && MathIsValidNumber(medAll) && medAll > 0 && MathIsValidNumber(g_bxRMed[r])) ?
+                     " (x" + F(g_bxRMed[r] / medAll, 2) + ")" : "";
+      if(g_bxRCat[r] < 0)
+        {
+         W("<tr class='base'>" + TD(g_bxRLb[r]) + TD(I2S(g_bxRn[r])) + TD(FP(g_bxRV[b0], 1)) + TD(FP(g_bxRV[b0 + 1], 3)) + TD(FP(g_bxRV[b0 + 2], 3)) +
+           TD(FP(g_bxRV[b0 + 3], 1)) + TD(FP(g_bxRV[b0 + 4], 1)) + TD(FP(g_bxRV[b0 + 5], 1)) + TD(FP(g_bxRV[b0 + 6], 1)) +
+           TD(F(g_bxRV[b0 + 7] * 100, 0)) + TD("riferimento") + "</tr>");
+         R(g_repBias, "  " + g_bxRLb[r] + " (N " + I2S(g_bxRn[r]) + "): rialzisti " + FP(g_bxRV[b0], 1) + "%, rendimento medio " + FP(g_bxRV[b0 + 1], 3) +
+           "%, range mediano " + FP(g_bxRV[b0 + 2], 3) + "%, trend " + FP(g_bxRV[b0 + 5], 1) + "%, mean reversion " + FP(g_bxRV[b0 + 6], 1) + "%");
+         continue;
+        }
+      string rd = BxReadRow(r);
+      W("<tr>" + TD(g_bxRLb[r]) + TD(I2S(g_bxRn[r])) + BxCell(FP(g_bxRV[b0], 1), g_bxRZ[b0], g_bxRT[b0]) +
+        BxCell(FP(g_bxRV[b0 + 1], 3), g_bxRZ[b0 + 1], g_bxRT[b0 + 1]) + BxCell(FP(g_bxRV[b0 + 2], 3) + ratio, g_bxRZ[b0 + 2], g_bxRT[b0 + 2]) +
+        BxCell(FP(g_bxRV[b0 + 3], 1), g_bxRZ[b0 + 3], g_bxRT[b0 + 3]) + BxCell(FP(g_bxRV[b0 + 4], 1), g_bxRZ[b0 + 4], g_bxRT[b0 + 4]) +
+        BxCell(FP(g_bxRV[b0 + 5], 1), g_bxRZ[b0 + 5], g_bxRT[b0 + 5]) + BxCell(FP(g_bxRV[b0 + 6], 1), g_bxRZ[b0 + 6], g_bxRT[b0 + 6]) +
+        TD(F(g_bxRV[b0 + 7] * 100, 0)) + TD(rd) + "</tr>");
+      R(g_repBias, "  " + g_bxRLb[r] + " (N " + I2S(g_bxRn[r]) + "): rialzisti " + FP(g_bxRV[b0], 1) + "% (z " + ZS(g_bxRZ[b0]) + BxMark(g_bxRT[b0]) +
+        "), rendimento medio " + FP(g_bxRV[b0 + 1], 3) + "% (z " + ZS(g_bxRZ[b0 + 1]) + "), range mediano " + FP(g_bxRV[b0 + 2], 3) + "%" + ratio +
+        " (z " + ZS(g_bxRZ[b0 + 2]) + BxMark(g_bxRT[b0 + 2]) + ")" +
+        (intra ? ", massimo nel primo terzo " + FP(g_bxRV[b0 + 3], 1) + "% (z " + ZS(g_bxRZ[b0 + 3]) + "), minimo nel primo terzo " +
+                 FP(g_bxRV[b0 + 4], 1) + "% (z " + ZS(g_bxRZ[b0 + 4]) + ")" : "") +
+        ", trend " + FP(g_bxRV[b0 + 5], 1) + "% (z " + ZS(g_bxRZ[b0 + 5]) + "), mean reversion " + FP(g_bxRV[b0 + 6], 1) + "% (z " +
+        ZS(g_bxRZ[b0 + 6]) + "), restituito " + F(g_bxRV[b0 + 7] * 100, 0) + "% -> " + rd);
+     }
+   TEnd();
+   SecEnd();
+  }
+
+void BxRenderHeat(void)
+  {
+   int dl[7];
+   int nd = 0;
+   for(int d = 0; d < 7; d++)
+     {
+      int tot = 0;
+      for(int h = 0; h < 24; h++)
+         tot += g_bxHn[h * 7 + d];
+      if(tot >= 100)
+         dl[nd++] = d;
+     }
+   if(nd == 0)
+      return;
+   string hd = "Ora|Tutti i giorni";
+   for(int k = 0; k < nd; k++)
+      hd += "|" + DOW[dl[k]];
+   for(int tb = 0; tb < 2; tb++)
+     {
+      string ttl = tb == 0 ? "Ora x giorno della settimana: % di ore rialziste" : "Ora x giorno della settimana: range";
+      SecStart(ttl, "Ogni ora del giorno (orario dei dati) contro la stessa ora negli altri giorni della settimana. " +
+               (tb == 0 ? "Cella = % di barre orarie rialziste; z contro la media della stessa ora." :
+               "Cella = range medio (geometrico) in volte quello della stessa ora nei giorni della settimana; z sul logaritmo del range.") +
+               " &dagger; = robusto (FDR 5% e stesso verso nelle due met&agrave;), &sect; = solo FDR. Almeno 30 ore per cella.");
+      THead(hd);
+      R(g_repBias, "");
+      R(g_repBias, "[" + ttl + "]");
+      for(int h = 0; h < 24; h++)
+        {
+         if(g_bxHbn[h] < 100)
+            continue;
+         string row = "<tr>" + TD(HourLab(h)) + TD(tb == 0 ? BxPer(g_bxHbu[h], 1) : "1.00");
+         string tx = "  " + HourLab(h) + " (tutti i giorni " + (tb == 0 ? FP(g_bxHbu[h], 1) + "% rialziste" : "range 1.00") + "):";
+         for(int k = 0; k < nd; k++)
+           {
+            int c = h * 7 + dl[k];
+            if(g_bxHn[c] < 30)
+              {
+               row += TD("&ndash;");
+               continue;
+              }
+            if(tb == 0)
+              {
+               row += BxCell(FP(g_bxHu[c], 0), g_bxHzu[c], g_bxHtu[c]);
+               tx += " " + DOW[dl[k]] + " " + FP(g_bxHu[c], 1) + "% (z " + ZS(g_bxHzu[c]) + BxMark(g_bxHtu[c]) + ");";
+              }
+            else
+              {
+               row += BxCell(F(g_bxHr[c], 2), g_bxHzr[c], g_bxHtr[c]);
+               tx += " " + DOW[dl[k]] + " x" + F(g_bxHr[c], 2) + " (z " + ZS(g_bxHzr[c]) + BxMark(g_bxHtr[c]) + ");";
+              }
+           }
+         W(row + "</tr>");
+         R(g_repBias, tx);
+        }
+      TEnd();
+      SecEnd();
+     }
+  }
+
+void BxRenderWeek(void)
+  {
+   if(g_bxWn < 52)
+      return;
+   int dl[7];
+   int nd = 0;
+   for(int d = 0; d < 7; d++)
+      if(g_bxWe[d] + g_bxWe[7 + d] >= 10)
+         dl[nd++] = d;
+   if(nd == 0)
+      return;
+   SecStart("Massimo e minimo della settimana: in quale giorno",
+            "In quale giorno cade il massimo e il minimo della settimana, in % delle " + I2S(g_bxWn) + " settimane, contro la quota attesa da un prezzo " +
+            "casuale con la volatilit&agrave; di ogni ora (legge dell'arcoseno: gli estremi cadono pi&ugrave; spesso all'inizio e alla fine del periodo). &dagger; = robusto, &sect; = solo FDR.");
+   string hd = "Estremo";
+   for(int k = 0; k < nd; k++)
+      hd += "|" + DOW[dl[k]];
+   THead(hd);
+   R(g_repBias, "");
+   R(g_repBias, "[Massimo e minimo della settimana: giorno in cui cadono, % delle settimane (atteso da un prezzo casuale)]");
+   for(int ty = 0; ty < 2; ty++)
+     {
+      string row = "<tr>" + TD(ty == 0 ? "Massimo della settimana" : "Minimo della settimana");
+      string tx = "  " + (ty == 0 ? "Massimo" : "Minimo") + ":";
+      for(int k = 0; k < nd; k++)
+        {
+         int c = ty * 7 + dl[k];
+         row += BxCell(FP(g_bxWo[c] / g_bxWn, 1) + " (" + FP(g_bxWe[c] / g_bxWn, 1) + ")", g_bxWz[c], g_bxWt[c]);
+         tx += " " + DOW[dl[k]] + " " + FP(g_bxWo[c] / g_bxWn, 1) + "% (atteso " + FP(g_bxWe[c] / g_bxWn, 1) + "%, z " + ZS(g_bxWz[c]) + BxMark(g_bxWt[c]) + ");";
+        }
+      W(row + "</tr>");
+      R(g_repBias, tx);
+     }
+   TEnd();
+   SecEnd();
+  }
+
+void BxRenderTg(void)
+  {
+   if(g_tgNd < 250)
+      return;
+   SecStart("Quando: l'impulso pi&ugrave; forte, il massimo e il minimo del giorno",
+            "Su " + I2S(g_tgNd) + " giorni validi (barre orarie). <b>Impulso pi&ugrave; forte</b> = l'ora con il maggior movimento apertura-chiusura " +
+            "del giorno. Atteso: ogni barra oraria del giorno estratta dalla distribuzione storica della propria ora (forma completa: apertura, massimo, minimo e chiusura), indipendente dalle altre (" + I2S(TG_MC) +
+            " estrazioni per giorno): &egrave; quanto ci si aspetta se ogni ora avesse la sua volatilit&agrave;, le sue code e la sua deriva e le ore " +
+            "fossero indipendenti, quindi un'ora di notizie ha una quota alta anche nell'atteso. Vale per l'impulso, il massimo e il minimo. Una differenza significativa indica una dipendenza dentro la giornata (un'ora forte che ne rende un'altra pi&ugrave; o meno " +
+            "probabile), non che l'ora sia prevedibile in anticipo. " +
+            "&dagger; = robusto (FDR 5% e stesso verso nelle due met&agrave;), &sect; = solo FDR.");
+   THead("Ora|Giorni|Impulso pi&ugrave; forte: % giorni (atteso)|Impulso rialzista %|Massimo del giorno: % (atteso)|Minimo del giorno: % (atteso)");
+   R(g_repBias, "");
+   R(g_repBias, "[Quando: impulso piu' forte, massimo e minimo del giorno, % dei giorni con quell'ora (atteso); ora dei dati]");
+   for(int h = 0; h < 24; h++)
+     {
+      double nd = g_tgDays[h];
+      if(nd < 100)
+         continue;
+      string row = "<tr>" + TD(HourLab(h)) + TD(I2S((int)nd));
+      string tx = "  " + HourLab(h) + " (" + I2S((int)nd) + " giorni):";
+      for(int ty = 0; ty < TG_NT; ty++)
+        {
+         int idx = ty * 24 + h;
+         string cellv = FP(g_tgO[idx] / nd, 1) + " (" + FP(g_tgE[idx] / nd, 1) + ")";
+         row += BxCell(cellv, g_tgZ[idx], g_tgT[idx]);
+         tx += " " + TG_TN[ty] + " " + cellv + "% z " + ZS(g_tgZ[idx]) + BxMark(g_tgT[idx]) + ";";
+         if(ty == 0)
+           {
+            if(g_tgUn[h] >= 30)
+              {
+               row += BxCell(FP(g_tgUu[h] / g_tgUn[h], 0), g_tgUz[h], g_tgUt[h]);
+               tx += " impulso rialzista " + FP(g_tgUu[h] / g_tgUn[h], 1) + "% (z " + ZS(g_tgUz[h]) + BxMark(g_tgUt[h]) + ");";
+              }
+            else
+               row += TD("&ndash;");
+           }
+        }
+      W(row + "</tr>");
+      R(g_repBias, tx);
+     }
+   TEnd();
+   SecEnd();
+   for(int pt = 0; pt < TG_NP; pt++)
+     {
+      bool causal = pt == 1;
+      SecStart("Cosa precede: " + TG_PN[pt] + " (" + I2S(g_tgCases[pt]) + " casi)",
+               (causal ? "Un impulso forte &egrave; una barra oraria tra il 2% dei movimenti pi&ugrave; ampi di quell'ora (soglia fissa per ora, dall'intero " +
+                "storico): si riconosce dalla barra stessa, senza guardare le altre barre del giorno, quindi le condizioni prima sono informazioni " +
+                "disponibili in anticipo. " :
+                "L'impulso pi&ugrave; forte del giorno &egrave; scelto a posteriori, tra tutte le barre della giornata: scegliere il massimo di una serie " +
+                "crea differenze meccaniche con quello che precede (per esempio le barre prima tendono a essere pi&ugrave; piccole, altrimenti non sarebbe " +
+                "il massimo). Le celle sono descrittive: nessun test n&eacute; &dagger;, non sono segnali. Per condizioni utilizzabili in anticipo guarda gli " +
+                "impulsi forti sotto. ") +
+               "Per ogni caso, la situazione nelle barre <b>prima</b>, confrontata con le altre barre della stessa ora negli altri giorni, nel verso " +
+               "dell'impulso (a favore = nella direzione dell'impulso). ATR = ATR(14) orario; sweep = il prezzo ha gi&agrave; superato il massimo o il minimo " +
+               "di ieri prima di questa barra." + (causal ? " &dagger; = robusto (FDR 5% e stesso verso nelle due met&agrave;), &sect; = solo FDR." : ""));
+      THead("Caratteristica|Classe|Casi|% dei casi|% atteso (stessa ora)|z");
+      R(g_repBias, "");
+      R(g_repBias, "[Cosa precede: " + TG_PN[pt] + ", " + I2S(g_tgCases[pt]) + " casi" + (causal ? "" : "; descrittivo, scelto a posteriori: differenze in parte meccaniche") + "]");
+      for(int fi = 0; fi < TG_NF; fi++)
+        {
+         double u = g_tgFn[pt * TG_NF + fi];
+         if(u < 30)
+            continue;
+         Grp(TG_FN[fi], 6);
+         R(g_repBias, "  " + TG_FN[fi] + ":");
+         for(int ci = 0; ci < TG_NCL[fi]; ci++)
+           {
+            int gx = (pt * TG_NF + fi) * TG_NC + ci;
+            W("<tr>" + TD(TG_FN[fi]) + TD(TG_CL[fi * TG_NC + ci]) + TD(I2S((int)u)) + TD(FP(g_tgFO[gx] / u, 1)) + TD(FP(g_tgFE[gx] / u, 1)) +
+              (causal ? TDc("z " + ZS(g_tgFZ[gx]) + BxMark(g_tgFt[gx]), PCol(g_tgFZ[gx], 0, 5)) : TD("z " + ZS(g_tgFZ[gx]))) + "</tr>");
+            R(g_repBias, "    " + TG_CL[fi * TG_NC + ci] + ": " + FP(g_tgFO[gx] / u, 1) + "% dei casi contro " + FP(g_tgFE[gx] / u, 1) + "% atteso (N " +
+              I2S((int)u) + ", z " + ZS(g_tgFZ[gx]) + BxMark(g_tgFt[gx]) + ")");
+           }
+        }
+      TEnd();
+      SecEnd();
+     }
+  }
+
+// i confronti del modulo Bias che sopravvivono al controllo FDR e sono stabili nelle due meta'
+int BxRobustCount(void)
+  {
+   int n = 0;
+   for(int t = 0; t < g_bxNT; t++)
+      if(g_bxTfd[t] && g_bxTst[t])
+         n++;
+   return n;
+  }
+
+string BxKindName(const int k)
+  {
+   if(k == 0)
+      return "Direzione: quanto spesso sale, rendimento medio, direzione dell'impulso";
+   if(k == 1)
+      return "Volatilit&agrave;: quanto si muove (range)";
+   if(k == 2)
+      return "Timing e struttura: massimo e minimo nel periodo, trend e mean reversion, giorno degli estremi della settimana, ora dell'impulso e degli estremi del giorno";
+   return "Cosa precede un impulso forte (condizioni note in anticipo)";
+  }
+
+void BxRobust(void)
+  {
+   int n = 0, nHint = 0;
+   double zz[];
+   int idx[];
+   ArrayResize(zz, g_bxNT);
+   ArrayResize(idx, g_bxNT);
+   for(int t = 0; t < g_bxNT; t++)
+     {
+      if(MathAbs(g_bxTz[t]) >= 2)
+         nHint++;
+      if(g_bxTfd[t] && g_bxTst[t])
+        {
+         zz[n] = MathAbs(g_bxTz[t]);
+         idx[n] = t;
+         n++;
+        }
+     }
+   int ord[];
+   EdOrder(zz, n, ord);
+   SecStart("Bias robusti",
+            "Su " + I2S(g_bxNT) + " confronti di questa scheda, " + I2S(nHint) + " superano |z| 2 e " + I2S(n) + " sopravvivono al controllo del tasso di falsi " +
+            "positivi (FDR 5%, Benjamini-Hochberg) <b>e</b> hanno lo stesso verso nelle due met&agrave; dello storico. Sono i soli bias di questa scheda che " +
+            "non si spiegano facilmente con il caso. Sono raggruppati per tipo: la <b>volatilit&agrave;</b> (ore e giorni pi&ugrave; o meno mossi) &egrave; quasi " +
+            "sempre robusta perch&eacute; l'attivit&agrave; ha un ritmo giornaliero forte, ma non d&agrave; una direzione; la <b>direzione</b> &egrave; quella " +
+            "che conta per un edge. Un bias descrittivo non &egrave; un edge: va tradotto in una regola, provato con i costi e verificato fuori campione.");
+   R(g_repBias, "");
+   R(g_repBias, "[Bias robusti: " + I2S(n) + " su " + I2S(g_bxNT) + " confronti (FDR 5% e stabili nelle due meta'); " + I2S(nHint) + " superano |z| 2]");
+   if(n == 0)
+     {
+      W("<p class='muted'>Nessun confronto supera insieme il controllo FDR e il test delle due met&agrave;.</p>");
+      R(g_repBias, "  nessuno");
+     }
+   else
+     {
+      int kord[4] = {0, 3, 2, 1};
+      int caps[4] = {20, 15, 12, 8};
+      for(int kk = 0; kk < 4; kk++)
+        {
+         int kind = kord[kk], cnt = 0, shown = 0;
+         for(int j = 0; j < n; j++)
+            if(g_bxTk[idx[ord[j]]] == kind)
+               cnt++;
+         R(g_repBias, "  " + BxKindName(kind) + " - " + I2S(cnt) + " robusti:");
+         if(cnt == 0)
+            continue;
+         W("<h3>" + BxKindName(kind) + " (" + I2S(cnt) + ")</h3>");
+         THead("z|Risultato");
+         for(int j = 0; j < n; j++)
+           {
+            int t = idx[ord[j]];
+            if(g_bxTk[t] != kind)
+               continue;
+            R(g_repBias, "    z " + ZS(g_bxTz[t]) + " | " + g_bxTtx[t]);
+            if(shown < caps[kk])
+              {
+               W("<tr>" + TDc(ZS(g_bxTz[t]), PCol(g_bxTz[t], 0, 6)) + "<td style='text-align:left;white-space:normal'>" + g_bxTtx[t] + "</td></tr>");
+               shown++;
+              }
+           }
+         TEnd();
+         if(cnt > shown)
+            W("<p class='muted'>Altri " + I2S(cnt - shown) + " nel testo Bias.</p>");
+        }
+     }
+   SecEnd();
+  }
+
+//+------------------------------------------------------------------+
+//| Scheda Bias e impulsi                                             |
+//+------------------------------------------------------------------+
+void BiasTab(CSeries &h1, CSeries &d1)
+  {
+   g_repBias = "";
+   HI_NAME[ED_MB] = "Bias del calendario: ogni categoria (ora, giorno, mese...) contro tutti i periodi, ora x giorno, massimo e minimo della settimana";
+   HI_NAME[ED_MT] = "Impulso piu' forte, massimo e minimo del giorno: a che ora avvengono (contro l'atteso) e cosa li precede (contro la stessa ora)";
+   R(g_repBias, "=== BIAS E IMPULSI ===");
+   if(h1.n < 5000 && d1.n < 500)
+     {
+      SecStart("Bias e impulsi", "");
+      W("<p class='muted'>Servono barre H1 e D1.</p>");
+      SecEnd();
+      R(g_repBias, "  non calcolato (servono barre H1 e D1)");
+      return;
+     }
+   MathSrand(777);
+   g_bxLast = h1.n > 0 ? h1.t[h1.n - 1] : (d1.n > 0 ? d1.t[d1.n - 1] : (datetime)0);
+   if(h1.n >= 2000)
+      BxVarProfile(h1);
+   int tl[11] = {1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12};
+   CBlocks b;
+   for(int k = 0; k < 11 && !IsStopped(); k++)
+     {
+      int tfi = tl[k];
+      bool ok = false;
+      if(tfi <= 7)
+         ok = h1.n > 50 && Build(tfi, 1, h1, b, 0);
+      else
+         ok = d1.n > 50 && Build(tfi, 2, d1, b, 0);
+      if(!ok)
+        {
+         b.Free();
+         continue;
+        }
+      datetime tMid = (datetime)((long)b.t0[0] + ((long)b.t0[b.N - 1] - (long)b.t0[0]) / 2);
+      BxDigest(tfi, b);
+      if(tfi != 7 && tfi != 12)
+         BxTf(tfi, b, tMid);
+      if(tfi == 1)
+         BxHeat(b, tMid);
+      if(tfi == 6)
+         BxYear(b);
+      b.Free();
+     }
+   if(h1.n >= 2000)
+     {
+      datetime tMidH = (datetime)((long)h1.t[0] + ((long)h1.t[h1.n - 1] - (long)h1.t[0]) / 2);
+      BxWeek(h1, tMidH);
+      TgRun(h1, tMidH);
+     }
+   //--- controllo FDR su tutti i confronti di ogni modulo, poi registrazione nel riepilogo generale
+   for(int mod = ED_MB; mod <= ED_MT; mod++)
+     {
+      double zz[];
+      int idx[];
+      int kk = 0;
+      ArrayResize(zz, g_bxNT);
+      ArrayResize(idx, g_bxNT);
+      for(int t = 0; t < g_bxNT; t++)
+         if(g_bxTm[t] == mod)
+           {
+            zz[kk] = g_bxTz[t];
+            idx[kk] = t;
+            kk++;
+           }
+      bool fl[];
+      EdBhFlags(zz, kk, (double)kk, 0.05, fl);
+      for(int j = 0; j < kk; j++)
+         g_bxTfd[idx[j]] = fl[j];
+     }
+   for(int t = 0; t < g_bxNT; t++)
+      Hi(g_bxTm[t], g_bxTz[t], g_bxTtx[t]);
+   //--- pagina
+   SecStart("Bias e impulsi: come leggere",
+            "Tendenze del prezzo per ora, blocchi di 4/6/8/12 ore, giorno della settimana, mese, trimestre e semestre; ora x giorno; giorno " +
+            "della settimana in cui cadono il massimo e il minimo della settimana; ora dell'impulso pi&ugrave; forte del giorno e del massimo e " +
+            "minimo del giorno; cosa li precede. Ogni valore &egrave; confrontato con un riferimento (tutti i periodi, la stessa ora negli altri " +
+            "giorni, un prezzo casuale) e ha uno <b>z</b> (entro &plusmn;2 compatibile con il caso). Poich&eacute; i confronti sono centinaia, " +
+            "molti supereranno |z| 2 per caso: per questo ogni risultato ha due controlli, il tasso di falsi positivi (FDR 5% su tutti i " +
+            "confronti di questa scheda) e la <b>stabilit&agrave;</b> (stesso verso nella prima e nella seconda met&agrave; dello storico). " +
+            "<b>&dagger;</b> = supera entrambi. Tutto quello che non ha il &dagger; va letto come rumore probabile. Gli orari sono quelli dei dati. " +
+            "I giorni e le ore dipendono dal fuso: con i dati del broker (New York + 7) il giorno va da NY 17:00 a NY 17:00.");
+   SecEnd();
+   BxRobust();
+   BxRenderTg();
+   int tll[9] = {1, 6, 2, 3, 4, 5, 9, 10, 11};
+   for(int k = 0; k < 9; k++)
+      BxRenderTf(tll[k]);
+   BxRenderHeat();
+   BxRenderWeek();
+   if(g_bxYr != "")
+     {
+      SecStart("Anno per anno (giorni)", "Come cambiano rialzisti, spostamento e tipo di giornata da un anno all'altro (descrittivo).");
+      W(g_bxYr);
+      SecEnd();
+      R(g_repBias, "");
+      R(g_repBias, g_bxYrTx);
+     }
+   if(g_bxDig != "")
+     {
+      SecStart("Carattere dei timeframe", "Spostamento tipico, direzione e persistenza per timeframe. L'ultima colonna dice quanto spesso il periodo successivo va " +
+               "nella stessa direzione, con z contro la sola prevalenza dei periodi rialzisti (positivo = momentum, negativo = mean reversion tra periodi).");
+      THead("Timeframe|Periodi|Spostamento mediano %|&asymp; prezzo|% rialzisti|% Trend|% Mean rev.|Restituito medio %|Periodo dopo nella stessa direzione");
+      W(g_bxDig);
+      TEnd();
+      SecEnd();
+      R(g_repBias, "");
+      R(g_repBias, "[Carattere dei timeframe]");
+      R(g_repBias, g_bxDigTx);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Scheda Sintesi edge                                               |
+//+------------------------------------------------------------------+
+#define ED_TOP 6   // combinazioni ORB mostrate tra le migliori in assoluto
+
+string EdMk(const int v)
+  {
+   if(v == 1)
+      return "<span style='color:" + C_GREEN + "'>&#10003;</span>";
+   if(v == 0)
+      return "<span style='color:" + C_RED + "'>&#10007;</span>";
+   return "<span class='muted'>&ndash;</span>";
+  }
+
+// cella di controllo: valore e simbolo; se il controllo non si applica solo il trattino
+string EdCk(const string v, const int ck) { return ck < 0 ? TD(EdMk(ck)) : TD(v + " " + EdMk(ck)); }
+
+string EdMkT(const int v) { return v == 1 ? "si" : (v == 0 ? "NO" : "n/d"); }
+string EdLvName(const int lv) { return lv == 3 ? "ROBUSTO" : (lv == 2 ? "PROMETTENTE" : (lv == 1 ? "INDIZIO" : "SCARTATO")); }
+string EdLvCol(const int lv) { return lv == 3 ? C_GREEN : (lv == 2 ? C_BLUE : (lv == 1 ? C_AMBER : C_GREY)); }
+
+// nel rapporto le entita' HTML sono decodificate dalla textarea (come nel resto dello script)
+string EdPlain(const string s) { return s; }
+
+// i migliori ORB in assoluto (z netto del broker peggiore), anche se non hanno superato i filtri delle regole
+void EdOrbTop(const double orbT)
+  {
+   int ntr = ArraySize(g_otN);
+   if(!InpOrb || ntr <= 0)
+      return;
+   int tt[ED_TOP];
+   double tz[ED_TOP];
+   int nt = 0;
+   for(int tr = 0; tr < ntr; tr++)
+     {
+      if(g_otN[tr] < 100 || !MathIsValidNumber(g_otZw[tr]) || g_osDay[tr / (3 * OB_NT) / g_obNF] < g_obMinDay)
+         continue;
+      double z = g_otZw[tr];
+      if(nt == ED_TOP && z <= tz[ED_TOP - 1])
+         continue;
+      int p = nt < ED_TOP ? nt : ED_TOP - 1;
+      while(p > 0 && tz[p - 1] < z)
+        {
+         tz[p] = tz[p - 1];
+         tt[p] = tt[p - 1];
+         p--;
+        }
+      tz[p] = z;
+      tt[p] = tr;
+      if(nt < ED_TOP)
+         nt++;
+     }
+   if(nt == 0)
+      return;
+   double zc = EdZCrit(0.05, orbT);
+   SecStart("ORB: le combinazioni migliori in assoluto",
+            "Le " + I2S(nt) + " combinazioni ORB con lo z netto del broker peggiore pi&ugrave; alto tra " + F(orbT, 0) + " confronti con almeno 100 trade " +
+            "(orari coperti). Per confronto: con questo numero di combinazioni la soglia di Bonferroni (5%) &egrave; z = " + F(zc, 1) +
+            "; la migliore di molte combinazioni correlate supera spesso z 3 per solo effetto della selezione. Servono stabilit&agrave; nelle due " +
+            "met&agrave;, vantaggio sul placebo, costo di pareggio sopra il costo del broker e, soprattutto, conferma fuori campione.");
+   THead("Combinazione e operazione|Trade|Netta peggiore R|z|Stabile|Placebo z|Costo di pareggio|Nelle regole");
+   R(g_repEdge, "");
+   R(g_repEdge, "[ORB: migliori in assoluto su " + F(orbT, 0) + " confronti (soglia di Bonferroni z " + F(zc, 1) + ")]");
+   for(int r = 0; r < nt; r++)
+     {
+      int tr = tt[r], t = (tr / 3) % OB_NT, sd = tr % 3, cf = tr / (3 * OB_NT);
+      bool inRule = false;
+      for(int q = 0; q < g_orN; q++)
+         if(g_orX[q] == tr)
+            inRule = true;
+      string lab = OB_OP[t] + " | " + ObCfLab(cf) + ", " + OB_SIDE[sd];
+      W("<tr><td style='text-align:left;white-space:normal'>" + lab + "</td>" + TD(I2S(g_otN[tr])) + TD(SgnF(g_otEw[tr], 3)) +
+        TDc(ZS(g_otZw[tr]), PCol(g_otZw[tr], 0, 5)) + TD(g_otSt[tr] ? "si" : "no") + TD(ZS(g_otZp[tr])) + TD(BpTxt(g_otBe[tr])) +
+        TD(inRule ? "s&igrave;" : "no") + "</tr>");
+      R(g_repEdge, "  " + EdPlain(lab) + ": " + I2S(g_otN[tr]) + " trade, netta peggiore " + SgnF(g_otEw[tr], 3) + " R, z " + ZS(g_otZw[tr]) +
+        (g_otSt[tr] ? ", stabile" : ", non stabile") + ", placebo z " + ZS(g_otZp[tr]) + ", costo di pareggio " + BpTxt(g_otBe[tr]) +
+        (inRule ? ", esportata come regola" : ""));
+     }
+   TEnd();
+   SecEnd();
+  }
+
+// riga della tabella per timeframe e categoria (-1 se assente)
+int EdRow(const int tfi, const int cat)
+  {
+   for(int r = 0; r < g_bxRN; r++)
+      if(g_bxRTf[r] == tfi && g_bxRCat[r] == cat)
+         return r;
+   return -1;
+  }
+
+// profilo compatto: 24 ore e giorni della settimana (direzione e volatilita')
+void EdProfile(void)
+  {
+   int rAll1 = EdRow(1, -1), rAll6 = EdRow(6, -1);
+   if(rAll1 < 0 && rAll6 < 0)
+      return;
+   SecStart("Profilo di ore e giorni",
+            "Sintesi delle tendenze del prezzo per ora del giorno e giorno della settimana (orario dei dati; tra parentesi l'ora della piazza di " +
+            "riferimento nelle schede complete). <b>Range</b> = movimento mediano in volte quello di tutte le ore; <b>% rialzista</b> = quota di barre " +
+            "che salgono, con lo z contro tutte le ore. &dagger; = robusto (FDR 5% e stabile nelle due met&agrave;). Il range dice <i>quando</i> il prezzo si muove, " +
+            "non in che direzione: solo la % rialzista e il rendimento riguardano la direzione.");
+   R(g_repEdge, "");
+   R(g_repEdge, "[Profilo di ore e giorni]");
+   if(rAll1 >= 0)
+     {
+      double medAll = g_bxRMed[rAll1];
+      string h1 = "<tr><th>Ora</th>", r1 = "<tr>" + TD("Range (volte la media)"), r2 = "<tr>" + TD("% rialzista"), tx1 = "  Ore, range (x media): ", tx2 = "  Ore, % rialzista (z): ";
+      for(int k = 0; k < 24; k++)
+        {
+         int r = EdRow(1, k);
+         h1 += "<th>" + StringFormat("%02d", k) + "</th>";
+         if(r < 0)
+           {
+            r1 += TD("&ndash;");
+            r2 += TD("&ndash;");
+            continue;
+           }
+         int b0 = r * BX_NM;
+         double ratio = (MathIsValidNumber(medAll) && medAll > 0) ? g_bxRMed[r] / medAll : Nan();
+         r1 += TDc(F(ratio, 2) + BxMark(g_bxRT[b0 + 2]), PCol(MathIsValidNumber(ratio) ? MathLog(ratio) : Nan(), 0, 0.5));
+         r2 += TDc(FP(g_bxRV[b0], 0) + " <small>" + ZS(g_bxRZ[b0]) + BxMark(g_bxRT[b0]) + "</small>", PCol(g_bxRZ[b0], 0, 5));
+         tx1 += StringFormat("%02d", k) + "h " + F(ratio, 2) + BxMark(g_bxRT[b0 + 2]) + "; ";
+         tx2 += StringFormat("%02d", k) + "h " + FP(g_bxRV[b0], 1) + "% (" + ZS(g_bxRZ[b0]) + BxMark(g_bxRT[b0]) + "); ";
+        }
+      W("<div class='tw'><table><thead>" + h1 + "</tr></thead><tbody>" + r1 + "</tr>" + r2 + "</tr></tbody></table></div>");
+      R(g_repEdge, tx1);
+      R(g_repEdge, tx2);
+     }
+   if(rAll6 >= 0)
+     {
+      double medAll = g_bxRMed[rAll6];
+      THead("Giorno|Periodi|% rialzista|Rendimento medio %|Range (volte la media)|Massimo nel primo terzo|Minimo nel primo terzo");
+      for(int k = 0; k < 7; k++)
+        {
+         int r = EdRow(6, k);
+         if(r < 0)
+            continue;
+         int b0 = r * BX_NM;
+         double ratio = (MathIsValidNumber(medAll) && medAll > 0) ? g_bxRMed[r] / medAll : Nan();
+         W("<tr>" + TD(g_bxRLb[r]) + TD(I2S(g_bxRn[r])) + BxCell(FP(g_bxRV[b0], 1), g_bxRZ[b0], g_bxRT[b0]) +
+           BxCell(FP(g_bxRV[b0 + 1], 3), g_bxRZ[b0 + 1], g_bxRT[b0 + 1]) + BxCell(F(ratio, 2), g_bxRZ[b0 + 2], g_bxRT[b0 + 2]) +
+           BxCell(FP(g_bxRV[b0 + 3], 0), g_bxRZ[b0 + 3], g_bxRT[b0 + 3]) + BxCell(FP(g_bxRV[b0 + 4], 0), g_bxRZ[b0 + 4], g_bxRT[b0 + 4]) + "</tr>");
+         R(g_repEdge, "  " + g_bxRLb[r] + " (" + I2S(g_bxRn[r]) + " giorni): rialzisti " + FP(g_bxRV[b0], 1) + "% (z " + ZS(g_bxRZ[b0]) + BxMark(g_bxRT[b0]) +
+           "), rendimento medio " + FP(g_bxRV[b0 + 1], 3) + "% (z " + ZS(g_bxRZ[b0 + 1]) + BxMark(g_bxRT[b0 + 1]) + "), range x" + F(ratio, 2) +
+           " (z " + ZS(g_bxRZ[b0 + 2]) + BxMark(g_bxRT[b0 + 2]) + "), massimo nel primo terzo " + FP(g_bxRV[b0 + 3], 0) + "%, minimo nel primo terzo " +
+           FP(g_bxRV[b0 + 4], 0) + "%");
+        }
+      TEnd();
+     }
+   SecEnd();
+  }
+
+// elenco dei bias robusti di un tipo (0 direzione, 1 volatilita', 2 timing, 3 cosa precede)
+void EdBiasKind(const int kind, const int cap)
+  {
+   int n = 0;
+   double zz[];
+   int idx[];
+   ArrayResize(zz, g_bxNT);
+   ArrayResize(idx, g_bxNT);
+   for(int t = 0; t < g_bxNT; t++)
+      if(g_bxTk[t] == kind && g_bxTfd[t] && g_bxTst[t])
+        {
+         zz[n] = MathAbs(g_bxTz[t]);
+         idx[n] = t;
+         n++;
+        }
+   int ord[];
+   EdOrder(zz, n, ord);
+   R(g_repEdge, "  " + BxKindName(kind) + ": " + I2S(n) + " robusti");
+   if(n == 0)
+     {
+      W("<p class='muted'><b>" + BxKindName(kind) + "</b>: nessun bias robusto.</p>");
+      return;
+     }
+   W("<h3>" + BxKindName(kind) + " (" + I2S(n) + " robusti)</h3>");
+   THead("z|Risultato");
+   for(int j = 0; j < n && j < cap; j++)
+     {
+      int t = idx[ord[j]];
+      W("<tr>" + TDc(ZS(g_bxTz[t]), PCol(g_bxTz[t], 0, 6)) + "<td style='text-align:left;white-space:normal'>" + g_bxTtx[t] + "</td></tr>");
+      R(g_repEdge, "    z " + ZS(g_bxTz[t]) + " | " + EdPlain(g_bxTtx[t]));
+     }
+   TEnd();
+   if(n > cap)
+     {
+      W("<p class='muted'>Altri " + I2S(n - cap) + " nella scheda Bias e impulsi.</p>");
+      R(g_repEdge, "    ... altri " + I2S(n - cap) + " nella scheda Bias e impulsi");
+     }
+  }
+
+// bias del momento: le categorie dell'ultima barra dei dati (giorno, ora, mese...) lette nelle tabelle storiche
+void EdNow(void)
+  {
+   if(g_bxLast <= 0 || g_bxRN == 0)
+      return;
+   MqlDateTime d;
+   TimeToStruct(g_bxLast, d);
+   int dw = DowMon(g_bxLast), hr = d.hour, mo = d.mon - 1;
+   int tf[7] = {6, 1, 2, 4, 9, 10, 11};
+   int ct[7] = {dw, hr, hr / 4, hr / 8, mo, mo / 3, mo / 6};
+   string lb[7] = {"Giorno della settimana", "Ora del giorno", "Blocco di 4 ore", "Blocco di 8 ore", "Mese", "Trimestre", "Semestre"};
+   bool any = false;
+   for(int k = 0; k < 7; k++)
+      if(EdRow(tf[k], ct[k]) >= 0)
+         any = true;
+   if(!any)
+      return;
+   SecStart("Bias del momento",
+            "Le categorie a cui appartiene l'ultima barra dei dati (" + TimeToString(g_bxLast, TIME_DATE | TIME_MINUTES) + ", " + DOW[dw] + "), lette nelle tabelle " +
+            "storiche: come si &egrave; comportato il prezzo in quel giorno, ora, mese, trimestre e semestre rispetto a tutti gli altri. &dagger; = robusto. " +
+            "&Egrave; contesto, non un segnale: un bias di calendario piccolo o non robusto non giustifica un'operazione.");
+   THead("Categoria|Valore|Periodi|% rialzista|Rendimento medio %|Range (volte la media)|Lettura");
+   R(g_repEdge, "");
+   R(g_repEdge, "[Bias del momento: ultima barra " + TimeToString(g_bxLast, TIME_DATE | TIME_MINUTES) + ", " + DOW[dw] + "]");
+   for(int k = 0; k < 7; k++)
+     {
+      int r = EdRow(tf[k], ct[k]), ra = EdRow(tf[k], -1);
+      if(r < 0)
+         continue;
+      int b0 = r * BX_NM;
+      double medAll = ra >= 0 ? g_bxRMed[ra] : Nan();
+      double ratio = (MathIsValidNumber(medAll) && medAll > 0) ? g_bxRMed[r] / medAll : Nan();
+      string rd = BxReadRow(r);
+      W("<tr>" + TD(lb[k]) + TD(g_bxRLb[r]) + TD(I2S(g_bxRn[r])) + BxCell(FP(g_bxRV[b0], 1), g_bxRZ[b0], g_bxRT[b0]) +
+        BxCell(FP(g_bxRV[b0 + 1], 3), g_bxRZ[b0 + 1], g_bxRT[b0 + 1]) + BxCell(F(ratio, 2), g_bxRZ[b0 + 2], g_bxRT[b0 + 2]) + TD(rd) + "</tr>");
+      R(g_repEdge, "  " + lb[k] + " " + g_bxRLb[r] + " (N " + I2S(g_bxRn[r]) + "): rialzisti " + FP(g_bxRV[b0], 1) + "% (z " + ZS(g_bxRZ[b0]) + BxMark(g_bxRT[b0]) +
+        "), rendimento medio " + FP(g_bxRV[b0 + 1], 3) + "% (z " + ZS(g_bxRZ[b0 + 1]) + BxMark(g_bxRT[b0 + 1]) + "), range x" + F(ratio, 2) + " (z " +
+        ZS(g_bxRZ[b0 + 2]) + BxMark(g_bxRT[b0 + 2]) + ") -> " + rd);
+     }
+   int c = hr * 7 + dw;
+   if(g_bxHn[c] >= 30)
+     {
+      W("<tr>" + TD("Ora x giorno") + TD(StringFormat("%02dh", hr) + " del " + DOW[dw]) + TD(I2S(g_bxHn[c])) + BxCell(FP(g_bxHu[c], 1), g_bxHzu[c], g_bxHtu[c]) +
+        TD("&ndash;") + BxCell(F(g_bxHr[c], 2), g_bxHzr[c], g_bxHtr[c]) + TD("contro la stessa ora negli altri giorni") + "</tr>");
+      R(g_repEdge, "  Ora x giorno " + StringFormat("%02dh", hr) + " del " + DOW[dw] + " (N " + I2S(g_bxHn[c]) + "): rialzista " + FP(g_bxHu[c], 1) + "% (z " +
+        ZS(g_bxHzu[c]) + BxMark(g_bxHtu[c]) + "), range x" + F(g_bxHr[c], 2) + " (z " + ZS(g_bxHzr[c]) + BxMark(g_bxHtr[c]) + ")");
+     }
+   TEnd();
+   SecEnd();
+  }
+
+void EdgeTab(const string sym)
+  {
+   g_repEdge = "";
+   EdgeAddOrb();
+   EdFdrAll();
+   int nC = g_edNC;
+   int lev[], cks[];
+   double mt[], sc[];
+   ArrayResize(lev, nC);
+   ArrayResize(cks, nC * 8);
+   ArrayResize(mt, nC);
+   ArrayResize(sc, nC);
+   int cnt[4];
+   ArrayInitialize(cnt, 0);
+   double orbT = EdOrbTests();
+   for(int i = 0; i < nC; i++)
+     {
+      mt[i] = EdTests(i, orbT);
+      int ck[];
+      lev[i] = EdChecks(i, mt[i], ck);
+      for(int k = 0; k < 8; k++)
+         cks[i * 8 + k] = ck[k];
+      sc[i] = (g_edKd[i] == 0 ? 0.0 : 1000.0) + lev[i] * 100.0 + MathMax(-50.0, MathMin(MathIsValidNumber(g_edZ[i]) ? g_edZ[i] : -50.0, 49.0));
+      if(g_edKd[i] != 0)
+         cnt[lev[i]]++;
+     }
+   double tests = 0, exp3 = 0;
+   int n3 = 0, nf = 0;
+   for(int m = 0; m < HI_NMOD; m++)
+     {
+      tests += g_hiCnt[m];
+      exp3 += 0.0027 * g_hiCnt[m];
+      n3 += g_edN3[m];
+      nf += g_edNfdr[m];
+     }
+   int bk[4], bt[4];
+   ArrayInitialize(bk, 0);
+   ArrayInitialize(bt, 0);
+   for(int t = 0; t < g_bxNT; t++)
+     {
+      bt[g_bxTk[t]]++;
+      if(g_bxTfd[t] && g_bxTst[t])
+         bk[g_bxTk[t]]++;
+     }
+   //--- pagina: testa e verdetto
+   R(g_repEdge, "SINTESI EDGE - " + sym);
+   SecStart("Sintesi: dove esiste un edge e dove no",
+            "Riassunto di tutte le schede. Un <b>edge</b> qui significa: una regola che con i costi del broker resta positiva, non si spiega con " +
+            "l'orario o con il semplice movimento del prezzo, ha lo stesso segno nelle due met&agrave; dello storico e regge al fatto che sono " +
+            "stati provati migliaia di contesti. Sotto trovi il verdetto, la tabella dei candidati con ogni controllo, cosa sopravvive ai test " +
+            "multipli in ogni area, i bias del calendario e i numeri di base da cui cercare tu stesso.");
+   W("<div class='kpi'>");
+   Kpi("Confronti statistici", I2S((int)tests), "in tutte le schede");
+   Kpi("Oltre z 3", I2S(n3), "attesi per solo caso: " + F(exp3, 0));
+   Kpi("Sopravvivono al controllo FDR", I2S(nf), "falsi positivi attesi al massimo 5%");
+   Kpi("Strategie robuste", I2S(cnt[3]), "superano tutti i controlli");
+   Kpi("Strategie promettenti", I2S(cnt[2]), "tutto tranne i test multipli");
+   Kpi("Indizi", I2S(cnt[1]), "positive e stabili, ma con un controllo non superato");
+   Kpi("Bias di direzione robusti", I2S(bk[0]), "su " + I2S(bt[0]) + " confronti (FDR e stabili)");
+   Kpi("Precursori di impulsi robusti", I2S(bk[3]), "su " + I2S(bt[3]) + " confronti");
+   Kpi("Bias di volatilit&agrave;", I2S(bk[1]), "ritmo dell'attivit&agrave;, non direzione");
+   W("</div>");
+   string head, col;
+   if(cnt[3] > 0)
+     {
+      head = "Almeno una strategia supera tutti i controlli, compresa la soglia dei test multipli. Non e' una garanzia: e' il punto di partenza per la verifica fuori campione.";
+      col = C_GREEN;
+     }
+   else
+      if(cnt[2] > 0)
+        {
+         head = "Nessuna strategia supera la soglia dei test multipli. " + I2S(cnt[2]) + " passano tutti gli altri controlli (promettenti): sono le sole da verificare fuori campione, sapendo che ognuna potrebbe essere la migliore di molti tentativi.";
+         col = C_BLUE;
+        }
+      else
+         if(cnt[1] > 0)
+           {
+            head = "Solo indizi: " + I2S(cnt[1]) + " strategie sono positive e stabili ma falliscono almeno un controllo (stessa ora, placebo, costo o test multipli). Cosi' non sono operabili.";
+            col = C_AMBER;
+           }
+         else
+           {
+            head = "Nessuna strategia supera i filtri: in questi dati, con questi costi, tra i contesti, le coppie e gli ORB provati non c'e' un edge operabile.";
+            col = C_RED;
+           }
+   string stat = "Confronti totali " + I2S((int)tests) + ". Oltre z 3 ne trovi " + I2S(n3) + " contro circa " + F(exp3, 0) + " attesi per puro caso (se i confronti fossero indipendenti); " +
+                 I2S(nf) + " sopravvivono al controllo FDR" + (bk[1] > 0 ? " (di cui " + I2S(bk[1]) + " solo volatilita', cioe' il ritmo giornaliero dell'attivita')" : "") + ". " +
+                 (n3 <= 1.5 * exp3 + 3 ? "Il numero di risultati forti e' compatibile con il caso: senza un controllo serio, quasi tutto quello che vedi nelle schede e' rumore." :
+                  "Ci sono piu' risultati forti di quanti ne darebbe il caso: guarda le aree con eccesso nella tabella sotto.");
+   string bs = bk[0] > 0 ? I2S(bk[0]) + " bias di DIREZIONE (ora, giorno, mese, ora x giorno) superano FDR e stabilita': sono ipotesi da trasformare in regola e verificare fuori campione." :
+               "Nessun bias di direzione (ora, giorno, mese, ora x giorno) supera insieme FDR e stabilita': la direzione del prezzo per calendario e' compatibile con il caso.";
+   bs += " Bias di volatilita': " + I2S(bk[1]) + " robusti (il prezzo si muove di piu' o di meno a certe ore e giorni: e' il ritmo dell'attivita', non da' una direzione)." +
+         " Cosa precede un impulso forte: " + I2S(bk[3]) + " condizioni robuste. Timing e struttura: " + I2S(bk[2]) + ".";
+   W("<div style='border-left:4px solid " + col + ";padding:10px 14px;background:#0f172a;margin:12px 0'><p><b>Verdetto.</b> " + head + "</p><p>" + stat + "</p><p>" + bs +
+     "</p></div>");
+   R(g_repEdge, "VERDETTO: " + head);
+   R(g_repEdge, "  " + stat);
+   R(g_repEdge, "  " + bs);
+   R(g_repEdge, "  Candidati (esclusi i riferimenti 'entra sempre'): robusti " + I2S(cnt[3]) + ", promettenti " + I2S(cnt[2]) + ", indizi " + I2S(cnt[1]) +
+     ", scartati " + I2S(cnt[0]));
+   SecEnd();
+   //--- scorecard dei candidati
+   SecStart("Strategie candidate: tutti i controlli",
+            "I candidati sono quelli scelti dalle altre schede: i contesti singoli e le coppie migliori di ogni timeframe simulati una posizione alla " +
+            "volta (R/R), le regole ORB scelte e il riferimento 'entra sempre'. Per ognuno, dal broker peggiore: <b>z netto &ge; 3</b>; " +
+            "<b>stabile</b> nelle due met&agrave;; <b>oltre la stessa ora</b> (il contesto aggiunge qualcosa all'orario, z &ge; 2); " +
+            "<b>direzione</b> (contro il placebo con direzione a caso, z &ge; 2); <b>costo</b> (il costo di pareggio in punti base &egrave; almeno 1,5 " +
+            "volte il costo del broker); <b>una alla volta</b> (R per trade positivo con una posizione alla volta e almeno il 60% di anni " +
+            "positivi); <b>test multipli</b> (z sopra la soglia di Bonferroni 5% per il numero di confronti da cui &egrave; stato scelto). " +
+            "Robusto = tutti i controlli; promettente = tutti tranne i test multipli; indizio = z &ge; 2, positivo, stabile e senza costi o " +
+            "posizione alla volta negativi. &ndash; = controllo non applicabile.");
+   if(nC == 0)
+     {
+      W("<p class='muted'>Nessun candidato: le schede Rischio/rendimento e ORB non hanno prodotto regole. Controlla che i dati M1 siano disponibili.</p>");
+      R(g_repEdge, "  Nessun candidato strategia.");
+     }
+   else
+     {
+      int ord[];
+      EdOrder(sc, nC, ord);
+      THead("Livello|Fonte|Timeframe|Operazione|Contesto|Trade|Netta peggiore R|z netto|Stabile|Oltre la stessa ora (z)|Direzione (placebo z)|" +
+            "Costo di pareggio / costo broker|Una alla volta|Test multipli (z / soglia)|Controlli");
+      R(g_repEdge, "");
+      R(g_repEdge, "[Strategie candidate: controlli. I = z netto>=3, II = stabile, III = oltre la stessa ora, IV = direzione (placebo), V = costo, VI = una alla volta, VII = test multipli]");
+      int shown = 0;
+      for(int j = 0; j < nC && shown < 40; j++)
+        {
+         int i = ord[j];
+         shown++;
+         int k0 = i * 8;
+         int okn = 0, apn = 0;
+         for(int k = 1; k < 8; k++)
+           {
+            if(cks[k0 + k] >= 0)
+               apn++;
+            if(cks[k0 + k] == 1)
+               okn++;
+           }
+         string lvn = g_edKd[i] == 0 ? "riferimento" : EdLvName(lev[i]);
+         string lvc = g_edKd[i] == 0 ? C_GREY : EdLvCol(lev[i]);
+         string seq = g_edKd[i] == 3 ? "un trade al giorno" : SgnF(g_edSe[i], 3) + " R, " + F(g_edTy[i], 0) + "/anno, anni + " + I2S(g_edYp[i]) + "/" + I2S(g_edYn[i]) +
+                      (g_edDk[i] == 0 ? ", perdite raggruppate" : "");
+         double zc = EdZCrit(0.05, mt[i]);
+         string costc = BpTxt(g_edBe[i]) + " / " + (MathIsValidNumber(g_edCb[i]) ? F(g_edCb[i], 2) + " pb" : "n/d");
+         W("<tr><td style='color:" + lvc + ";font-weight:600'>" + lvn + "</td>" + TD(g_edSrc[i]) + TD(g_edTf[i]) +
+           "<td style='text-align:left;white-space:normal;min-width:150px'>" + g_edOp[i] + "</td>" +
+           "<td style='text-align:left;white-space:normal;min-width:260px'>" + g_edCx[i] + "</td>" + TD(I2S(g_edN[i])) + TD(SgnF(g_edE[i], 3)) +
+           TDc(ZS(g_edZ[i]) + " " + EdMk(cks[k0 + 1]), PCol(g_edZ[i], 0, 5)) + TD(EdMk(cks[k0 + 2])) +
+           EdCk(ZS(g_edZh[i]), cks[k0 + 3]) + EdCk(ZS(g_edZp[i]), cks[k0 + 4]) + EdCk(costc, cks[k0 + 5]) +
+           EdCk(seq, cks[k0 + 6]) + EdCk(F(g_edZ[i], 1) + " / " + F(zc, 1), cks[k0 + 7]) + TD(I2S(okn) + "/" + I2S(apn)) + "</tr>");
+         R(g_repEdge, "  " + lvn + " | " + g_edSrc[i] + " " + g_edTf[i] + " " + g_edOp[i] + " | " + EdPlain(g_edCx[i]) + " | trade " + I2S(g_edN[i]) +
+           ", netta peggiore " + SgnF(g_edE[i], 3) + " R, z " + ZS(g_edZ[i]) + " (I " + EdMkT(cks[k0 + 1]) + "), stabile (II) " + EdMkT(cks[k0 + 2]) +
+           ", oltre la stessa ora z " + ZS(g_edZh[i]) + " (III " + EdMkT(cks[k0 + 3]) + "), placebo z " + ZS(g_edZp[i]) + " (IV " + EdMkT(cks[k0 + 4]) +
+           "), costo di pareggio " + BpTxt(g_edBe[i]) + " contro costo broker " + (MathIsValidNumber(g_edCb[i]) ? F(g_edCb[i], 2) + " pb" : "n/d") +
+           " (V " + EdMkT(cks[k0 + 5]) + "), una alla volta " + EdPlain(seq) + " (VI " + EdMkT(cks[k0 + 6]) + "), soglia Bonferroni z " + F(zc, 1) +
+           " su " + F(mt[i], 0) + " confronti (VII " + EdMkT(cks[k0 + 7]) + ")" + (g_edRl[i] > 0 ? ", regola " + I2S(g_edRl[i]) : ""));
+        }
+      TEnd();
+      if(nC > shown)
+         W("<p class='muted'>Altri " + I2S(nC - shown) + " candidati con punteggio pi&ugrave; basso non mostrati.</p>");
+     }
+   SecEnd();
+   EdOrbTop(orbT);
+   //--- cosa sopravvive ai test multipli, per area
+   SecStart("Cosa sopravvive ai test multipli, area per area",
+            "Per ogni area di analisi (i bias del calendario e degli impulsi sono nella sezione dedicata): quanti confronti, quanti superano z 3 (e quanti se ne aspettano per solo caso), quanti sopravvivono al " +
+            "controllo FDR (Benjamini-Hochberg 5%) e la soglia di z che serve per un test di Bonferroni 5% su quel numero di confronti. Tra i " +
+            "sopravvissuti, i pi&ugrave; forti. I confronti dentro un'area sono correlati (stessi giorni, stessi trade con obiettivi diversi): il " +
+            "numero di falsi positivi attesi &egrave; un ordine di grandezza.");
+   THead("Area|Confronti|Oltre z 3 (attesi)|Sopravvivono FDR|Soglia Bonferroni (z)|Risultato pi&ugrave; forte");
+   R(g_repEdge, "");
+   R(g_repEdge, "[Aree: confronti, oltre z 3 (attesi per caso), sopravvissuti al controllo FDR, soglia di Bonferroni, risultato piu' forte]");
+   for(int m = 0; m < HI_NMOD; m++)
+     {
+      if(HI_NAME[m] == "" || g_hiCnt[m] <= 0)
+         continue;
+      int bi = -1;
+      for(int i = 0; i < g_hiN; i++)
+         if(g_hiM[i] == m && (bi < 0 || MathAbs(g_hiZ[i]) > MathAbs(g_hiZ[bi])))
+            bi = i;
+      string best = bi >= 0 ? "z " + ZS(g_hiZ[bi]) + " | " + g_hiT[bi] : "nessun risultato oltre z 2";
+      W("<tr><td style='text-align:left;white-space:normal'>" + HI_NAME[m] + "</td>" + TD(I2S(g_hiCnt[m])) +
+        TDc(I2S(g_edN3[m]) + " (" + F(0.0027 * g_hiCnt[m], 1) + ")", g_edN3[m] > 3 * 0.0027 * g_hiCnt[m] + 2 ? "rgba(59,130,246,0.35)" : "") +
+        TDc(I2S(g_edNfdr[m]), g_edNfdr[m] > 0 ? "rgba(52,211,153,0.35)" : "") + TD(F(g_edZb[m], 2)) +
+        "<td style='text-align:left;white-space:normal'>" + best + "</td></tr>");
+      R(g_repEdge, "  " + EdPlain(HI_NAME[m]) + ": " + I2S(g_hiCnt[m]) + " confronti, oltre z 3: " + I2S(g_edN3[m]) + " (attesi " + F(0.0027 * g_hiCnt[m], 1) +
+        "), sopravvissuti FDR " + I2S(g_edNfdr[m]) + ", soglia di Bonferroni z " + F(g_edZb[m], 2) + "; piu' forte: " + EdPlain(best));
+     }
+   TEnd();
+   bool anySurv = false;
+   for(int m = 0; m < HI_NMOD; m++)
+      if(g_edNfdr[m] > 0 && HI_NAME[m] != "" && m != ED_MB && m != ED_MT)
+         anySurv = true;
+   if(anySurv)
+     {
+      W("<h3>Risultati che sopravvivono al controllo FDR (fino a 5 per area)</h3>");
+      THead("z|Risultato");
+      R(g_repEdge, "");
+      R(g_repEdge, "[Risultati che sopravvivono al controllo FDR, fino a 5 per area]");
+      for(int m = 0; m < HI_NMOD; m++)
+        {
+         if(g_edNfdr[m] <= 0 || HI_NAME[m] == "" || m == ED_MB || m == ED_MT)
+            continue;
+         int idx[];
+         double zz[];
+         int k = 0;
+         ArrayResize(idx, g_hiN);
+         ArrayResize(zz, g_hiN);
+         for(int i = 0; i < g_hiN; i++)
+            if(g_hiM[i] == m && g_edFdr[i])
+              {
+               idx[k] = i;
+               zz[k] = MathAbs(g_hiZ[i]);
+               k++;
+              }
+         int ord[];
+         EdOrder(zz, k, ord);
+         Grp(HI_NAME[m] + " (" + I2S(k) + " sopravvissuti)", 2);
+         R(g_repEdge, "  " + EdPlain(HI_NAME[m]) + " (" + I2S(k) + " sopravvissuti):");
+         for(int j = 0; j < k && j < 5; j++)
+           {
+            int i = idx[ord[j]];
+            W("<tr>" + TDc(ZS(g_hiZ[i]), PCol(g_hiZ[i], 0, 6)) + "<td style='text-align:left;white-space:normal'>" + g_hiT[i] + "</td></tr>");
+            R(g_repEdge, "    z " + ZS(g_hiZ[i]) + " | " + EdPlain(g_hiT[i]));
+           }
+        }
+      TEnd();
+     }
+   else
+     {
+      W("<p class='muted'>Nessun risultato delle altre aree (sessioni, livelli, direzione, R/R, ORB, persistenza, alto-basso) sopravvive al controllo FDR.</p>");
+      R(g_repEdge, "  Nessun risultato delle altre aree (sessioni, livelli, direzione, R/R, ORB, persistenza, alto-basso) sopravvive al controllo FDR.");
+     }
+   SecEnd();
+   //--- bias del momento, profilo e bias robusti
+   EdNow();
+   EdProfile();
+   if(g_bxNT > 0)
+     {
+      SecStart("Bias del calendario e degli impulsi: i robusti",
+               "I bias (ora, giorno, mese, trimestre, semestre, ora x giorno, giorno del massimo e minimo della settimana, ora dell'impulso pi&ugrave; forte e " +
+               "cosa lo precede) che superano il controllo FDR e sono stabili nelle due met&agrave; dello storico, per tipo. La <b>direzione</b> &egrave; " +
+               "quella che pu&ograve; diventare un edge; la <b>volatilit&agrave;</b> dice solo quando il prezzo si muove. Tutti i dati sono nella scheda " +
+               "Bias e impulsi.");
+      R(g_repEdge, "");
+      R(g_repEdge, "[Bias robusti per tipo (FDR 5% e stabili nelle due meta')]");
+      EdBiasKind(0, 12);
+      EdBiasKind(3, 8);
+      EdBiasKind(2, 6);
+      EdBiasKind(1, 5);
+      SecEnd();
+     }
+   //--- numeri di base
+   if(g_bxDig != "")
+     {
+      SecStart("Numeri di base per cercare da soli", "Spostamento tipico, direzione e persistenza per timeframe. Per i bias di ora, giorno, mese, " +
+               "trimestre e semestre: scheda Bias e impulsi; per il rischio/rendimento di ogni contesto: schede R/R.");
+      THead("Timeframe|Periodi|Spostamento mediano %|&asymp; prezzo|% rialzisti|% Trend|% Mean rev.|Restituito medio %|Periodo dopo nella stessa direzione");
+      W(g_bxDig);
+      TEnd();
+      SecEnd();
+      R(g_repEdge, "");
+      R(g_repEdge, "[Numeri di base per timeframe]");
+      R(g_repEdge, g_bxDigTx);
+     }
+   //--- come procedere
+   SecStart("Cosa fare con questi risultati",
+            "<ol><li>Parti dalle strategie <b>promettenti</b> e <b>robuste</b>, non dai singoli z pi&ugrave; alti: lo z pi&ugrave; alto di migliaia di prove &egrave; quasi sempre fortuna.</li>" +
+            "<li>Verifica fuori campione: esporta le regole (schede Strategie e ORB) e provale con MPRuleTester sui tick reali del broker, su un periodo " +
+            "successivo a quello dei dati analizzati. Una regola vera deve restare positiva l&igrave;.</li>" +
+            "<li>Guarda il costo: un vantaggio con costo di pareggio sotto il costo del broker non &egrave; operabile.</li>" +
+            "<li>Un bias del calendario (ora, giorno, mese) &egrave; un'ipotesi, non una regola: traducilo in una regola semplice, con stop e obiettivo, " +
+            "e sottoponilo agli stessi controlli.</li>" +
+            "<li>Se nessuna area supera i controlli, il risultato utile &egrave; questo: non c'&egrave; un edge semplice in questi dati con questi costi. " +
+            "Cambia strumento, timeframe o ipotesi, non la soglia.</li></ol>");
+   SecEnd();
+   R(g_repEdge, "");
+   R(g_repEdge, "COSA FARE: partire dalle strategie promettenti e robuste; verificare fuori campione con MPRuleTester (tick reali, periodo successivo ai dati); " +
+     "controllare che il costo di pareggio superi il costo del broker; trattare i bias del calendario come ipotesi da tradurre in regole e ritestare; " +
+     "se nessuna area supera i controlli non c'e' un edge semplice in questi dati: cambiare strumento, timeframe o ipotesi, non la soglia.");
+  }
+</script>
+<script>
+// Patch di MarketProfiler.mq5: ogni punto di aggancio deve comparire esattamente una volta
+var MP_MARK = 'MarketProfilerEdge.mqh - modulo aggiunto';
+
+var MP_PATCHES = [
+  { id: 1, name: 'Sezioni del riepilogo: 18 -> 20',
+    re: /#define\s+HI_NMOD\s+18\b/,
+    rep: function () { return '#define HI_NMOD 20'; } },
+  { id: 2, name: 'Nomi delle due nuove sezioni del riepilogo',
+    re: /\(coppia contro tutte le altre candele\)"\s*\}\s*;/,
+    rep: function () { return '(coppia contro tutte le altre candele)", "", ""};'; } },
+  { id: 3, name: 'Inserimento del modulo (prima di Analyze)',
+    re: /^\/\/\+-+\+[ \t]*\n\/\/\| Analisi di un simbolo/m,
+    rep: function (m, mod) { return mod + '\n\n' + m; } },
+  { id: 4, name: 'Azzeramento all\'inizio dell\'analisi',
+    re: /^([ \t]*)Comment\("MarketProfiler ", sym, ": costi dei broker \.\.\."\);/m,
+    rep: function (m, mod, g1) { return g1 + 'EdgeReset();\n' + m; } },
+  { id: 5, name: 'Raccolta dei candidati R/R',
+    re: /^([ \t]*)string ctl = \(MathIsValidNumber\(g_ckZh\[c\]\)/m,
+    rep: function (m, mod, g1) { return g1 + 'EdgeAddRR(nm, c, id, rs, ok);\n' + m; } },
+  { id: 6, name: 'Pulsante Sintesi edge',
+    re: /<button data-tab='overview'>Panoramica<\/button>/,
+    rep: function (m) { return "<button data-tab='edge'>Sintesi edge</button>" + m; } },
+  { id: 7, name: 'Pulsante Bias e impulsi',
+    re: /<button data-tab='mtf'>Alto &rarr; basso<\/button>/,
+    rep: function (m) { return m + "<button data-tab='bias'>Bias e impulsi</button>"; } },
+  { id: 8, name: 'Pulsante testo Sintesi edge',
+    re: /<button data-tab='report'>Rapporto completo<\/button>/,
+    rep: function (m) { return m + "<button data-tab='txedge'>Sintesi edge</button>"; } },
+  { id: 9, name: 'Pulsante testo Bias e impulsi',
+    re: /<button data-tab='txmtf'>Alto &rarr; basso<\/button>/,
+    rep: function (m) { return m + "<button data-tab='txbias'>Bias e impulsi</button>"; } },
+  { id: 10, name: 'Scheda Bias e impulsi',
+    re: /(MtfTab\(m5, 300\);\s*W\("<\/div>"\);)/,
+    rep: function (m) {
+      return m + '\n   Comment("MarketProfiler ", sym, ": bias e impulsi ...");\n   W("<div class=\'tab\' id=\'tab-bias\' hidden>");\n' +
+             '   BiasTab(h1, d1);\n   W("</div>");';
+    } },
+  { id: 11, name: 'Scheda Sintesi edge',
+    re: /HiTab\(\);(\s*)W\("<\/div><div class='tab' id='tab-report' hidden>"\);/,
+    rep: function (m, mod, g1) {
+      return 'HiTab();\n   W("</div><div class=\'tab\' id=\'tab-edge\' hidden>");\n   EdgeTab(sym);\n   W("</div><div class=\'tab\' id=\'tab-report\' hidden>");';
+    } },
+  { id: 12, name: 'Rapporto completo: sezione 0 (Sintesi edge)',
+    re: /W\(RepIndex\(\)\);/,
+    rep: function (m) {
+      return m + '\n   W("\\n=== 0. SINTESI EDGE: verdetto, candidati, test multipli, bias del momento, profilo e bias robusti ===\\n");\n   W(g_repEdge);';
+    } },
+  { id: 13, name: 'Rapporto completo: sezione 15 (Bias e impulsi)',
+    re: /W\(g_repMtf\);/,
+    rep: function (m) {
+      return m + '\n   W("\\n=== 15. BIAS E IMPULSI: ora, giorno, mese, trimestre, semestre; massimo e minimo della settimana; impulso piu\' forte, massimo e minimo del giorno e cosa li precede ===\\n");\n   W(g_repBias);';
+    } },
+  { id: 14, name: 'Schede di testo da copiare',
+    re: /^([ \t]*)TxTab\("txvol",/m,
+    rep: function (m, mod, g1) {
+      return g1 + 'TxTab("txedge", "Testo: sintesi edge", "Verdetto, candidati con tutti i controlli, test multipli, bias del momento, profilo di ore e giorni e bias robusti.", "SINTESI EDGE - " + sym + "\\n" + g_repEdge);\n' +
+             g1 + 'TxTab("txbias", "Testo: bias e impulsi", "Bias di ora, giorno, mese, trimestre e semestre; ora x giorno; massimo e minimo della settimana; impulso piu\' forte del giorno e cosa lo precede.", "BIAS E IMPULSI - " + sym + "\\n" + g_repBias);\n' + m;
+    } },
+  { id: 15, name: 'Scheda iniziale: Sintesi edge (apertura della pagina)',
+    re: /\)\)id='overview';/,
+    rep: function () { return "))id='edge';"; } },
+  { id: 16, name: 'Scheda iniziale: Sintesi edge (indirizzo senza scheda)',
+    re: /\|\|'overview'\);/,
+    rep: function () { return "||'edge');"; } },
+  { id: 17, name: 'Correzione: intestazione del Riepilogo con colonne sfalsate',
+    re: /Oltre \|z\| 3\|Attesi per caso\|Tra \|z\| 2 e 3\|Attesi per caso/,
+    rep: function () { return 'Oltre z 3|Attesi per caso|Tra z 2 e 3|Attesi per caso'; },
+    optional: true }
+];
+
+// applica tutte le patch; ritorna { ok, results[], text }
+function mpApply(src, moduleSrc) {
+  var text = src.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  var results = [];
+  if (text.indexOf(MP_MARK) >= 0 || /\bEdgeTab\s*\(\s*sym\s*\)/.test(text)) {
+    return { ok: false, already: true, results: results, text: '' };
+  }
+  var ok = true;
+  // prima verifica: ogni aggancio esattamente una volta
+  for (var i = 0; i < MP_PATCHES.length; i++) {
+    var p = MP_PATCHES[i];
+    var g = new RegExp(p.re.source, p.re.flags.replace('g', '') + 'g');
+    var found = text.match(g);
+    var n = found ? found.length : 0;
+    var st = n === 1 ? 'ok' : (n === 0 ? 'manca' : 'multiplo');
+    if (p.optional && n === 0) st = 'saltata';
+    results.push({ id: p.id, name: p.name, count: n, status: st });
+    if (st !== 'ok' && st !== 'saltata') ok = false;
+  }
+  if (!ok) return { ok: false, results: results, text: '' };
+  // seconda fase: applicazione (gli agganci sono indipendenti; il modulo entra per ultimo cosi' le altre patch non lo toccano)
+  var mod = '';
+  for (var j = 0; j < MP_PATCHES.length; j++) {
+    var q = MP_PATCHES[j];
+    if (q.id === 3) continue;
+    if (results[j].status !== 'ok') continue;
+    text = text.replace(q.re, function () {
+      var a = Array.prototype.slice.call(arguments);
+      var m = a[0];
+      var groups = a.slice(1, a.length - 2);
+      return q.rep.apply(null, [m, mod].concat(groups));
+    });
+  }
+  var pm = MP_PATCHES[2];
+  text = text.replace(pm.re, function (m) { return pm.rep(m, moduleSrc); });
+  return { ok: true, results: results, text: text };
+}
+
+if (typeof module !== 'undefined') module.exports = { MP_PATCHES: MP_PATCHES, mpApply: mpApply, MP_MARK: MP_MARK };
+
+</script>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var mod = $('modsrc').textContent.replace(/^\n/, '');
+  var modLinesN = mod.split('\n').length;
+  $('modLines').textContent = modLinesN.toLocaleString('it-IT');
+  $('modOut').value = mod;
+
+  function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+
+  // tabella delle modifiche a mano
+  var man = $('manual');
+  MP_PATCHES.forEach(function (p) {
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + p.id + '</td><td>' + esc(p.name) + (p.optional ? ' <span class="chip warn">facoltativa</span>' : '') +
+                   '</td><td><code>' + esc(p.re.source) + '</code></td>';
+    man.appendChild(tr);
+  });
+
+  function copyText(area, btn, label) {
+    var t = area.value;
+    var done = function () { var o = btn.textContent; btn.textContent = 'Copiato'; setTimeout(function () { btn.textContent = label || o; }, 1800); };
+    var fallback = function () { area.focus(); area.select(); try { document.execCommand('copy'); done(); } catch (e) { btn.textContent = 'Seleziona e copia a mano'; } };
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t).then(done, fallback); } else { fallback(); }
+  }
+  $('copyOut').addEventListener('click', function () { copyText($('out'), $('copyOut'), 'Copia il file completo'); });
+  $('copyMod').addEventListener('click', function () { copyText($('modOut'), $('copyMod'), 'Copia il modulo'); });
+
+  function info() {
+    var v = $('src').value;
+    $('srcInfo').textContent = v ? v.split('\n').length.toLocaleString('it-IT') + ' righe, ' + Math.round(v.length / 1024).toLocaleString('it-IT') + ' KB' : 'Nessun file caricato.';
+  }
+  $('src').addEventListener('input', info);
+  $('fileIn').addEventListener('change', function (e) {
+    var f = e.target.files && e.target.files[0];
+    if (!f) return;
+    var rd = new FileReader();
+    rd.onload = function () { $('src').value = String(rd.result).replace(/^﻿/, ''); info(); };
+    rd.readAsText(f);
+  });
+
+  function setStatus(kind, text) { var s = $('status'); s.className = 'msg ' + kind; s.textContent = text; s.hidden = false; }
+
+  $('apply').addEventListener('click', function () {
+    var src = $('src').value;
+    $('outCard').hidden = true;
+    $('tableWrap').hidden = true;
+    if (!src.trim()) { setStatus('warn', 'Incolla prima il codice di MarketProfiler.mq5.'); return; }
+    var r = mpApply(src, mod);
+    if (r.already) { setStatus('warn', 'Questo file contiene già il modulo (Sintesi edge / Bias e impulsi). Non applico nulla per non duplicarlo.'); return; }
+    var tb = $('tbody'); tb.innerHTML = '';
+    r.results.forEach(function (x) {
+      var tr = document.createElement('tr');
+      var chip = x.status === 'ok' ? '<span class="chip ok">ok</span>' : x.status === 'saltata' ? '<span class="chip warn">saltata</span>' :
+                 x.status === 'manca' ? '<span class="chip bad">non trovato</span>' : '<span class="chip bad">trovato più volte</span>';
+      tr.innerHTML = '<td>' + x.id + '</td><td>' + esc(x.name) + '</td><td>' + x.count + '</td><td>' + chip + '</td>';
+      tb.appendChild(tr);
+    });
+    $('tableWrap').hidden = false;
+    if (!r.ok) {
+      var bad = r.results.filter(function (x) { return x.status === 'manca' || x.status === 'multiplo'; }).length;
+      setStatus('bad', 'Non produco nessun file: ' + bad + ' punti di aggancio non corrispondono. Il file non è la versione attesa. Incollami questa tabella (o le righe indicate) e adeguo le modifiche.');
+      return;
+    }
+    var skipped = r.results.filter(function (x) { return x.status === 'saltata'; }).length;
+    $('out').value = r.text;
+    $('outInfo').textContent = r.text.split('\n').length.toLocaleString('it-IT') + ' righe, ' + Math.round(r.text.length / 1024).toLocaleString('it-IT') + ' KB (' +
+                               (r.text.split('\n').length - src.split(/\r?\n/).length).toLocaleString('it-IT') + ' righe in più)';
+    $('outCard').hidden = false;
+    setStatus('ok', 'Modifiche applicate' + (skipped ? ' (' + skipped + ' facoltativa/e non necessaria/e)' : '') + '. Il file completo è qui sotto.');
+    $('outCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+})();
+</script>
