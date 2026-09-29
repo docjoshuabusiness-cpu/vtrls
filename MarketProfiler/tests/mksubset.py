@@ -3,7 +3,7 @@
 import re, sys
 src = open(sys.argv[1], encoding='utf-8').read().split('\n')
 names = ['NthSunday', 'LastSunday', 'IsUSDST', 'IsEUDST', 'DataOffset', 'DataToNY7', 'RollPre', 'RollPost', 'RollWin', 'RollIn', 'RollHit7',
-         'HM', 'RollTxt', 'RollInC', 'LowerBound', 'CN', 'MktOffset']
+         'HM', 'RollTxt', 'RollInC', 'LowerBound', 'CN', 'MktOffset', 'TZName']
 out = []
 for nm in names:
     pat = re.compile(r'^(?:[A-Za-z_][\w<>&\*]*[ \t]+)+' + nm + r'[ \t]*\(')

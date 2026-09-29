@@ -168,6 +168,7 @@ inline datetime StructToTime(MqlDateTime &dt)
   {
    return _days_from_civil(dt.year, dt.mon, dt.day) * 86400LL + dt.hour * 3600LL + dt.min * 60LL + dt.sec;
   }
+inline datetime TimeLocal() { return (datetime)1790000000; }
 inline string TimeToString(datetime t, int fl = TIME_DATE | TIME_MINUTES)
   {
    MqlDateTime d; TimeToStruct(t, d); char b[64]; std::string r;

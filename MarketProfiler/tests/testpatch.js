@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { mpApply } = require('./patches.js');
 const src = fs.readFileSync(path.join(__dirname, '..', 'originale', 'MarketProfiler.mq5'), 'utf8');
-const mod = fs.readFileSync(path.join(__dirname, '..', 'MarketProfilerEdge.mqh'), 'utf8') + '\n\n' + fs.readFileSync(path.join(__dirname, '..', 'MarketProfilerCandle.mqh'), 'utf8');
+const mod = fs.readFileSync(path.join(__dirname, '..', 'MarketProfilerEdge.mqh'), 'utf8') + '\n\n' + fs.readFileSync(path.join(__dirname, '..', 'MarketProfilerCandle.mqh'), 'utf8') + '\n\n' + fs.readFileSync(path.join(__dirname, '..', 'MarketProfilerDash.mqh'), 'utf8');
 const r = mpApply(src, mod);
 console.log('ok', r.ok, r.already || '');
 r.results.forEach(x => console.log(x.id, x.status, x.count, x.name));

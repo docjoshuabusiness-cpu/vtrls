@@ -107,6 +107,20 @@ static void runCase(const char *name, const Cfg &cfg)
    clock_t c0 = clock();
    CandTab(b, cfg.m5 ? 300 : 60, S("TEST"));
    printf("CandTab: %.2f s, output %zu byte, testo %zu byte\n", (double)(clock() - c0) / CLOCKS_PER_SEC, g_out.size(), g_cxTxt.size() + g_cxTxtTf.size());
+   size_t o0 = g_out.size();
+   { std::ifstream ef("out_plant_edgejson.txt"); std::string ej((std::istreambuf_iterator<char>(ef)), std::istreambuf_iterator<char>()); g_edJson = ej; }
+   clock_t c1 = clock();
+   DashTab(S("TEST"));
+   std::string dash = g_out.substr(o0);
+   g_out.resize(o0);
+   printf("DashTab: %.2f s, output %zu byte\n", (double)(clock() - c1) / CLOCKS_PER_SEC, dash.size());
+   {
+      std::ifstream cf("css.txt"); std::string css((std::istreambuf_iterator<char>(cf)), std::istreambuf_iterator<char>());
+      std::ofstream f(std::string("out_") + name + "_dash.html");
+      f << "<!doctype html><html><head><meta charset='utf-8'><title>dash " << name << "</title><style>" << css << "</style></head><body><main>" << dash << "</main></body></html>";
+      size_t a = dash.find("id='cxd-data'>"); a += 14; size_t z = dash.find("</script>", a);
+      std::ofstream j(std::string("out_") + name + "_dash.json"); j << dash.substr(a, z - a);
+   }
    printf("confronti %lld, memorizzati (|z|>=2) %d, Hi %d, attesi |z|>=2 per caso %.0f\n", (long long)g_cxNAll, g_cxNT, g_hiN, g_cxNAll * 0.0455);
    int nfd = 0, nrob = 0, n3 = 0;
    for(int i = 0; i < g_cxNT; i++) { if(g_cxTfd[i]) nfd++; if(g_cxTfd[i] && g_cxTst[i]) nrob++; if(std::fabs(g_cxTz[i]) >= 3) n3++; }

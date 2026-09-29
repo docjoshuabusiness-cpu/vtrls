@@ -19,7 +19,7 @@ var MP_PATCHES = [
     rep: function (m, mod, g1) { return g1 + 'EdgeAddRR(nm, c, id, rs, ok);\n' + m; } },
   { id: 6, name: 'Pulsante Sintesi edge',
     re: /<button data-tab='overview'>Panoramica<\/button>/,
-    rep: function (m) { return "<button data-tab='edge'>Sintesi edge</button>" + m; } },
+    rep: function (m) { return "<button data-tab='dash'>Cruscotto</button><button data-tab='edge'>Sintesi edge</button>" + m; } },
   { id: 7, name: 'Pulsante Bias e impulsi',
     re: /<button data-tab='mtf'>Alto &rarr; basso<\/button>/,
     rep: function (m) { return m + "<button data-tab='bias'>Bias e impulsi</button><button data-tab='cand'>Candele</button>"; } },
@@ -40,7 +40,7 @@ var MP_PATCHES = [
   { id: 11, name: 'Scheda Sintesi edge',
     re: /HiTab\(\);(\s*)W\("<\/div><div class='tab' id='tab-report' hidden>"\);/,
     rep: function (m, mod, g1) {
-      return 'HiTab();\n   W("</div><div class=\'tab\' id=\'tab-edge\' hidden>");\n   EdgeTab(sym);\n   W("</div><div class=\'tab\' id=\'tab-report\' hidden>");';
+      return 'HiTab();\n   W("</div><div class=\'tab\' id=\'tab-edge\' hidden>");\n   EdgeTab(sym);\n   W("</div><div class=\'tab\' id=\'tab-dash\' hidden>");\n   DashTab(sym);\n   W("</div><div class=\'tab\' id=\'tab-report\' hidden>");';
     } },
   { id: 12, name: 'Rapporto completo: sezione 0 (Sintesi edge)',
     re: /W\(RepIndex\(\)\);/,
@@ -76,12 +76,12 @@ var MP_PATCHES = [
     rep: function (m, mod, g1) {
       return 'WT(g_txMtfAll);\n   W("\\n=== APPENDICE G. CANDELE: testo completo di ogni timeframe ===\\n");\n   W(g_cxTxtTf);' + g1 + 'W("</textarea>");';
     } },
-  { id: 15, name: 'Scheda iniziale: Sintesi edge (apertura della pagina)',
+  { id: 15, name: 'Scheda iniziale: Cruscotto (apertura della pagina)',
     re: /\)\)id='overview';/,
-    rep: function () { return "))id='edge';"; } },
-  { id: 16, name: 'Scheda iniziale: Sintesi edge (indirizzo senza scheda)',
+    rep: function () { return "))id='dash';"; } },
+  { id: 16, name: 'Scheda iniziale: Cruscotto (indirizzo senza scheda)',
     re: /\|\|'overview'\);/,
-    rep: function () { return "||'edge');"; } },
+    rep: function () { return "||'dash');"; } },
   { id: 17, name: 'Correzione: intestazione del Riepilogo con colonne sfalsate',
     re: /Oltre \|z\| 3\|Attesi per caso\|Tra \|z\| 2 e 3\|Attesi per caso/,
     rep: function () { return 'Oltre z 3|Attesi per caso|Tra z 2 e 3|Attesi per caso'; },

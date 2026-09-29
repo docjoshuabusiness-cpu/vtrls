@@ -187,6 +187,7 @@ static void runCase(const char *name, bool plant, int years, bool withFake, bool
    writeHtml(fn, S(name));
    std::ofstream t1(std::string("out_") + name + "_bias.txt"); t1 << g_repBias;
    std::ofstream t2(std::string("out_") + name + "_edge.txt"); t2 << g_repEdge;
+   std::ofstream t3(std::string("out_") + name + "_edgejson.txt"); t3 << g_edJson;
    printf("scritti %s (%zu byte) e testi\n", fn, g_out.size());
   }
 

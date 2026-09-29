@@ -29,6 +29,7 @@ input double InpEdRefCostBp = 0.0; // Sintesi edge: costo per trade in punti bas
 
 string g_repBias = "", g_repEdge = "";
 int    g_edCbSrc = 0;   // origine del costo usato nei controlli: 0 assente, 1 misurato dal broker, 2 riferimento manuale
+string g_edJson = "";   // sintesi edge in JSON per il Cruscotto (verdetto, conteggi, candidati migliori, bias robusti)
 
 //--- candidati strategia (R/R e ORB)
 int    g_edNC = 0;
@@ -2226,9 +2227,84 @@ void EdNow(void)
    SecEnd();
   }
 
+//--- JSON per il Cruscotto (modulo Dash): stringhe senza caratteri speciali (< > & e non ASCII in \\uXXXX), numeri senza zeri finali
+string EdJq(const string s)
+  {
+   int n = StringLen(s);
+   bool plain = true;
+   for(int i = 0; i < n && plain; i++)
+     {
+      ushort c = StringGetCharacter(s, i);
+      if(c < 32 || c > 126 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&')
+         plain = false;
+     }
+   if(plain)
+      return "\"" + s + "\"";
+   string hx = "0123456789abcdef";
+   string o = "\"";
+   for(int i = 0; i < n; i++)
+     {
+      ushort c = StringGetCharacter(s, i);
+      if(c < 32)
+         o += " ";
+      else
+         if(c > 126 || c == '<' || c == '>' || c == '&' || c == '"' || c == '\\')
+            o += "\\u" + StringSubstr(hx, (c >> 12) & 15, 1) + StringSubstr(hx, (c >> 8) & 15, 1) + StringSubstr(hx, (c >> 4) & 15, 1) + StringSubstr(hx, c & 15, 1);
+         else
+            o += StringSubstr(s, i, 1);
+     }
+   return o + "\"";
+  }
+
+string EdJn(const double x, const int d)
+  {
+   if(!MathIsValidNumber(x))
+      return "null";
+   string s = DoubleToString(x, d);
+   if(StringFind(s, ".") >= 0)
+     {
+      int n = StringLen(s);
+      while(n > 1 && StringGetCharacter(s, n - 1) == '0')
+         n--;
+      if(n > 1 && StringGetCharacter(s, n - 1) == '.')
+         n--;
+      s = StringSubstr(s, 0, n);
+     }
+   if(s == "-0")
+      s = "0";
+   return s;
+  }
+
+// bias robusti di un tipo (0 direzione, 1 volatilita', 2 timing, 3 cosa precede): [nome, robusti, [[z, testo], ...]]
+string EdJsBias(const int kind, const int cap)
+  {
+   int n = 0;
+   double zz[];
+   int idx[];
+   ArrayResize(zz, MathMax(1, g_bxNT));
+   ArrayResize(idx, MathMax(1, g_bxNT));
+   for(int t = 0; t < g_bxNT; t++)
+      if(g_bxTk[t] == kind && g_bxTfd[t] && g_bxTst[t])
+        {
+         zz[n] = MathAbs(g_bxTz[t]);
+         idx[n] = t;
+         n++;
+        }
+   int ord[];
+   EdOrder(zz, n, ord);
+   string r = "[" + EdJq(BxKindName(kind)) + "," + I2S(n) + ",[";
+   for(int j = 0; j < n && j < cap; j++)
+     {
+      int t = idx[ord[j]];
+      r += (j > 0 ? "," : "") + "[" + EdJn(g_bxTz[t], 1) + "," + EdJq(g_bxTtx[t]) + "]";
+     }
+   return r + "]]";
+  }
+
 void EdgeTab(const string sym)
   {
    g_repEdge = "";
+   g_edJson = "";
    EdgeAddOrb();
    EdFdrAll();
    double cbNow = EdCostBp();   // fissa anche l'origine del costo (g_edCbSrc)
@@ -2345,6 +2421,7 @@ void EdgeTab(const string sym)
                head = "Nessuna strategia supera i filtri: in questi dati, con questi costi, tra i contesti, le coppie e gli ORB provati non c'e' un edge operabile.";
                col = C_RED;
               }
+   string colc = col == C_GREEN ? "good" : (col == C_BLUE ? "info" : (col == C_AMBER ? "warn" : "bad"));
    string stat = "Confronti totali " + I2S((int)tests) + ". Oltre z 3 ne trovi " + I2S(n3) + " contro circa " + F(exp3, 0) + " attesi per puro caso (se i confronti fossero indipendenti); " +
                  I2S(nf) + " sopravvivono al controllo FDR" + (bk[1] > 0 ? " (di cui " + I2S(bk[1]) + " solo volatilita', cioe' il ritmo giornaliero dell'attivita')" : "") + ". " +
                  (n3 <= 1.5 * exp3 + 3 ? "Il numero di risultati forti e' compatibile con il caso: senza un controllo serio, quasi tutto quello che vedi nelle schede e' rumore." :
@@ -2366,6 +2443,8 @@ void EdgeTab(const string sym)
      ", scartati " + I2S(cnt[0]));
    SecEnd();
    //--- scorecard dei candidati
+   string topJ = "";
+   int nTopJ = 0;
    SecStart("Strategie candidate: tutti i controlli",
             "I candidati sono quelli scelti dalle altre schede: i contesti singoli e le coppie migliori di ogni timeframe simulati una posizione alla " +
             "volta (R/R), le regole ORB scelte e il riferimento 'entra sempre'. Per ognuno, dal broker peggiore: <b>z netto &ge; 3</b>; " +
@@ -2404,6 +2483,12 @@ void EdgeTab(const string sym)
                okn++;
            }
          string lvn = g_edKd[i] == 0 ? "riferimento" : EdLvName(lev[i]);
+         if(g_edKd[i] != 0 && nTopJ < 8)
+           {
+            topJ += (nTopJ > 0 ? "," : "") + "[" + EdJq(lvn) + "," + EdJq(g_edSrc[i]) + "," + EdJq(g_edTf[i]) + "," + EdJq(g_edOp[i]) + "," + EdJq(g_edCx[i]) + "," +
+                    I2S(g_edN[i]) + "," + EdJn(g_edE[i], 3) + "," + EdJn(g_edZ[i], 1) + "," + I2S(okn) + "," + I2S(apn) + "]";
+            nTopJ++;
+           }
          string lvc = g_edKd[i] == 0 ? C_GREY : EdLvCol(lev[i]);
          string seq = g_edKd[i] == 3 ? "un trade al giorno" : SgnF(g_edSe[i], 3) + " R, " + F(g_edTy[i], 0) + "/anno, anni + " + I2S(g_edYp[i]) + "/" + I2S(g_edYn[i]) +
                       (g_edDk[i] == 0 ? ", perdite raggruppate" : "");
@@ -2547,4 +2632,11 @@ void EdgeTab(const string sym)
    R(g_repEdge, "COSA FARE: partire dalle strategie promettenti e robuste; verificare fuori campione con MPRuleTester (tick reali, periodo successivo ai dati); " +
      "controllare che il costo di pareggio superi il costo del broker; trattare i bias del calendario come ipotesi da tradurre in regole e ritestare; " +
      "se nessuna area supera i controlli non c'e' un edge semplice in questi dati: cambiare strumento, timeframe o ipotesi, non la soglia.");
+   //--- dati per il Cruscotto
+   g_edJson = "{\"col\":" + EdJq(colc) + ",\"head\":" + EdJq(head) + ",\"stat\":" + EdJq(stat) + ",\"bs\":" + EdJq(bs) + (costWarn != "" ? ",\"warn\":" + EdJq(costWarn) : "") +
+              ",\"cnt\":[" + I2S(cnt[0]) + "," + I2S(cnt[1]) + "," + I2S(cnt[2]) + "," + I2S(cnt[3]) + "],\"cost\":" +
+              EdJq(g_edCbSrc == 0 ? "n/d" : F(cbNow, 2) + " pb") + ",\"costsrc\":" +
+              EdJq(g_edCbSrc == 0 ? "non misurato: risultati al lordo" : (g_edCbSrc == 1 ? "misurato, broker piu' caro" : "riferimento manuale")) +
+              ",\"tests\":" + I2S((int)tests) + ",\"n3\":" + I2S(n3) + ",\"exp3\":" + EdJn(exp3, 1) + ",\"fdr\":" + I2S(nf) +
+              ",\"top\":[" + topJ + "],\"bias\":[" + EdJsBias(0, 10) + "," + EdJsBias(3, 8) + "," + EdJsBias(2, 6) + "," + EdJsBias(1, 5) + "]}";
   }

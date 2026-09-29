@@ -1,14 +1,24 @@
-# MarketProfiler: moduli Edge e Candele
+# MarketProfiler: moduli Edge, Candele e Cruscotto
 
 Moduli aggiuntivi per `MarketProfiler.mq5` (script MT5 che scrive un report HTML per simbolo).
 
 ## File
-- `MarketProfiler.mq5`: **il file completo, pronto da usare**: il tuo MarketProfiler.mq5 con i moduli Edge 1.2 e Candele gia' integrati (20 punti di aggancio applicati). Si sostituisce per intero il contenuto del file in MetaEditor, poi F7.
+- `MarketProfiler.mq5`: **il file completo, pronto da usare**: il tuo MarketProfiler.mq5 con i moduli Edge 1.2, Candele e Cruscotto gia' integrati (20 punti di aggancio applicati). Si sostituisce per intero il contenuto del file in MetaEditor, poi F7.
 - `MarketProfilerEdge.mqh`: modulo **Sintesi edge** e **Bias e impulsi**.
 - `MarketProfilerCandle.mqh`: modulo **Candele** (tutti i 21 timeframe).
-- `MarketProfilerEdge_patch.html`: pagina che unisce i due moduli al tuo `MarketProfiler.mq5` (incolla, applica, copia il file completo).
+- `MarketProfilerDash.mqh`: modulo **Cruscotto** (generato da `dash/`: emettitore JSON in MQL5 piu' fogli di stile e programma del cruscotto come stringhe).
+- `dash/`: sorgenti del cruscotto: `dash.css`, `dash.js` (nessuna libreria esterna), `emit.mqh` (dati JSON e scheda), `build_dash_mqh.py` (li unisce in `MarketProfilerDash.mqh`).
+- `MarketProfilerEdge_patch.html`: pagina che unisce i tre moduli al tuo `MarketProfiler.mq5` (incolla, applica, copia il file completo).
 - `originale/MarketProfiler.mq5`: il file originale prima dei moduli (serve a ricostruire il completo).
 - `tests/`: banco di prova (vedi sotto).
+
+## Scheda Cruscotto (modulo Cruscotto)
+Si apre per prima. Un solo posto da cui leggere quello che e' stato trovato, senza scorrere le tabelle:
+- **Menu a tendina**: timeframe (21) e argomento. Argomenti: sintesi del timeframe; quando si muove (ora, minuto, giorno, settimana del mese, mese, trimestre, anno; range, impulsi, candele grandi, rialziste, rendimento); eventi piu' frequenti (primi 5, 10 o 15, ordinati per quota o per frequenza al giorno); pattern, forme e stati (gruppo, misura, ordinamento, numero di righe); cosa c'e' prima di un impulso; confronti robusti (per famiglia); confronto tra timeframe (mappa ora x timeframe); edge e strategie; file per l'analisi.
+- **In poche parole**: ogni argomento apre con il riassunto scritto (il valore piu' alto e piu' basso, quante categorie si scostano dal caso, quale confronto e' robusto).
+- **Grafici** con suggerimento al passaggio del puntatore e **tabella gemella** (pulsante Grafico/Tabella). Blu = sopra la media, rosso = sotto, colore pieno solo se |z| >= 2; † = robusto, § = solo controllo dei falsi positivi. Le misure di direzione sono disegnate come scostamento dalla media.
+- **File per l'analisi**: scelta dei timeframe (principali, tutti sotto il D1, tutti, uno solo, scelta libera) e del dettaglio (su dati sintetici, per timeframe: Minimo 5-10 KB, Essenziale 10-17 KB, Completo 20-30 KB; gli 8 timeframe principali al livello Minimo sono circa 40 KB), dimensione in caratteri e token stimati, pulsante Copia. Il testo e' JSON: incollandolo in chat lo si ricarica in un cruscotto identico a questo, con grafici e riassunti (`CXD.load`).
+- I dati stanno nella pagina (`<script type='application/json'>`): nessun file esterno, funziona offline.
 
 ## Scheda Candele (modulo Candele)
 Rapporto descrittivo su **tutti i 21 timeframe di MT5** (M1 M2 M3 M4 M5 M6 M10 M12 M15 M20 M30 H1 H2 H3 H4 H6 H8 H12 D1 W1 MN1), costruiti dai dati M1 (o M5) sull'orologio dei dati, con la settimana da domenica. Per ogni timeframe:
@@ -42,6 +52,7 @@ Il controllo V (costo di pareggio contro costo del broker) richiede i costi misu
 - Candele (`driver2.cpp`): effetti piantati (pin, mercoledi', volume prima degli impulsi), rumore iid e rumore con volatilita' persistente (zero falsi positivi di direzione e di precursori), domenica, buchi, senza volume, base M5, storico minimo, rollover acceso e spento.
 - Indicatori (`driver3.cpp`): candele, ATR, ADX, z-score, RVOL, VWAP, finestre di 20 candele ed esiti a 1 e 3 candele contro calcoli indipendenti (errori al limite della precisione a 32 bit).
 - Pattern e forme (`driver4.cpp`): candele costruite a mano.
+- Cruscotto (`tests/testdash.js`): apre la pagina prodotta da `DashTab` sui dati sintetici, percorre tutti i timeframe, le sezioni e le voci di ogni menu (oltre 1200 combinazioni) cercando errori, `NaN`, `undefined` e sbordamenti a 1300 e a 390 pixel; ricarica il file compatto di ogni livello; `testfake.js` lo prova dentro il guscio del report con la scheda nascosta all'avvio.
 - `build_full.js` ricostruisce il file completo; `make_patch_page.py` e `make_copy_page.py` rigenerano le pagine.
 
 ## Punti aperti
