@@ -2,12 +2,12 @@
 var MP_MARK = 'MarketProfilerEdge.mqh - modulo aggiunto';
 
 var MP_PATCHES = [
-  { id: 1, name: 'Sezioni del riepilogo: 18 -> 20',
+  { id: 1, name: 'Sezioni del riepilogo: 18 -> 21',
     re: /#define\s+HI_NMOD\s+18\b/,
-    rep: function () { return '#define HI_NMOD 20'; } },
-  { id: 2, name: 'Nomi delle due nuove sezioni del riepilogo',
+    rep: function () { return '#define HI_NMOD 21'; } },
+  { id: 2, name: 'Nomi delle tre nuove sezioni del riepilogo',
     re: /\(coppia contro tutte le altre candele\)"\s*\}\s*;/,
-    rep: function () { return '(coppia contro tutte le altre candele)", "", ""};'; } },
+    rep: function () { return '(coppia contro tutte le altre candele)", "", "", ""};'; } },
   { id: 3, name: 'Inserimento del modulo (prima di Analyze)',
     re: /^\/\/\+-+\+[ \t]*\n\/\/\| Analisi di un simbolo/m,
     rep: function (m, mod) { return mod + '\n\n' + m; } },
@@ -22,18 +22,20 @@ var MP_PATCHES = [
     rep: function (m) { return "<button data-tab='edge'>Sintesi edge</button>" + m; } },
   { id: 7, name: 'Pulsante Bias e impulsi',
     re: /<button data-tab='mtf'>Alto &rarr; basso<\/button>/,
-    rep: function (m) { return m + "<button data-tab='bias'>Bias e impulsi</button>"; } },
+    rep: function (m) { return m + "<button data-tab='bias'>Bias e impulsi</button><button data-tab='cand'>Candele</button>"; } },
   { id: 8, name: 'Pulsante testo Sintesi edge',
     re: /<button data-tab='report'>Rapporto completo<\/button>/,
     rep: function (m) { return m + "<button data-tab='txedge'>Sintesi edge</button>"; } },
   { id: 9, name: 'Pulsante testo Bias e impulsi',
     re: /<button data-tab='txmtf'>Alto &rarr; basso<\/button>/,
-    rep: function (m) { return m + "<button data-tab='txbias'>Bias e impulsi</button>"; } },
+    rep: function (m) { return m + "<button data-tab='txbias'>Bias e impulsi</button><button data-tab='txcand'>Candele</button><button data-tab='txcandtf'>Candele: ogni timeframe</button>"; } },
   { id: 10, name: 'Scheda Bias e impulsi',
     re: /(MtfTab\(m5, 300\);\s*W\("<\/div>"\);)/,
     rep: function (m) {
       return m + '\n   Comment("MarketProfiler ", sym, ": bias e impulsi ...");\n   W("<div class=\'tab\' id=\'tab-bias\' hidden>");\n' +
-             '   BiasTab(h1, d1);\n   W("</div>");';
+             '   BiasTab(h1, d1);\n   W("</div>");\n' +
+             '   Comment("MarketProfiler ", sym, ": candele su tutti i timeframe ...");\n   W("<div class=\'tab\' id=\'tab-cand\' hidden>");\n' +
+             '   if(m1.n > 5000)\n      CandTab(m1, 60, clean);\n   else\n      CandTab(m5, 300, clean);\n   W("</div>");';
     } },
   { id: 11, name: 'Scheda Sintesi edge',
     re: /HiTab\(\);(\s*)W\("<\/div><div class='tab' id='tab-report' hidden>"\);/,
@@ -48,13 +50,31 @@ var MP_PATCHES = [
   { id: 13, name: 'Rapporto completo: sezione 15 (Bias e impulsi)',
     re: /W\(g_repMtf\);/,
     rep: function (m) {
-      return m + '\n   W("\\n=== 15. BIAS E IMPULSI: ora, giorno, mese, trimestre, semestre; massimo e minimo della settimana; impulso piu\' forte, massimo e minimo del giorno e cosa li precede ===\\n");\n   W(g_repBias);';
+      return m + '\n   W("\\n=== 15. BIAS E IMPULSI: ora, giorno, mese, trimestre, semestre; massimo e minimo della settimana; impulso piu\' forte, massimo e minimo del giorno e cosa li precede ===\\n");\n   W(g_repBias);' +
+             '\n   W("\\n=== 16. CANDELE: tutti i 21 timeframe da M1 a MN1, riepilogo, quando si muove di piu\' e confronti robusti (il testo di ogni timeframe e\' nell\'appendice G) ===\\n");\n   W(g_cxTxt);';
     } },
   { id: 14, name: 'Schede di testo da copiare',
     re: /^([ \t]*)TxTab\("txvol",/m,
     rep: function (m, mod, g1) {
       return g1 + 'TxTab("txedge", "Testo: sintesi edge", "Verdetto, candidati con tutti i controlli, test multipli, bias del momento, profilo di ore e giorni e bias robusti.", "SINTESI EDGE - " + sym + "\\n" + g_repEdge);\n' +
-             g1 + 'TxTab("txbias", "Testo: bias e impulsi", "Bias di ora, giorno, mese, trimestre e semestre; ora x giorno; massimo e minimo della settimana; impulso piu\' forte del giorno e cosa lo precede.", "BIAS E IMPULSI - " + sym + "\\n" + g_repBias);\n' + m;
+             g1 + 'TxTab("txbias", "Testo: bias e impulsi", "Bias di ora, giorno, mese, trimestre e semestre; ora x giorno; massimo e minimo della settimana; impulso piu\' forte del giorno e cosa lo precede.", "BIAS E IMPULSI - " + sym + "\\n" + g_repBias);\n' +
+             g1 + 'TxTab("txcand", "Testo: candele", "Riepilogo dei 21 timeframe da M1 a MN1, quando si muove di piu\' timeframe per timeframe e i confronti piu\' solidi. Il testo completo di ogni timeframe e\' nella scheda successiva.", "CANDELE - " + sym + "\\n" + g_cxTxt);\n' +
+             g1 + 'TxTab("txcandtf", "Testo: candele, ogni timeframe", "Per ogni timeframe: confronti robusti, dove si muove di piu\', eventi piu\' frequenti, ora/minuto/giorno/settimana del mese/mese/trimestre/anno, forme, pattern, serie, stati, coppie e terne, impulsi e cosa li precede. Molto lungo: copia un timeframe alla volta dalla scheda Candele.", "CANDELE - TESTO DI OGNI TIMEFRAME - " + sym + "\\n" + g_cxTxtTf);\n' + m;
+    } },
+  { id: 18, name: 'Indice del rapporto: sezioni 0, 15 e 16',
+    re: /PARTE PRINCIPALE \(da leggere; per l'analisi in chat basta questa\)\\n"([\s\S]*?)"    14\. Dal timeframe alto al basso: stato della candela H4, D1 e settimanale e comportamento dei timeframe inferiori\\n" \+/,
+    rep: function (m, mod, g1) {
+      var a = m.replace("basta questa)\\n\"", "basta questa)\\n    0. Sintesi edge: verdetto, candidati strategia, test multipli, bias del momento, profilo di ore e giorni\\n\"");
+      return a + '\n        "    15. Bias e impulsi: ora, giorno, mese, trimestre, semestre; massimo e minimo della settimana; impulso piu\' forte del giorno e cosa lo precede\\n" +' +
+             '\n        "    16. Candele: tutti i 21 timeframe da M1 a MN1 (riepilogo, quando si muove di piu\', confronti robusti)\\n" +';
+    } },
+  { id: 19, name: 'Indice del rapporto: appendice G',
+    re: /F\. Dal timeframe alto al basso: tutte le coppie di stati\\n\\n"/,
+    rep: function () { return 'F. Dal timeframe alto al basso: tutte le coppie di stati\\n    G. Candele: testo completo di ogni timeframe\\n\\n"'; } },
+  { id: 20, name: 'Rapporto completo: appendice G (candele)',
+    re: /WT\(g_txMtfAll\);(\s*)W\("<\/textarea>"\);/,
+    rep: function (m, mod, g1) {
+      return 'WT(g_txMtfAll);\n   W("\\n=== APPENDICE G. CANDELE: testo completo di ogni timeframe ===\\n");\n   W(g_cxTxtTf);' + g1 + 'W("</textarea>");';
     } },
   { id: 15, name: 'Scheda iniziale: Sintesi edge (apertura della pagina)',
     re: /\)\)id='overview';/,

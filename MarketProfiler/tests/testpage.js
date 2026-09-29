@@ -1,0 +1,22 @@
+const { chromium } = require('/opt/node22/lib/node_modules/playwright');
+const fs = require('fs');
+(async () => {
+  const b = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
+  const p = await b.newPage({ viewport: { width: 1200, height: 900 } });
+  const errs = [];
+  p.on('pageerror', e => errs.push(String(e)));
+  await p.goto('file://' + require('path').resolve(__dirname, '..', 'MarketProfilerEdge_patch.html'));
+  const orig = fs.readFileSync(require('path').resolve(__dirname, '..', 'originale', 'MarketProfiler.mq5'), 'utf8');
+  await p.evaluate((t) => { const e = document.getElementById('src'); e.value = t; e.dispatchEvent(new Event('input', { bubbles: true })); }, orig);
+  await p.click('#apply');
+  await p.waitForTimeout(1500);
+  const out = await p.inputValue('#out');
+  const want = fs.readFileSync(require('path').resolve(__dirname, '..', 'MarketProfiler.mq5'), 'utf8');
+  const st = await p.textContent('#status');
+  console.log('stato:', st.trim().slice(0, 120));
+  console.log('uguale al file completo:', out === want, out.length, want.length);
+  require('fs').writeFileSync('/tmp/pageout.mq5', out);
+  console.log('errori pagina:', JSON.stringify(errs));
+  await p.screenshot({ path: '/tmp/patchpage.png' });
+  await b.close();
+})();

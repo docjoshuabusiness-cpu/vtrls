@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //| MarketProfilerEdge.mqh - modulo aggiunto a MarketProfiler.mq5     |
 //| Schede 'Sintesi edge' e 'Bias e impulsi'.                         |
-//| Versione 1.1. Testato in un banco di prova C++ (MQL5 tradotto)    |
+//| Versione 1.2. Testato in un banco di prova C++ (MQL5 tradotto)    |
 //| su serie sintetiche: nessun avviso del compilatore, nessun        |
 //| indice fuori limite, calibrazione dei falsi positivi verificata.  |
 //+------------------------------------------------------------------+
@@ -17,6 +17,7 @@
 //+------------------------------------------------------------------+
 #define ED_MB   18   // modulo del riepilogo: bias del calendario
 #define ED_MT   19   // modulo del riepilogo: impulso piu' forte, massimo e minimo del giorno
+#define ED_MC   20   // modulo del riepilogo: scheda Candele (21 timeframe)
 #define BX_NA   14   // accumulatori per categoria e meta' del campione
 #define BX_NM   8    // metriche per riga di tabella
 #define TG_NT   3    // bersagli del 'quando': impulso piu' forte, massimo, minimo del giorno
@@ -1979,6 +1980,7 @@ void BiasTab(CSeries &h1, CSeries &d1)
 //+------------------------------------------------------------------+
 //| Scheda Sintesi edge                                               |
 //+------------------------------------------------------------------+
+void CxEdgeBlock(void);   // blocco della scheda Candele (modulo Candele)
 #define ED_TOP 6   // combinazioni ORB mostrate tra le migliori in assoluto
 
 string EdMk(const int v)
@@ -2265,6 +2267,8 @@ void EdgeTab(const string sym)
    int n3 = 0, nf = 0;
    for(int m = 0; m < HI_NMOD; m++)
      {
+      if(m == ED_MC)
+         continue;   // la scheda Candele (descrittiva, migliaia di confronti correlati) ha un blocco a parte
       tests += g_hiCnt[m];
       exp3 += 0.0027 * g_hiCnt[m];
       n3 += g_edN3[m];
@@ -2452,7 +2456,7 @@ void EdgeTab(const string sym)
    TEnd();
    bool anySurv = false;
    for(int m = 0; m < HI_NMOD; m++)
-      if(g_edNfdr[m] > 0 && HI_NAME[m] != "" && m != ED_MB && m != ED_MT)
+      if(g_edNfdr[m] > 0 && HI_NAME[m] != "" && m != ED_MB && m != ED_MT && m != ED_MC)
          anySurv = true;
    if(anySurv)
      {
@@ -2462,7 +2466,7 @@ void EdgeTab(const string sym)
       R(g_repEdge, "[Risultati che sopravvivono al controllo FDR, fino a 5 per area]");
       for(int m = 0; m < HI_NMOD; m++)
         {
-         if(g_edNfdr[m] <= 0 || HI_NAME[m] == "" || m == ED_MB || m == ED_MT)
+         if(g_edNfdr[m] <= 0 || HI_NAME[m] == "" || m == ED_MB || m == ED_MT || m == ED_MC)
             continue;
          int idx[];
          double zz[];
@@ -2513,6 +2517,7 @@ void EdgeTab(const string sym)
       EdBiasKind(1, 5);
       SecEnd();
      }
+   CxEdgeBlock();
    //--- numeri di base
    if(g_bxDig != "")
      {

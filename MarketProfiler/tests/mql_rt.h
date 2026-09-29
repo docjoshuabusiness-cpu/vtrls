@@ -175,3 +175,21 @@ inline string TimeToString(datetime t, int fl = TIME_DATE | TIME_MINUTES)
    if(fl & TIME_MINUTES) { snprintf(b, sizeof b, "%s%02d:%02d", r.empty() ? "" : " ", d.hour, d.min); r += b; }
    return string(r);
   }
+
+// file: scrittura reale nella cartella corrente (prefisso out_) per ispezionare i CSV
+#define FILE_WRITE 1
+#define FILE_TXT 2
+#define FILE_ANSI 4
+#define FILE_COMMON 8
+#define TERMINAL_COMMONDATA_PATH 1
+#define TERMINAL_DATA_PATH 2
+static FILE *g_files[16];
+inline int FileOpen(const string &n, int)
+  {
+   for(int i = 0; i < 16; i++)
+      if(!g_files[i]) { g_files[i] = fopen(("out_" + std::string(n)).c_str(), "w"); return g_files[i] ? i : -1; }
+   return -1;
+  }
+inline uint FileWriteString(int h, const string &s) { if(h < 0 || h >= 16 || !g_files[h]) return 0; fputs(s.c_str(), g_files[h]); return (uint)s.size(); }
+inline void FileClose(int h) { if(h >= 0 && h < 16 && g_files[h]) { fclose(g_files[h]); g_files[h] = nullptr; } }
+inline string TerminalInfoString(int) { return string("C:\\Test"); }

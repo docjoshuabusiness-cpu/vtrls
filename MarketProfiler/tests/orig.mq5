@@ -8,8 +8,17 @@
 #define C_AMBER "#f59e0b"
 #define C_GREEN "#34d399"
 #define NPRF 3
-#define HI_NMOD 20
+#define HI_NMOD 21
 #define OB_NT 7
+
+enum ENUM_DATA_TZ { TZ_BROKER_NY7 = 0, TZ_UTC = 1, TZ_EUROPE = 2, TZ_FIXED = 3 };
+input ENUM_DATA_TZ InpDataTZ = TZ_BROKER_NY7;
+input int    InpDataGMT = 2;
+input bool   InpRollSkip = true;
+input int    InpRollPre = 15;
+input int    InpRollPost = 60;
+input double InpImpulsePct = 99.5;
+input bool   InpCommonDir = false;
 
 string TF_KEY[NTF]   = {"min", "h1", "h4", "h6", "h8", "h12", "d", "w", "w2", "mo", "q", "s", "y"};
 string TF_LABEL[NTF] = {"Minuto", "Ora", "4 ore", "6 ore", "8 ore", "12 ore", "Giorno", "Settimana",
@@ -118,7 +127,7 @@ string HI_NAME[HI_NMOD] = {"Sessioni e orari chiave (reale contro atteso con dir
                            "Persistenza per timeframe",
                            "Persistenza per ora del giorno",
                            "Timeframe alto -> basso: stati singoli della candela alta",
-                           "Timeframe alto -> basso: coppie di stati della candela alta", "", ""};
+                           "Timeframe alto -> basso: coppie di stati della candela alta", "", "", ""};
 int    g_hiCnt[HI_NMOD];
 int    g_hiN = 0;
 int    g_hiM[];
