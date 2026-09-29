@@ -1,0 +1,73 @@
+<title>Cruscotto candele</title>
+<style>
+/* Strumento di lettura: intestazione sottile, il cruscotto occupa la pagina. Blu = sopra il riferimento, rosso = sotto (coppia validata per daltonismo, chiaro e scuro). */
+:root{--c-bg:#f4f5f7;--c-card:#ffffff;--c-fg:#17202d;--c-mut:#5a6473;--c-line:#dde1e8;--c-axis:#b4bcc9;
+  --c-s1:#2563c9;--c-s1-dim:#a8c1ec;--c-neg:#c8402f;--c-neg-dim:#eab1aa;--c-heat0:#e7ebf1;--c-on-s1:#ffffff;
+  --c-warn:#b7791f;--c-good:#1a8a40;--c-crit:#c62f2f;--c-tip:#ffffff;--c-pos-t:#1d4fa8;--c-neg-t:#a52a1c;--c-good-t:#17703a}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--c-bg:#0e1218;--c-card:#151b24;--c-fg:#e6eaf0;--c-mut:#98a2b3;--c-line:#232b37;--c-axis:#3a4557;
+  --c-s1:#3987e5;--c-s1-dim:#26466f;--c-neg:#e66767;--c-neg-dim:#6b3a3a;--c-heat0:#1b222d;--c-on-s1:#08121f;
+  --c-warn:#fab219;--c-good:#2cb67d;--c-crit:#e0524f;--c-tip:#0b0f17;--c-pos-t:#8ab4f8;--c-neg-t:#f28b82;--c-good-t:#34d399;color-scheme:dark}}
+:root[data-theme="dark"]{--c-bg:#0e1218;--c-card:#151b24;--c-fg:#e6eaf0;--c-mut:#98a2b3;--c-line:#232b37;--c-axis:#3a4557;
+  --c-s1:#3987e5;--c-s1-dim:#26466f;--c-neg:#e66767;--c-neg-dim:#6b3a3a;--c-heat0:#1b222d;--c-on-s1:#08121f;
+  --c-warn:#fab219;--c-good:#2cb67d;--c-crit:#e0524f;--c-tip:#0b0f17;--c-pos-t:#8ab4f8;--c-neg-t:#f28b82;--c-good-t:#34d399;color-scheme:dark}
+body{background:var(--c-bg);color:var(--c-fg);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1400px;margin:0 auto;padding-inline:16px;padding-block:18px 32px;display:flex;flex-direction:column;gap:14px}
+.top{display:flex;flex-wrap:wrap;gap:10px 24px;align-items:flex-start;justify-content:space-between}
+.top h1{margin:0;font-size:22px;line-height:1.2;letter-spacing:-.01em;text-wrap:balance}
+.top p{margin:2px 0 0;color:var(--c-mut);max-width:60ch}
+.load{min-width:0;flex:1 1 320px;max-width:560px}
+.load summary{cursor:pointer;font-weight:600;color:var(--c-pos-t);width:max-content;padding:4px 0}
+.load summary:focus-visible,.load button:focus-visible,.load textarea:focus-visible{outline:2px solid var(--c-s1);outline-offset:2px}
+.load label{display:block;margin:8px 0 4px;font-size:12px;color:var(--c-mut)}
+.load textarea{width:100%;height:110px;font:12px/1.4 ui-monospace,Consolas,monospace;color:var(--c-fg);background:var(--c-card);border:1px solid var(--c-axis);border-radius:8px;padding:8px 10px;resize:vertical}
+.load .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:8px}
+.load button{font:inherit;font-weight:600;color:var(--c-on-s1);background:var(--c-s1);border:1px solid var(--c-s1);border-radius:8px;padding:7px 14px;cursor:pointer}
+.load #msg{font-size:13px;color:var(--c-mut)}
+.load #msg.err{color:var(--c-neg-t)}
+.demo{margin:0;border-left:4px solid var(--c-warn);background:var(--c-card);border-radius:0 10px 10px 0;padding:9px 14px}
+</style>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Cruscotto candele</h1>
+      <p>Grafici e riassunti dal file che copi dal Cruscotto di MarketProfiler. Scegli il timeframe e l’argomento dai menu.</p>
+    </div>
+    <details class="load" id="loader">
+      <summary>Carica un file</summary>
+      <label for="paste">Incolla qui il testo copiato dal Cruscotto del report (sezione “File per l’analisi”)</label>
+      <textarea id="paste" spellcheck="false" placeholder='{"v":1,"app":"MarketProfiler-cruscotto", ...'></textarea>
+      <div class="row"><button id="show" type="button">Mostra</button><span id="msg" role="status"></span></div>
+    </details>
+  </header>
+  <p class="demo" id="demo" hidden><b>Dati di esempio.</b> Serie sintetica generata al computer per provare il cruscotto: non è un mercato reale. Carica il tuo file per vedere i tuoi numeri.</p>
+  <div class="cxd" id="cxd"></div>
+</div>
+<script type="application/json" id="file-data">/*DATA*/</script>
+<style>/*CSS*/</style>
+<script>/*JS*/</script>
+<script>
+(function () {
+  var msg = document.getElementById('msg'), demo = document.getElementById('demo'), ta = document.getElementById('paste');
+  function parse(t) {
+    t = String(t || '').trim();
+    var a = t.indexOf('{'), b = t.lastIndexOf('}');
+    if (a < 0 || b < a) throw new Error('Non trovo il file: incolla tutto il testo, dalla prima { all’ultima }.');
+    var o = JSON.parse(t.slice(a, b + 1));
+    if (o.app !== 'MarketProfiler-cruscotto' || !Array.isArray(o.tfs)) throw new Error('Il testo non è un file del cruscotto di MarketProfiler.');
+    return o;
+  }
+  function show(o) { CXD.load(o); demo.hidden = !o.demo; }
+  function say(text, err) { msg.textContent = text; msg.className = err ? 'err' : ''; }
+  function tryLoad(fromPaste) {
+    try {
+      var o = parse(ta.value);
+      show(o);
+      say('Caricato: ' + (o.sym || '') + ', ' + o.tfs.length + ' timeframe.', false);
+      document.getElementById('cxd').scrollIntoView({ block: 'start' });
+    } catch (e) { if (!fromPaste) say(e.message, true); }
+  }
+  document.getElementById('show').addEventListener('click', function () { tryLoad(false); });
+  ta.addEventListener('paste', function () { setTimeout(function () { tryLoad(true); }, 60); });
+  try { show(JSON.parse(document.getElementById('file-data').textContent)); } catch (e) { say('Dati incorporati non leggibili: ' + e.message, true); }
+})();
+</script>

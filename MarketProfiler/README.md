@@ -18,6 +18,7 @@ Si apre per prima. Un solo posto da cui leggere quello che e' stato trovato, sen
 - **In poche parole**: ogni argomento apre con il riassunto scritto (il valore piu' alto e piu' basso, quante categorie si scostano dal caso, quale confronto e' robusto).
 - **Grafici** con suggerimento al passaggio del puntatore e **tabella gemella** (pulsante Grafico/Tabella). Blu = sopra la media, rosso = sotto, colore pieno solo se |z| >= 2; † = robusto, § = solo controllo dei falsi positivi. Le misure di direzione sono disegnate come scostamento dalla media.
 - **File per l'analisi**: scelta dei timeframe (principali, tutti sotto il D1, tutti, uno solo, scelta libera) e del dettaglio (su dati sintetici, per timeframe: Minimo 5-10 KB, Essenziale 10-17 KB, Completo 20-30 KB; gli 8 timeframe principali al livello Minimo sono circa 40 KB), dimensione in caratteri e token stimati, pulsante Copia. Il testo e' JSON: incollandolo in chat lo si ricarica in un cruscotto identico a questo, con grafici e riassunti (`CXD.load`).
+- **Visualizzatore** (`dash/viewer.html`, costruito da `dash/make_viewer.py file.json pagina.html`): pagina autonoma con lo stesso cruscotto e una casella per incollare il file copiato; quando il testo incollato e' valido lo mostra subito.
 - I dati stanno nella pagina (`<script type='application/json'>`): nessun file esterno, funziona offline.
 
 ## Scheda Candele (modulo Candele)
