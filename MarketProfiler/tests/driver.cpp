@@ -139,9 +139,16 @@ static void runCase(const char *name, bool plant, int years, bool withFake, bool
    }
    if(withFake)
      {
-      // costi
-      g_cp[1].on = true; g_cp[1].name = S("FP Markets"); g_cp[1].comm = 0; g_cp[1].slip = 0;
-      for(int h = 0; h < 24; h++) { g_cp[1].sp[h] = 0.5; g_cp[1].spOk[h] = true; }
+      // costi: COSTMODE = broker (default, spread 0.5), none (nessun profilo: costo n/d), zero (profilo con spread nullo), ref (solo InpEdRefCostBp = 0.5 pb)
+      const char *cmEnv = getenv("COSTMODE");
+      std::string costMode = cmEnv ? cmEnv : "broker";
+      printf("COSTMODE %s\n", costMode.c_str());
+      if(costMode == "broker" || costMode == "zero")
+        {
+         g_cp[1].on = true; g_cp[1].name = S("FP Markets"); g_cp[1].comm = 0; g_cp[1].slip = 0;
+         for(int h = 0; h < 24; h++) { g_cp[1].sp[h] = costMode == "zero" ? 0.0 : 0.5; g_cp[1].spOk[h] = true; }
+        }
+      if(costMode == "ref") InpEdRefCostBp = 0.5;
       // candidati R/R finti
       ArrayResize(g_ckKind, 4); ArrayResize(g_ckNn, 4); ArrayResize(g_ckZ, 4); ArrayResize(g_ckE, 4); ArrayResize(g_ckSt, 4);
       ArrayResize(g_ckZh, 4); ArrayResize(g_ckZp, 4); ArrayResize(g_ckBe, 4); ArrayResize(g_ckLab, 4); ArrayResize(g_ckI, 4);

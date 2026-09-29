@@ -156,7 +156,7 @@
 <script type="text/plain" id="modsrc">//+------------------------------------------------------------------+
 //| MarketProfilerEdge.mqh - modulo aggiunto a MarketProfiler.mq5     |
 //| Schede 'Sintesi edge' e 'Bias e impulsi'.                         |
-//| Versione 1.0. Testato in un banco di prova C++ (MQL5 tradotto)    |
+//| Versione 1.1. Testato in un banco di prova C++ (MQL5 tradotto)    |
 //| su serie sintetiche: nessun avviso del compilatore, nessun        |
 //| indice fuori limite, calibrazione dei falsi positivi verificata.  |
 //+------------------------------------------------------------------+
@@ -179,7 +179,10 @@
 #define TG_NF   5    // caratteristiche che precedono il bersaglio
 #define TG_NC   4    // classi al massimo per caratteristica
 
+input double InpEdRefCostBp = 0.0; // Sintesi edge: costo per trade in punti base da usare se i costi del broker non sono misurati (0 = nessuno)
+
 string g_repBias = "", g_repEdge = "";
+int    g_edCbSrc = 0;   // origine del costo usato nei controlli: 0 assente, 1 misurato dal broker, 2 riferimento manuale
 
 //--- candidati strategia (R/R e ORB)
 int    g_edNC = 0;
@@ -375,7 +378,9 @@ void EdGrow(const int k)
    ArrayResize(g_edPf, k, 64); ArrayResize(g_edSt, k, 64);
   }
 
-// costo tipico per trade del broker piu' caro tra quelli con costi disponibili, in punti base (Nan se nessuno)
+// costo tipico per trade del broker piu' caro tra quelli con costi disponibili, in punti base.
+// Un costo nullo o negativo non e' un costo misurato (simboli personalizzati senza spread): vale come assente.
+// Senza costi del broker vale il riferimento manuale InpEdRefCostBp, se positivo; altrimenti Nan.
 double EdCostBp(void)
   {
    double cb = Nan();
@@ -383,8 +388,17 @@ double EdCostBp(void)
       if(g_cp[p].on)
         {
          double x = CostBp(p);
-         if(MathIsValidNumber(x) && (!MathIsValidNumber(cb) || x > cb))
+         if(MathIsValidNumber(x) && x > 0 && (!MathIsValidNumber(cb) || x > cb))
             cb = x;
+        }
+   g_edCbSrc = 0;
+   if(MathIsValidNumber(cb))
+      g_edCbSrc = 1;
+   else
+      if(MathIsValidNumber(InpEdRefCostBp) && InpEdRefCostBp > 0)
+        {
+         cb = InpEdRefCostBp;
+         g_edCbSrc = 2;
         }
    return cb;
   }
@@ -393,6 +407,7 @@ void EdgeReset(void)
   {
    g_repBias = "";
    g_repEdge = "";
+   g_edCbSrc = 0;
    g_edNC = 0;
    EdGrow(0);
    g_bxNT = 0;
@@ -524,7 +539,8 @@ double EdTests(const int i, const double orbT)
    return orbT;
   }
 
-// controlli di un candidato: 1 superato, 0 no, -1 non applicabile. Ritorna il livello: 3 robusto, 2 promettente, 1 indizio, 0 scartato
+// controlli di un candidato: 1 superato, 0 no, -1 non applicabile. Ritorna il livello: 3 robusto, 2 promettente, 1 indizio, 0 scartato.
+// Se il costo del broker non e' noto (V = -1) il livello massimo e' 1: al lordo dei costi nessuna strategia e' robusta o promettente.
 int EdChecks(const int i, const double mTests, int &ck[])
   {
    ArrayResize(ck, 8);
@@ -550,13 +566,14 @@ int EdChecks(const int i, const double mTests, int &ck[])
          if(k < 7)
             all7 = false;
         }
+   bool hint = MathIsValidNumber(g_edZ[i]) && g_edZ[i] >= 2 && g_edE[i] > 0 && g_edSt[i] && ck[5] != 0 && ck[6] != 0;
+   if(ck[5] < 0)
+      return hint ? 1 : 0;
    if(all8)
       return 3;
    if(all7)
       return 2;
-   if(MathIsValidNumber(g_edZ[i]) && g_edZ[i] >= 2 && g_edE[i] > 0 && g_edSt[i] && ck[5] != 0 && ck[6] != 0)
-      return 1;
-   return 0;
+   return hint ? 1 : 0;
   }
 
 //+------------------------------------------------------------------+
@@ -2132,7 +2149,12 @@ string EdMk(const int v)
 string EdCk(const string v, const int ck) { return ck < 0 ? TD(EdMk(ck)) : TD(v + " " + EdMk(ck)); }
 
 string EdMkT(const int v) { return v == 1 ? "si" : (v == 0 ? "NO" : "n/d"); }
-string EdLvName(const int lv) { return lv == 3 ? "ROBUSTO" : (lv == 2 ? "PROMETTENTE" : (lv == 1 ? "INDIZIO" : "SCARTATO")); }
+string EdLvName(const int lv)
+  {
+   if(lv == 1 && g_edCbSrc == 0)
+      return "INDIZIO LORDO";
+   return lv == 3 ? "ROBUSTO" : (lv == 2 ? "PROMETTENTE" : (lv == 1 ? "INDIZIO" : "SCARTATO"));
+  }
 string EdLvCol(const int lv) { return lv == 3 ? C_GREEN : (lv == 2 ? C_BLUE : (lv == 1 ? C_AMBER : C_GREY)); }
 
 // nel rapporto le entita' HTML sono decodificate dalla textarea (come nel resto dello script)
@@ -2362,6 +2384,7 @@ void EdgeTab(const string sym)
    g_repEdge = "";
    EdgeAddOrb();
    EdFdrAll();
+   double cbNow = EdCostBp();   // fissa anche l'origine del costo (g_edCbSrc)
    int nC = g_edNC;
    int lev[], cks[];
    double mt[], sc[];
@@ -2383,6 +2406,16 @@ void EdgeTab(const string sym)
       if(g_edKd[i] != 0)
          cnt[lev[i]]++;
      }
+   // costi di pareggio dei candidati positivi (indizi o meglio): servono a leggere il verdetto quando i costi del broker mancano
+   double beLo = Nan(), beHi = Nan();
+   for(int i = 0; i < nC; i++)
+      if(g_edKd[i] != 0 && lev[i] >= 1 && MathIsValidNumber(g_edBe[i]) && g_edBe[i] > 0)
+        {
+         if(!MathIsValidNumber(beLo) || g_edBe[i] < beLo)
+            beLo = g_edBe[i];
+         if(!MathIsValidNumber(beHi) || g_edBe[i] > beHi)
+            beHi = g_edBe[i];
+        }
    double tests = 0, exp3 = 0;
    int n3 = 0, nf = 0;
    for(int m = 0; m < HI_NMOD; m++)
@@ -2412,36 +2445,57 @@ void EdgeTab(const string sym)
    Kpi("Confronti statistici", I2S((int)tests), "in tutte le schede");
    Kpi("Oltre z 3", I2S(n3), "attesi per solo caso: " + F(exp3, 0));
    Kpi("Sopravvivono al controllo FDR", I2S(nf), "falsi positivi attesi al massimo 5%");
-   Kpi("Strategie robuste", I2S(cnt[3]), "superano tutti i controlli");
-   Kpi("Strategie promettenti", I2S(cnt[2]), "tutto tranne i test multipli");
-   Kpi("Indizi", I2S(cnt[1]), "positive e stabili, ma con un controllo non superato");
+   Kpi("Costo del broker", g_edCbSrc == 0 ? "n/d" : F(cbNow, 2) + " pb", g_edCbSrc == 0 ? "non misurato: risultati al lordo" : (g_edCbSrc == 1 ? "misurato, broker pi&ugrave; caro" : "riferimento manuale"));
+   Kpi("Strategie robuste", I2S(cnt[3]), g_edCbSrc == 0 ? "impossibile senza i costi del broker" : "superano tutti i controlli");
+   Kpi("Strategie promettenti", I2S(cnt[2]), g_edCbSrc == 0 ? "impossibile senza i costi del broker" : "tutto tranne i test multipli");
+   Kpi(g_edCbSrc == 0 ? "Indizi lordi" : "Indizi", I2S(cnt[1]), g_edCbSrc == 0 ? "positive e stabili al lordo dei costi" : "positive e stabili, ma con un controllo non superato");
    Kpi("Bias di direzione robusti", I2S(bk[0]), "su " + I2S(bt[0]) + " confronti (FDR e stabili)");
    Kpi("Precursori di impulsi robusti", I2S(bk[3]), "su " + I2S(bt[3]) + " confronti");
    Kpi("Bias di volatilit&agrave;", I2S(bk[1]), "ritmo dell'attivit&agrave;, non direzione");
    W("</div>");
-   string head, col;
-   if(cnt[3] > 0)
+   string head, col, costWarn = "";
+   if(g_edCbSrc == 0)
      {
-      head = "Almeno una strategia supera tutti i controlli, compresa la soglia dei test multipli. Non e' una garanzia: e' il punto di partenza per la verifica fuori campione.";
-      col = C_GREEN;
-     }
-   else
-      if(cnt[2] > 0)
+      // senza costi il controllo V non e' eseguibile: il verdetto e' al lordo e nessun candidato puo' superare 'indizio'
+      costWarn = "ATTENZIONE: i costi del broker non sono disponibili per questo simbolo (nessun profilo misurato, oppure spread nullo, come nei simboli personalizzati). " +
+                 "Tutti i risultati sono AL LORDO dei costi e il controllo V (costo) non e' stato eseguito. " +
+                 (MathIsValidNumber(beHi) ? "Il costo di pareggio dei candidati positivi va da " + F(beLo, 1) + " a " + F(beHi, 1) + " pb: una regola regge solo se il costo reale per trade " +
+                  "(spread + commissione + slittamento) e' inferiore al suo pareggio diviso 1,5. " : "") +
+                 "Per avere il controllo: misura i costi con InpCostsOnly = true nel terminale del broker (poi rilancia qui), oppure indica un costo in punti base in InpEdRefCostBp.";
+      if(cnt[1] > 0)
         {
-         head = "Nessuna strategia supera la soglia dei test multipli. " + I2S(cnt[2]) + " passano tutti gli altri controlli (promettenti): sono le sole da verificare fuori campione, sapendo che ognuna potrebbe essere la migliore di molti tentativi.";
-         col = C_BLUE;
+         head = "Al lordo dei costi " + I2S(cnt[1]) + " strategie sono positive e stabili, ma senza i costi del broker nessuna puo' essere dichiarata robusta o promettente. Decide il costo di pareggio contro il costo reale per trade.";
+         col = C_AMBER;
         }
       else
-         if(cnt[1] > 0)
+        {
+         head = "Nessuna strategia supera i filtri, nemmeno al lordo dei costi (che qui non sono disponibili): tra i contesti, le coppie e gli ORB provati non c'e' un edge.";
+         col = C_RED;
+        }
+     }
+   else
+      if(cnt[3] > 0)
+        {
+         head = "Almeno una strategia supera tutti i controlli, compresa la soglia dei test multipli. Non e' una garanzia: e' il punto di partenza per la verifica fuori campione.";
+         col = C_GREEN;
+        }
+      else
+         if(cnt[2] > 0)
            {
-            head = "Solo indizi: " + I2S(cnt[1]) + " strategie sono positive e stabili ma falliscono almeno un controllo (stessa ora, placebo, costo o test multipli). Cosi' non sono operabili.";
-            col = C_AMBER;
+            head = "Nessuna strategia supera la soglia dei test multipli. " + I2S(cnt[2]) + " passano tutti gli altri controlli (promettenti): sono le sole da verificare fuori campione, sapendo che ognuna potrebbe essere la migliore di molti tentativi.";
+            col = C_BLUE;
            }
          else
-           {
-            head = "Nessuna strategia supera i filtri: in questi dati, con questi costi, tra i contesti, le coppie e gli ORB provati non c'e' un edge operabile.";
-            col = C_RED;
-           }
+            if(cnt[1] > 0)
+              {
+               head = "Solo indizi: " + I2S(cnt[1]) + " strategie sono positive e stabili ma falliscono almeno un controllo (stessa ora, placebo, costo o test multipli). Cosi' non sono operabili.";
+               col = C_AMBER;
+              }
+            else
+              {
+               head = "Nessuna strategia supera i filtri: in questi dati, con questi costi, tra i contesti, le coppie e gli ORB provati non c'e' un edge operabile.";
+               col = C_RED;
+              }
    string stat = "Confronti totali " + I2S((int)tests) + ". Oltre z 3 ne trovi " + I2S(n3) + " contro circa " + F(exp3, 0) + " attesi per puro caso (se i confronti fossero indipendenti); " +
                  I2S(nf) + " sopravvivono al controllo FDR" + (bk[1] > 0 ? " (di cui " + I2S(bk[1]) + " solo volatilita', cioe' il ritmo giornaliero dell'attivita')" : "") + ". " +
                  (n3 <= 1.5 * exp3 + 3 ? "Il numero di risultati forti e' compatibile con il caso: senza un controllo serio, quasi tutto quello che vedi nelle schede e' rumore." :
@@ -2450,8 +2504,12 @@ void EdgeTab(const string sym)
                "Nessun bias di direzione (ora, giorno, mese, ora x giorno) supera insieme FDR e stabilita': la direzione del prezzo per calendario e' compatibile con il caso.";
    bs += " Bias di volatilita': " + I2S(bk[1]) + " robusti (il prezzo si muove di piu' o di meno a certe ore e giorni: e' il ritmo dell'attivita', non da' una direzione)." +
          " Cosa precede un impulso forte: " + I2S(bk[3]) + " condizioni robuste. Timing e struttura: " + I2S(bk[2]) + ".";
+   if(costWarn != "")
+      W("<div style='border-left:4px solid " + C_RED + ";padding:10px 14px;background:#2a1215;margin:12px 0'><p><b>" + costWarn + "</b></p></div>");
    W("<div style='border-left:4px solid " + col + ";padding:10px 14px;background:#0f172a;margin:12px 0'><p><b>Verdetto.</b> " + head + "</p><p>" + stat + "</p><p>" + bs +
      "</p></div>");
+   if(costWarn != "")
+      R(g_repEdge, costWarn);
    R(g_repEdge, "VERDETTO: " + head);
    R(g_repEdge, "  " + stat);
    R(g_repEdge, "  " + bs);
@@ -2467,7 +2525,8 @@ void EdgeTab(const string sym)
             "volte il costo del broker); <b>una alla volta</b> (R per trade positivo con una posizione alla volta e almeno il 60% di anni " +
             "positivi); <b>test multipli</b> (z sopra la soglia di Bonferroni 5% per il numero di confronti da cui &egrave; stato scelto). " +
             "Robusto = tutti i controlli; promettente = tutti tranne i test multipli; indizio = z &ge; 2, positivo, stabile e senza costi o " +
-            "posizione alla volta negativi. &ndash; = controllo non applicabile.");
+            "posizione alla volta negativi. Senza costi del broker (controllo <b>V</b> non eseguibile) il livello massimo &egrave; l'indizio lordo. " +
+            "&ndash; = controllo non applicabile.");
    if(nC == 0)
      {
       W("<p class='muted'>Nessun candidato: le schede Rischio/rendimento e ORB non hanno prodotto regole. Controlla che i dati M1 siano disponibili.</p>");
@@ -2627,7 +2686,8 @@ void EdgeTab(const string sym)
             "<ol><li>Parti dalle strategie <b>promettenti</b> e <b>robuste</b>, non dai singoli z pi&ugrave; alti: lo z pi&ugrave; alto di migliaia di prove &egrave; quasi sempre fortuna.</li>" +
             "<li>Verifica fuori campione: esporta le regole (schede Strategie e ORB) e provale con MPRuleTester sui tick reali del broker, su un periodo " +
             "successivo a quello dei dati analizzati. Una regola vera deve restare positiva l&igrave;.</li>" +
-            "<li>Guarda il costo: un vantaggio con costo di pareggio sotto il costo del broker non &egrave; operabile.</li>" +
+            "<li>Guarda il costo: un vantaggio con costo di pareggio sotto il costo del broker non &egrave; operabile. Se i costi non sono stati misurati " +
+            "(InpCostsOnly = true sul terminale del broker, oppure InpEdRefCostBp), i livelli qui sopra sono al lordo e vanno letti cos&igrave;.</li>" +
             "<li>Un bias del calendario (ora, giorno, mese) &egrave; un'ipotesi, non una regola: traducilo in una regola semplice, con stop e obiettivo, " +
             "e sottoponilo agli stessi controlli.</li>" +
             "<li>Se nessuna area supera i controlli, il risultato utile &egrave; questo: non c'&egrave; un edge semplice in questi dati con questi costi. " +
