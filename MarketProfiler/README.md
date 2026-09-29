@@ -3,6 +3,7 @@
 Modulo aggiuntivo per `MarketProfiler.mq5` (script MT5).
 
 - `MarketProfilerEdge.mqh`: il modulo (schede **Sintesi edge** e **Bias e impulsi**).
+- `MarketProfiler.mq5`: **il file completo, pronto da usare**: il tuo MarketProfiler.mq5 con il modulo Edge 1.1 gia' integrato (17 punti di aggancio applicati). Si sostituisce per intero il contenuto del file in MetaEditor, poi F7.
 - `MarketProfilerEdge_patch.html`: pagina che unisce il modulo al tuo `MarketProfiler.mq5` (incolla, applica, copia il file completo).
 - `tests/`: banco di prova. Traduce il modulo MQL5 in C++ con le funzioni originali che usa, lo compila con controllo dei limiti degli array e lo esegue su serie sintetiche. `tests/run.sh` lo lancia.
 
