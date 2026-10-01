@@ -16,6 +16,10 @@ js = open(os.path.join(here, 'dash.js'), encoding='utf-8').read()
 for nm, t in (('css', css), ('js', js)):
     if '</' + 'script' in t.lower() or '</' + 'style' in t.lower():
         sys.exit(nm + ' contiene una chiusura di tag')
+sym = data.get('sym') or ''
+if sym and not data.get('demo'):
+    short = sym.split('.')[0].split('_')[0] or sym
+    tpl = tpl.replace('<title>Cruscotto candele</title>', '<title>Cruscotto %s</title>' % short).replace('<h1>Cruscotto candele</h1>', '<h1>Cruscotto candele &middot; %s</h1>' % sym.replace('&', '&amp;').replace('<', '&lt;'))
 page = tpl.replace('/*DATA*/', txt).replace('/*CSS*/', css).replace('/*JS*/', js)
 open(out, 'w', encoding='utf-8').write(page)
 print('scritto', out, len(page), 'caratteri; dati', len(txt), 'timeframe', ','.join(t['id'] for t in data['tfs']))
