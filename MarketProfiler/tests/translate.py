@@ -152,6 +152,7 @@ def main():
     code, lits = strip_and_placeholder(src)
     # direttive
     code = re.sub(r'(?m)^\s*#(property|include|import)[^\n]*\n', '\n', code)
+    code = re.sub(r'(?m)^[ \t]*input[ \t]+group[ \t]+\x01\d+\x02[^\n]*\n', '\n', code)   # input group "..." (solo grafica)
     code = re.sub(r'(?m)^input\s+', '', code)
     # tipi definiti dal codice
     types = list(BUILTIN)
