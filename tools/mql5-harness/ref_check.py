@@ -12,24 +12,35 @@ def fixed(path,S,comm,SL,TP,opt):
         if ht: return 1,(TP-comm)/SL,0
     uC=path[-1][3]-S
     return 0,(uC-comm)/SL,1
+def tpoint(sl,p,act,dist,step):
+    if p<act: return sl
+    ns=p-dist
+    return ns if ns>sl+step else sl
+def tclimb(sl,h,act,dist,step):
+    # salita continua fino a h: l'EA sposta lo stop a gradini (prezzo-dist > stop+step), non "massimo-dist"
+    if h<act: return sl
+    if step<=0: return max(sl,h-dist)
+    while True:
+        p=max(act,sl+dist+step)
+        if p>h: return sl
+        sl=p-dist
 def trail(path,S,comm,SL,TP,act,dist,step,opt):
-    sl=-SL; hasTP=TP>0; peak=-1e300; fl=0
+    sl=-SL; hasTP=TP>0; fl=0
     for (o,f,a,c) in path:
         uO,uF,uA=o-S,f-S,a-S
         if uO<=sl: return -1,(uO-comm)/SL,fl
         if hasTP and uO>=TP: return 1,(uO-comm)/SL,fl
+        sl=tpoint(sl,uO,act,dist,step)
         if not opt:
-            # worst path: adverse extreme vs current stop first, then TP, then ratchet, then adverse vs new stop
+            # peggiore: estremo avverso contro lo stop corrente, poi TP, poi gradini, poi avverso contro il nuovo stop
             if uA<=sl: return -1,(sl-comm)/SL,(2 if (hasTP and uF>=TP) else 0)
             if hasTP and uF>=TP: return 1,(TP-comm)/SL,0
-            peak=max(peak,uF)
-            if peak>=act and peak-dist>sl+step: sl=peak-dist
+            sl=tclimb(sl,uF,act,dist,step)
             if uA<=sl: return -1,(sl-comm)/SL,2
         else:
             if hasTP and uF>=TP: return 1,(TP-comm)/SL,(2 if uA<=sl else 0)
             if uA<=sl: return -1,(sl-comm)/SL,0
-            peak=max(peak,uF)
-            if peak>=act and peak-dist>sl+step: sl=peak-dist
+            sl=tclimb(sl,uF,act,dist,step)
     uC=path[-1][3]-S
     return 0,(uC-comm)/SL,1
 lines=open('simcases.txt').read().split('\n')

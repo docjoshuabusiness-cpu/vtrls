@@ -4,6 +4,7 @@ static uint64_t rs = 88172645463325252ULL;
 static double urand() { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return (rs >> 11) * (1.0 / 9007199254740992.0); }
 static double nrand() { double u = urand() + 1e-12, v = urand(); return std::sqrt(-2.0 * std::log(u)) * std::cos(6.283185307179586 * v); }
 
+static double g_gridF = 1e5;
 static std::vector<MqlRates> aggregate(const std::vector<MqlRates>& m1, int per, int mode) {
    std::vector<MqlRates> out;
    long long cur = -1;
@@ -30,6 +31,7 @@ static std::vector<MqlRates> aggregate(const std::vector<MqlRates>& m1, int per,
 // drift_bias: adds a small directional drift after rejection-like situations to test edge detection (0 = pure random walk)
 static void gen(int days, double kappa, double sigma, unsigned long long seed) {
    rs = seed;
+   if(getenv("GEN_ROUND")) g_gridF = atof(getenv("GEN_ROUND"));
    std::vector<MqlRates> m1;
    struct tm g; memset(&g, 0, sizeof g);
    g.tm_year = 2023 - 1900; g.tm_mon = 0; g.tm_mday = 2;     // Monday 2023-01-02
@@ -50,7 +52,7 @@ static void gen(int days, double kappa, double sigma, unsigned long long seed) {
          double c = o + mv;
          double h = std::max(o, c) + std::fabs(nrand()) * sigma * act * 0.6;
          double l = std::min(o, c) - std::fabs(nrand()) * sigma * act * 0.6;
-         MqlRates r; r.time = day0 + mnt * 60; r.open = std::round(o * 1e5) / 1e5; r.high = std::round(h * 1e5) / 1e5; r.low = std::round(l * 1e5) / 1e5; r.close = std::round(c * 1e5) / 1e5;
+         MqlRates r; r.time = day0 + mnt * 60; r.open = std::round(o * g_gridF) / g_gridF; r.high = std::round(h * g_gridF) / g_gridF; r.low = std::round(l * g_gridF) / g_gridF; r.close = std::round(c * g_gridF) / g_gridF;
          r.high = std::max(r.high, std::max(r.open, r.close)); r.low = std::min(r.low, std::min(r.open, r.close));
          r.tick_volume = (long)(40 + 260 * act * urand()); r.spread = 12; r.real_volume = 0;
          m1.push_back(r);

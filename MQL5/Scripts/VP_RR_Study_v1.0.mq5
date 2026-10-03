@@ -200,6 +200,7 @@ bool     g_simSame = true;
 bool     g_useReal = false;
 int      g_perChart = 0, g_perSim = 0, g_ratio = 1, g_L = 0;
 double   g_point = 0.0;
+double   g_tol = 0.0;           // tolleranza sui confronti con soglie su griglia di punti
 int      g_ssH[4], g_ssM[4], g_seH[4], g_seM[4];
 
 //--- Eventi
@@ -469,6 +470,7 @@ bool Setup()
    g_chartTF = (ENUM_TIMEFRAMES)_Period;
    g_point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    g_perChart = PeriodSeconds(g_chartTF);
+   g_tol = g_point * 0.001;
    if(g_point <= 0.0 || g_perChart <= 0) { Print("Errore: point/periodo non validi"); return false; }
 
    g_simTF = (InpSimTF == PERIOD_CURRENT) ? g_chartTF : InpSimTF;
@@ -1008,10 +1010,10 @@ int SimFixed(const double S, const double comm, const double SLd, const double T
    for(int j = 0; j < g_L; j++)
    {
       double uO = g_wO[j] - S;
-      if(uO <= slu) { R = (uO - comm) / SLd; return -1; }
-      if(hasTP && uO >= tpu) { R = (uO - comm) / SLd; return 1; }
-      bool hs = ((g_wA[j] - S) <= slu);
-      bool ht = hasTP && ((g_wF[j] - S) >= tpu);
+      if(uO <= slu + g_tol) { R = (uO - comm) / SLd; return -1; }
+      if(hasTP && uO >= tpu - g_tol) { R = (uO - comm) / SLd; return 1; }
+      bool hs = ((g_wA[j] - S) <= slu + g_tol);
+      bool ht = hasTP && ((g_wF[j] - S) >= tpu - g_tol);
       if(hs && ht)
       {
          fl |= 2;
@@ -1027,6 +1029,35 @@ int SimFixed(const double S, const double comm, const double SLd, const double T
    return 0;
 }
 
+// Trailing dell'EA (ProcessTrailing) su un percorso di prezzo CONTINUO dentro la barra. L'EA controlla a
+// ogni tick: dopo l'attivazione (profitto >= act) lo stop si sposta SOLO se "prezzo - distanza" supera lo stop di
+// piu' di step, quindi sale a gradini e resta indietro rispetto al massimo di al piu' uno step. Non e'
+// "massimo - distanza". TrailPoint = una valutazione al prezzo p (u: profitto).
+double TrailPoint(const double sl, const double p, const double act, const double dist, const double step)
+{
+   if(p + g_tol < act) return sl;
+   double ns = p - dist;
+   if(ns > sl + step - g_tol) return ns;
+   return sl;
+}
+
+// salita continua del prezzo fino a hMax: gradini di ampiezza "step"
+double TrailClimb(const double sl0, const double hMax, const double act, const double dist, const double step)
+{
+   double sl = sl0;
+   if(hMax + g_tol < act) return sl;
+   if(step <= g_tol) return MathMax(sl, hMax - dist);       // nessuno step: segue il massimo
+   for(int guard = 0; guard < 20000; guard++)
+   {
+      double p = MathMax(act, sl + dist + step);
+      if(p > hMax + g_tol) break;
+      double ns = p - dist;
+      if(ns <= sl) break;
+      sl = ns;
+   }
+   return sl;
+}
+
 int SimTrail(const double S, const double comm, const double SLd, const double TPd,
              const double act, const double dist, const double step, double &R, int &fl)
 {
@@ -1034,47 +1065,37 @@ int SimTrail(const double S, const double comm, const double SLd, const double T
    double sl = -SLd;
    const bool hasTP = (TPd > 0.0);
    const double tpu = hasTP ? TPd : 0.0;
-   double peak = -DBL_MAX;
    for(int j = 0; j < g_L; j++)
    {
       double uO = g_wO[j] - S;
       double uF = g_wF[j] - S;
       double uA = g_wA[j] - S;
-      if(uO <= sl) { R = (uO - comm) / SLd; return -1; }
-      if(hasTP && uO >= tpu) { R = (uO - comm) / SLd; return 1; }
+      if(uO <= sl + g_tol) { R = (uO - comm) / SLd; return -1; }
+      if(hasTP && uO >= tpu - g_tol) { R = (uO - comm) / SLd; return 1; }
+      sl = TrailPoint(sl, uO, act, dist, step);                // tick di apertura
 
       if(!InpOptimistic)
       {
-         if(uA <= sl)
+         if(uA <= sl + g_tol)
          {
-            if(hasTP && uF >= tpu) fl |= 2;
+            if(hasTP && uF >= tpu - g_tol) fl |= 2;
             R = (sl - comm) / SLd;
             return -1;
          }
-         if(hasTP && uF >= tpu) { R = (tpu - comm) / SLd; return 1; }
-         if(uF > peak) peak = uF;
-         if(peak >= act)
-         {
-            double ns = peak - dist;
-            if(ns > sl + step) sl = ns;
-         }
-         if(uA <= sl) { fl |= 2; R = (sl - comm) / SLd; return -1; }
+         if(hasTP && uF >= tpu - g_tol) { R = (tpu - comm) / SLd; return 1; }
+         sl = TrailClimb(sl, uF, act, dist, step);
+         if(uA <= sl + g_tol) { fl |= 2; R = (sl - comm) / SLd; return -1; }
       }
       else
       {
-         if(hasTP && uF >= tpu)
+         if(hasTP && uF >= tpu - g_tol)
          {
-            if(uA <= sl) fl |= 2;
+            if(uA <= sl + g_tol) fl |= 2;
             R = (tpu - comm) / SLd;
             return 1;
          }
-         if(uA <= sl) { R = (sl - comm) / SLd; return -1; }
-         if(uF > peak) peak = uF;
-         if(peak >= act)
-         {
-            double ns = peak - dist;
-            if(ns > sl + step) sl = ns;
-         }
+         if(uA <= sl + g_tol) { R = (sl - comm) / SLd; return -1; }
+         sl = TrailClimb(sl, uF, act, dist, step);
       }
    }
    fl |= 1;
@@ -2015,7 +2036,7 @@ void WriteHtml()
 
    HW("<h2>5b. Trailing stop</h2>");
    HW("<div class='note'>SL iniziale fisso (" + F(InpTrailSLATR, 2) + " ATR, o " + F(g_cfg[g_base[2]].sl / g_point, 0) + " punti in modalit&agrave; punti), " +
-      (InpTrailTPRR > 0.0 ? "TP a RR " + F(InpTrailTPRR, 1) : "nessun TP") + ". Righe: soglia di attivazione. Colonne: distanza dello stop dal massimo. Step di aggiornamento = " +
+      (InpTrailTPRR > 0.0 ? "TP a RR " + F(InpTrailTPRR, 1) : "nessun TP") + ". Righe: soglia di attivazione. Colonne: distanza dello stop dal prezzo corrente (come l'EA: lo stop sale a gradini, solo se supera il precedente di almeno lo step). Step di aggiornamento = " +
       F(InpTrailStepRatio, 2) + " x distanza. Confronta con la riga SL corrispondente delle tabelle RR fisso: &egrave; il trailing che aggiunge valore oppure no?</div>");
    HW("<h3>Punti</h3>");
    HtmlMatrix("Expectancy (R) - In-Sample", "", 2, 0, 0);

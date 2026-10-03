@@ -181,14 +181,28 @@ extern string g__Symbol;
 extern double g_pointval;
 extern int g_spreadval;
 enum { SYMBOL_POINT = 1, SYMBOL_SPREAD, SYMBOL_DIGITS, SYMBOL_TRADE_TICK_VALUE, SYMBOL_TRADE_TICK_SIZE, SYMBOL_VOLUME_STEP, SYMBOL_VOLUME_MIN, SYMBOL_VOLUME_MAX,
-       SYMBOL_FILLING_MODE, SYMBOL_ASK, SYMBOL_BID, SYMBOL_FILLING_FOK = 1, SYMBOL_FILLING_IOC = 2 };
+       SYMBOL_FILLING_MODE, SYMBOL_ASK, SYMBOL_BID, SYMBOL_TRADE_STOPS_LEVEL, SYMBOL_TRADE_FREEZE_LEVEL, SYMBOL_EXPIRATION_MODE, SYMBOL_TRADE_MODE,
+       SYMBOL_FILLING_FOK = 1, SYMBOL_FILLING_IOC = 2, SYMBOL_EXPIRATION_SPECIFIED = 4, SYMBOL_TRADE_MODE_FULL = 4 };
+inline double g_ticksize = 0.00001;
+inline int g_digitsval = 5;
+inline long g_stopsLevel = 0;
+inline double g_curBid = 0.0, g_curAsk = 0.0;
+#define _Point (g_pointval)
+#define _Digits (g_digitsval)
 inline double SymbolInfoDouble(const string&, int prop) {
-   switch(prop) { case SYMBOL_POINT: return g_pointval; case SYMBOL_TRADE_TICK_VALUE: return 1.0; case SYMBOL_TRADE_TICK_SIZE: return g_pointval;
+   switch(prop) { case SYMBOL_POINT: return g_pointval; case SYMBOL_TRADE_TICK_VALUE: return 1.0; case SYMBOL_TRADE_TICK_SIZE: return g_ticksize;
+                  case SYMBOL_ASK: return g_curAsk; case SYMBOL_BID: return g_curBid;
                   case SYMBOL_VOLUME_STEP: return 0.01; case SYMBOL_VOLUME_MIN: return 0.01; case SYMBOL_VOLUME_MAX: return 100; default: return 0; }
 }
-inline long SymbolInfoInteger(const string&, int prop) { if(prop == SYMBOL_SPREAD) return g_spreadval; if(prop == SYMBOL_DIGITS) return 5; if(prop == SYMBOL_FILLING_MODE) return 1; return 0; }
-enum { TERMINAL_MAXBARS = 1, TERMINAL_DATA_PATH };
-inline long TerminalInfoInteger(int) { return 100000000; }
+inline long SymbolInfoInteger(const string&, int prop) {
+   if(prop == SYMBOL_SPREAD) return g_spreadval; if(prop == SYMBOL_DIGITS) return g_digitsval; if(prop == SYMBOL_FILLING_MODE) return 1;
+   if(prop == SYMBOL_TRADE_STOPS_LEVEL) return g_stopsLevel; if(prop == SYMBOL_TRADE_FREEZE_LEVEL) return 0;
+   if(prop == SYMBOL_EXPIRATION_MODE) return 1 | 2 | 4 | 8; if(prop == SYMBOL_TRADE_MODE) return SYMBOL_TRADE_MODE_FULL; return 0; }
+enum { TERMINAL_MAXBARS = 1, TERMINAL_DATA_PATH, TERMINAL_TRADE_ALLOWED };
+inline long TerminalInfoInteger(int p) { return p == TERMINAL_TRADE_ALLOWED ? 1 : 100000000; }
+enum { ACCOUNT_TRADE_ALLOWED = 100 };
+inline long AccountInfoInteger(int) { return 1; }
+enum { MQL_TRADE_ALLOWED = 100 };
 extern string g_datapath;
 inline string TerminalInfoString(int) { return g_datapath; }
 enum { SERIES_SYNCHRONIZED = 1, SERIES_SERVER_FIRSTDATE, SERIES_BARS_COUNT };
