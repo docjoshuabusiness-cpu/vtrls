@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
    fprintf(f, "tfill,dir,R,tplace\n");
    int C = ArraySize(g_cfg);
    int nex = 0;
-   for(int e = 0; e < ArraySize(g_ev); e++) {
+   for(int e = 0; e < ArraySize(g_ev) && ArraySize(g_xR) > 0; e++) {
       int off = e * C + g_refIdx;
       if(g_xR[off] == XR_SKIP) continue;
       nex++;

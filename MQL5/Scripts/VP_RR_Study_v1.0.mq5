@@ -1319,7 +1319,7 @@ void SimulateAll()
          double sl = g_cfg[c].atr ? g_cfg[c].sl * atr : g_cfg[c].sl;
          double R = 0.0;
          int fl = 0;
-         if(sl <= EPSILON) { g_R[off + c] = 0.0f; g_F[off + c] = 0; continue; }
+         if(sl <= EPSILON) { g_R[off + c] = 0.0; g_F[off + c] = 0; continue; }
          if(g_cfg[c].fam == 0 || g_cfg[c].fam == 1 || g_cfg[c].fam == 4)
          {
             SimFixed(S, comm, sl, g_cfg[c].rr * sl, R, fl);

@@ -7,7 +7,7 @@ H=..
 python3 $H/prep_mdrb.py >/dev/null
 CXX="g++ -std=c++17 -w -I. -I$H"
 $CXX -O2 -o mdrb_study_fast $H/main_mdrb_study.cpp
-$CXX -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -o mdrb_study_san $H/main_mdrb_study.cpp
+$CXX -O1 -g -fsanitize=address,undefined,float-divide-by-zero -fno-sanitize-recover=undefined,float-divide-by-zero -o mdrb_study_san $H/main_mdrb_study.cpp
 cp $H/auto_consistency.py .
 export GEN_ROUND=1e7 VPTF=M15 MDRB_QUIET=1
 F=out/MQL5/Files
@@ -19,8 +19,8 @@ if cmp -s map_fast.csv map_full.csv; then echo "OK: mappa identica byte per byte
 echo "== A2. riga della mappa == analisi completa della stessa definizione (+ taglio IS/OOS per data) =="
 VPINP="" ./mdrb_study_fast 260 0.002 0 >/dev/null 2>&1
 python3 auto_consistency.py 260 0.002 M15 14 || fail=1
-echo "== A3. AddressSanitizer: modalita' AUTO su storia corta e su kappa estremo =="
-for a in "90 0.002 0" "70 0.03 1"; do
+echo "== A3. AddressSanitizer + UBSan + divisioni per zero in virgola mobile (fatali in MQL5, silenziose in C++): modalita' AUTO =="
+for a in "90 0.002 0" "70 0.03 1" "400 0.002 0"; do
   VPINP="" ./mdrb_study_san $a >/dev/null 2>err_auto.txt || { echo "ERRORE ASan $a"; head -8 err_auto.txt; fail=1; }
 done
 cp $H/auto_null.py .
