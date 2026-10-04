@@ -39,4 +39,6 @@ echo "== 5. test di potenza (mean-reversion forte): il fade ai bordi deve risult
 ./study_nosan 4 400 0.03 2>&1 | grep -A6 RIEPILOGO | cut -c1-200
 echo "== 6. MDRB: EA MultiDayRangeBreakout reale contro MDRB_Study (batteria differenziale) =="
 (cd .. && ./run_mdrb.sh | tail -1) || fail=1
+echo "== 7. MDRB modalita' AUTO: orizzonte adattivo, coerenza mappa/analisi singola, ASan, test nullo e di potenza =="
+(cd .. && ./run_auto_tests.sh) || fail=1
 [ $fail -eq 0 ] && echo "TUTTO OK" || { echo "ATTENZIONE: verifiche fallite"; exit 1; }

@@ -1,8 +1,10 @@
 //+------------------------------------------------------------------+
-//|  MDRB_Study_v1.0.mq5                                             |
+//|  MDRB_Study_v1.0.mq5  (versione 1.10: analisi AUTOMATICA)         |
 //|  SCRIPT di studio statistico per MultiDayRangeBreakout (v3.00)    |
-//|  (si trascina su un grafico, gira UNA volta sulla storia e         |
-//|  termina; non apre ordini).                                       |
+//|  Si trascina su un grafico e basta: gira UNA volta sulla storia   |
+//|  disponibile, prova DA SOLO tutte le modalita' di range, finestre |
+//|  orarie, offset e uscite per orizzonte GIORNALIERO, SETTIMANALE e |
+//|  MENSILE, e scrive un unico report. Non apre ordini.              |
 //|                                                                    |
 //|  L'EA piazza ogni giorno, nella finestra di entrata, un BuyStop    |
 //|  sopra e un SellStop sotto un range (OCO). Questo script           |
@@ -25,13 +27,16 @@
 //|  soglia di Bonferroni, stabilita' annuale, equity.                 |
 //|  Output: report HTML + CSV in MQL5/Files, riepilogo nel log.       |
 //+------------------------------------------------------------------+
-#property copyright "Advanced Quant Systems - MDRB Study v1.0"
-#property version   "1.00"
+#property copyright "Advanced Quant Systems - MDRB Study v1.1"
+#property version   "1.10"
 #property strict
 #property script_show_inputs
 
-//=== RANGE (stessi nomi e significato dell'EA) ===
-input group "=== RANGE (come EA) ==="
+//=== PARAMETRI DELL'EA (stessi nomi e significato) ===
+// NON serve toccare nulla: lo script analizza DA SOLO tutte le modalita' di range, le finestre orarie, le
+// distanze/offset e le uscite, per orizzonte giornaliero, settimanale e mensile, su tutta la storia disponibile.
+// I valori qui sotto servono solo alla riga di confronto "EA con i tuoi input" (cosa fa l'EA oggi).
+input group "=== EA: RANGE (solo per la riga di confronto) ==="
 enum ENUM_RANGE_MODE
   {
    RANGE_BARS    = 0,
@@ -47,12 +52,11 @@ input int RangeMinuteStart = 0;
 input int RangeHourEnd = 0;
 input int RangeMinuteEnd = 0;
 input int RangeDaySpan = 1;
-input bool RequireRangeConfirmation = false;       // EA: true. Qui false = studia TUTTE le larghezze, poi scegli Min/Max dalle tabelle
+input bool RequireRangeConfirmation = false;       // EA: true. Qui false = studia TUTTE le larghezze (le tabelle dicono dove mettere Min/Max)
 input double MinRangePoints = 50;
 input double MaxRangePoints = 500;
 
-//=== FINESTRA DI ENTRATA (come EA) ===
-input group "=== FINESTRA DI ENTRATA (come EA, ora server) ==="
+input group "=== EA: FINESTRA DI ENTRATA (ora server) ==="
 input int TradeHourStart = 10;
 input int TradeMinuteStart = 0;
 input int TradeHourEnd = 11;
@@ -61,8 +65,7 @@ input int ExpireExtraMinutes = 0;
 input int PendingOrderOffsetPoints = 20;
 input bool ChaseIfBroken = false;
 
-//=== USCITE DELL'EA (configurazione di riferimento) ===
-input group "=== USCITE DELL'EA (riga 'EA' del report) ==="
+input group "=== EA: USCITE (riga 'EA' del report) ==="
 input double StopLossPoints = 100;
 input double TakeProfitPoints = 200;
 input bool UseTakeProfit = true;
@@ -74,66 +77,45 @@ input int TrailingStartProfit = 150;
 input int TrailingStep = 20;
 input int TrailingOffset = 30;
 
-//=== STUDIO ===
-input group "=== STUDIO ==="
-input int    InpMonthsBack = 60;                    // Mesi di storia da analizzare (0 = tutta quella disponibile)
-input ENUM_TIMEFRAMES InpSimTF = PERIOD_M1;         // TF di simulazione; se la storia non copre >=60% ripiega su M5, M15, M30, H1
-input ENUM_TIMEFRAMES InpATRTimeframe = PERIOD_H1;  // TF dell'ATR usato per SL/TP in ATR (l'EA non usa ATR)
-input int    InpATRPeriod = 14;
-input int    InpMaxHoldHours = 72;                  // Orizzonte massimo di una posizione; poi uscita a mercato (l'EA non ha time-stop)
-input int    InpISPercent = 70;                     // % di trade (cronologici) In-Sample; il resto e' Out-Of-Sample
-enum ENUM_RANK_BY { RANK_TSTAT, RANK_EXPECTANCY, RANK_PF };
-input ENUM_RANK_BY InpRankBy = RANK_TSTAT;          // Metrica per scegliere la cella migliore (sull'IS)
-input bool   InpSmoothRank = true;                  // Punteggio = media della cella e dei vicini 3x3 (penalizza i picchi isolati)
-input int    InpMinTrades = 30;                     // Minimo trade IS per candidare una cella
-input bool   InpOptimistic = false;                 // Ordine intrabarra OTTIMISTA (TP prima di SL). Default: pessimista
-
-//=== COSTI ===
 input group "=== COSTI ==="
 input int    InpSpreadPoints = -1;                  // Spread in punti (-1 = usa lo spread registrato nella barra)
 input double InpCommissionPoints = 0.0;             // Commissione round-turn in punti
 
-//=== GRIGLIA RR ===
-input group "=== GRIGLIA SL x RR ==="
-input string InpSLMultList = "0.5,0.75,1,1.5,2,3";   // SL in multipli di ATR (max 16 valori)
-input string InpSLPointsList = "";                  // SL in punti separati da virgola; vuoto = automatico (multipli x ATR mediano)
-input string InpSLRangeList = "0.25,0.5,0.75,1,1.5"; // SL in multipli della larghezza del range (1 = bordo opposto)
-input double InpRRMin = 1.0;
-input double InpRRMax = 6.0;
-input double InpRRStep = 1.0;
-
-//=== GRIGLIA TRAILING ===
-input group "=== GRIGLIA TRAILING ==="
-input double InpTrailSLATR = 1.0;                   // SL iniziale in ATR (modalita' ATR)
-input int    InpTrailSLPoints = 0;                  // SL iniziale in punti (0 = ATR mediano x InpTrailSLATR)
-input string InpTrailActList = "0.5,1,1.5,2,3";     // Attivazione in multipli di ATR
-input string InpTrailDistList = "0.5,0.75,1,1.5,2"; // Distanza trailing in multipli di ATR
-input string InpTrailActPoints = "";                // Attivazione in punti; vuoto = automatico
-input string InpTrailDistPoints = "";               // Distanza in punti; vuoto = automatico
-input double InpTrailStepRatio = 0.15;              // Step minimo = ratio x distanza
-input double InpTrailTPRR = 0.0;                    // TP in multipli dello SL durante il trailing (0 = nessun TP)
-
-//=== RIFERIMENTO PER LE TABELLE PER RANGE E GLI SWEEP ===
-input group "=== CONFIGURAZIONE DI RIFERIMENTO (tabelle per range, sweep) ==="
-input double InpRefSLATR = 1.0;
-input double InpRefRR = 2.0;
-
-//=== SWEEP ===
-input group "=== SWEEP delle definizioni (ogni riga e' un'ipotesi in piu': leggi la soglia di Bonferroni) ==="
-input bool   InpSweepRange = true;                  // Sweep delle definizioni di range (per il RangeMode scelto)
-input string InpSweepBarsLookback = "10,15,25,40,60,96"; // RANGE_BARS: numero di barre
-input string InpSweepTimeWindows = "00:00-08:00,02:00-10:00,08:00-16:00,16:00-00:00"; // RANGE_TIME: finestre HH:MM-HH:MM
-input string InpSweepDaySpans = "1,2,3,5";          // RANGE_PREV_D1: giorni
-input string InpSweepDaysBackList = "0,1";          // RangeDaysBack da provare (RANGE_PREV_D1 usa solo valori >=1)
-input bool   InpSweepEntryHours = true;             // Sweep della finestra oraria di ingresso (stesso range dell'EA)
-input int    InpSweepEntryLenMin = 60;              // durata delle finestre di ingresso provate
-input int    InpSweepEntryStepMin = 60;             // passo di partenza delle finestre (>= 30)
-
-//=== OUTPUT ===
 input group "=== OUTPUT ==="
 input bool   InpWriteHTML = true;
 input bool   InpWriteCSV = true;
 input string InpFilePrefix = "MDRB_Study";
+
+//=== PARAMETRI INTERNI (NON sono input: l'analisi e' automatica e non richiede scelte) ===
+enum ENUM_RANK_BY { RANK_TSTAT, RANK_EXPECTANCY, RANK_PF };
+bool   InpAuto = true;                      // true = esplora tutto (giornaliero/settimanale/mensile); false = analizza solo la configurazione degli input dell'EA (usato dai test)
+int    InpMonthsBack = 0;                   // 0 = tutta la storia disponibile (alla risoluzione piu' fine che copra almeno 3 anni)
+ENUM_TIMEFRAMES InpSimTF = PERIOD_M1;       // TF di simulazione; se la storia e' troppo corta ripiega su M5, M15, M30, H1
+ENUM_TIMEFRAMES InpATRTimeframe = PERIOD_H1;// TF dell'ATR usato per SL/TP in ATR (l'EA non usa ATR)
+int    InpATRPeriod = 14;
+int    InpMaxHoldHours = 72;                // Orizzonte massimo di una posizione; poi uscita a mercato (l'EA non ha time-stop)
+int    InpISPercent = 70;                   // % di TEMPO In-Sample (taglio per data comune a tutte le definizioni); il resto e' Out-Of-Sample
+ENUM_RANK_BY InpRankBy = RANK_TSTAT;        // Metrica per scegliere la cella/definizione migliore (sull'IS)
+bool   InpSmoothRank = true;                // Punteggio = media della cella e dei vicini (penalizza i picchi isolati)
+int    InpMinTrades = 30;                   // Minimo trade IS per candidare una cella
+bool   InpOptimistic = false;               // Ordine intrabarra OTTIMISTA (TP prima di SL). Default: pessimista
+bool   InpFastPath = true;                  // Orizzonte adattivo negli sweep (risultati identici, piu' veloce)
+string InpSLMultList = "0.5,0.75,1,1.5,2,3";    // SL in multipli di ATR
+string InpSLPointsList = "";                // SL in punti; vuoto = automatico (multipli x ATR mediano)
+string InpSLRangeList = "0.25,0.5,0.75,1,1.5";  // SL in multipli della larghezza del range (1 = bordo opposto)
+double InpRRMin = 1.0;
+double InpRRMax = 6.0;
+double InpRRStep = 1.0;
+double InpTrailSLATR = 1.0;                 // SL iniziale in ATR (trailing)
+int    InpTrailSLPoints = 0;                // SL iniziale in punti (0 = ATR mediano x InpTrailSLATR)
+string InpTrailActList = "0.5,1,1.5,2,3";   // Attivazione in multipli di ATR
+string InpTrailDistList = "0.5,0.75,1,1.5,2";   // Distanza trailing in multipli di ATR
+string InpTrailActPoints = "";              // Attivazione in punti; vuoto = automatico
+string InpTrailDistPoints = "";             // Distanza in punti; vuoto = automatico
+double InpTrailStepRatio = 0.15;            // Step minimo = ratio x distanza
+double InpTrailTPRR = 0.0;                  // TP in multipli dello SL durante il trailing (0 = nessun TP)
+double InpRefSLATR = 1.0;                   // configurazione di riferimento (mappa, sweep)
+double InpRefRR = 2.0;
 
 //--- Costanti
 #define EPSILON  0.0000001
@@ -142,7 +124,7 @@ input string InpFilePrefix = "MDRB_Study";
 #define NHOR     8
 #define NFP      5
 #define NFR      3
-#define MAXSWEEP 64
+#define NCLS     3        // classi di orizzonte: giornaliero, settimanale, mensile
 #define XR_SKIP  9999.0f      // marcatore: trade non eseguito (posizione ancora aperta)
 
 const double g_fpX[NFP] = {0.5, 1.0, 1.5, 2.0, 3.0};     // soglie first-passage in ATR
@@ -254,6 +236,26 @@ double   g_wEdge[4];
 double   g_dEdge[2];
 double   g_medATRpts = 0.0;
 int      g_split = 0;
+SDef     g_cur;                    // definizione analizzata a fondo (vincitore di classe, o input dell'EA in modo classico)
+string   g_pre = "";               // prefisso della numerazione delle sezioni (una parte per classe)
+datetime g_cut = 0;                // taglio IS/OOS per DATA, comune a tutte le definizioni
+
+//--- Esplorazione automatica: universo di definizioni di range x finestre di ingresso
+int      g_nR = 0, g_nW = 0;
+SDef     g_rDef[];                 // definizione di range (finestra di ingresso da impostare per combinazione)
+string   g_rLbl[];
+int      g_rCls[];                 // classe: 0 giornaliero, 1 settimanale, 2 mensile
+int      g_rChain[];               // righe adiacenti della stessa catena = vicini (per lo smoothing)
+int      g_wS[], g_wE[], g_wLen[]; // finestre di ingresso (minuti del giorno)
+SStat    g_mIS[], g_mOOS[], g_mAll[];   // [(r*nW+w)*2 + c]: c0 = SL ATR di riferimento, c1 = uscite dell'EA
+int      g_mN[];                   // trade per combinazione
+double   g_mScore[];               // punteggio IS (eventualmente mediato sui vicini)
+bool     g_mValid[];
+int      g_win[NCLS];              // combinazione vincente per classe (-1 = nessuna)
+int      g_eaN = 0;                // riga di confronto: gli input dell'EA
+SStat    g_eaIS[], g_eaOOS[], g_eaAll[];
+string   g_clsName[NCLS] = {"Giornaliero", "Settimanale", "Mensile"};
+string   g_clsTag[NCLS] = {"giornaliero", "settimanale", "mensile"};
 
 //--- Configurazioni e risultati
 SCfg     g_cfg[];
@@ -274,12 +276,11 @@ bool     g_valid[];
 int      g_best[MAXFAM];
 int      g_refIdx = -1;
 
-//--- Sweep
-string   g_s1Lbl[], g_s2Lbl[];
-int      g_s1N[], g_s2N[];
+//--- Sweep offset / chase / scadenza sul vincitore
+string   g_s1Lbl[];
+int      g_s1N[];
 SStat    g_s1IS[], g_s1OOS[], g_s1All[];
-SStat    g_s2IS[], g_s2OOS[], g_s2All[];
-SFunnel  g_s1Fn[], g_s2Fn[];
+SFunnel  g_s1Fn[];
 
 //--- Buffer di percorso
 double   g_wO[], g_wF[], g_wA[], g_wC[];
@@ -575,7 +576,6 @@ bool Setup()
    if(InpISPercent < 10 || InpISPercent > 95) { Print("Errore: InpISPercent 10-95"); return false; }
    if(InpRRMin <= 0.0 || InpRRMax < InpRRMin || InpRRStep <= 0.0) { Print("Errore: parametri RR non validi"); return false; }
    if(InpATRPeriod < 1) { Print("Errore: ATR period minimo 1"); return false; }
-   if(InpSweepEntryStepMin < 30 || InpSweepEntryLenMin < 15) { Print("Errore: sweep ingresso: passo >= 30 e durata >= 15 minuti"); return false; }
    if(RangeMode == RANGE_BARS && RangeBarsLookback < 1) { Print("Errore: RangeBarsLookback minimo 1"); return false; }
    if(RangeMode == RANGE_PREV_D1 && (RangeDaysBack < 1 || RangeDaySpan < 1)) { Print("Errore: RANGE_PREV_D1 richiede RangeDaysBack>=1 e RangeDaySpan>=1"); return false; }
    if(RangeMode == RANGE_TIME && (RangeHourStart < 0 || RangeHourStart > 23 || RangeHourEnd < 0 || RangeHourEnd > 24 || RangeMinuteStart < 0 || RangeMinuteStart > 59 || RangeMinuteEnd < 0 || RangeMinuteEnd > 59))
@@ -606,7 +606,7 @@ bool LoadSim(datetime from, datetime now)
          ArrayResize(g_rs, ArraySize(tmp));
          ArrayCopy(g_rs, tmp);
       }
-      if(frac >= 0.6)
+      if(frac >= 0.6 || (InpMonthsBack == 0 && cov >= 3.0 * 365.0 * 86400.0))
       {
          if(c > 0)
             Warn(StringFormat("Storia %s insufficiente (max barre terminale: %d): simulo su %s con ordine intrabarra pessimista. Per M1: Strumenti > Opzioni > Grafici > 'Max barre nel grafico' = Illimitato, riavvia, rilancia.",
@@ -617,7 +617,7 @@ bool LoadSim(datetime from, datetime now)
    }
    if(bestCov < 0.0) return false;
    g_simTF = bestTF;
-   Warn(StringFormat("Nessun TF di simulazione copre il periodo richiesto: uso %s (copertura %.0f%%). Riduci InpMonthsBack o alza 'Max barre nel grafico'.", EnumToString(bestTF), 100.0 * bestCov));
+   Warn(StringFormat("Nessun TF di simulazione copre il periodo richiesto: uso %s (copertura %.0f%%). Alza 'Max barre nel grafico' (Strumenti > Opzioni > Grafici) e rilancia per avere piu' storia a risoluzione fine.", EnumToString(bestTF), 100.0 * bestCov));
    return true;
 }
 
@@ -657,9 +657,10 @@ bool LoadAllData()
    Comment("MDRB Study: caricamento storico...");
 
    if(!LoadRates(PERIOD_D1, fromPad, now, g_d1)) { Print("Errore: nessun dato D1"); return false; }
+   if(!LoadSim(from, now)) { Print("Errore: nessun dato per la simulazione"); return false; }
+   if(ArraySize(g_rs) > 0 && g_rs[0].time > from) fromPad = g_rs[0].time - 90 * 86400;     // il periodo analizzato parte dove esiste la simulazione
    if(!LoadRates(g_rangeTF, fromPad, now, g_rr)) { Print("Errore: nessun dato sul TF del range"); return false; }
    if(!LoadRates(g_atrTF, fromPad, now, g_ra)) { Print("Errore: nessun dato sul TF dell'ATR"); return false; }
-   if(!LoadSim(from, now)) { Print("Errore: nessun dato per la simulazione"); return false; }
    if(ArraySize(g_d1) < 60 || ArraySize(g_rs) < 1000) { Print("Errore: storico insufficiente"); return false; }
 
    g_perSim = PeriodSeconds(g_simTF);
@@ -1291,7 +1292,7 @@ void BuildConfigs()
    AddCfg(5, 2, 0, 0, 0, StopLossPoints * g_point, UseTakeProfit ? TakeProfitPoints / StopLossPoints : 0.0, 0, 0);
    g_refIdx = g_base[5];
 
-   if(autoSL) Print("Nota: SL in punti generati da ATR mediano (", F(med, 0), " punti) x multipli. Per fissare i tuoi valori usa InpSLPointsList.");
+   if(autoSL) Print("Nota: SL in punti generati da ATR mediano (", F(med, 0), " punti) x multipli.");
 }
 
 // configurazioni ridotte per gli sweep: [0] = ATR di riferimento, [1] = uscita dell'EA
@@ -1416,6 +1417,9 @@ void SimulateOne(const SEvent &ev, const SCfg &cf, double &R0, int &fl, int &jx)
    SimCfgOnEvent(ev, cf, R0, fl, jx);
 }
 
+// Negli sweep (study = false) la simulazione parte con un orizzonte corto (4 h, poi 24 h, poi quello pieno): se
+// TUTTE le configurazioni escono prima della fine del livello, il risultato e' identico a quello con orizzonte
+// pieno (l'esito fino all'uscita non dipende dalle barre successive); altrimenti si riesegue al livello superiore.
 void SimulateEvents(SEvent &ev[], const SCfg &cfg[], float &R[], uchar &F2[], int &XJ[], const bool study)
 {
    int E = ArraySize(ev);
@@ -1427,23 +1431,56 @@ void SimulateEvents(SEvent &ev[], const SCfg &cfg[], float &R[], uchar &F2[], in
    ArrayResize(g_wF, g_L);
    ArrayResize(g_wA, g_L);
    ArrayResize(g_wC, g_L);
+   const int Lfull = g_L;
+   int lv[3];
+   lv[0] = Lfull; lv[1] = Lfull; lv[2] = Lfull;
+   if(!study && InpFastPath)
+   {
+      lv[0] = MathMin(Lfull, MathMax(2, (int)(4 * 3600 / g_perSim)));
+      lv[1] = MathMin(Lfull, MathMax(lv[0], (int)(24 * 3600 / g_perSim)));
+   }
+   double r0[];
+   int f0[], j0[];
+   ArrayResize(r0, C);
+   ArrayResize(f0, C);
+   ArrayResize(j0, C);
    for(int e = 0; e < E; e++)
    {
-      if(IsStopped()) return;
+      if(IsStopped()) { g_L = Lfull; return; }
       if(study && (e & 31) == 0) Comment(StringFormat("MDRB Study: simulazione %d/%d trade x %d configurazioni", e, E, C));
-      BuildPath(ev[e]);
-      if(study) EventStudy(ev[e]);
+      if(study)
+      {
+         g_L = Lfull;
+         BuildPath(ev[e]);
+         EventStudy(ev[e]);
+         for(int c = 0; c < C; c++) SimCfgOnEvent(ev[e], cfg[c], r0[c], f0[c], j0[c]);
+      }
+      else
+      {
+         for(int k = 0; k < 3; k++)
+         {
+            if(k > 0 && lv[k] == lv[k - 1]) continue;
+            g_L = lv[k];
+            BuildPath(ev[e]);
+            bool open = false;
+            for(int c = 0; c < C; c++)
+            {
+               SimCfgOnEvent(ev[e], cfg[c], r0[c], f0[c], j0[c]);
+               if((f0[c] & 1) != 0 && lv[k] < Lfull) open = true;
+            }
+            if(!open) break;
+         }
+         g_L = Lfull;
+      }
       int off = e * C;
       for(int c = 0; c < C; c++)
       {
-         double R0;
-         int fl, jx;
-         SimCfgOnEvent(ev[e], cfg[c], R0, fl, jx);
-         R[off + c] = (float)R0;
-         F2[off + c] = (uchar)fl;
-         XJ[off + c] = jx;
+         R[off + c] = (float)r0[c];
+         F2[off + c] = (uchar)f0[c];
+         XJ[off + c] = j0[c];
       }
    }
+   g_L = Lfull;
 }
 
 //+------------------------------------------------------------------+
@@ -1474,7 +1511,12 @@ double StatSD(const SStat &s)
 double StatT(const SStat &s)
 {
    double sd = StatSD(s);
-   if(s.n < 2 || sd < EPSILON) return 0.0;
+   if(s.n < 2) return 0.0;
+   if(sd < EPSILON)      // tutti i trade con lo stesso R (es. tutti stoppati): non e' "t = 0", e' il caso estremo
+   {
+      double m0 = StatMean(s);
+      return (m0 > EPSILON) ? 99.0 : ((m0 < -EPSILON) ? -99.0 : 0.0);
+   }
    return StatMean(s) / (sd / MathSqrt((double)s.n));
 }
 double StatPF(const SStat &s)
@@ -1555,19 +1597,29 @@ void AggregateBusy(const SEvent &ev[], const SDef &d, const SCfg &cfg[], const i
    }
 }
 
+// Taglio IS/OOS per DATA, lo stesso per tutte le definizioni: se ogni definizione avesse il proprio taglio (70% dei
+// SUOI trade) scegliere la migliore sull'IS userebbe giorni che per un'altra definizione sono gia' OOS.
+int SplitFor(const SEvent &ev[])
+{
+   int E = ArraySize(ev);
+   int sp = E;
+   for(int i = 0; i < E; i++)
+      if(ev[i].day >= g_cut) { sp = i; break; }
+   if(sp < 1) sp = 1;
+   if(sp > E) sp = E;
+   return sp;
+}
+
 void AggregateMain()
 {
-   int E = ArraySize(g_ev);
    int C = ArraySize(g_cfg);
    ArrayResize(g_stIS, C);
    ArrayResize(g_stOOS, C);
    ArrayResize(g_stAll, C);
    ArrayResize(g_skip, C);
    ArrayResize(g_repl, C);
-   g_split = (int)(E * InpISPercent / 100.0);
-   if(g_split < 1) g_split = 1;
-   if(g_split > E) g_split = E;
-   AggregateBusy(g_ev, g_def, g_cfg, C, g_R, g_F, g_XJ, g_split, g_stIS, g_stOOS, g_stAll, g_skip, g_repl, g_xR, g_xT, g_xD);
+   g_split = SplitFor(g_ev);
+   AggregateBusy(g_ev, g_cur, g_cfg, C, g_R, g_F, g_XJ, g_split, g_stIS, g_stOOS, g_stAll, g_skip, g_repl, g_xR, g_xT, g_xD);
 }
 
 double RankMetric(const SStat &s)
@@ -1673,8 +1725,7 @@ void RunDefStats(const SDef &d, const SCfg &cfg[], SStat &sIS[], SStat &sOOS[], 
    uchar F2[];
    int XJ[];
    SimulateEvents(ev, cfg, R, F2, XJ, false);
-   int split = (int)(E * InpISPercent / 100.0);
-   if(split < 1) split = 1;
+   int split = SplitFor(ev);
    SStat tIS[], tOOS[], tAll[];
    ArrayResize(tIS, C); ArrayResize(tOOS, C); ArrayResize(tAll, C);
    int skip[], repl[];
@@ -1687,68 +1738,273 @@ void RunDefStats(const SDef &d, const SCfg &cfg[], SStat &sIS[], SStat &sOOS[], 
    for(int c = 0; c < C; c++) { sIS[row * C + c] = tIS[c]; sOOS[row * C + c] = tOOS[c]; sAll[row * C + c] = tAll[c]; }
 }
 
-void RunSweep1()
+string RangeText(const SDef &d)
+{
+   if(d.mode == (int)RANGE_BARS) return IntegerToString(d.lookback) + " barre " + EnumToString(g_rangeTF) + ", giorno -" + IntegerToString(d.daysBack);
+   if(d.mode == (int)RANGE_TIME) return StringFormat("finestra %02d:%02d-%02d:%02d, giorno -%d", d.rhs, d.rms, d.rhe, d.rme, d.daysBack);
+   return IntegerToString(d.span) + " giorni D1 da -" + IntegerToString(d.daysBack);
+}
+
+string ModeName(const SDef &d)
+{
+   if(d.mode == (int)RANGE_BARS) return "RANGE_BARS";
+   if(d.mode == (int)RANGE_TIME) return "RANGE_TIME";
+   return "RANGE_PREV_D1";
+}
+
+void AddUniqueInt(int &a[], const int v)
+{
+   for(int i = 0; i < ArraySize(a); i++)
+      if(a[i] == v) return;
+   int n = ArraySize(a);
+   ArrayResize(a, n + 1);
+   a[n] = v;
+}
+
+//+------------------------------------------------------------------+
+//| ESPLORAZIONE AUTOMATICA                                            |
+//| Universo = definizioni di range (tutte le modalita' dell'EA) x     |
+//| finestre di ingresso. Le definizioni sono raggruppate per          |
+//| ORIZZONTE: giornaliero (range fino a 1 giorno: ultime N ore,       |
+//| sessioni, giorno precedente), settimanale (D1 2-5 giorni), mensile |
+//| (D1 10-21 giorni). Per ogni combinazione: 2 uscite (SL ATR di      |
+//| riferimento e uscite dell'EA), eventi e regola "EA occupato"       |
+//| identici all'analisi completa.                                     |
+//+------------------------------------------------------------------+
+void AddRangeRow(const int cls, const int chain, const SDef &d, const string lbl)
+{
+   int n = ArraySize(g_rDef);
+   ArrayResize(g_rDef, n + 1);
+   ArrayResize(g_rLbl, n + 1);
+   ArrayResize(g_rCls, n + 1);
+   ArrayResize(g_rChain, n + 1);
+   g_rDef[n] = d;
+   g_rLbl[n] = lbl;
+   g_rCls[n] = cls;
+   g_rChain[n] = chain;
+}
+
+void BuildUniverse()
+{
+   ArrayResize(g_rDef, 0);
+   ArrayResize(g_rLbl, 0);
+   ArrayResize(g_rCls, 0);
+   ArrayResize(g_rChain, 0);
+   ArrayResize(g_wS, 0);
+   ArrayResize(g_wE, 0);
+   ArrayResize(g_wLen, 0);
+   int chain = 0;
+   SDef d;
+   d = g_def;                       // eredita offset / chase / scadenza degli input dell'EA
+   int per = MathMax(60, PeriodSeconds(g_rangeTF));
+
+   // --- giornaliero: ultime N ore (barre del TF del range), al piazzamento (giorno -0) o fino all'apertura di oggi (giorno -1)
+   double hrs[8] = {1, 2, 3, 4, 6, 8, 12, 24};
+   for(int b = 0; b < 2; b++)
+   {
+      chain++;
+      int last = -1;
+      for(int i = 0; i < 8; i++)
+      {
+         int bars = (int)MathMax(1.0, MathRound(hrs[i] * 3600.0 / per));
+         if(bars == last) continue;
+         last = bars;
+         d.mode = (int)RANGE_BARS; d.lookback = bars; d.daysBack = b;
+         AddRangeRow(0, chain, d, StringFormat("Ultime %d barre %s (%.1f h), %s", bars, EnumToString(g_rangeTF), bars * per / 3600.0,
+                                                Pick(b == 0, "al piazzamento", "fino all'apertura di oggi")));
+      }
+   }
+   // --- giornaliero: sessioni orarie (4 h e 8 h), di oggi (finita prima della finestra di ingresso) o di ieri
+   int starts[6] = {0, 4, 8, 12, 16, 20};
+   int lens[2] = {4, 8};
+   for(int b = 0; b < 2; b++)
+      for(int l = 0; l < 2; l++)
+      {
+         chain++;
+         for(int k = 0; k < 6; k++)
+         {
+            int hs = starts[k];
+            if(b == 0 && hs + lens[l] >= 24) continue;     // di oggi: deve chiudersi prima della mezzanotte
+            int he = (hs + lens[l]) % 24;
+            d.mode = (int)RANGE_TIME; d.rhs = hs; d.rms = 0; d.rhe = he; d.rme = 0; d.daysBack = b;
+            AddRangeRow(0, chain, d, StringFormat("Sessione %02d:00-%02d:00 (%d h), %s", hs, he, lens[l], Pick(b == 0, "di oggi", "di ieri")));
+         }
+      }
+   // --- giornaliero: giorno precedente
+   chain++;
+   d.mode = (int)RANGE_PREV_D1; d.span = 1; d.daysBack = 1;
+   AddRangeRow(0, chain, d, "Giorno precedente (D1)");
+   // --- settimanale: ultimi 2, 3, 5 giorni D1
+   chain++;
+   int spW[3] = {2, 3, 5};
+   for(int i = 0; i < 3; i++)
+   {
+      d.mode = (int)RANGE_PREV_D1; d.span = spW[i]; d.daysBack = 1;
+      AddRangeRow(1, chain, d, StringFormat("Ultimi %d giorni D1%s", spW[i], Pick(spW[i] == 5, " (settimana)", "")));
+   }
+   // --- mensile: ultimi 10, 15, 21 giorni D1
+   chain++;
+   int spM[3] = {10, 15, 21};
+   for(int i = 0; i < 3; i++)
+   {
+      d.mode = (int)RANGE_PREV_D1; d.span = spM[i]; d.daysBack = 1;
+      AddRangeRow(2, chain, d, StringFormat("Ultimi %d giorni D1%s", spM[i], Pick(spM[i] == 10, " (2 settimane)", Pick(spM[i] == 15, " (3 settimane)", " (mese)"))));
+   }
+   g_nR = ArraySize(g_rDef);
+
+   // --- finestre di ingresso: 60, 120 e 240 minuti, senza scavalcare la mezzanotte
+   int wl[3] = {60, 120, 240};
+   for(int l = 0; l < 3; l++)
+      for(int st = 0; st + wl[l] <= 1440; st += wl[l])
+      {
+         int n = ArraySize(g_wS);
+         ArrayResize(g_wS, n + 1);
+         ArrayResize(g_wE, n + 1);
+         ArrayResize(g_wLen, n + 1);
+         g_wS[n] = st;
+         g_wE[n] = st + wl[l];
+         g_wLen[n] = wl[l];
+      }
+   g_nW = ArraySize(g_wS);
+}
+
+bool RunAutoMap()
+{
+   BuildUniverse();
+   int K = g_nR * g_nW;
+   SCfg cfg[];
+   BuildSweepCfgs(cfg);
+   ArrayResize(g_mN, K);
+   ArrayResize(g_mIS, K * 2);
+   ArrayResize(g_mOOS, K * 2);
+   ArrayResize(g_mAll, K * 2);
+   PrintFormat("Esplorazione automatica: %d definizioni di range x %d finestre di ingresso = %d combinazioni", g_nR, g_nW, K);
+   uint t0 = GetTickCount();
+   for(int r = 0; r < g_nR; r++)
+      for(int w = 0; w < g_nW; w++)
+      {
+         if(IsStopped()) return false;
+         int k = r * g_nW + w;
+         SDef d;
+         d = g_rDef[r];
+         d.wsMin = g_wS[w];
+         d.weMin = g_wE[w];
+         SFunnel fn;
+         RunDefStats(d, cfg, g_mIS, g_mOOS, g_mAll, k, g_mN[k], fn);
+         if((k % 6) == 0)
+         {
+            double el = (GetTickCount() - t0) / 1000.0;
+            Comment(StringFormat("MDRB Study: esplorazione %d/%d combinazioni (%.0f s, restano ~%.0f s)", k + 1, K, el, el * (K - k - 1) / (k + 1)));
+         }
+      }
+   return true;
+}
+
+// punteggio IS di ogni combinazione (SL ATR di riferimento), eventualmente mediato sui vicini (finestre adiacenti
+// della stessa durata, definizioni adiacenti della stessa catena); vincitore per classe
+void ScoreMap()
+{
+   int K = g_nR * g_nW;
+   ArrayResize(g_mScore, K);
+   ArrayResize(g_mValid, K);
+   for(int k = 0; k < K; k++) g_mValid[k] = (g_mIS[k * 2].n >= InpMinTrades);
+   for(int r = 0; r < g_nR; r++)
+      for(int w = 0; w < g_nW; w++)
+      {
+         int k = r * g_nW + w;
+         if(!g_mValid[k]) { g_mScore[k] = -1e9; continue; }
+         double raw = RankMetric(g_mIS[k * 2]);
+         if(!InpSmoothRank) { g_mScore[k] = raw; continue; }
+         double sum = 0.0;
+         int cnt = 0;
+         for(int dr = -1; dr <= 1; dr++)
+         {
+            int r2 = r + dr;
+            if(r2 < 0 || r2 >= g_nR || g_rChain[r2] != g_rChain[r]) continue;
+            for(int dw = -1; dw <= 1; dw++)
+            {
+               int w2 = w + dw;
+               if(w2 < 0 || w2 >= g_nW || g_wLen[w2] != g_wLen[w]) continue;
+               int k2 = r2 * g_nW + w2;
+               if(!g_mValid[k2]) continue;
+               sum += RankMetric(g_mIS[k2 * 2]);
+               cnt++;
+            }
+         }
+         g_mScore[k] = (cnt > 0) ? sum / cnt : raw;
+      }
+   for(int cl = 0; cl < NCLS; cl++)
+   {
+      g_win[cl] = -1;
+      for(int r = 0; r < g_nR; r++)
+      {
+         if(g_rCls[r] != cl) continue;
+         for(int w = 0; w < g_nW; w++)
+         {
+            int k = r * g_nW + w;
+            if(!g_mValid[k]) continue;
+            if(g_win[cl] < 0 || g_mScore[k] > g_mScore[g_win[cl]]) g_win[cl] = k;
+         }
+      }
+   }
+}
+
+// definizione (range + finestra di ingresso) di una combinazione della mappa
+void ComboDef(const int k, SDef &d)
+{
+   d = g_rDef[k / g_nW];
+   d.wsMin = g_wS[k % g_nW];
+   d.weMin = g_wE[k % g_nW];
+}
+
+void RunEaRow()
+{
+   SCfg cfg[];
+   BuildSweepCfgs(cfg);
+   ArrayResize(g_eaIS, 2);
+   ArrayResize(g_eaOOS, 2);
+   ArrayResize(g_eaAll, 2);
+   SFunnel fn;
+   RunDefStats(g_def, cfg, g_eaIS, g_eaOOS, g_eaAll, 0, g_eaN, fn);
+}
+
+// Offset del livello, ChaseIfBroken e scadenza extra sul vincitore: stessi eventi del vincitore, cambia solo come si piazza la coppia.
+void RunOffsetSweep()
 {
    ArrayResize(g_s1Lbl, 0);
    SDef defs[];
    ArrayResize(defs, 0);
-   int dbk[];
-   if(ParseIntList(InpSweepDaysBackList, dbk) < 1) { ArrayResize(dbk, 1); dbk[0] = RangeDaysBack; }
-
-   if(RangeMode == RANGE_BARS)
+   double med = MathMax(1.0, g_medATRpts);
+   double fo[4] = {0.0, 0.05, 0.1, 0.25};
+   int offs[];
+   ArrayResize(offs, 0);
+   for(int i = 0; i < 4; i++) AddUniqueInt(offs, (int)MathRound(fo[i] * med));
+   AddUniqueInt(offs, g_cur.offsetPts);
+   AddUniqueInt(offs, g_def.offsetPts);
+   ArraySort(offs);
+   for(int o = 0; o < ArraySize(offs); o++)
+      for(int ch = 0; ch < 2; ch++)
+      {
+         int n = ArraySize(defs);
+         ArrayResize(defs, n + 1);
+         defs[n] = g_cur;
+         defs[n].offsetPts = offs[o];
+         defs[n].chase = (ch == 1);
+         ArrayResize(g_s1Lbl, n + 1);
+         bool isBase = (offs[o] == g_cur.offsetPts && defs[n].chase == g_cur.chase);
+         g_s1Lbl[n] = StringFormat("offset %d pt (%.2f ATR), %s, scadenza +%d min%s", offs[o], offs[o] / med, Pick(ch == 1, "chase", "attesa del rientro"), g_cur.extra, Pick(isBase, "  [= definizione analizzata]", ""));
+      }
+   int ex[2] = {60, 180};
+   for(int x = 0; x < 2; x++)
    {
-      double lb[];
-      if(ParseList(InpSweepBarsLookback, lb) < 1) return;
-      for(int a = 0; a < ArraySize(lb); a++)
-         for(int b = 0; b < ArraySize(dbk); b++)
-         {
-            if(ArraySize(defs) >= MAXSWEEP) break;
-            int n = ArraySize(defs);
-            ArrayResize(defs, n + 1);
-            defs[n] = g_def;
-            defs[n].lookback = (int)lb[a];
-            defs[n].daysBack = dbk[b];
-            ArrayResize(g_s1Lbl, n + 1);
-            g_s1Lbl[n] = StringFormat("%d barre %s, giorno -%d", (int)lb[a], EnumToString(g_rangeTF), dbk[b]);
-         }
-   }
-   else if(RangeMode == RANGE_TIME)
-   {
-      int hs[], ms[], he[], me[];
-      if(ParseWindows(InpSweepTimeWindows, hs, ms, he, me) < 1) return;
-      for(int a = 0; a < ArraySize(hs); a++)
-         for(int b = 0; b < ArraySize(dbk); b++)
-         {
-            if(ArraySize(defs) >= MAXSWEEP) break;
-            int n = ArraySize(defs);
-            ArrayResize(defs, n + 1);
-            defs[n] = g_def;
-            defs[n].rhs = hs[a]; defs[n].rms = ms[a]; defs[n].rhe = he[a]; defs[n].rme = me[a];
-            defs[n].daysBack = dbk[b];
-            ArrayResize(g_s1Lbl, n + 1);
-            g_s1Lbl[n] = StringFormat("%02d:%02d-%02d:%02d, giorno -%d", hs[a], ms[a], he[a], me[a], dbk[b]);
-         }
-   }
-   else
-   {
-      double sp[];
-      if(ParseList(InpSweepDaySpans, sp) < 1) return;
-      for(int a = 0; a < ArraySize(sp); a++)
-         for(int b = 0; b < ArraySize(dbk); b++)
-         {
-            if(dbk[b] < 1) continue;
-            if(ArraySize(defs) >= MAXSWEEP) break;
-            int n = ArraySize(defs);
-            ArrayResize(defs, n + 1);
-            defs[n] = g_def;
-            defs[n].span = (int)sp[a];
-            defs[n].daysBack = dbk[b];
-            ArrayResize(g_s1Lbl, n + 1);
-            g_s1Lbl[n] = StringFormat("%d giorni D1, da -%d", (int)sp[a], dbk[b]);
-         }
+      int n = ArraySize(defs);
+      ArrayResize(defs, n + 1);
+      defs[n] = g_cur;
+      defs[n].extra = g_cur.extra + ex[x];
+      ArrayResize(g_s1Lbl, n + 1);
+      g_s1Lbl[n] = StringFormat("offset %d pt (%.2f ATR), %s, scadenza +%d min", g_cur.offsetPts, g_cur.offsetPts / med, Pick(g_cur.chase, "chase", "attesa del rientro"), defs[n].extra);
    }
    int K = ArraySize(defs);
-   if(K == 0) return;
    SCfg cfg[];
    BuildSweepCfgs(cfg);
    ArrayResize(g_s1N, K);
@@ -1759,42 +2015,8 @@ void RunSweep1()
    for(int k = 0; k < K; k++)
    {
       if(IsStopped()) return;
-      Comment(StringFormat("MDRB Study: sweep range %d/%d", k + 1, K));
+      Comment(StringFormat("MDRB Study: offset / chase / scadenza %d/%d", k + 1, K));
       RunDefStats(defs[k], cfg, g_s1IS, g_s1OOS, g_s1All, k, g_s1N[k], g_s1Fn[k]);
-   }
-}
-
-void RunSweep2()
-{
-   ArrayResize(g_s2Lbl, 0);
-   SDef defs[];
-   ArrayResize(defs, 0);
-   int len = InpSweepEntryLenMin;
-   for(int s = 0; s + len <= 1440; s += InpSweepEntryStepMin)
-   {
-      if(ArraySize(defs) >= MAXSWEEP) break;
-      int n = ArraySize(defs);
-      ArrayResize(defs, n + 1);
-      defs[n] = g_def;
-      defs[n].wsMin = s;
-      defs[n].weMin = s + len;
-      ArrayResize(g_s2Lbl, n + 1);
-      g_s2Lbl[n] = HHMM(s) + "-" + HHMM(s + len);
-   }
-   int K = ArraySize(defs);
-   if(K == 0) return;
-   SCfg cfg[];
-   BuildSweepCfgs(cfg);
-   ArrayResize(g_s2N, K);
-   ArrayResize(g_s2Fn, K);
-   ArrayResize(g_s2IS, K * 2);
-   ArrayResize(g_s2OOS, K * 2);
-   ArrayResize(g_s2All, K * 2);
-   for(int k = 0; k < K; k++)
-   {
-      if(IsStopped()) return;
-      Comment(StringFormat("MDRB Study: sweep finestra di ingresso %d/%d", k + 1, K));
-      RunDefStats(defs[k], cfg, g_s2IS, g_s2OOS, g_s2All, k, g_s2N[k], g_s2Fn[k]);
    }
 }
 
@@ -1918,6 +2140,7 @@ void HtmlStart()
    HW("th{background:#eef1f4;font-weight:600}th.rl{text-align:left;white-space:nowrap}td.lo{color:#9aa3ad}td.best{outline:2px solid #1f6feb;outline-offset:-2px;font-weight:700}");
    HW(".note{color:#59636e;font-size:12px;margin:2px 0 4px}.warn{background:#fff4d6;border:1px solid #e0c36a;padding:6px 10px;margin:6px 0;font-size:13px}");
    HW(".bad{color:#b42318;font-weight:600}.ok{color:#1a7f37;font-weight:600}.mid{color:#9a6700;font-weight:600}.mono{font-family:Consolas,monospace}");
+   HW(".m2 td,.m2 th{font-size:10.5px;padding:2px 4px}.sc{overflow-x:auto}");
    HW(".legend span{display:inline-block;margin-right:14px}svg{background:#fff;border:1px solid #d0d7de}ul{margin:6px 0 6px 18px;padding:0}li{margin:3px 0}tr.bestrow td,tr.bestrow th{background:#e8f1ff}");
    HW("</style></head><body>\n");
 }
@@ -1954,11 +2177,12 @@ string Verdict(const SStat &o, double &pOut)
 
 void HtmlVerdict()
 {
-   HW("<h2>1. Verdetto</h2>");
+   HW("<h2>" + g_pre + "1. Verdetto</h2>");
    HW("<div class='note'>Per ogni famiglia la cella migliore &egrave; scelta SOLO sull'In-Sample (metrica: " +
       Pick(InpRankBy == RANK_TSTAT, "t-stat", Pick(InpRankBy == RANK_EXPECTANCY, "expectancy", "profit factor")) +
       Pick(InpSmoothRank, ", mediata sui vicini 3x3", "") + "). L'unico numero onesto &egrave; la colonna OOS: un solo test, fatto su dati mai usati per scegliere. "
-      "Un trade = un giorno: il campione &egrave; piccolo, quindi anche un buon risultato vale poco senza conferma OOS. "
+      "Un trade = un giorno: il campione &egrave; piccolo, quindi anche un buon risultato vale poco senza conferma OOS. " +
+      Pick(InpAuto, "Anche la DEFINIZIONE analizzata qui (range + finestra di ingresso) &egrave; stata scelta sull'IS tra le combinazioni della mappa: l'OOS di questa tabella &egrave; quindi il test unico dell'intera catena di scelte (definizione + cella). ", "") +
       "Attenzione: tutte le famiglie usano gli stessi giorni e lo stesso OOS, quindi un OOS fortunato le conferma TUTTE insieme: leggi \"quante famiglie confermano\" come un solo test, non come sei test indipendenti, e guarda la stabilit&agrave; per anno.</div>");
    HW("<table><tr><th class='rl'>Famiglia</th><th class='rl'>Cella scelta (IS)</th><th>N IS</th><th>E[R] IS</th><th>t IS</th><th>t critico*</th><th>N OOS</th><th>E[R] OOS</th><th>t OOS</th><th>p OOS</th><th>PF OOS</th><th>MaxDD (R) tutto</th><th class='rl'>Esito</th></tr>");
    for(int f = 0; f < 6; f++)
@@ -2006,7 +2230,7 @@ void HtmlVerdict()
 
 void HtmlFunnel()
 {
-   HW("<h2>2. Cosa succede ogni giorno</h2>");
+   HW("<h2>" + g_pre + "2. Cosa succede ogni giorno</h2>");
    HW("<table><tr><th class='rl'>Passo</th><th>Giorni</th><th>%</th></tr>");
    int d = MathMax(1, g_fn.days);
    HW("<tr><th class='rl'>Giorni di mercato analizzati</th><td>" + IntegerToString(g_fn.days) + "</td><td>100.0</td></tr>");
@@ -2034,7 +2258,7 @@ void HtmlFunnel()
 void HtmlEventStudy()
 {
    int E = ArraySize(g_ev);
-   HW("<h2>3. Come si comporta il prezzo dopo lo sfondamento (lordo di costi)</h2>");
+   HW("<h2>" + g_pre + "3. Come si comporta il prezzo dopo lo sfondamento (lordo di costi)</h2>");
    HW("<div class='note'>Misurato dall'ingresso. Direzionale: positivo = il prezzo prosegue nel verso dello sfondamento. Unit&agrave;: ATR (" + EnumToString(g_atrTF) + ", " + IntegerToString(InpATRPeriod) +
       ") al momento del piazzamento; in punti con l'ATR mediano (" + F(g_medATRpts, 0) + " punti). Orizzonte: ore dopo l'ingresso. Tutti i " + IntegerToString(E) + " sfondamenti, senza saltare nulla.</div>");
 
@@ -2148,7 +2372,7 @@ void BreakRow(const string label, const int dimType, const int val)
 
 void HtmlBreakdown()
 {
-   HW("<h2>4. Quali range funzionano meglio</h2>");
+   HW("<h2>" + g_pre + "4. Quali range funzionano meglio</h2>");
    HW("<div class='note'>Configurazione di riferimento: SL " + F(InpRefSLATR, 2) + " ATR, TP " + F(InpRefRR * InpRefSLATR, 2) + " ATR (RR 1:" + F(InpRefRR, 1) +
       "), netto di costi, su tutti gli sfondamenti (senza saltare giorni). Una dimensione alla volta. Evidenziati solo scostamenti con |t| &ge; 2 e almeno " +
       IntegerToString(InpMinTrades) + " trade: con una ventina di celle guardate, un paio escono per puro caso. " +
@@ -2196,7 +2420,7 @@ void HtmlSweepTable(const string title, const string note, const string &lbl[], 
    double tcrit = NormInvUpper(0.05 / K);
    if(best >= 0 && StatMean(sIS[best * 2]) <= 0.0)
       HW("<div class='warn'>Nessuna definizione ha E[R] positivo in-sample con la configurazione SL ATR di riferimento: la riga evidenziata &egrave; solo la meno negativa.</div>");
-   HW("<table><tr><th class='rl'>Definizione</th><th>Trade</th><th>Giorni senza range valido</th>"
+   HW("<div class='sc'><table><tr><th class='rl'>Definizione</th><th>Trade</th><th>Giorni senza range valido</th>"
       "<th>N IS</th><th>E[R] IS</th><th>t IS</th><th>N OOS</th><th>E[R] OOS</th><th>t OOS</th><th>p OOS</th>"
       "<th>N IS</th><th>E[R] IS</th><th>t IS</th><th>N OOS</th><th>E[R] OOS</th><th>t OOS</th><th>p OOS</th></tr>");
    HW("<tr><th class='rl' style='background:#f6f8fa'></th><th style='background:#f6f8fa'></th><th style='background:#f6f8fa'></th><th colspan='7' style='background:#f6f8fa'>SL " + F(InpRefSLATR, 2) + " ATR / RR 1:" + F(InpRefRR, 1) +
@@ -2215,25 +2439,20 @@ void HtmlSweepTable(const string title, const string note, const string &lbl[], 
       }
       HW("</tr>\n");
    }
-   HW("</table><div class='note'>Riga evidenziata = migliore sull'IS (SL ATR). t IS verde = supera la soglia di Bonferroni su " + IntegerToString(K) + " definizioni (t &ge; " + F(tcrit, 2) +
-      "). Se nessuna &egrave; verde, la differenza tra definizioni &egrave; compatibile con il caso. Ogni definizione ha eventi diversi, quindi N cambia.</div>");
+   HW("</table></div><div class='note'>Riga evidenziata = migliore sull'IS (SL ATR). t IS verde = supera la soglia di Bonferroni su " + IntegerToString(K) + " righe (t &ge; " + F(tcrit, 2) +
+      "). Se nessuna &egrave; verde, la differenza tra le righe &egrave; compatibile con il caso. Ogni riga ha eventi in parte diversi, quindi N cambia.</div>");
 }
 
-void HtmlSweeps()
+void HtmlOffsetSweep()
 {
-   HW("<h2>5. Sweep: quale definizione di range, quale finestra di ingresso</h2>");
-   HW("<div class='note'>Qui ogni riga &egrave; una variante degli input dell'EA. Le due configurazioni di uscita sono le stesse per tutte le righe (SL ATR di riferimento e uscite dell'EA), cos&igrave; le differenze vengono dalla definizione e non dall'uscita. Le righe sono molte ipotesi: guarda l'OOS, non l'IS.</div>");
-   if(InpSweepRange)
-      HtmlSweepTable("5a. Definizione del range (" + Pick(RangeMode == RANGE_BARS, "ultime N barre", Pick(RangeMode == RANGE_TIME, "finestra oraria", "giorni D1")) + ")",
-                     "Tutto il resto come nei tuoi input.", g_s1Lbl, g_s1N, g_s1IS, g_s1OOS, g_s1All, g_s1Fn, ArraySize(g_s1Lbl));
-   if(InpSweepEntryHours)
-      HtmlSweepTable("5b. Finestra oraria di ingresso (durata " + IntegerToString(InpSweepEntryLenMin) + " minuti, ora server)",
-                     "Stesso range dei tuoi input; cambia solo quando piazzi la coppia.", g_s2Lbl, g_s2N, g_s2IS, g_s2OOS, g_s2All, g_s2Fn, ArraySize(g_s2Lbl));
+   HW("<h2>" + g_pre + "5. Come si piazza la coppia: offset, chase, scadenza</h2>");
+   HW("<div class='note'>Stessa definizione di range e stessa finestra del vincitore; cambiano solo la distanza dei livelli dal range (offset, anche in frazioni di ATR), ChaseIfBroken e quanto dura l'ordine oltre la finestra. Due uscite uguali per tutte le righe (SL ATR di riferimento e uscite dell'EA).</div>");
+   HtmlSweepTable("Offset / chase / scadenza", "Righe = ipotesi in pi&ugrave;: guarda l'OOS, non l'IS.", g_s1Lbl, g_s1N, g_s1IS, g_s1OOS, g_s1All, g_s1Fn, ArraySize(g_s1Lbl));
 }
 
 void HtmlTop10()
 {
-   HW("<h2>7. Prime 10 celle per famiglia (ordinate sul punteggio IS)</h2>");
+   HW("<h2>" + g_pre + "7. Prime 10 celle per famiglia (ordinate sul punteggio IS)</h2>");
    for(int f = 0; f < 5; f++)
    {
       int R = g_dimR[f], Cn = g_dimC[f];
@@ -2315,7 +2534,7 @@ void HtmlStability()
 {
    int E = ArraySize(g_ev);
    int C = ArraySize(g_cfg);
-   HW("<h2>8. Stabilit&agrave; nel tempo e curve di equity</h2>");
+   HW("<h2>" + g_pre + "8. Stabilit&agrave; nel tempo e curve di equity</h2>");
    int fin[6];
    string names[6];
    int nf = 0;
@@ -2361,16 +2580,18 @@ void HtmlStability()
 
 void HtmlNotes()
 {
-   HW("<h2>9. Come leggere questo report e cosa NON dimostra</h2><ul>");
+   HW("<h2 id='note'>Come leggere questo report e cosa NON dimostra</h2><ul>");
+   HW("<li><b>Analisi automatica.</b> Lo script non chiede nulla: prova tutte le modalit&agrave; di range dell'EA (ultime N barre, sessioni orarie, giorni D1), tutte le finestre di ingresso (60, 120 e 240 minuti), raggruppate per orizzonte del range (giornaliero fino a 1 giorno, settimanale 2-5 giorni, mensile 10-21 giorni), su tutta la storia disponibile. Per ogni orizzonte sceglie la combinazione migliore SOLO sull'In-Sample (taglio per data uguale per tutte), poi analizza a fondo quella: uscite, trailing, giorno/settimana/mese. Il numero onesto &egrave; l'Out-Of-Sample della combinazione scelta: un solo test fatto su dati mai usati per scegliere.</li>");
    HW("<li>Il meccanismo replica l'EA: range calcolato con le stesse regole (barre/orario/D1), finestra in ora server, coppia stop piazzata solo se il prezzo &egrave; dentro i livelli (altrimenti si aspetta il rientro), scadenza a fine finestra, riempimento con gap, SL/TP relativi al prezzo dell'ordine, un solo trade al giorno e nessuna nuova coppia con una posizione aperta (se la posizione si chiude a met&agrave; finestra la coppia viene ripiazzata da quel momento, per ogni configurazione).</li>");
-   HW("<li>Non modellati: filtro spread (MaxSpreadPoints, MaxSpreadPctOfSL), MaxTradesPerDay &gt; 1 (lo studio misura il primo trade del giorno), slippage oltre il gap, allargamenti di spread nei momenti critici. I risultati reali saranno peggiori.</li>");
+   HW("<li>Non modellati: filtro spread (MaxSpreadPoints, MaxSpreadPctOfSL), MaxTradesPerDay &gt; 1 (lo studio misura il primo trade del giorno), slippage oltre il gap, allargamenti di spread nei momenti critici. I risultati reali saranno peggiori. Le finestre di ingresso della mappa non scavalcano la mezzanotte.</li>");
    HW("<li>Se SL/TP/trailing si toccano dentro la stessa barra l'ordine &egrave; " + Pick(InpOptimistic, "OTTIMISTA (TP prima di SL)", "PESSIMISTA (SL prima di TP; con trailing/BE prima si alza lo stop e poi si testa l'estremo avverso)") +
       ". TF di simulazione: " + EnumToString(g_simTF) + ". Con M1 l'ambiguit&agrave; &egrave; trascurabile; a TF grossolano le colonne &laquo;Ambig. %&raquo; ti dicono quanto pesa. Nella barra di innesco l'estremo avverso &egrave; stimato dalla chiusura.</li>");
+   HW("<li>Periodo: tutta la storia disponibile, alla risoluzione pi&ugrave; fine che copra almeno 3 anni (M1, poi M5, M15, M30, H1). Se il terminale limita le barre ('Max barre nel grafico') la storia analizzata &egrave; pi&ugrave; corta: la data di inizio &egrave; scritta in cima.</li>");
    HW("<li>Orizzonte " + IntegerToString(InpMaxHoldHours) + " ore, poi uscita a mercato. L'EA non ha time-stop: una posizione che si trascina oltre blocca anche i giorni successivi, ed &egrave; ci&ograve; che lo studio replica con i trade saltati.</li>");
-   HW("<li>Un trade al giorno: in 5 anni sono circa 1000 trade al massimo. Con un campione cos&igrave; la differenza tra due celle vicine &egrave; quasi sempre rumore: conta la struttura (zone intere che funzionano), non il singolo massimo.</li>");
+   HW("<li>Un trade al giorno al massimo: con qualche anno di storia sono poche centinaia di trade per combinazione. La differenza tra due celle vicine &egrave; quasi sempre rumore: conta la struttura (zone intere della mappa che funzionano, anche fuori campione), non il singolo massimo.</li>");
    HW("<li>ATR: SMA del true range come iATR, sul TF " + EnumToString(g_atrTF) + ", valutato sull'ultima barra chiusa prima del piazzamento. L'EA non usa ATR: le griglie ATR e range servono a capire se distanze adattive battono quelle fisse. In automatico i punti derivano dall'ATR mediano, cos&igrave; le griglie sono confrontabili.</li>");
    HW("<li>R-multipli: confrontabili tra famiglie solo con sizing a rischio fisso per trade. L'EA usa lotti fissi (LotSize): con lotti fissi uno SL largo pesa di pi&ugrave; in denaro.</li>");
-   HW("<li>Gli sweep di definizione e di orario sono molte ipotesi sullo stesso campione: la soglia di Bonferroni nelle tabelle indica quanto deve essere forte l'IS per non essere data-mining; la conferma vera &egrave; l'OOS.</li>");
+   HW("<li>La mappa contiene centinaia di combinazioni sullo stesso campione: la soglia di Bonferroni indica quanto deve essere forte l'IS per non essere data-mining. Le tre classi (giornaliero, settimanale, mensile) usano gli stessi giorni e lo stesso OOS: un OOS fortunato pu&ograve; confermarle tutte insieme, non sono test indipendenti.</li>");
    HW("</ul>");
 }
 
@@ -2381,35 +2602,384 @@ int CountDir(const int dir)
    return n;
 }
 
-void WriteHtml()
+//+------------------------------------------------------------------+
+//| Report: struttura                                                  |
+//+------------------------------------------------------------------+
+bool HtmlOpen()
 {
    string fn = InpFilePrefix + "_" + _Symbol + ".html";
    g_fh = FileOpen(fn, FILE_WRITE | FILE_TXT | FILE_ANSI);
-   if(g_fh == INVALID_HANDLE) { Print("Errore: impossibile creare ", fn, " (", GetLastError(), ")"); return; }
-
-   int E = ArraySize(g_ev);
+   if(g_fh == INVALID_HANDLE) { Print("Errore: impossibile creare ", fn, " (", GetLastError(), ")"); return false; }
    HtmlStart();
    HW("<h1>MDRB Study - " + _Symbol + "</h1>");
-   string rdef;
-   if(RangeMode == RANGE_BARS) rdef = IntegerToString(RangeBarsLookback) + " barre " + EnumToString(g_rangeTF) + ", giorno -" + IntegerToString(RangeDaysBack);
-   else if(RangeMode == RANGE_TIME) rdef = StringFormat("finestra %02d:%02d-%02d:%02d, giorno -%d", RangeHourStart, RangeMinuteStart, RangeHourEnd, RangeMinuteEnd, RangeDaysBack);
-   else rdef = IntegerToString(RangeDaySpan) + " giorni D1 da -" + IntegerToString(RangeDaysBack);
-   HW("<div class='note'>Dati " + TimeToString(g_dataFirst, TIME_DATE) + " &rarr; " + TimeToString(g_dataLast, TIME_DATE) + " | range: <b>" + rdef + "</b> | finestra " + HHMM(g_wsMin) + "-" + HHMM(g_weMin) +
-      " ora server | offset " + IntegerToString(PendingOrderOffsetPoints) + " pt | sfondamenti: <b>" + IntegerToString(E) + "</b> (long " + IntegerToString(CountDir(1)) + ", short " + IntegerToString(CountDir(-1)) +
-      ") | IS: " + IntegerToString(g_split) + " fino al " + TimeToString(g_ev[MathMax(0, g_split - 1)].day, TIME_DATE) + ", OOS: " + IntegerToString(E - g_split) + " | simulazione " + EnumToString(g_simTF) +
-      " | orizzonte " + IntegerToString(InpMaxHoldHours) + " h | spread " + Pick(InpSpreadPoints >= 0, IntegerToString(InpSpreadPoints) + " pt fissi", "da barra") + " + comm. " + F(InpCommissionPoints, 1) +
-      " pt | ATR mediano " + F(g_medATRpts, 0) + " punti | limiti Min/Max range " + Pick(RequireRangeConfirmation, "APPLICATI", "non applicati") + "</div>");
-   for(int i = 0; i < ArraySize(g_warn); i++) HW("<div class='warn'>" + g_warn[i] + "</div>");
-   if(E < 150) HW("<div class='warn'>Meno di 150 trade: le griglie sono rumore. Allunga lo storico (InpMonthsBack) o allarga la finestra di ingresso.</div>");
-   if(E - g_split < 30) HW("<div class='warn'>Meno di 30 trade in OOS: il verdetto OOS non &egrave; affidabile.</div>");
+   return true;
+}
 
+void HtmlClose()
+{
+   if(g_fh == INVALID_HANDLE) return;
+   HtmlNotes();
+   HW("</body></html>");
+   FileClose(g_fh);
+   g_fh = INVALID_HANDLE;
+   Print("Report HTML: ", TerminalInfoString(TERMINAL_DATA_PATH), "\\MQL5\\Files\\", InpFilePrefix + "_" + _Symbol + ".html");
+}
+
+void HtmlGlobalInfo()
+{
+   HW("<div class='note'>Storia analizzata: <b>" + TimeToString(g_dataFirst, TIME_DATE) + " &rarr; " + TimeToString(g_dataLast, TIME_DATE) + "</b> (tutta quella disponibile, simulazione " + EnumToString(g_simTF) +
+      ") | taglio In-Sample / Out-Of-Sample: <b>" + TimeToString(g_cut, TIME_DATE) + "</b> (" + IntegerToString(InpISPercent) + "% del tempo, uguale per tutte le definizioni) | orizzonte massimo " + IntegerToString(InpMaxHoldHours) +
+      " h | spread " + Pick(InpSpreadPoints >= 0, IntegerToString(InpSpreadPoints) + " pt fissi", "da barra") + " + comm. " + F(InpCommissionPoints, 1) + " pt | ATR " + EnumToString(g_atrTF) + "(" + IntegerToString(InpATRPeriod) +
+      ") | limiti Min/Max range dell'EA " + Pick(RequireRangeConfirmation, "APPLICATI", "non applicati (le tabelle dicono dove metterli)") + "</div>");
+   for(int i = 0; i < ArraySize(g_warn); i++) HW("<div class='warn'>" + g_warn[i] + "</div>");
+}
+
+// parametri dell'EA che riproducono la definizione analizzata
+string EaInputsText(const SDef &d)
+{
+   string s = "RangeMode=" + ModeName(d) + ", ";
+   if(d.mode == (int)RANGE_BARS) s += "RangeBarsLookback=" + IntegerToString(d.lookback) + " (Timeframe=" + EnumToString(g_rangeTF) + "), RangeDaysBack=" + IntegerToString(d.daysBack);
+   else if(d.mode == (int)RANGE_TIME) s += StringFormat("RangeHourStart=%d, RangeMinuteStart=%d, RangeHourEnd=%d, RangeMinuteEnd=%d, RangeDaysBack=%d", d.rhs, d.rms, d.rhe, d.rme, d.daysBack);
+   else s += "RangeDaySpan=" + IntegerToString(d.span) + ", RangeDaysBack=" + IntegerToString(d.daysBack);
+   int we = d.weMin % 1440;
+   s += StringFormat(", TradeHourStart=%d, TradeMinuteStart=%d, TradeHourEnd=%d, TradeMinuteEnd=%d, ExpireExtraMinutes=%d, PendingOrderOffsetPoints=%d, ChaseIfBroken=%s",
+                     d.wsMin / 60, d.wsMin % 60, we / 60, we % 60, d.extra, d.offsetPts, Pick(d.chase, "true", "false"));
+   return s;
+}
+
+void HtmlClassIntro()
+{
+   int E = ArraySize(g_ev);
+   HW("<div class='note'>range: <b>" + RangeText(g_cur) + "</b> (" + ModeName(g_cur) + ") | finestra di entrata <b>" + HHMM(g_cur.wsMin) + "-" + HHMM(g_cur.weMin) +
+      "</b> ora server | offset " + IntegerToString(g_cur.offsetPts) + " pt | sfondamenti: <b>" + IntegerToString(E) + "</b> (long " + IntegerToString(CountDir(1)) + ", short " + IntegerToString(CountDir(-1)) +
+      ") | IS: " + IntegerToString(g_split) + " trade fino al " + TimeToString(g_ev[MathMax(0, g_split - 1)].day, TIME_DATE) + ", OOS: " + IntegerToString(E - g_split) +
+      " | ATR mediano " + F(g_medATRpts, 0) + " punti</div>");
+   HW("<div class='note'>Per riprodurre questa definizione nell'EA: <span class='mono'>" + EaInputsText(g_cur) + "</span></div>");
+   if(E < 150) HW("<div class='warn'>Meno di 150 trade: le griglie sono rumore. La storia disponibile &egrave; corta o la finestra &egrave; stretta.</div>");
+   if(E - g_split < 30) HW("<div class='warn'>Meno di 30 trade in OOS: il verdetto OOS non &egrave; affidabile.</div>");
+}
+
+//+------------------------------------------------------------------+
+//| Calendario: giorno, settimana, mese                                |
+//+------------------------------------------------------------------+
+void CalRow(const string label, const double &v[], const int n)
+{
+   if(n < 2) { HW("<tr><th class='rl'>" + label + "</th><td colspan='7'>dati insufficienti</td></tr>"); return; }
+   double sum = 0.0, sum2 = 0.0, mn = 1e18, mx = -1e18;
+   int pos = 0;
+   for(int i = 0; i < n; i++)
+   {
+      sum += v[i]; sum2 += v[i] * v[i];
+      if(v[i] < mn) mn = v[i];
+      if(v[i] > mx) mx = v[i];
+      if(v[i] > 0.0) pos++;
+   }
+   double mean = sum / n;
+   double var = (sum2 - sum * sum / n) / (n - 1);
+   double sd = (var > 0.0) ? MathSqrt(var) : 0.0;
+   double t = (sd > EPSILON) ? mean / (sd / MathSqrt((double)n)) : 0.0;
+   string cls = (MathAbs(t) >= 2.0) ? ((t > 0.0) ? " class='ok'" : " class='bad'") : "";
+   HW("<tr><th class='rl'>" + label + "</th><td>" + IntegerToString(n) + "</td><td>" + F(100.0 * pos / n, 1) + "%</td><td>" + F(mean, 3) + "</td><td>" + F(sd, 3) +
+      "</td><td" + cls + ">" + F(t, 2) + "</td><td>" + F(mn, 2) + "</td><td>" + F(mx, 2) + "</td></tr>\n");
+}
+
+void HtmlCalendar()
+{
+   int E = ArraySize(g_ev);
+   int C = ArraySize(g_cfg);
+   int fin[2];
+   string nm[2];
+   string nmS[2];
+   int nf = 0;
+   if(g_best[1] >= 0) { fin[nf] = g_best[1]; nm[nf] = "SL in ATR scelto sull'IS: " + CellDesc(g_best[1]); nmS[nf] = "SL ATR scelto"; nf++; }
+   if(g_refIdx >= 0) { fin[nf] = g_refIdx; nm[nf] = "Uscite dell'EA (SL/TP + BE + trailing dei tuoi input)"; nmS[nf] = "Uscite EA"; nf++; }
+   if(nf == 0 || E < 2) return;
+   HW("<h2>" + g_pre + "8b. Calendario: giorno, settimana, mese</h2>");
+   HW("<div class='note'>Trade eseguiti secondo la regola dell'EA, in R. Giorno = un trade; settimana = luned&igrave;-domenica; mese = mese solare (giorno di piazzamento). Un edge reale non dipende da pochi mesi fortunati: guarda la quota di periodi positivi e la t. Le righe settimana e mese sommano le R dei trade del periodo.</div>");
+
+   MqlDateTime a0, a1;
+   TimeToStruct(g_ev[0].day, a0);
+   TimeToStruct(g_ev[E - 1].day, a1);
+   int m0 = a0.year * 12 + a0.mon - 1;
+   int nMon = (a1.year * 12 + a1.mon - 1) - m0 + 1;
+   long w0 = ((long)g_ev[0].day / 86400 + 3) / 7;
+   int nWk = (int)(((long)g_ev[E - 1].day / 86400 + 3) / 7 - w0) + 1;
+   if(nMon < 1 || nWk < 1) return;
+   double monS[], wkS[];
+   int monC[], wkC[];
+   ArrayResize(monS, nf * nMon);
+   ArrayResize(monC, nf * nMon);
+   ArrayResize(wkS, nf * nWk);
+   ArrayResize(wkC, nf * nWk);
+   ArrayInitialize(monS, 0.0);
+   ArrayInitialize(wkS, 0.0);
+   ArrayInitialize(monC, 0);
+   ArrayInitialize(wkC, 0);
+
+   HW("<h3>Riepilogo per periodo</h3><table><tr><th class='rl'>Uscita / periodo</th><th>Periodi con trade</th><th>% periodi positivi</th><th>R medio per periodo</th><th>Dev. std.</th><th>t</th><th>Peggiore (R)</th><th>Migliore (R)</th></tr>");
+   for(int i = 0; i < nf; i++)
+   {
+      double dd[];
+      ArrayResize(dd, 0);
+      int streak = 0, maxStreak = 0;
+      for(int e = 0; e < E; e++)
+      {
+         float xr = g_xR[e * C + fin[i]];
+         if(xr == XR_SKIP) continue;
+         double r = (double)xr;
+         int sz = ArraySize(dd);
+         ArrayResize(dd, sz + 1);
+         dd[sz] = r;
+         if(r < 0.0) { streak++; if(streak > maxStreak) maxStreak = streak; }
+         else streak = 0;
+         MqlDateTime dt;
+         TimeToStruct(g_ev[e].day, dt);
+         int mi = dt.year * 12 + dt.mon - 1 - m0;
+         int wi = (int)(((long)g_ev[e].day / 86400 + 3) / 7 - w0);
+         if(mi >= 0 && mi < nMon) { monS[i * nMon + mi] += r; monC[i * nMon + mi]++; }
+         if(wi >= 0 && wi < nWk) { wkS[i * nWk + wi] += r; wkC[i * nWk + wi]++; }
+      }
+      HW("<tr><th class='rl' colspan='8' style='background:#f6f8fa'>" + nm[i] + " &mdash; serie perdente pi&ugrave; lunga: " + IntegerToString(maxStreak) + " trade consecutivi</th></tr>");
+      CalRow("Giorno (1 trade)", dd, ArraySize(dd));
+      double wk[], mo[];
+      ArrayResize(wk, 0);
+      ArrayResize(mo, 0);
+      for(int k = 0; k < nWk; k++)
+         if(wkC[i * nWk + k] > 0) { int sz = ArraySize(wk); ArrayResize(wk, sz + 1); wk[sz] = wkS[i * nWk + k]; }
+      for(int k = 0; k < nMon; k++)
+         if(monC[i * nMon + k] > 0) { int sz = ArraySize(mo); ArrayResize(mo, sz + 1); mo[sz] = monS[i * nMon + k]; }
+      CalRow("Settimana", wk, ArraySize(wk));
+      CalRow("Mese", mo, ArraySize(mo));
+   }
+   HW("</table>");
+
+   HW("<h3>Mese per mese (somma R / N trade)</h3><table class='m'><tr><th>Mese</th>");
+   for(int i = 0; i < nf; i++) HW("<th>" + nmS[i] + "</th>");
+   HW("</tr>\n");
+   for(int k = 0; k < nMon; k++)
+   {
+      int mm = m0 + k;
+      HW("<tr><th>" + IntegerToString(mm / 12) + "-" + StringFormat("%02d", mm % 12 + 1) + "</th>");
+      for(int i = 0; i < nf; i++)
+      {
+         int n = monC[i * nMon + k];
+         double sm = monS[i * nMon + k];
+         string bg = (n > 0) ? " style='background:" + Heat(sm, 3.0) + "'" : "";
+         HW("<td" + bg + ">" + Pick(n > 0, F(sm, 2) + " (" + IntegerToString(n) + ")", "-") + "</td>");
+      }
+      HW("</tr>\n");
+   }
+   HW("</table>");
+}
+
+//+------------------------------------------------------------------+
+//| Sintesi e mappa dell'esplorazione automatica                       |
+//+------------------------------------------------------------------+
+int ValidInClass(const int cl)
+{
+   int n = 0;
+   for(int r = 0; r < g_nR; r++)
+   {
+      if(g_rCls[r] != cl) continue;
+      for(int w = 0; w < g_nW; w++)
+         if(g_mValid[r * g_nW + w]) n++;
+   }
+   return n;
+}
+
+void SumRow(const string label, const string defTxt, const string winTxt, const int K, const SStat &isA, const SStat &oosA, const SStat &oosB, const bool chosen)
+{
+   double tcrit = chosen ? NormInvUpper(0.05 / MathMax(1, K)) : 1.645;
+   double p;
+   string v = Verdict(oosA, p);
+   if(chosen && StatMean(isA) <= 0.0) v += " <span class='note'>(nessuna combinazione con E[R] IS positivo)</span>";
+   else if(chosen && StatT(isA) < tcrit) v += " <span class='note'>(t IS sotto la soglia di correzione multipla)</span>";
+   HW("<tr><th class='rl'>" + label + "</th><td class='mono' style='text-align:left'>" + defTxt + "</td><td>" + winTxt + "</td><td>" + Pick(chosen, IntegerToString(K), "-") + "</td><td>" + F(tcrit, 2) + "</td><td>" +
+      IntegerToString(isA.n) + "</td><td>" + F(StatMean(isA), 3) + "</td><td>" + F(StatT(isA), 2) + "</td><td>" + IntegerToString(oosA.n) + "</td><td>" + F(StatMean(oosA), 3) + "</td><td>" +
+      F(StatT(oosA), 2) + "</td><td>" + F(p, 3) + "</td><td>" + F(StatMean(oosB), 3) + "</td><td class='rl' style='text-align:left'>" + v + "</td></tr>\n");
+}
+
+void HtmlAutoSummary()
+{
+   int K = g_nR * g_nW;
+   HW("<h2 id='sintesi'>Sintesi: giornaliero, settimanale, mensile</h2>");
+   HW("<div class='note'>Lo script ha provato da solo <b>" + IntegerToString(K) + "</b> combinazioni di (definizione di range &times; finestra di ingresso) su tutta la storia disponibile. Per ogni orizzonte del range la combinazione migliore &egrave; scelta SOLO sull'In-Sample " +
+      "(SL " + F(InpRefSLATR, 2) + " ATR / RR 1:" + F(InpRefRR, 1) + ", metrica " + Pick(InpRankBy == RANK_TSTAT, "t-stat", Pick(InpRankBy == RANK_EXPECTANCY, "expectancy", "profit factor")) + Pick(InpSmoothRank, ", mediata sui vicini", "") +
+      "). L'unico numero onesto &egrave; l'Out-Of-Sample di quella scelta (un solo test). Dopo la sintesi trovi la mappa completa di ogni orizzonte e, per ognuno, l'analisi a fondo (uscite, trailing, giorno/settimana/mese). " +
+      "I tre orizzonti usano gli stessi giorni: un OOS fortunato pu&ograve; confermarli tutti insieme.</div>");
+   HW("<table><tr><th class='rl'>Orizzonte del range</th><th class='rl'>Definizione scelta (IS)</th><th>Finestra di ingresso</th><th>Combinazioni valide</th><th>t critico*</th><th>N IS</th><th>E[R] IS</th><th>t IS</th><th>N OOS</th>");
+   HW("<th>E[R] OOS</th><th>t OOS</th><th>p OOS</th><th>E[R] OOS con le uscite dell'EA</th><th class='rl'>Esito</th></tr>");
+   for(int cl = 0; cl < NCLS; cl++)
+   {
+      int k = g_win[cl];
+      if(k < 0) { HW("<tr><th class='rl'>" + g_clsName[cl] + "</th><td colspan='13' class='rl'>nessuna combinazione con almeno " + IntegerToString(InpMinTrades) + " trade IS</td></tr>"); continue; }
+      SumRow(g_clsName[cl], g_rLbl[k / g_nW], HHMM(g_wS[k % g_nW]) + "-" + HHMM(g_wE[k % g_nW]), ValidInClass(cl), g_mIS[k * 2], g_mOOS[k * 2], g_mOOS[k * 2 + 1], true);
+   }
+   SumRow("EA con i tuoi input (non scelta)", RangeText(g_def), HHMM(g_def.wsMin) + "-" + HHMM(g_def.weMin), 1, g_eaIS[0], g_eaOOS[0], g_eaOOS[1], false);
+   HW("</table><div class='note'>* soglia t (one-sided 5%) con correzione di Bonferroni sul numero di combinazioni valide dell'orizzonte: conservativa perch&eacute; le combinazioni sono correlate, ma &egrave; l'ordine di grandezza giusto per il data-mining. ");
+   HW("L'ultima riga non &egrave; stata scelta: sono i parametri dell'EA nei suoi input, quindi vale come test unico a posteriori. Se la scelta per un orizzonte ha OOS negativo o non significativo, per quell'orizzonte non c'&egrave; un edge dimostrato.</div>");
+}
+
+void MapCell(const int k, const int part, const double sc)
+{
+   SStat s;
+   if(part == 0) s = g_mIS[k * 2]; else s = g_mOOS[k * 2];
+   bool win = false;
+   for(int cl = 0; cl < NCLS; cl++) if(g_win[cl] == k) win = true;
+   string cls = "";
+   if(!g_mValid[k]) cls = " class='lo'";
+   else if(win) cls = " class='best'";
+   if(s.n == 0) { HW("<td" + cls + ">-</td>"); return; }
+   double m = StatMean(s);
+   string bg = (g_mValid[k] && m != 0.0) ? " style='background:" + Heat(m, sc) + "'" : "";
+   HW("<td" + cls + bg + " title='N " + IntegerToString(s.n) + " | E[R] " + F(m, 3) + " | t " + F(StatT(s), 2) + " | win " + F(StatWR(s), 1) + "%'>" + F(m, 2) + "</td>");
+}
+
+void HtmlAutoMap(const int cl)
+{
+   int rows[];
+   ArrayResize(rows, 0);
+   for(int r = 0; r < g_nR; r++)
+      if(g_rCls[r] == cl) { int sz = ArraySize(rows); ArrayResize(rows, sz + 1); rows[sz] = r; }
+   int nr = ArraySize(rows);
+   if(nr == 0) return;
+   int nValid = ValidInClass(cl);
+   double sc = 0.0;
+   for(int i = 0; i < nr; i++)
+      for(int w = 0; w < g_nW; w++)
+      {
+         int k = rows[i] * g_nW + w;
+         if(!g_mValid[k]) continue;
+         sc = MathMax(sc, MathAbs(StatMean(g_mIS[k * 2])));
+         if(g_mOOS[k * 2].n >= 10) sc = MathMax(sc, MathAbs(StatMean(g_mOOS[k * 2])));
+      }
+   sc = MathMin(0.4, MathMax(0.05, sc));
+   double tcrit = NormInvUpper(0.05 / MathMax(1, nValid));
+
+   HW("<h2 id='mappa" + IntegerToString(cl) + "'>Mappa &mdash; orizzonte " + g_clsName[cl] + ": " + IntegerToString(nr) + " definizioni di range &times; " + IntegerToString(g_nW) + " finestre di ingresso</h2>");
+   HW("<div class='note'>Ogni cella &egrave; una combinazione (range + finestra di ingresso) con SL " + F(InpRefSLATR, 2) + " ATR / RR 1:" + F(InpRefRR, 1) + ", netto di costi, regola dell'EA applicata. Colonna = ora di inizio della finestra (ora server) per durata. " +
+      "Celle tenui = meno di " + IntegerToString(InpMinTrades) + " trade IS. Contorno blu = combinazione scelta. Passa il mouse su una cella per N, t e win rate. " +
+      "L'ultima riga e l'ultima colonna sono la media delle celle valide: una zona che funziona dovrebbe vedersi in entrambe le mappe (IS e OOS) e non in una sola cella.</div>");
+   for(int part = 0; part < 2; part++)
+   {
+      HW("<h3>E[R] " + Pick(part == 0, "In-Sample", "Out-Of-Sample") + "</h3><div class='sc'><table class='m m2'><tr><th rowspan='2' class='rl'>Definizione di range</th>");
+      int w = 0;
+      while(w < g_nW)
+      {
+         int len = g_wLen[w];
+         int c = 0;
+         while(w + c < g_nW && g_wLen[w + c] == len) c++;
+         HW("<th colspan='" + IntegerToString(c) + "'>finestra " + IntegerToString(len) + " min</th>");
+         w += c;
+      }
+      HW("<th rowspan='2'>Media (60 min)</th></tr><tr>");
+      for(int w2 = 0; w2 < g_nW; w2++) HW("<th>" + StringFormat("%02d", g_wS[w2] / 60) + "</th>");
+      HW("</tr>\n");
+      double colSum[], colCnt[];
+      ArrayResize(colSum, g_nW);
+      ArrayResize(colCnt, g_nW);
+      ArrayInitialize(colSum, 0.0);
+      ArrayInitialize(colCnt, 0.0);
+      for(int i = 0; i < nr; i++)
+      {
+         HW("<tr><th class='rl'>" + g_rLbl[rows[i]] + "</th>");
+         double rs = 0.0, rc = 0.0;
+         for(int w3 = 0; w3 < g_nW; w3++)
+         {
+            int k = rows[i] * g_nW + w3;
+            MapCell(k, part, sc);
+            if(g_mValid[k])
+            {
+               SStat sc3;
+               if(part == 0) sc3 = g_mIS[k * 2]; else sc3 = g_mOOS[k * 2];
+               double m = StatMean(sc3);
+               colSum[w3] += m; colCnt[w3] += 1.0;
+               if(g_wLen[w3] == 60) { rs += m; rc += 1.0; }
+            }
+         }
+         HW(Pick(rc > 0.0, "<td style='background:" + Heat(rs / MathMax(1.0, rc), sc) + "'>" + F(rs / MathMax(1.0, rc), 3) + "</td>", "<td>-</td>") + "</tr>\n");
+      }
+      HW("<tr><th class='rl'>Media (celle valide)</th>");
+      for(int w4 = 0; w4 < g_nW; w4++)
+         HW(Pick(colCnt[w4] > 0.0, "<td style='background:" + Heat(colSum[w4] / colCnt[w4], sc) + "'>" + F(colSum[w4] / colCnt[w4], 3) + "</td>", "<td>-</td>"));
+      HW("<td></td></tr></table></div>");
+   }
+
+   // prime 12 combinazioni per punteggio IS
+   int top[12];
+   int nt = 0;
+   for(int q = 0; q < 12; q++)
+   {
+      int bk = -1;
+      for(int i = 0; i < nr; i++)
+         for(int w = 0; w < g_nW; w++)
+         {
+            int k = rows[i] * g_nW + w;
+            if(!g_mValid[k]) continue;
+            bool used = false;
+            for(int j = 0; j < nt; j++) if(top[j] == k) used = true;
+            if(used) continue;
+            if(bk < 0 || g_mScore[k] > g_mScore[bk]) bk = k;
+         }
+      if(bk < 0) break;
+      top[nt] = bk;
+      nt++;
+   }
+   HW("<h3>Prime " + IntegerToString(nt) + " combinazioni per punteggio IS</h3><table><tr><th class='rl'>Definizione di range</th><th>Finestra</th><th>Punteggio</th><th>N IS</th><th>E[R] IS</th><th>t IS</th><th>N OOS</th><th>E[R] OOS</th><th>t OOS</th><th>p OOS</th><th>E[R] OOS uscite EA</th></tr>");
+   int oosPos = 0;
+   for(int i = 0; i < nt; i++)
+   {
+      int k = top[i];
+      SStat a, b;
+      a = g_mIS[k * 2];
+      b = g_mOOS[k * 2];
+      double p = NormUpper(StatT(b));
+      if(StatMean(b) > 0.0) oosPos++;
+      string tcl = (StatT(a) >= tcrit) ? " class='ok'" : "";
+      string rcl = (i == 0) ? " class='bestrow'" : "";
+      HW("<tr" + rcl + "><th class='rl'>" + g_rLbl[k / g_nW] + "</th><td>" + HHMM(g_wS[k % g_nW]) + "-" + HHMM(g_wE[k % g_nW]) + "</td><td>" + F(g_mScore[k], 2) + "</td><td>" + IntegerToString(a.n) + "</td><td>" + F(StatMean(a), 3) +
+         "</td><td" + tcl + ">" + F(StatT(a), 2) + "</td><td>" + IntegerToString(b.n) + "</td><td>" + F(StatMean(b), 3) + "</td><td>" + F(StatT(b), 2) + "</td><td>" + Pick(b.n >= 20, F(p, 3), "-") + "</td><td>" +
+         F(StatMean(g_mOOS[k * 2 + 1]), 3) + "</td></tr>\n");
+   }
+   HW("</table><div class='note'>t IS verde = supera la soglia di Bonferroni su " + IntegerToString(nValid) + " combinazioni (t &ge; " + F(tcrit, 2) + "). Delle prime " + IntegerToString(nt) + ", " + IntegerToString(oosPos) +
+      " hanno E[R] OOS positivo: senza edge ci si aspetta circa la met&agrave;.</div>");
+
+   // la mappa IS predice la mappa OOS?
+   double ia[], ib[];
+   ArrayResize(ia, 0);
+   ArrayResize(ib, 0);
+   for(int i = 0; i < nr; i++)
+      for(int w = 0; w < g_nW; w++)
+      {
+         int k = rows[i] * g_nW + w;
+         if(!g_mValid[k] || g_mOOS[k * 2].n < 10) continue;
+         int sz = ArraySize(ia);
+         ArrayResize(ia, sz + 1);
+         ArrayResize(ib, sz + 1);
+         ia[sz] = StatMean(g_mIS[k * 2]);
+         ib[sz] = StatMean(g_mOOS[k * 2]);
+      }
+   int nn = ArraySize(ia);
+   double rho = Spearman(ia, ib, nn);
+   string lec = "dati insufficienti";
+   if(nn >= 8) lec = (rho >= 0.5) ? "<span class='ok'>mappa stabile</span>" : ((rho >= 0.2) ? "<span class='mid'>mappa debole</span>" : "<span class='bad'>mappa instabile: scegliere la cella migliore insegue rumore</span>");
+   HW("<div class='note'>La mappa si ripete fuori campione? Spearman IS-OOS su " + IntegerToString(nn) + " combinazioni: <b>" + F(rho, 2) + "</b> &mdash; " + lec + ". Correlazione ~0 = la scelta sull'IS non ha valore predittivo. " +
+      "Una correlazione alta non prova un edge (anche i costi creano struttura: finestre in ore di spread alto perdono sempre di pi&ugrave;); conta il segno di E[R] OOS.</div>");
+}
+
+//+------------------------------------------------------------------+
+//| Corpo dell'analisi a fondo (una definizione)                       |
+//+------------------------------------------------------------------+
+void WriteClassBody()
+{
+   HtmlClassIntro();
    HtmlVerdict();
    HtmlFunnel();
    HtmlEventStudy();
    HtmlBreakdown();
-   HtmlSweeps();
+   if(InpAuto && ArraySize(g_s1Lbl) > 0) HtmlOffsetSweep();
 
-   HW("<h2>6. Rischio/rendimento: SL e TP in PUNTI FISSI, in ATR, in multipli del RANGE</h2>");
+   HW("<h2>" + g_pre + "6. Rischio/rendimento: SL e TP in PUNTI FISSI, in ATR, in multipli del RANGE</h2>");
    HW("<div class='note'>Righe: SL. Colonne: RR 1:x (TP = x &middot; SL). SL e TP sono relativi al prezzo dell'ordine stop, come nell'EA. Celle tenui = meno di " + IntegerToString(InpMinTrades) +
       " trade IS. Contorno blu = cella scelta (IS). Il win rate &egrave; colorato rispetto al breakeven 1/(1+RR): conta lo scarto, non il valore assoluto. SL = 1 x range &egrave; circa lo stop sul bordo opposto.</div>");
    for(int f = 0; f < 3; f++)
@@ -2423,7 +2993,7 @@ void WriteHtml()
       HtmlMatrix("Max drawdown (R) - tutto il campione", f, 4, 2);
    }
 
-   HW("<h2>6b. Trailing stop</h2>");
+   HW("<h2>" + g_pre + "6b. Trailing stop</h2>");
    HW("<div class='note'>SL iniziale fisso (" + F(InpTrailSLATR, 2) + " ATR, o " + F(g_cfg[g_base[3]].sl / g_point, 0) + " punti in modalit&agrave; punti), " +
       Pick(InpTrailTPRR > 0.0, "TP a RR " + F(InpTrailTPRR, 1), "nessun TP") + ". Righe: soglia di attivazione. Colonne: distanza dello stop dal prezzo corrente (come l'EA: lo stop sale a gradini, solo se supera il precedente di almeno lo step). Step = " +
       F(InpTrailStepRatio, 2) + " x distanza. Confronta con le righe corrispondenti delle tabelle RR: il trailing aggiunge valore oppure no?</div>");
@@ -2438,16 +3008,15 @@ void WriteHtml()
 
    HtmlTop10();
    HtmlStability();
-   HtmlNotes();
-   HW("</body></html>");
-   FileClose(g_fh);
-   g_fh = INVALID_HANDLE;
-   Print("Report HTML: ", TerminalInfoString(TERMINAL_DATA_PATH), "\\MQL5\\Files\\", fn);
+   HtmlCalendar();
 }
 
-void WriteCSV()
+//+------------------------------------------------------------------+
+//| CSV                                                                |
+//+------------------------------------------------------------------+
+void WriteCSV(const string suffix)
 {
-   string base = InpFilePrefix + "_" + _Symbol;
+   string base = InpFilePrefix + "_" + _Symbol + Pick(suffix == "", "", "_" + suffix);
    int E = ArraySize(g_ev);
    int C = ArraySize(g_cfg);
 
@@ -2501,35 +3070,61 @@ void WriteCSV()
       Print("CSV griglia: ", TerminalInfoString(TERMINAL_DATA_PATH), "\\MQL5\\Files\\", base, "_grid.csv");
    }
 
-   h = FileOpen(base + "_sweeps.csv", FILE_WRITE | FILE_TXT | FILE_ANSI);
-   if(h != INVALID_HANDLE)
+   int K = ArraySize(g_s1Lbl);
+   if(K > 0)
    {
-      FileWriteString(h, "sweep,definition,trades,cfg,n_is,er_is,t_is,n_oos,er_oos,t_oos\n");
-      for(int s = 0; s < 2; s++)
+      h = FileOpen(base + "_offsets.csv", FILE_WRITE | FILE_TXT | FILE_ANSI);
+      if(h != INVALID_HANDLE)
       {
-         int K = (s == 0) ? ArraySize(g_s1Lbl) : ArraySize(g_s2Lbl);
+         FileWriteString(h, "definition,trades,cfg,n_is,er_is,t_is,n_oos,er_oos,t_oos\n");
          for(int k = 0; k < K; k++)
             for(int c = 0; c < 2; c++)
             {
                SStat a, b;
-               string lbl;
-               int nTr;
-               if(s == 0) { a = g_s1IS[k * 2 + c]; b = g_s1OOS[k * 2 + c]; lbl = g_s1Lbl[k]; nTr = g_s1N[k]; }
-               else { a = g_s2IS[k * 2 + c]; b = g_s2OOS[k * 2 + c]; lbl = g_s2Lbl[k]; nTr = g_s2N[k]; }
-               string ln = Pick(s == 0, "range", "entry_window") + ",\"" + lbl + "\"," + IntegerToString(nTr) + "," +
-                           Pick(c == 0, "ATR_ref", "EA_exit") + "," + IntegerToString(a.n) + "," + F(StatMean(a), 4) + "," + F(StatT(a), 3) + "," + IntegerToString(b.n) + "," + F(StatMean(b), 4) + "," + F(StatT(b), 3);
-               FileWriteString(h, ln + "\n");
+               a = g_s1IS[k * 2 + c];
+               b = g_s1OOS[k * 2 + c];
+               FileWriteString(h, "\"" + g_s1Lbl[k] + "\"," + IntegerToString(g_s1N[k]) + "," + Pick(c == 0, "ATR_ref", "EA_exit") + "," + IntegerToString(a.n) + "," + F(StatMean(a), 4) + "," + F(StatT(a), 3) + "," +
+                               IntegerToString(b.n) + "," + F(StatMean(b), 4) + "," + F(StatT(b), 3) + "\n");
             }
+         FileClose(h);
       }
-      FileClose(h);
    }
 }
 
-void PrintSummary()
+// tutta la mappa: una riga per combinazione x uscita; include i parametri per riprodurre la combinazione
+void WriteMapCSV()
+{
+   string base = InpFilePrefix + "_" + _Symbol;
+   int h = FileOpen(base + "_map.csv", FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(h == INVALID_HANDLE) return;
+   FileWriteString(h, "class,range,mode,days_back,lookback_bars,rhs,rms,rhe,rme,span,ws_min,we_min,valid,winner,trades,cfg,n_is,er_is,t_is,wr_is,n_oos,er_oos,t_oos,wr_oos,score_is\n");
+   for(int r = 0; r < g_nR; r++)
+      for(int w = 0; w < g_nW; w++)
+      {
+         int k = r * g_nW + w;
+         bool win = false;
+         for(int cl = 0; cl < NCLS; cl++) if(g_win[cl] == k) win = true;
+         for(int c = 0; c < 2; c++)
+         {
+            SStat a, b;
+            a = g_mIS[k * 2 + c];
+            b = g_mOOS[k * 2 + c];
+            string ln = g_clsTag[g_rCls[r]] + ",\"" + g_rLbl[r] + "\"," + IntegerToString(g_rDef[r].mode) + "," + IntegerToString(g_rDef[r].daysBack) + "," + IntegerToString(g_rDef[r].lookback) + "," +
+                        IntegerToString(g_rDef[r].rhs) + "," + IntegerToString(g_rDef[r].rms) + "," + IntegerToString(g_rDef[r].rhe) + "," + IntegerToString(g_rDef[r].rme) + "," + IntegerToString(g_rDef[r].span) + "," +
+                        IntegerToString(g_wS[w]) + "," + IntegerToString(g_wE[w]) + "," + Pick(g_mValid[k], "1", "0") + "," + Pick(win, "1", "0") + "," + IntegerToString(g_mN[k]) + "," + Pick(c == 0, "ATR_ref", "EA_exit") + "," +
+                        IntegerToString(a.n) + "," + F(StatMean(a), 5) + "," + F(StatT(a), 4) + "," + F(StatWR(a), 2) + "," + IntegerToString(b.n) + "," + F(StatMean(b), 5) + "," + F(StatT(b), 4) + "," + F(StatWR(b), 2) + "," + F(g_mScore[k], 4);
+            FileWriteString(h, ln + "\n");
+         }
+      }
+   FileClose(h);
+   Print("CSV mappa: ", TerminalInfoString(TERMINAL_DATA_PATH), "\\MQL5\\Files\\", base, "_map.csv");
+}
+
+void PrintSummary(const string label)
 {
    int E = ArraySize(g_ev);
-   Print("=============== MDRB STUDY - RIEPILOGO ===============");
-   PrintFormat("%s | sfondamenti %d (IS %d / OOS %d) | sim %s | ATR mediano %.0f punti", _Symbol, E, g_split, E - g_split, EnumToString(g_simTF), g_medATRpts);
+   Print("=============== MDRB STUDY - RIEPILOGO: ", label, " ===============");
+   PrintFormat("%s | range %s, finestra %s-%s | sfondamenti %d (IS %d / OOS %d) | sim %s | ATR mediano %.0f punti", _Symbol, RangeText(g_cur), HHMM(g_cur.wsMin), HHMM(g_cur.weMin), E, g_split, E - g_split, EnumToString(g_simTF), g_medATRpts);
    PrintFormat("Giorni %d: range non calcolabile %d, scartati %d, mai piazzata %d, senza sfondamento %d, trade %d (L %d / S %d)",
                g_fn.days, g_fn.noRange, g_fn.tooSmall + g_fn.tooBig + g_fn.invalid, g_fn.noPlace, g_fn.noFill, g_fn.filled, g_fn.longs, g_fn.shorts);
    for(int f = 0; f < 6; f++)
@@ -2548,6 +3143,32 @@ void PrintSummary()
 }
 
 //+------------------------------------------------------------------+
+//| Analisi a fondo della definizione g_cur                            |
+//+------------------------------------------------------------------+
+bool AnalyzeCur()
+{
+   BuildSetups(g_cur, g_ev, g_fn);
+   if(IsStopped()) return false;
+   int E = ArraySize(g_ev);
+   PrintFormat("Sfondamenti: %d su %d giorni (range non calcolabile %d, piccolo %d, grande %d, nullo %d, mai piazzata %d, senza sfondamento %d, fine dati %d)",
+               E, g_fn.days, g_fn.noRange, g_fn.tooSmall, g_fn.tooBig, g_fn.invalid, g_fn.noPlace, g_fn.noFill, g_fn.noData + g_fn.noATR);
+   if(E < 20)
+   {
+      Comment("");
+      PrintFormat("Solo %d sfondamenti: troppo pochi per qualunque statistica (storia corta o finestra/range da controllare: ora SERVER).", E);
+      return false;
+   }
+   g_medATRpts = MedianATRPoints();
+   AssignBuckets();
+   BuildConfigs();
+   SimulateEvents(g_ev, g_cfg, g_R, g_F, g_XJ, true);
+   if(IsStopped()) return false;
+   AggregateMain();
+   ScoreCells();
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| OnStart                                                            |
 //+------------------------------------------------------------------+
 void OnStart()
@@ -2556,41 +3177,68 @@ void OnStart()
    ArrayResize(g_warn, 0);
    if(!Setup()) return;
    if(!LoadAllData()) { Comment(""); return; }
-
-   Comment("MDRB Study: ricostruzione dei setup giornalieri...");
-   BuildSetups(g_def, g_ev, g_fn);
-   if(IsStopped()) { Comment(""); return; }
-   int E = ArraySize(g_ev);
-   PrintFormat("Sfondamenti: %d su %d giorni (range non calcolabile %d, piccolo %d, grande %d, nullo %d, mai piazzata %d, senza sfondamento %d, fine dati %d)",
-               E, g_fn.days, g_fn.noRange, g_fn.tooSmall, g_fn.tooBig, g_fn.invalid, g_fn.noPlace, g_fn.noFill, g_fn.noData + g_fn.noATR);
-   if(E < 20)
-   {
-      Comment("");
-      PrintFormat("Solo %d sfondamenti: troppo pochi per qualunque statistica. Allunga InpMonthsBack, allarga la finestra di entrata o controlla range e orari (ora SERVER).", E);
-      return;
-   }
+   g_cut = g_dataFirst + (datetime)((double)(g_dataLast - g_dataFirst) * InpISPercent / 100.0);
+   for(int i = 0; i < NCLS; i++) g_win[i] = -1;
+   ArrayResize(g_s1Lbl, 0);
 
    g_nH = 0;
    for(int i = 0; i < NHOR; i++)
       if(g_horAllH[i] <= InpMaxHoldHours) { g_hor[g_nH] = g_horAllH[i]; g_nH++; }
    if(g_nH == 0) { g_hor[0] = 1; g_nH = 1; }
 
-   g_medATRpts = MedianATRPoints();
-   AssignBuckets();
-   BuildConfigs();
-   SimulateEvents(g_ev, g_cfg, g_R, g_F, g_XJ, true);
-   if(IsStopped()) { Comment(""); return; }
-   AggregateMain();
-   ScoreCells();
-
-   if(InpSweepRange) RunSweep1();
-   if(InpSweepEntryHours) RunSweep2();
-   if(IsStopped()) { Comment(""); return; }
-
-   Comment("MDRB Study: scrittura report...");
-   if(InpWriteHTML) WriteHtml();
-   if(InpWriteCSV) WriteCSV();
-   PrintSummary();
+   if(!InpAuto)
+   {
+      // modo classico: analizza solo la configurazione degli input dell'EA
+      g_cur = g_def;
+      g_pre = "";
+      Comment("MDRB Study: ricostruzione dei setup giornalieri...");
+      if(!AnalyzeCur()) { Comment(""); return; }
+      if(InpWriteHTML && HtmlOpen())
+      {
+         HtmlGlobalInfo();
+         WriteClassBody();
+         HtmlClose();
+      }
+      if(InpWriteCSV) WriteCSV("");
+      PrintSummary("configurazione degli input dell'EA");
+   }
+   else
+   {
+      if(!RunAutoMap()) { Comment(""); return; }
+      ScoreMap();
+      RunEaRow();
+      if(InpWriteCSV) WriteMapCSV();
+      bool html = (InpWriteHTML && HtmlOpen());
+      if(html)
+      {
+         HtmlGlobalInfo();
+         HW("<div class='note'>Indice: <a href='#sintesi'>Sintesi</a> &middot; Mappe: <a href='#mappa0'>giornaliero</a>, <a href='#mappa1'>settimanale</a>, <a href='#mappa2'>mensile</a> &middot; Analisi a fondo: <a href='#analisi0'>giornaliero</a>, <a href='#analisi1'>settimanale</a>, <a href='#analisi2'>mensile</a> &middot; <a href='#note'>Come leggere il report</a></div>");
+         HtmlAutoSummary();
+         for(int cl = 0; cl < NCLS; cl++) HtmlAutoMap(cl);
+      }
+      for(int cl = 0; cl < NCLS; cl++)
+      {
+         if(IsStopped()) break;
+         if(g_win[cl] < 0)
+         {
+            PrintFormat("Orizzonte %s: nessuna combinazione con almeno %d trade IS.", g_clsName[cl], InpMinTrades);
+            continue;
+         }
+         ComboDef(g_win[cl], g_cur);
+         g_pre = Pick(cl == 0, "G", Pick(cl == 1, "S", "M"));
+         Comment("MDRB Study: analisi a fondo, orizzonte " + g_clsName[cl] + "...");
+         if(!AnalyzeCur()) continue;
+         RunOffsetSweep();
+         if(html)
+         {
+            HW("<h1 id='analisi" + IntegerToString(cl) + "' style='margin-top:46px;border-top:3px solid #1f6feb;padding-top:10px'>Analisi a fondo &mdash; orizzonte " + g_clsName[cl] + "</h1>");
+            WriteClassBody();
+         }
+         if(InpWriteCSV) WriteCSV(g_clsTag[cl]);
+         PrintSummary(g_clsName[cl]);
+      }
+      if(html) HtmlClose();
+   }
    Comment("");
    PrintFormat("Completato in %.1f s", (GetTickCount() - t0) / 1000.0);
 }
