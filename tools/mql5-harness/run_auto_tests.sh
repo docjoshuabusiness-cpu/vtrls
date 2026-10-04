@@ -23,9 +23,38 @@ echo "== A3. AddressSanitizer + UBSan + divisioni per zero in virgola mobile (fa
 for a in "90 0.002 0" "70 0.03 1" "400 0.002 0"; do
   VPINP="" ./mdrb_study_san $a >/dev/null 2>err_auto.txt || { echo "ERRORE ASan $a"; head -8 err_auto.txt; fail=1; }
 done
-cp $H/auto_null.py .
+cp $H/auto_null.py $H/cb_check.py $H/event_check.py $H/custom_check.py .
 echo "== A4. test nullo: random walk a costi zero, 12 storie (36 vincitori): confermati OOS ~5% atteso, massimo 5 =="
 python3 auto_null.py 900 0.0 12 0 5 - | tail -6 || fail=1
 echo "== A5. test di potenza: salto giornaliero del livello medio (effetto reale nei dati): i vincitori giornalieri devono confermarsi =="
 python3 auto_null.py 900 0.002 6 -1 - 4 | tail -6 || fail=1
+echo "== A6. Parte A (rotture a candela chiusa): eventi e 21 esiti SL x RR contro il ricalcolo indipendente in Python =="
+export MDRB_DUMP_M1=1
+for combo in "43 2 20:00+2h" "54 4 09:00+3h" "14 0 14:00+1h" "54 5 09:00+3h" "100 4 14:00+6h"; do
+  set -- $combo
+  VPINP="g_cbDbgW=$1,g_cbDbgT=$2,InpSpreadPoints=2" ./mdrb_study_fast 150 0.002 1 >/dev/null 2>&1
+  python3 cb_check.py $1 $2 2 || fail=1
+done
+echo "== A7. Parte B: ritest, meta' range, zona del giorno prima, falsi breakout, MFE e rientro contro il ricalcolo indipendente =="
+for ov in "InpAuto=0" "InpAuto=0,RangeMode=1,RangeHourStart=0,RangeHourEnd=8,RangeDaysBack=0,TradeHourStart=9,TradeHourEnd=12,PendingOrderOffsetPoints=10" "InpAuto=0,ChaseIfBroken=1,TradeHourStart=20,TradeHourEnd=23"; do
+  off=$(echo "$ov" | grep -o "PendingOrderOffsetPoints=[0-9]*" | cut -d= -f2); off=${off:-20}
+  VPINP="$ov" ./mdrb_study_fast 300 0.002 1 >/dev/null 2>&1
+  python3 event_check.py $off || fail=1
+done
+unset MDRB_DUMP_M1
+echo "== A8. modalita' PERSONALIZZATA: giorni, periodo, larghezza, range orario, finestra, time frame =="
+python3 custom_check.py || fail=1
+echo "== A9. metro di misura: PUNTI / ATR / ENTRAMBI producono il report atteso =="
+for u in 0 1 2; do
+  VPINP="UnitMode=$u" ./mdrb_study_fast 200 0.002 0 >/dev/null 2>&1
+  python3 - $u <<'PYU' || fail=1
+import re, sys
+u = int(sys.argv[1]); h = open("out/MQL5/Files/MDRB_Study_EURUSD.html", encoding="utf-8", errors="ignore").read()
+has_atr_tab = "Stessa distanza espressa in ATR" in h
+appx = "GA. Appendice" in h
+ok = (u == 0 and appx and not has_atr_tab) or (u == 1 and has_atr_tab and not appx) or (u == 2 and has_atr_tab and not appx)
+print("unita'", u, "OK" if ok else "FALLITO")
+sys.exit(0 if ok else 1)
+PYU
+done
 [ $fail -eq 0 ] && echo "AUTO: TUTTO OK" || { echo "AUTO: verifiche fallite"; exit 1; }

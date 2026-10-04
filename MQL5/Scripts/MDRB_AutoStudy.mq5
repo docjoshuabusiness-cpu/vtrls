@@ -317,6 +317,12 @@ double   g_mScore[];               // punteggio IS (eventualmente mediato sui vi
 bool     g_mValid[];
 int      g_win[NCLS];              // combinazione vincente per classe (-1 = nessuna)
 bool     g_winNeg[NCLS];           // true = nessuna combinazione valida con E[R] IS positivo: il "vincitore" e' solo la meno negativa
+bool     g_winRelax[NCLS];         // true = nessuna combinazione con la frequenza minima: scelta senza il vincolo di frequenza
+int      g_daysAn = 0;             // giorni analizzati (uguali per ogni definizione, salvo il filtro dei giorni)
+double   g_minFreq = 0.20;         // quota minima di giorni con un'operazione per candidare un vincitore (modalita' TUTTO)
+bool     g_mFreqOK[];
+int      g_srvOff = 2;             // offset del server rispetto a GMT in ore (solo per le etichette delle sessioni)
+
 bool     g_curNeg = false;         // idem per la classe in analisi
 int      g_nCls = 1;               // numero di classi con un vincitore (correzione per test multipli del verdetto)
 int      g_kClass = 1;             // combinazioni valide della classe in analisi
@@ -662,6 +668,8 @@ bool Setup()
    g_stopLvl = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * g_point;
    g_tol = g_point * 0.001;
    if(g_point <= 0.0) { Print("Errore: point non valido"); return false; }
+   g_srvOff = (int)MathRound((double)(TimeTradeServer() - TimeGMT()) / 3600.0);
+   if(g_srvOff < -12 || g_srvOff > 14) g_srvOff = 2;
 
    g_rangeTF = (Timeframe == PERIOD_CURRENT) ? g_chartTF : Timeframe;
    if(g_custom && ChBarsTF != PERIOD_CURRENT) g_rangeTF = ChBarsTF;
@@ -1521,7 +1529,7 @@ void EventStudy(SEvent &e)
    e.fakeHrs = -1.0;
    for(int j = 0; j < g_L; j++)
    {
-      if(g_wA[j] <= thr)
+      if(g_wA[j] <= thr + g_tol)
       {
          e.fakeout = 1;
          e.fakeHrs = (double)(j + 1) * g_perSim / 3600.0;
@@ -1533,7 +1541,7 @@ void EventStudy(SEvent &e)
    e.rt4 = 0; e.rt24 = 0; e.rtHrs = -1.0; e.rtRes = 0;
    int jr = -1;
    for(int j = 0; j < g_L; j++)
-      if(g_wA[j] <= Lrel + tol) { jr = j; break; }
+      if(g_wA[j] <= Lrel + tol + g_tol) { jr = j; break; }
    if(jr >= 0)
    {
       e.rtHrs = (double)(jr + 1) * g_perSim / 3600.0;
@@ -1541,8 +1549,8 @@ void EventStudy(SEvent &e)
       if(e.rtHrs <= 24.0) e.rt24 = 1;
       for(int j = jr; j < g_L; j++)
       {
-         if(g_wA[j] <= Lrel - fail) { e.rtRes = -1; break; }
-         if(j > jr && g_wF[j] >= Lrel + cont) { e.rtRes = 1; break; }
+         if(g_wA[j] <= Lrel - fail + g_tol) { e.rtRes = -1; break; }
+         if(j > jr && g_wF[j] >= Lrel + cont - g_tol) { e.rtRes = 1; break; }
       }
    }
    // meta' del range
@@ -1550,7 +1558,7 @@ void EventStudy(SEvent &e)
    double mrel = dir * ((e.hi + e.lo) * 0.5 - e.E0);
    for(int j = 0; j < g_L; j++)
    {
-      if(g_wA[j] <= mrel)
+      if(g_wA[j] <= mrel + g_tol)
       {
          e.midHrs = (double)(j + 1) * g_perSim / 3600.0;
          if(e.midHrs <= 24.0) e.midHit = 1;
@@ -1564,19 +1572,19 @@ void EventStudy(SEvent &e)
       double zp = (dir > 0) ? g_d1[e.di - 1].high : g_d1[e.di - 1].low;
       double zrel = dir * (zp - e.E0);
       e.pdDist = zrel / pt;
-      if(zrel > tol)
+      if(zrel > tol + g_tol)
       {
          e.pdAhead = 1;
          int jz = -1;
          for(int j = 0; j < g_L; j++)
-            if(g_wF[j] >= zrel) { jz = j; break; }
+            if(g_wF[j] >= zrel - g_tol) { jz = j; break; }
          if(jz >= 0 && (double)(jz + 1) * g_perSim / 3600.0 <= 24.0)
          {
             e.pdHit = 1;
             for(int j = jz; j < g_L; j++)
             {
-               if(j > jz && g_wA[j] <= zrel - fail) { e.pdRes = -1; break; }
-               if(g_wF[j] >= zrel + fail) { e.pdRes = 1; break; }
+               if(j > jz && g_wA[j] <= zrel - fail + g_tol) { e.pdRes = -1; break; }
+               if(g_wF[j] >= zrel + fail - g_tol) { e.pdRes = 1; break; }
             }
          }
       }
@@ -2011,6 +2019,37 @@ void AddRangeRow(const int cls, const int chain, const SDef &d, const string lbl
    g_rChain[n] = chain;
 }
 
+// sessioni di mercato (ora UTC, orario invernale): Sydney 22-07, Tokyo 00-09, Londra 08-17, New York 13-22
+bool InSessionUTC(const int u, const int a, const int b)
+{
+   if(a < b) return (u >= a && u < b);
+   return (u >= a || u < b);
+}
+
+string SessionTag(const int hs, const int dur)
+{
+   if(dur < 1) return "";
+   int us = ((hs - g_srvOff) % 24 + 24) % 24;
+   int cs[4], ca[4] = {22, 0, 8, 13}, cb[4] = {7, 9, 17, 22};
+   string nm[4] = {"Sydney", "Tokyo", "Londra", "New York"};
+   int best = -1, bn = 0;
+   for(int q = 0; q < 4; q++)
+   {
+      cs[q] = 0;
+      for(int h = 0; h < dur; h++) if(InSessionUTC((us + h) % 24, ca[q], cb[q])) cs[q]++;
+      if(cs[q] > bn) { bn = cs[q]; best = q; }
+   }
+   if(best >= 0 && bn * 10 >= dur * 7) return " [" + nm[best] + "]";
+   return "";
+}
+
+string SessionLegend()
+{
+   int o = g_srvOff;
+   return StringFormat("Sessioni di mercato in ora SERVER (GMT%+d, orario invernale): Sydney %02d-%02d, Tokyo %02d-%02d, Londra %02d-%02d, New York %02d-%02d. Le etichette tra parentesi quadre indicano la sessione che contiene almeno il 70%% del range.",
+                       o, (22 + o) % 24, (7 + o) % 24, (0 + o) % 24, (9 + o) % 24, (8 + o) % 24, (17 + o) % 24, (13 + o) % 24, (22 + o) % 24);
+}
+
 // orizzonte di una definizione: giornaliero (range fino a 1 giorno), settimanale (2-5 giorni), mensile (oltre)
 int ClassOfDef(const SDef &d)
 {
@@ -2083,20 +2122,18 @@ void BuildUniverse()
                                                    Pick(b == 0, "al piazzamento", "fino all'apertura di oggi")));
          }
       }
-      // --- giornaliero: sessioni orarie (4 h e 8 h), di oggi (finita prima della finestra di ingresso) o di ieri
-      int starts[6] = {0, 4, 8, 12, 16, 20};
-      int lens[2] = {4, 8};
+         // --- giornaliero: sessioni orarie, ogni ora di inizio, durate 1, 2, 4, 8 ore, di oggi (finita prima della finestra di ingresso) o di ieri
+      int lens[4] = {1, 2, 4, 8};
       for(int b = 0; b < 2; b++)
-         for(int l = 0; l < 2; l++)
+         for(int l = 0; l < 4; l++)
          {
             chain++;
-            for(int k = 0; k < 6; k++)
+            for(int hs = 0; hs < 24; hs++)
             {
-               int hs = starts[k];
-               if(b == 0 && hs + lens[l] >= 24) continue;     // di oggi: deve chiudersi prima della mezzanotte
+               if(b == 0 && hs + lens[l] > 23) continue;     // di oggi: deve chiudersi prima della mezzanotte
                int he = (hs + lens[l]) % 24;
                d.mode = (int)RANGE_TIME; d.rhs = hs; d.rms = 0; d.rhe = he; d.rme = 0; d.daysBack = b;
-               AddRangeRow(0, chain, d, StringFormat("Sessione %02d:00-%02d:00 (%d h), %s", hs, he, lens[l], Pick(b == 0, "di oggi", "di ieri")));
+               AddRangeRow(0, chain, d, StringFormat("Sessione %02d:00-%02d:00 (%d h)%s, %s", hs, he, lens[l], SessionTag(hs, lens[l]), Pick(b == 0, "di oggi", "di ieri")));
             }
          }
       // --- giornaliero: giorno precedente
@@ -2154,6 +2191,17 @@ void BuildUniverse()
    g_nW = ArraySize(g_wS);
 }
 
+// una finestra di ingresso che finisce prima che il range di OGGI sia pronto non puo' produrre trade: non si calcola
+bool ComboPossible(const int r, const int w)
+{
+   if(g_rDef[r].mode == (int)RANGE_TIME && g_rDef[r].daysBack == 0 && g_wE[w] >= g_wS[w])
+   {
+      int endMin = ((g_rDef[r].rhe == 0) ? 24 : g_rDef[r].rhe) * 60;
+      if(g_wE[w] <= endMin) return false;
+   }
+   return true;
+}
+
 bool RunAutoMap()
 {
    BuildUniverse();
@@ -2171,12 +2219,19 @@ bool RunAutoMap()
       {
          if(IsStopped()) return false;
          int k = r * g_nW + w;
+         if(!ComboPossible(r, w))
+         {
+            g_mN[k] = 0;
+            for(int c = 0; c < 2; c++) { ZeroMemory(g_mIS[k * 2 + c]); ZeroMemory(g_mOOS[k * 2 + c]); ZeroMemory(g_mAll[k * 2 + c]); }
+            continue;
+         }
          SDef d;
          d = g_rDef[r];
          d.wsMin = g_wS[w];
          d.weMin = g_wE[w];
          SFunnel fn;
          RunDefStats(d, cfg, g_mIS, g_mOOS, g_mAll, k, g_mN[k], fn);
+         if(fn.days > g_daysAn) g_daysAn = fn.days;
          if((k % 6) == 0)
          {
             double el = (GetTickCount() - t0) / 1000.0;
@@ -2193,7 +2248,13 @@ void ScoreMap()
    int K = g_nR * g_nW;
    ArrayResize(g_mScore, K);
    ArrayResize(g_mValid, K);
-   for(int k = 0; k < K; k++) g_mValid[k] = (g_mIS[k * 2].n >= g_minIS);
+   ArrayResize(g_mFreqOK, K);
+   double minFreq = g_custom ? 0.0 : g_minFreq;
+   for(int k = 0; k < K; k++)
+   {
+      g_mValid[k] = (g_mIS[k * 2].n >= g_minIS);
+      g_mFreqOK[k] = ((double)g_mN[k] >= minFreq * g_daysAn);
+   }
    for(int r = 0; r < g_nR; r++)
       for(int w = 0; w < g_nW; w++)
       {
@@ -2223,9 +2284,12 @@ void ScoreMap()
    {
       g_win[cl] = -1;
       g_winNeg[cl] = false;
-      for(int pass = 0; pass < 2 && g_win[cl] < 0; pass++)
+      g_winRelax[cl] = false;
+      for(int pass = 0; pass < 4 && g_win[cl] < 0; pass++)
       {
-         // passo 0: solo combinazioni con E[R] IS positivo; passo 1 (se non ce ne sono): la meno negativa, segnalata
+         // passo 0: E[R] IS positivo e frequenza minima; 1: positivo senza vincolo di frequenza; 2: la meno negativa con la frequenza; 3: la meno negativa
+         bool needPos = (pass <= 1);
+         bool needFreq = (pass == 0 || pass == 2);
          for(int r = 0; r < g_nR; r++)
          {
             if(g_rCls[r] != cl) continue;
@@ -2233,11 +2297,16 @@ void ScoreMap()
             {
                int k = r * g_nW + w;
                if(!g_mValid[k]) continue;
-               if(pass == 0 && StatMean(g_mIS[k * 2]) <= 0.0) continue;
+               if(needPos && StatMean(g_mIS[k * 2]) <= 0.0) continue;
+               if(needFreq && !g_mFreqOK[k]) continue;
                if(g_win[cl] < 0 || g_mScore[k] > g_mScore[g_win[cl]]) g_win[cl] = k;
             }
          }
-         if(g_win[cl] >= 0 && pass == 1) g_winNeg[cl] = true;
+         if(g_win[cl] >= 0)
+         {
+            g_winNeg[cl] = (pass >= 2);
+            g_winRelax[cl] = (pass == 1 || pass == 3);
+         }
       }
    }
 }
@@ -3642,7 +3711,7 @@ void HtmlCandleStudy()
    for(int part = 0; part < 2; part++)
    {
       HW("<h2>A4" + Pick(part == 0, "a", "b") + ". Quale range orario: E[R] 1:2 " + Pick(part == 0, "In-Sample", "Out-Of-Sample") + " (tutti i TF e tutti i k insieme, SL di riferimento)</h2>");
-      if(part == 0) HW("<div class='note'>Righe = ora di inizio del range (ora server), colonne = durata in ore. Un range che funziona deve vedersi sia nell'IS sia nell'OOS e nei TF vicini, non in una sola cella.</div>");
+      if(part == 0) HW("<div class='note'>Righe = ora di inizio del range (ora server), colonne = durata in ore. Un range che funziona deve vedersi sia nell'IS sia nell'OOS e nei TF vicini, non in una sola cella. " + SessionLegend() + "</div>");
       HW("<div class='sc'><table class='m'><tr><th>Inizio</th>");
       for(int d = 0; d < 7; d++) HW("<th>" + IntegerToString(durs[d]) + " h</th>");
       HW("</tr>");
@@ -3731,6 +3800,209 @@ void HtmlCandleStudy()
          "</td><td>" + IntegerToString(o.n) + "</td><td>" + F(StatWR(o), 1) + "%</td><td>" + F(StatMean(o), 3) + "</td><td>" + F(StatT(o), 2) + "</td><td>" + Pick(o.n >= 20, F(p, 3), "-") + "</td></tr>\n");
    }
    HW("</table></div><div class='note'>Delle prime " + IntegerToString(nt) + ", " + IntegerToString(oosPos) + " hanno E[R] OOS positivo. Le righe condividono molti eventi: il conteggio vale poco; con i costi, senza edge, ne sono positive meno della met&agrave;.</div>");
+}
+
+//+------------------------------------------------------------------+
+//| Qualita' del breakout dei candidati, larghezza del range, profilo   |
+//| orario del simbolo, matrici delle sessioni                          |
+//+------------------------------------------------------------------+
+// metriche di qualita' (falsi breakout, ritest, estensione) per una definizione, senza griglie di uscita
+void LiteMetrics(const SDef &d, int &n, double &fakePct, double &rt24Pct, double &contPct, double &mfeMed, double &pullMed)
+{
+   SEvent ev[];
+   SFunnel fn;
+   BuildSetups(d, ev, fn);
+   n = ArraySize(ev);
+   fakePct = 0.0; rt24Pct = 0.0; contPct = 0.0; mfeMed = 0.0; pullMed = 0.0;
+   if(n == 0) return;
+   ArrayResize(g_wO, g_L);
+   ArrayResize(g_wF, g_L);
+   ArrayResize(g_wA, g_L);
+   ArrayResize(g_wC, g_L);
+   double mf[], pb[];
+   ArrayResize(mf, n);
+   ArrayResize(pb, n);
+   int fk = 0, r24 = 0, rn = 0, rc = 0;
+   for(int e = 0; e < n; e++)
+   {
+      if(IsStopped()) return;
+      BuildPath(ev[e]);
+      EventStudy(ev[e]);
+      if(ev[e].fakeout != 0) fk++;
+      if(ev[e].rt24 != 0) r24++;
+      if(ev[e].rtHrs >= 0.0) { rn++; if(ev[e].rtRes > 0) rc++; }
+      mf[e] = ev[e].mfe;
+      pb[e] = ev[e].mae;
+   }
+   ArraySort(mf);
+   ArraySort(pb);
+   fakePct = 100.0 * fk / n;
+   rt24Pct = 100.0 * r24 / n;
+   contPct = (rn > 0) ? 100.0 * rc / rn : 0.0;
+   mfeMed = Quantile(mf, n, 0.5);
+   pullMed = Quantile(pb, n, 0.5);
+}
+
+// larghezza del range in punti: quali range tenere (Min/Max range dell'EA)
+void HtmlRangeWidth()
+{
+   int E = ArraySize(g_ev);
+   int C = ArraySize(g_cfg);
+   int ri = (g_refPtIdx >= 0) ? g_refPtIdx : g_refIdx;
+   if(E < 40) return;
+   double wIS[];
+   ArrayResize(wIS, 0);
+   for(int e = 0; e < g_split; e++) { int sz = ArraySize(wIS); ArrayResize(wIS, sz + 1); wIS[sz] = g_ev[e].width / g_point; }
+   int nI = ArraySize(wIS);
+   if(nI < 20) return;
+   ArraySort(wIS);
+   HW("<h2>" + g_pre + "4b. Larghezza del range in punti: quali range tenere</h2>");
+   HW("<div class='note'>Uscita di riferimento: " + RefText() + ", netto di costi, su tutti gli sfondamenti (senza saltare giorni). Si provano limiti Min/Max di larghezza presi dai percentili della larghezza IS (come MinRangePoints / MaxRangePoints dell'EA): la scelta &egrave; fatta SOLO sull'In-Sample, l'OOS ne &egrave; il test. "
+      "Le coppie provate sono molte: la soglia di Bonferroni nella tabella conta le coppie.</div>");
+   double qa[7] = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6};
+   double qb[6] = {0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
+   int pairs = 0;
+   int bestA = -1, bestB = -1;
+   double bs = -1e18;
+   for(int a = 0; a < 7; a++)
+      for(int b = 0; b < 6; b++)
+      {
+         if(qa[a] >= qb[b]) continue;
+         double wmin = (qa[a] <= 0.0) ? 0.0 : Quantile(wIS, nI, qa[a]);
+         double wmax = (qb[b] >= 1.0) ? 1e18 : Quantile(wIS, nI, qb[b]);
+         SStat si;
+         ZeroMemory(si);
+         for(int e = 0; e < g_split; e++)
+         {
+            double wp = g_ev[e].width / g_point;
+            if(wp < wmin || wp > wmax) continue;
+            StatAdd(si, (double)g_R[e * C + ri], g_F[e * C + ri]);
+         }
+         if(si.n < g_minIS) continue;
+         pairs++;
+         double sc = RankMetric(si);
+         if(sc > bs) { bs = sc; bestA = a; bestB = b; }
+      }
+   if(bestA < 0) { HW("<div class='warn'>Nessuna coppia di limiti con abbastanza trade In-Sample.</div>"); return; }
+   double tcrit = NormInvUpper(0.05 / MathMax(1, pairs));
+   HW("<table><tr><th class='rl'>Limiti di larghezza</th><th>N IS</th><th>E[R] IS</th><th>t IS</th><th>N OOS</th><th>E[R] OOS</th><th>t OOS</th><th>p OOS</th></tr>");
+   for(int pass = 0; pass < 2; pass++)
+   {
+      double wmin = 0.0, wmax = 1e18;
+      string lbl = "Nessun limite (tutti i range)";
+      if(pass == 1)
+      {
+         wmin = (qa[bestA] <= 0.0) ? 0.0 : Quantile(wIS, nI, qa[bestA]);
+         wmax = (qb[bestB] >= 1.0) ? 1e18 : Quantile(wIS, nI, qb[bestB]);
+         lbl = "Migliore sull'IS: " + F(wmin, 0) + " - " + Pick(wmax >= 1e17, "nessun massimo", F(wmax, 0)) + " punti";
+      }
+      SStat si, so;
+      ZeroMemory(si);
+      ZeroMemory(so);
+      for(int e = 0; e < E; e++)
+      {
+         double wp = g_ev[e].width / g_point;
+         if(wp < wmin || wp > wmax) continue;
+         if(e < g_split) StatAdd(si, (double)g_R[e * C + ri], g_F[e * C + ri]);
+         else StatAdd(so, (double)g_R[e * C + ri], g_F[e * C + ri]);
+      }
+      double p = NormUpper(StatT(so));
+      string tcl = (pass == 1 && StatT(si) >= tcrit) ? " class='ok'" : "";
+      HW("<tr" + Pick(pass == 1, " class='bestrow'", "") + "><th class='rl'>" + lbl + "</th><td>" + IntegerToString(si.n) + "</td><td>" + F(StatMean(si), 3) + "</td><td" + tcl + ">" + F(StatT(si), 2) + "</td><td>" + IntegerToString(so.n) + "</td><td>" + F(StatMean(so), 3) + "</td><td>" + F(StatT(so), 2) + "</td><td>" + Pick(so.n >= 20, F(p, 3), "-") + "</td></tr>\n");
+      if(pass == 1)
+         HW("<tr><td colspan='8' class='rl' style='text-align:left'>Per l'EA: <span class='mono'>RequireRangeConfirmation=true, MinRangePoints=" + F(MathFloor(wmin), 0) + ", MaxRangePoints=" + Pick(wmax >= 1e17, "100000", F(MathCeil(wmax), 0)) + "</span></td></tr>");
+   }
+   HW("</table><div class='note'>Coppie valide provate: " + IntegerToString(pairs) + " &rarr; soglia di Bonferroni t &ge; " + F(tcrit, 2) + " (verde). Un filtro di larghezza che migliora l'IS ma non l'OOS &egrave; solo adattamento ai dati.</div>");
+}
+
+// volatilita' media per ora del giorno (range di un'ora in punti) e spread medio: il profilo del simbolo
+void HtmlHourProfile()
+{
+   int nS = ArraySize(g_rs);
+   double rs[24], sp[24];
+   int rn[24], sn[24];
+   for(int h = 0; h < 24; h++) { rs[h] = 0.0; sp[h] = 0.0; rn[h] = 0; sn[h] = 0; }
+   long curKey = -1;
+   double hi = 0.0, lo = 0.0;
+   int hh = 0;
+   for(int j = 0; j < nS; j++)
+   {
+      datetime tt = g_rs[j].time;
+      long key = (long)tt / 3600;
+      int hj = (int)((tt % 86400) / 3600);
+      sp[hj] += SpreadAt(j) / g_point;
+      sn[hj]++;
+      if(key != curKey)
+      {
+         if(curKey >= 0) { rs[hh] += (hi - lo) / g_point; rn[hh]++; }
+         curKey = key; hi = g_rs[j].high; lo = g_rs[j].low; hh = hj;
+      }
+      else
+      {
+         if(g_rs[j].high > hi) hi = g_rs[j].high;
+         if(g_rs[j].low < lo) lo = g_rs[j].low;
+      }
+   }
+   double tot = 0.0;
+   int tn = 0;
+   for(int h = 0; h < 24; h++) if(rn[h] > 0) { tot += rs[h] / rn[h]; tn++; }
+   double mean = (tn > 0) ? tot / tn : 1.0;
+   HW("<h2>Profilo orario del simbolo (ora server)</h2><div class='note'>Range medio di un'ora di calendario in punti e spread medio, per ora del giorno, su tutta la storia analizzata. " + SessionLegend() + " Serve a leggere dove ha senso cercare range e rotture: le ore con volatilit&agrave; molto sopra la media sono quelle in cui un range si forma in fretta e le rotture sono pi&ugrave; ampie.</div>");
+   HW("<div class='sc'><table class='m'><tr><th class='rl'></th>");
+   for(int h = 0; h < 24; h++) HW("<th>" + StringFormat("%02d", h) + "</th>");
+   HW("</tr><tr><th class='rl'>Range medio 1 h (punti)</th>");
+   for(int h = 0; h < 24; h++)
+   {
+      double v = (rn[h] > 0) ? rs[h] / rn[h] : 0.0;
+      HW("<td style='background:" + Heat((v - mean) / MathMax(1.0, mean), 1.0) + "'>" + F(v, 0) + "</td>");
+   }
+   HW("</tr><tr><th class='rl'>Spread medio (punti)</th>");
+   for(int h = 0; h < 24; h++) HW("<td>" + F((sn[h] > 0) ? sp[h] / sn[h] : 0.0, 1) + "</td>");
+   HW("</tr></table></div>");
+}
+
+// matrici delle sessioni orarie: E[R] medio sulle finestre di ingresso valide
+void HtmlSessionMatrix(const int cl)
+{
+   int lens[4] = {1, 2, 4, 8};
+   for(int dbk = 0; dbk < 2; dbk++)
+      for(int part = 0; part < 2; part++)
+      {
+         HW("<h3>Range orari " + Pick(dbk == 0, "di OGGI (finiscono prima dell'ingresso)", "di IERI") + ": E[R] medio sulle finestre di ingresso valide &mdash; " + Pick(part == 0, "In-Sample", "Out-Of-Sample") + "</h3>");
+         if(dbk == 0 && part == 0)
+            HW("<div class='note'>Righe = ora di inizio del range (ora server), colonne = durata in ore. Ogni cella &egrave; la media dell'E[R] (" + RefText() + ") sulle finestre di ingresso con abbastanza trade IS: riduce l'effetto del singolo massimo. Passa il mouse per il numero di finestre. " + SessionLegend() + "</div>");
+         HW("<table class='m'><tr><th></th>");
+         for(int l = 0; l < 4; l++) HW("<th>" + IntegerToString(lens[l]) + " h</th>");
+         HW("<th>Sessione</th></tr>");
+         for(int hs = 0; hs < 24; hs++)
+         {
+            HW("<tr><th class='rl'>" + StringFormat("%02d:00", hs) + "</th>");
+            for(int l = 0; l < 4; l++)
+            {
+               int rr = -1;
+               for(int r = 0; r < g_nR; r++)
+                  if(g_rCls[r] == cl && g_rDef[r].mode == (int)RANGE_TIME && g_rDef[r].daysBack == dbk && g_rDef[r].rhs == hs && ((g_rDef[r].rhe - hs + 24) % 24) == (lens[l] % 24)) { rr = r; break; }
+               if(rr < 0) { HW("<td>-</td>"); continue; }
+               double sum = 0.0;
+               int cnt = 0;
+               for(int w = 0; w < g_nW; w++)
+               {
+                  int k = rr * g_nW + w;
+                  if(!g_mValid[k]) continue;
+                  SStat x;
+                  if(part == 0) x = g_mIS[k * 2]; else x = g_mOOS[k * 2];
+                  if(part == 1 && x.n < 5) continue;
+                  sum += StatMean(x);
+                  cnt++;
+               }
+               if(cnt == 0) { HW("<td class='lo'>-</td>"); continue; }
+               double m = sum / cnt;
+               HW("<td style='background:" + Heat(m, 0.15) + "' title='finestre valide: " + IntegerToString(cnt) + "'>" + F(m, 3) + "</td>");
+            }
+            HW("<td class='rl' style='text-align:left'>" + Pick(SessionTag(hs, 4) != "", SessionTag(hs, 4), "") + "</td></tr>\n");
+         }
+         HW("</table>");
+      }
 }
 
 void HtmlNotes()
@@ -4026,9 +4298,16 @@ void HtmlAutoMap(const int cl)
 {
    int rows[];
    ArrayResize(rows, 0);
+   bool compact = (cl == 0 && !g_custom);       // le sessioni orarie sono centinaia: si mostrano nelle matrici compatte
    for(int r = 0; r < g_nR; r++)
-      if(g_rCls[r] == cl) { int sz = ArraySize(rows); ArrayResize(rows, sz + 1); rows[sz] = r; }
+      if(g_rCls[r] == cl && !(compact && g_rDef[r].mode == (int)RANGE_TIME)) { int sz = ArraySize(rows); ArrayResize(rows, sz + 1); rows[sz] = r; }
    int nr = ArraySize(rows);
+   if(RowsInClass(cl) == 0) return;
+   if(compact)
+   {
+      HW("<h2 id='mappa" + IntegerToString(cl) + "'>Mappa &mdash; orizzonte " + g_clsName[cl] + ": range orari (sessioni)</h2>");
+      HtmlSessionMatrix(cl);
+   }
    if(nr == 0) return;
    int nValid = ValidInClass(cl);
    double sc = 0.0;
@@ -4043,7 +4322,8 @@ void HtmlAutoMap(const int cl)
    sc = MathMin(0.4, MathMax(0.05, sc));
    double tcrit = NormInvUpper(0.05 / MathMax(1, nValid));
 
-   HW("<h2 id='mappa" + IntegerToString(cl) + "'>Mappa &mdash; orizzonte " + g_clsName[cl] + ": " + IntegerToString(nr) + " definizioni di range &times; " + IntegerToString(g_nW) + " finestre di ingresso</h2>");
+   if(compact) HW("<h3 style='font-size:15px;border-top:1px solid #d0d7de;padding-top:10px'>Altre definizioni (ultime N barre, giorno precedente): " + IntegerToString(nr) + " righe &times; " + IntegerToString(g_nW) + " finestre di ingresso</h3>");
+   else HW("<h2 id='mappa" + IntegerToString(cl) + "'>Mappa &mdash; orizzonte " + g_clsName[cl] + ": " + IntegerToString(nr) + " definizioni di range &times; " + IntegerToString(g_nW) + " finestre di ingresso</h2>");
    HW("<div class='note'>Ogni cella &egrave; una combinazione (range + finestra di ingresso) con " + RefText() + ", netto di costi, regola dell'EA applicata. Colonna = ora di inizio della finestra (ora server) per durata. " +
       "Celle tenui = meno di " + IntegerToString(g_minIS) + " trade IS. Contorno blu = combinazione scelta. Passa il mouse su una cella per N, t e win rate. " +
       "L'ultima riga e l'ultima colonna sono la media delle celle valide: una zona che funziona dovrebbe vedersi in entrambe le mappe (IS e OOS) e non in una sola cella.</div>");
@@ -4143,6 +4423,26 @@ void HtmlAutoMap(const int cl)
    HW("</table><div class='note'>t IS verde = supera la soglia di Bonferroni su " + IntegerToString(nValid) + " combinazioni (t &ge; " + F(tcrit, 2) + "). Delle prime " + IntegerToString(nt) + ", " + IntegerToString(oosPos) +
       " hanno E[R] OOS positivo. Le 12 combinazioni condividono molti trade (finestre e definizioni vicine): il conteggio vale poco, e con i costi senza edge ne sono positive molto meno della met&agrave;.</div>");
 
+   // qualita' del breakout dei candidati: frequenza, falsi breakout, ritest, estensione e rientro
+   int nq = MathMin(8, nt);
+   if(nq > 0)
+   {
+      HW("<h3>Qualit&agrave; del breakout delle prime " + IntegerToString(nq) + " (obiettivo: breakout pulito, SL contenuto, operativit&agrave; quasi quotidiana)</h3><div class='sc'><table><tr><th class='rl'>Definizione</th><th>Finestra</th><th>Giorni con trade %</th><th>N</th><th>E[R] IS</th><th>E[R] OOS</th>"
+         "<th>Falsi breakout %</th><th>Ritest 24 h %</th><th>Continuaz. dopo ritest %</th><th>MFE mediana (pt)</th><th>Rientro mediano (pt)</th></tr>");
+      for(int i = 0; i < nq; i++)
+      {
+         int k = top[i];
+         SDef dd;
+         ComboDef(k, dd);
+         int nn;
+         double fk, r24, ct, mfm, pbm;
+         LiteMetrics(dd, nn, fk, r24, ct, mfm, pbm);
+         HW("<tr><th class='rl'>" + g_rLbl[k / g_nW] + "</th><td>" + HHMM(g_wS[k % g_nW]) + "-" + HHMM(g_wE[k % g_nW]) + "</td><td>" + F(100.0 * g_mN[k] / MathMax(1, g_daysAn), 1) + "</td><td>" + IntegerToString(nn) + "</td><td>" + F(StatMean(g_mIS[k * 2]), 3) +
+            "</td><td>" + F(StatMean(g_mOOS[k * 2]), 3) + "</td><td>" + F(fk, 1) + "</td><td>" + F(r24, 1) + "</td><td>" + F(ct, 1) + "</td><td>" + F(mfm, 0) + "</td><td>" + F(pbm, 0) + "</td></tr>\n");
+      }
+      HW("</table></div><div class='note'>Falsi breakout = tornano a toccare il bordo opposto del range. Rientro mediano = di quanti punti il prezzo rientra sotto il livello rotto (positivo = dentro il range): d&agrave; l'ordine di grandezza dello SL che regge la rottura; lo SL ideale misurato su griglia &egrave; nella sezione 6 (RR in punti) e, per le rotture a candela chiusa, nella Parte A. Il vincitore dell'orizzonte richiede operativit&agrave; in almeno il " + F(100.0 * g_minFreq, 0) + "% dei giorni" + Pick(g_winRelax[cl], " (NESSUNA combinazione la raggiunge: scelta senza questo vincolo)", "") + ".</div>");
+   }
+
    // la mappa IS predice la mappa OOS?
    double ia[], ib[];
    ArrayResize(ia, 0);
@@ -4220,6 +4520,7 @@ void WriteClassBody()
    HtmlFunnel();
    HtmlEventStudy();
    HtmlBreakdown();
+   HtmlRangeWidth();
    if(InpAuto && ArraySize(g_s1Lbl) > 0) HtmlOffsetSweep();
 
    if(g_unit == UNIT_ATR) HtmlGridsATR(false); else HtmlGridsPoints();
@@ -4249,7 +4550,7 @@ void WriteCSV(const string suffix)
       for(int i = 0; i < g_nH; i++) head += ",ret_" + IntegerToString(g_hor[i]) + "h_pts";
       for(int i = 0; i < NFP; i++) head += ",fp_" + F(g_fpPts[i], 0) + "pt";
       for(int i = 0; i < NFR; i++) head += ",fp_" + F(g_frX[i], 2) + "range";
-      head += ",retest4,retest24,retest_hours,retest_result,mid_hit,pd_ahead,pd_hit,pd_result,pd_dist_pts,ea_R,ea_executed";
+      head += ",retest4,retest24,retest_hours,retest_result,mid_hit,pd_ahead,pd_hit,pd_result,pd_dist_pts,range_hi,range_lo,ea_R,ea_executed";
       FileWriteString(h, head + "\n");
       for(int e = 0; e < E; e++)
       {
@@ -4262,7 +4563,7 @@ void WriteCSV(const string suffix)
          for(int i = 0; i < NFP; i++) ln += "," + IntegerToString(g_ev[e].fp[i]);
          for(int i = 0; i < NFR; i++) ln += "," + IntegerToString(g_ev[e].fr[i]);
          ln += "," + IntegerToString(g_ev[e].rt4) + "," + IntegerToString(g_ev[e].rt24) + "," + F(g_ev[e].rtHrs, 2) + "," + IntegerToString(g_ev[e].rtRes) + "," + IntegerToString(g_ev[e].midHit) + "," +
-               IntegerToString(g_ev[e].pdAhead) + "," + IntegerToString(g_ev[e].pdHit) + "," + IntegerToString(g_ev[e].pdRes) + "," + F(g_ev[e].pdDist, 1);
+               IntegerToString(g_ev[e].pdAhead) + "," + IntegerToString(g_ev[e].pdHit) + "," + IntegerToString(g_ev[e].pdRes) + "," + F(g_ev[e].pdDist, 1) + "," + F(g_ev[e].hi, 7) + "," + F(g_ev[e].lo, 7);
          ln += "," + F((double)g_R[e * C + g_refIdx], 4) + "," + Pick(g_xR[e * C + g_refIdx] != XR_SKIP, "1", "0");
          FileWriteString(h, ln + "\n");
       }
@@ -4444,6 +4745,7 @@ void OnStart()
       {
          HtmlGlobalInfo();
          HW("<div class='note'>Indice: <a href='#parteA'>Parte A: rotture a candela chiusa</a> &middot; Parte B (replica dell'EA): <a href='#sintesi'>Sintesi</a> &middot; Mappe: <a href='#mappa0'>giornaliero</a>, <a href='#mappa1'>settimanale</a>, <a href='#mappa2'>mensile</a> &middot; Analisi a fondo: <a href='#analisi0'>giornaliero</a>, <a href='#analisi1'>settimanale</a>, <a href='#analisi2'>mensile</a> &middot; <a href='#note'>Come leggere il report</a></div>");
+         HtmlHourProfile();
          HtmlCandleStudy();
          HW("<h1 id='parteB' style='margin-top:40px;border-top:3px solid #1f6feb;padding-top:10px'>Parte B &mdash; Replica dell'EA (ordini stop al tocco del livello)</h1>");
          HtmlAutoSummary();

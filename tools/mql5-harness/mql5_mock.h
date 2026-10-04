@@ -71,6 +71,8 @@ inline double MathPow(double x, double y) { return std::pow(x, y); }
 inline double MathFloor(double x) { return std::floor(x); }
 inline double MathCeil(double x) { return std::ceil(x); }
 inline double MathRound(double x) { return std::round(x); }
+inline datetime TimeTradeServer();
+inline datetime TimeGMT();
 inline double NormalizeDouble(double x, int d) { double m = std::pow(10.0, d); return std::round(x * m) / m; }
 
 // ---- strings
@@ -252,3 +254,6 @@ inline int FileOpen(const string& name, int flags) {
 }
 inline unsigned FileWriteString(int h, const string& s) { if(h < 0) return 0; fwrite(s.data(), 1, s.size(), g_files[h]); return (unsigned)s.size(); }
 inline void FileClose(int h) { if(h >= 0 && g_files[h]) { fclose(g_files[h]); g_files[h] = nullptr; } }
+
+inline datetime TimeTradeServer() { extern datetime g_now; return g_now; }
+inline datetime TimeGMT() { extern datetime g_now; return g_now - 7200; }

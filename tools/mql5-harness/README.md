@@ -27,7 +27,14 @@ Serve a compilare e far girare il codice su dati sintetici **senza MetaEditor** 
    lanciata come configurazione singola (`InpAuto=0`, `auto_consistency.py`, incluso il taglio IS/OOS per data);
    AddressSanitizer pulito; test nullo (random walk a costi zero: i vincitori scelti sull'IS non si confermano
    OOS oltre il ~5%, `auto_null.py`) e test di potenza (il salto giornaliero del livello medio nei dati sintetici
-   deve emergere nelle finestre notturne e confermarsi OOS).
+   deve emergere nelle finestre notturne e confermarsi OOS). Controlli aggiunti con la Parte A / modalita' PERSONALIZZATA:
+   - `cb_check.py`: eventi della Parte A (prima candela che chiude fuori dal range, k candele dopo, entrata alla
+     chiusura) e i 21 esiti SL x RR ricalcolati in Python da zero sui dati M1 esportati (`MDRB_DUMP_M1=1`);
+   - `event_check.py`: ritest del livello, meta' range, zona del giorno prima, falsi breakout, MFE e rientro in punti
+     ricalcolati in Python dal CSV dei trade;
+   - `custom_check.py`: ogni filtro PERSONALIZZATO (giorni, periodo, larghezza, range orario, finestra, time frame)
+     restringe davvero l'universo e nient'altro;
+   - metro di misura PUNTI / ATR / ENTRAMBI: struttura del report attesa per ciascuno.
 
 Uso: `./run_all.sh` (richiede `g++` e `python3`; crea la cartella `build/`; include `run_mdrb.sh`).
 
