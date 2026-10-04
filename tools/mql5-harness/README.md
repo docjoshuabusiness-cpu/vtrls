@@ -22,6 +22,13 @@ Serve a compilare e far girare il codice su dati sintetici **senza MetaEditor** 
    (modalita' range, finestre, offset, chase, trailing/BE, TF, ...). Le uniche differenze ammesse sono
    quelle dichiarate nello script (EA occupato -> giorno saltato, ri-piazzamento a meta' finestra).
 
+6. (MDRB, modalita' AUTO) `./run_auto_tests.sh`: l'orizzonte adattivo degli sweep da' una mappa identica byte per byte
+   a quella con orizzonte pieno; ogni riga della mappa coincide con l'analisi completa della stessa definizione
+   lanciata come configurazione singola (`InpAuto=0`, `auto_consistency.py`, incluso il taglio IS/OOS per data);
+   AddressSanitizer pulito; test nullo (random walk a costi zero: i vincitori scelti sull'IS non si confermano
+   OOS oltre il ~5%, `auto_null.py`) e test di potenza (il salto giornaliero del livello medio nei dati sintetici
+   deve emergere nelle finestre notturne e confermarsi OOS).
+
 Uso: `./run_all.sh` (richiede `g++` e `python3`; crea la cartella `build/`; include `run_mdrb.sh`).
 
 Nota: sui prezzi tondi l'EA reale puo' fallire confronti a soglia esatta per rumore float
