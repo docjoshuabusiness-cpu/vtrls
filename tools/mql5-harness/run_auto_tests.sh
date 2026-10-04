@@ -37,7 +37,7 @@ for combo in "43 2 20:00+2h" "54 4 09:00+3h" "14 0 14:00+1h" "54 5 09:00+3h" "10
 done
 echo "== A7. Parte B: ritest, meta' range, zona del giorno prima, falsi breakout, MFE e rientro contro il ricalcolo indipendente =="
 for ov in "InpAuto=0" "InpAuto=0,RangeMode=1,RangeHourStart=0,RangeHourEnd=8,RangeDaysBack=0,TradeHourStart=9,TradeHourEnd=12,PendingOrderOffsetPoints=10" "InpAuto=0,ChaseIfBroken=1,TradeHourStart=20,TradeHourEnd=23"; do
-  off=$(echo "$ov" | grep -o "PendingOrderOffsetPoints=[0-9]*" | cut -d= -f2); off=${off:-20}
+  off=$(echo "$ov" | grep -o "PendingOrderOffsetPoints=[0-9]*" | cut -d= -f2 || true); off=${off:-20}
   VPINP="$ov" ./mdrb_study_fast 300 0.002 1 >/dev/null 2>&1
   python3 event_check.py $off || fail=1
 done
