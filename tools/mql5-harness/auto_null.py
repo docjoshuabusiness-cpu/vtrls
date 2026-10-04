@@ -19,9 +19,9 @@ for sd in range(seeds):
     rows = list(csv.DictReader(open(F + "MDRB_Study_EURUSD_map.csv")))
     valid = {}
     for r in rows:
-        if r["cfg"] == "ATR_ref" and r["valid"] == "1": valid[r["class"]] = valid.get(r["class"], 0) + 1
+        if r["cfg"] == "PT_ref" and r["valid"] == "1": valid[r["class"]] = valid.get(r["class"], 0) + 1
     for r in rows:
-        if r["cfg"] != "ATR_ref" or r["winner"] != "1": continue
+        if r["cfg"] != "PT_ref" or r["winner"] != "1": continue
         t_oos, n_oos, er_oos, t_is = float(r["t_oos"]), int(r["n_oos"]), float(r["er_oos"]), float(r["t_is"])
         p = pnorm_up(t_oos)
         K = valid[r["class"]]

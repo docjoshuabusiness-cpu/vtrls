@@ -177,12 +177,21 @@ struct SEvent
    double   widthAtr;
    double   delayMin;
    int      ambTrig;
-   double   mfe, mae;   // in ATR, lordi
+   double   mfe, mae;   // PUNTI dal livello rotto: massima estensione favorevole; rientro (>0 = sotto il livello, <0 = distanza minima sopra)
    int      fakeout;    // 1 se raggiunge il bordo opposto del range
    double   fakeHrs;    // ore al falso breakout (-1 = mai)
-   int      fp[NFP];    // first-passage in ATR
+   int      fp[NFP];    // first-passage dall'ingresso, soglie in PUNTI
    int      fr[NFR];    // first-passage in multipli del range
-   double   ret[NHOR];  // rendimento direzionale in ATR a fine orizzonte (ore)
+   double   ret[NHOR];  // distanza dal livello rotto, in PUNTI, a fine orizzonte (ore)
+   int      rt4, rt24;  // ritest del livello rotto entro 4 h / 24 h
+   double   rtHrs;      // ore al primo ritest (-1 = mai)
+   int      rtRes;      // dopo il ritest: +1 continuazione, -1 fallimento, 0 nessuno dei due
+   int      midHit;     // il prezzo torna a meta' del range entro 24 h
+   double   midHrs;
+   int      pdAhead;    // zona del giorno precedente (massimo per i long, minimo per gli short) davanti all'ingresso
+   int      pdHit;      // zona toccata entro 24 h
+   int      pdRes;      // dopo il tocco: +1 la supera, -1 respinto, 0 nessuno
+   double   pdDist;     // punti dall'ingresso alla zona
    int      bw, bd;
 };
 
@@ -209,6 +218,28 @@ struct SStat
    double eq, peak, dd;
 };
 
+//--- Parte A (rotture a candela chiusa): costanti e strutture
+#define NTF  7
+#define NKB  6
+#define NRRM 3
+#define NSL  7     // opzioni di SL: 6 distanze fisse in punti + il livello rotto
+#define NSLF 6
+#define NTG  2
+struct SCandle
+{
+   datetime t;
+   double   h, l, c;
+};
+struct SCbAcc
+{
+   int    n;
+   double sl;       // somma SL in punti
+   double mfe;      // somma MFE a 4 h in punti dall'ingresso
+   double ret;      // somma rendimento a 4 h in punti dall'ingresso
+   double mfeAtr;   // somma MFE a 4 h in ATR (ATR H1 al momento dell'ingresso)
+   int    pos;      // quanti hanno rendimento a 4 h positivo
+};
+
 //--- Dati
 MqlRates g_d1[];           // D1
 MqlRates g_rr[];           // barre del range (Timeframe)
@@ -229,11 +260,15 @@ int      g_nH = 0;
 int      g_hor[NHOR];
 double   g_wEdge[4];
 double   g_dEdge[2];
-double   g_medATRpts = 0.0;
+double   g_medATRpts = 0.0;      // ATR mediano di tutta la storia, in punti: serve SOLO come scala dei valori in punti (uguale per ogni definizione)
+double   g_fpPts[NFP];           // soglie first-passage in punti
+double   g_tolPts = 1.0, g_contPts = 1.0, g_failPts = 1.0;   // ritest: tolleranza, continuazione, fallimento (punti)
 int      g_split = 0;
 SDef     g_cur;                    // definizione analizzata a fondo (vincitore di classe, o input dell'EA in modo classico)
 string   g_pre = "";               // prefisso della numerazione delle sezioni (una parte per classe)
 datetime g_cut = 0;                // taglio IS/OOS per DATA, comune a tutte le definizioni
+
+int      g_dayMask = 0x7F;           // giorni della settimana inclusi (bit = day_of_week, 0 = domenica)
 
 //--- Esplorazione automatica: universo di definizioni di range x finestre di ingresso
 int      g_nR = 0, g_nW = 0;
@@ -252,7 +287,7 @@ bool     g_curNeg = false;         // idem per la classe in analisi
 int      g_nCls = 1;               // numero di classi con un vincitore (correzione per test multipli del verdetto)
 int      g_kClass = 1;             // combinazioni valide della classe in analisi
 int      g_minIS = 30;             // trade IS minimi per candidare una combinazione/cella (vedi MinTradesIS)
-int      g_atrRefIdx = -1;         // cella SL ATR di riferimento nella griglia principale
+int      g_refPtIdx = -1;         // cella SL ATR di riferimento nella griglia principale
 int      g_eaN = 0;                // riga di confronto: gli input dell'EA
 SStat    g_eaIS[], g_eaOOS[], g_eaAll[];
 string   g_clsName[NCLS] = {"Giornaliero", "Settimanale", "Mensile"};
@@ -1309,19 +1344,28 @@ void BuildConfigs()
    g_colLbl[5][0] = StringFormat("BE %s trail %s", UsaBreakEven ? IntegerToString(BreakEvenAttivazione) : "off", UsaTrailingStop ? IntegerToString(TrailingStartProfit) : "off");
    AddCfg(5, 2, 0, 0, 0, StopLossPoints * g_point, UseTakeProfit ? TakeProfitPoints / StopLossPoints : 0.0, 0, 0);
    g_refIdx = g_base[5];
-   g_atrRefIdx = -1;
+   g_refPtIdx = -1;
    for(int c = 0; c < ArraySize(g_cfg); c++)
-      if(g_cfg[c].fam == 1 && MathAbs(g_cfg[c].sl - InpRefSLATR) < 1e-9 && MathAbs(g_cfg[c].rr - InpRefRR) < 1e-9) { g_atrRefIdx = c; break; }
+      if(g_cfg[c].fam == 0 && MathAbs(g_cfg[c].sl - RefSLPoints() * g_point) < g_point * 0.01 && MathAbs(g_cfg[c].rr - InpRefRR) < 1e-9) { g_refPtIdx = c; break; }
 
    if(autoSL) Print("Nota: SL in punti generati da ATR mediano (", F(med, 0), " punti) x multipli.");
 }
 
-// configurazioni ridotte per gli sweep: [0] = ATR di riferimento, [1] = uscita dell'EA
+// SL di riferimento in punti (= InpRefSLATR x ATR mediano della storia, arrotondato): stessa formula delle griglie in punti
+double RefSLPoints()
+{
+   double med = MathMax(1.0, g_medATRpts);
+   return MathMax(1.0, MathRound(InpRefSLATR * med));
+}
+
+string RefText() { return "SL " + F(RefSLPoints(), 0) + " punti / RR 1:" + F(InpRefRR, 1); }
+
+// configurazioni ridotte per gli sweep: [0] = SL di riferimento in punti con RR di riferimento, [1] = uscita dell'EA
 void BuildSweepCfgs(SCfg &c[])
 {
    ArrayResize(c, 2);
    ZeroMemory(c[0]);
-   c[0].fam = 1; c[0].kind = 0; c[0].unit = 1; c[0].sl = InpRefSLATR; c[0].rr = InpRefRR;
+   c[0].fam = 0; c[0].kind = 0; c[0].unit = 0; c[0].sl = RefSLPoints() * g_point; c[0].rr = InpRefRR;
    ZeroMemory(c[1]);
    c[1].fam = 5; c[1].kind = 2; c[1].unit = 0; c[1].sl = StopLossPoints * g_point;
    c[1].rr = UseTakeProfit ? TakeProfitPoints / StopLossPoints : 0.0;
@@ -1350,28 +1394,32 @@ void BuildPath(const SEvent &e)
    if(g_wF[0] < 0.0) g_wF[0] = 0.0;
 }
 
+// Studio dell'evento in PUNTI dal livello rotto (il massimo del range per i long, il minimo per gli short).
+// Coordinate direzionali: positivo = nel verso dello sfondamento, relative a E0 (l'ingresso e' leggermente oltre il livello per offset e spread).
 void EventStudy(SEvent &e)
 {
-   double atr = e.atr;
+   double pt = g_point;
    int dir = e.dir;
-   double mfe = 0.0, mae = 0.0;
+   double edge = (dir > 0) ? e.hi : e.lo;
+   double Lrel = dir * (edge - e.E0);
+   double mx = -1e18, mn = 1e18;
    for(int j = 0; j < g_L; j++)
    {
-      if(g_wF[j] > mfe) mfe = g_wF[j];
-      if(-g_wA[j] > mae) mae = -g_wA[j];
+      if(g_wF[j] > mx) mx = g_wF[j];
+      if(g_wA[j] < mn) mn = g_wA[j];
    }
-   e.mfe = mfe / atr;
-   e.mae = mae / atr;
+   e.mfe = (mx - Lrel) / pt;
+   e.mae = (Lrel - mn) / pt;
    for(int h = 0; h < g_nH; h++)
    {
       int idx = MathMin(g_L - 1, (int)((long)g_hor[h] * 3600 / g_perSim) - 1);
       if(idx < 0) idx = 0;
-      e.ret[h] = g_wC[idx] / atr;
+      e.ret[h] = (g_wC[idx] - Lrel) / pt;
    }
    for(int i = 0; i < NFP; i++)
    {
       double R; int fl, jx;
-      double dd = g_fpX[i] * atr;
+      double dd = g_fpPts[i] * pt;
       e.fp[i] = SimFixed(0.0, 0.0, dd, dd, dd, R, fl, jx);
    }
    for(int i = 0; i < NFR; i++)
@@ -1392,6 +1440,59 @@ void EventStudy(SEvent &e)
          e.fakeout = 1;
          e.fakeHrs = (double)(j + 1) * g_perSim / 3600.0;
          break;
+      }
+   }
+   // ritest del livello rotto e cosa fa dopo (pessimista: se nella stessa barra il prezzo tocca sia la continuazione sia il fallimento, vince il fallimento)
+   double tol = g_tolPts * pt, cont = g_contPts * pt, fail = g_failPts * pt;
+   e.rt4 = 0; e.rt24 = 0; e.rtHrs = -1.0; e.rtRes = 0;
+   int jr = -1;
+   for(int j = 0; j < g_L; j++)
+      if(g_wA[j] <= Lrel + tol) { jr = j; break; }
+   if(jr >= 0)
+   {
+      e.rtHrs = (double)(jr + 1) * g_perSim / 3600.0;
+      if(e.rtHrs <= 4.0) e.rt4 = 1;
+      if(e.rtHrs <= 24.0) e.rt24 = 1;
+      for(int j = jr; j < g_L; j++)
+      {
+         if(g_wA[j] <= Lrel - fail) { e.rtRes = -1; break; }
+         if(j > jr && g_wF[j] >= Lrel + cont) { e.rtRes = 1; break; }
+      }
+   }
+   // meta' del range
+   e.midHit = 0; e.midHrs = -1.0;
+   double mrel = dir * ((e.hi + e.lo) * 0.5 - e.E0);
+   for(int j = 0; j < g_L; j++)
+   {
+      if(g_wA[j] <= mrel)
+      {
+         e.midHrs = (double)(j + 1) * g_perSim / 3600.0;
+         if(e.midHrs <= 24.0) e.midHit = 1;
+         break;
+      }
+   }
+   // zona del giorno precedente davanti all'ingresso
+   e.pdAhead = 0; e.pdHit = 0; e.pdRes = 0; e.pdDist = 0.0;
+   if(e.di >= 1)
+   {
+      double zp = (dir > 0) ? g_d1[e.di - 1].high : g_d1[e.di - 1].low;
+      double zrel = dir * (zp - e.E0);
+      e.pdDist = zrel / pt;
+      if(zrel > tol)
+      {
+         e.pdAhead = 1;
+         int jz = -1;
+         for(int j = 0; j < g_L; j++)
+            if(g_wF[j] >= zrel) { jz = j; break; }
+         if(jz >= 0 && (double)(jz + 1) * g_perSim / 3600.0 <= 24.0)
+         {
+            e.pdHit = 1;
+            for(int j = jz; j < g_L; j++)
+            {
+               if(j > jz && g_wA[j] <= zrel - fail) { e.pdRes = -1; break; }
+               if(g_wF[j] >= zrel + fail) { e.pdRes = 1; break; }
+            }
+         }
       }
    }
 }
@@ -1702,7 +1803,7 @@ void AssignBuckets()
    double w[], dl[];
    ArrayResize(w, E);
    ArrayResize(dl, E);
-   for(int e = 0; e < E; e++) { w[e] = g_ev[e].widthAtr; dl[e] = g_ev[e].delayMin; }
+   for(int e = 0; e < E; e++) { w[e] = g_ev[e].width / g_point; dl[e] = g_ev[e].delayMin; }
    ArraySort(w);
    ArraySort(dl);
    for(int i = 0; i < 4; i++) g_wEdge[i] = Quantile(w, E, (i + 1) / 5.0);
@@ -1710,7 +1811,7 @@ void AssignBuckets()
    for(int e = 0; e < E; e++)
    {
       int bw = 0;
-      for(int i = 0; i < 4; i++) if(g_ev[e].widthAtr > g_wEdge[i]) bw++;
+      for(int i = 0; i < 4; i++) if(g_ev[e].width / g_point > g_wEdge[i]) bw++;
       int bd = 0;
       for(int i = 0; i < 2; i++) if(g_ev[e].delayMin > g_dEdge[i]) bd++;
       g_ev[e].bw = bw;
@@ -1718,14 +1819,33 @@ void AssignBuckets()
    }
 }
 
-double MedianATRPoints()
+// ATR mediano di TUTTA la storia in punti: e' solo la SCALA delle distanze in punti (SL di riferimento, griglie, soglie),
+// la stessa per ogni definizione, cosi' i numeri sono confrontabili e le distanze restano in punti.
+double MedianATRAll()
 {
-   int E = ArraySize(g_ev);
+   int n = ArraySize(g_atrA);
    double a[];
-   ArrayResize(a, E);
-   for(int e = 0; e < E; e++) a[e] = g_ev[e].atr / g_point;
+   ArrayResize(a, 0);
+   for(int i = 0; i < n; i++)
+      if(g_atrA[i] > EPSILON && g_ra[i].time >= g_dataFirst)
+      {
+         int sz = ArraySize(a);
+         ArrayResize(a, sz + 1, 4096);
+         a[sz] = g_atrA[i] / g_point;
+      }
+   if(ArraySize(a) < 10) return 100.0;
    ArraySort(a);
-   return Quantile(a, E, 0.5);
+   return Quantile(a, ArraySize(a), 0.5);
+}
+
+void SetScales()
+{
+   double med = MathMax(1.0, g_medATRpts);
+   double fx[NFP] = {0.25, 0.5, 1.0, 2.0, 3.0};
+   for(int i = 0; i < NFP; i++) g_fpPts[i] = MathMax(1.0, MathRound(fx[i] * med));
+   g_tolPts = MathMax(1.0, MathRound(0.1 * med));
+   g_contPts = MathMax(1.0, MathRound(1.0 * med));
+   g_failPts = MathMax(1.0, MathRound(0.5 * med));
 }
 
 //+------------------------------------------------------------------+
@@ -2051,6 +2171,374 @@ void RunOffsetSweep()
 }
 
 //+------------------------------------------------------------------+
+//| PARTE A: rotture CONFERMATE DALLA CHIUSURA DELLA CANDELA            |
+//| Per ogni time frame (1 min ... 3 ore) e per ogni range orario del   |
+//| giorno (ora di inizio x durata): dopo la fine del range si osserva  |
+//| la PRIMA candela del TF che CHIUDE fuori dal range (sopra il massimo|
+//| o sotto il minimo), si conta quante candele dopo la fine del range  |
+//| e' avvenuta (k), e si entra a mercato alla chiusura di quella       |
+//| candela. Lo SL NON e' fissato a priori: si misurano 6 distanze in   |
+//| punti dall'ingresso (e, come riferimento, il livello rotto) con TP  |
+//| a 1R, 2R, 3R, e quanti trade vincenti sopravvivrebbero a ciascuno SL.|
+//+------------------------------------------------------------------+
+const int    g_cbSec[NTF] = {60, 300, 900, 1800, 3600, 7200, 10800};
+const string g_cbName[NTF] = {"M1", "M5", "M15", "M30", "H1", "H2", "H3"};
+bool         g_cbOn[NTF];
+int          g_cbOff[NTF], g_cbN[NTF];
+SCandle      g_cb[];
+int          g_cbNW = 0;
+int          g_cbWS[], g_cbWD[];                  // range: ora di inizio, durata (ore)
+SStat        g_cbR[];                              // [((cella*NSL + sl)*NRRM + m)*2 + parte], cella = (w*NTF+t)*NKB+kb
+SCbAcc       g_cbA[];                              // [cella*2+parte]
+int          g_cbRng[], g_cbBrk[];                 // [(w*NTF+t)*2+parte]: range osservati / con una chiusura fuori entro la sera
+int          g_cbReach[], g_cbSurv[];              // sopravvivenza: [((t*NKB+kb)*2+parte)*NTG+tg] e [(...)*NSLF+i]
+double       g_cbSLpts[NSLF];                      // le 6 distanze fisse dello SL dall'ingresso, in punti
+double       g_cbTG[NTG];                          // bersagli per l'analisi di sopravvivenza, in punti
+int          g_cbRef = 3;                          // SL di riferimento (scelto sull'IS, una volta)
+int          g_cbDbgW = -1, g_cbDbgT = -1;         // solo test: esporta gli eventi di una coppia (range, TF)
+int          g_cbEvents = 0;
+
+int CbKB(const int k)
+{
+   if(k <= 1) return 0;
+   if(k == 2) return 1;
+   if(k == 3) return 2;
+   if(k <= 5) return 3;
+   if(k <= 10) return 4;
+   return 5;
+}
+
+string CbKBName(const int b)
+{
+   if(b == 0) return "k=1";
+   if(b == 1) return "k=2";
+   if(b == 2) return "k=3";
+   if(b == 3) return "k=4-5";
+   if(b == 4) return "k=6-10";
+   return "k=11+";
+}
+
+int CbIdxR(const int cell, const int sl, const int m, const int part) { return ((((cell * NSL) + sl) * NRRM) + m) * 2 + part; }
+int CbIdxRA(const int cell, const int part) { return cell * 2 + part; }
+
+string CbSLName(const int sl)
+{
+   if(sl >= NSLF) return "sul livello rotto";
+   return F(g_cbSLpts[sl], 0) + " pt";
+}
+
+void StatMerge(SStat &d, const SStat &s)
+{
+   d.n += s.n; d.wins += s.wins; d.tmo += s.tmo; d.amb += s.amb;
+   d.sum += s.sum; d.sum2 += s.sum2; d.gp += s.gp; d.gl += s.gl;
+}
+
+// candele dei TF aggregando le barre di simulazione (allineate all'apertura del giorno server)
+void CbBuildCandles()
+{
+   int nS = ArraySize(g_rs);
+   ArrayResize(g_cb, 0);
+   int total = 0;
+   for(int t = 0; t < NTF; t++)
+   {
+      g_cbOn[t] = (g_cbSec[t] >= g_perSim && g_cbSec[t] % g_perSim == 0);
+      g_cbOff[t] = total;
+      g_cbN[t] = 0;
+      if(!g_cbOn[t]) continue;
+      int sec = g_cbSec[t];
+      ArrayResize(g_cb, total + nS / MathMax(1, sec / g_perSim) + 8, 100000);
+      int n = 0;
+      datetime curB = 0;
+      for(int j = 0; j < nS; j++)
+      {
+         datetime tt = g_rs[j].time;
+         datetime day = tt - tt % 86400;
+         datetime bk = day + ((tt - day) / sec) * sec;
+         if(n == 0 || bk != curB)
+         {
+            curB = bk;
+            g_cb[total + n].t = bk;
+            g_cb[total + n].h = g_rs[j].high;
+            g_cb[total + n].l = g_rs[j].low;
+            g_cb[total + n].c = g_rs[j].close;
+            n++;
+         }
+         else
+         {
+            int q = total + n - 1;
+            if(g_rs[j].high > g_cb[q].h) g_cb[q].h = g_rs[j].high;
+            if(g_rs[j].low < g_cb[q].l) g_cb[q].l = g_rs[j].low;
+            g_cb[q].c = g_rs[j].close;
+         }
+      }
+      g_cbN[t] = n;
+      total += n;
+      ArrayResize(g_cb, total);
+   }
+}
+
+int CbLower(const int off, const int n, const datetime t)
+{
+   int lo = 0, hi = n;
+   while(lo < hi)
+   {
+      int mid = (lo + hi) / 2;
+      if(g_cb[off + mid].t < t) lo = mid + 1; else hi = mid;
+   }
+   return lo;
+}
+
+// percorso a partire dalla barra j0 (la prima dopo la chiusura della candela), relativo a E0, direzionale
+void CbBuildPath(const int j0, const int dir, const double E0, const int L)
+{
+   for(int j = 0; j < L; j++)
+   {
+      double h = g_rs[j0 + j].high, l = g_rs[j0 + j].low, c = g_rs[j0 + j].close, o = g_rs[j0 + j].open;
+      g_wC[j] = dir * (c - E0);
+      g_wO[j] = dir * (o - E0);
+      if(dir > 0) { g_wF[j] = h - E0; g_wA[j] = l - E0; }
+      else        { g_wF[j] = E0 - l; g_wA[j] = E0 - h; }
+   }
+   g_a0raw = 1e18;
+}
+
+void CbSetScales()
+{
+   double med = MathMax(1.0, g_medATRpts);
+   double f[NSLF] = {0.25, 0.5, 0.75, 1.0, 1.5, 2.0};
+   for(int i = 0; i < NSLF; i++) g_cbSLpts[i] = MathMax(5.0, MathRound(f[i] * med));
+   for(int i = 1; i < NSLF; i++) if(g_cbSLpts[i] <= g_cbSLpts[i - 1]) g_cbSLpts[i] = g_cbSLpts[i - 1] + 1.0;
+   g_cbTG[0] = MathMax(1.0, MathRound(1.0 * med));
+   g_cbTG[1] = MathMax(2.0, MathRound(2.0 * med));
+}
+
+bool RunCandleStudy()
+{
+   CbBuildCandles();
+   CbSetScales();
+   int nS = ArraySize(g_rs);
+   // range orari: ogni ora di inizio x durate 1,2,3,4,6,8,12 ore; devono chiudersi entro le 23:00
+   ArrayResize(g_cbWS, 0);
+   ArrayResize(g_cbWD, 0);
+   int durs[7] = {1, 2, 3, 4, 6, 8, 12};
+   for(int d = 0; d < 7; d++)
+      for(int s = 0; s + durs[d] <= 23; s++)
+      {
+         int n = ArraySize(g_cbWS);
+         ArrayResize(g_cbWS, n + 1);
+         ArrayResize(g_cbWD, n + 1);
+         g_cbWS[n] = s;
+         g_cbWD[n] = durs[d];
+      }
+   g_cbNW = ArraySize(g_cbWS);
+   int cells = g_cbNW * NTF * NKB;
+   ArrayResize(g_cbR, cells * NSL * NRRM * 2);
+   ArrayResize(g_cbA, cells * 2);
+   ArrayResize(g_cbRng, g_cbNW * NTF * 2);
+   ArrayResize(g_cbBrk, g_cbNW * NTF * 2);
+   ArrayResize(g_cbReach, NTF * NKB * 2 * NTG);
+   ArrayResize(g_cbSurv, NTF * NKB * 2 * NTG * NSLF);
+   for(int i = 0; i < ArraySize(g_cbR); i++) ZeroMemory(g_cbR[i]);
+   for(int i = 0; i < ArraySize(g_cbA); i++) ZeroMemory(g_cbA[i]);
+   ArrayInitialize(g_cbRng, 0);
+   ArrayInitialize(g_cbBrk, 0);
+   ArrayInitialize(g_cbReach, 0);
+   ArrayInitialize(g_cbSurv, 0);
+   g_cbEvents = 0;
+
+   double pt = g_point;
+   double med = MathMax(1.0, g_medATRpts);
+   double bufPts = MathMax(1.0, MathRound(0.05 * med));
+   double comm = InpCommissionPoints * g_point;
+   int L4 = MathMin(g_L, MathMax(2, 4 * 3600 / g_perSim));
+   int L24 = MathMin(g_L, MathMax(L4, 24 * 3600 / g_perSim));
+   ArrayResize(g_wO, g_L);
+   ArrayResize(g_wF, g_L);
+   ArrayResize(g_wA, g_L);
+   ArrayResize(g_wC, g_L);
+   int Lfull = g_L;
+
+   int dbg = INVALID_HANDLE;
+   if(g_cbDbgW >= 0 && g_cbDbgT >= 0)
+   {
+      dbg = FileOpen(InpFilePrefix + "_" + _Symbol + "_cb_events_debug.csv", FILE_WRITE | FILE_TXT | FILE_ANSI);
+      if(dbg != INVALID_HANDLE)
+      {
+         string hd = "day,win_start,win_hours,tf,k,dir,range_hi,range_lo,close,entry_time,edge_sl_pts,spread_pts,mfe4_pts,ret4_pts";
+         for(int i = 0; i < NSL; i++)
+            for(int m = 0; m < NRRM; m++) hd += ",R_s" + IntegerToString(i) + "_m" + IntegerToString(m + 1);
+         FileWriteString(dbg, hd + "\n");
+      }
+   }
+
+   int nD1 = ArraySize(g_d1);
+   datetime lastOK = g_rs[nS - 1].time;
+   uint t0 = GetTickCount();
+   for(int di = 0; di < nD1 - 1; di++)
+   {
+      if(IsStopped()) { g_L = Lfull; return false; }
+      datetime D = g_d1[di].time;
+      if(D + 86400 <= g_dataFirst) continue;
+      if(D > lastOK) break;
+      MqlDateTime dtm;
+      TimeToStruct(D, dtm);
+      if(dtm.day_of_week == 0 || dtm.day_of_week == 6) continue;
+      if(((g_dayMask >> dtm.day_of_week) & 1) == 0) continue;
+      int part = (D >= g_cut) ? 1 : 0;
+      if((di % 20) == 0)
+      {
+         double el = (GetTickCount() - t0) / 1000.0;
+         Comment(StringFormat("MDRB AutoStudy: parte A (rotture a candela chiusa) giorno %d/%d (%.0f s)", di + 1, nD1, el));
+      }
+      for(int w = 0; w < g_cbNW; w++)
+      {
+         datetime rs0 = D + (datetime)g_cbWS[w] * 3600;
+         datetime re0 = rs0 + (datetime)g_cbWD[w] * 3600;
+         int ja = LowerBound(g_rs, rs0);
+         int jb = LowerBound(g_rs, re0);
+         int need = (int)(0.6 * g_cbWD[w] * 3600 / g_perSim);
+         if(jb - ja < MathMax(1, need)) continue;
+         double hi = -DBL_MAX, lo = DBL_MAX;
+         for(int j = ja; j < jb; j++)
+         {
+            if(g_rs[j].high > hi) hi = g_rs[j].high;
+            if(g_rs[j].low < lo) lo = g_rs[j].low;
+         }
+         if(!(hi > lo) || lo <= 0.0) continue;
+         if((hi - lo) < 2.0 * SpreadAt(ja)) continue;
+         datetime endDay = D + 86400;
+         for(int t = 0; t < NTF; t++)
+         {
+            if(!g_cbOn[t]) continue;
+            int sec = g_cbSec[t];
+            int off = g_cbOff[t], n = g_cbN[t];
+            int pidx = ((w * NTF) + t) * 2 + part;
+            int ci = CbLower(off, n, re0);
+            int k = 0;
+            int hit = -1, dir = 0;
+            for(int q = ci; q < n; q++)
+            {
+               datetime ct = g_cb[off + q].t;
+               if(ct + sec > endDay) break;
+               if(ct < re0) continue;
+               k++;
+               double cc = g_cb[off + q].c;
+               if(cc > hi) { hit = q; dir = 1; break; }
+               if(cc < lo) { hit = q; dir = -1; break; }
+            }
+            if(k == 0 && hit < 0) continue;
+            g_cbRng[pidx]++;
+            if(hit < 0) continue;
+            g_cbBrk[pidx]++;
+            // ingresso a mercato alla chiusura della candela che rompe
+            datetime tc = g_cb[off + hit].t + sec;
+            int j0 = LowerBound(g_rs, tc);
+            if(j0 + L4 >= nS) continue;
+            double E0 = g_cb[off + hit].c;
+            double edge = (dir > 0) ? hi : lo;
+            double S = SpreadAt(j0);
+            double edgeDist = dir * (E0 - edge) / pt;
+            double slEdge = MathMax(edgeDist + bufPts, MathMax(5.0, 4.0 * S / pt));
+            double Rr[NSL][NRRM];
+            for(int i = 0; i < NSL; i++) for(int m = 0; m < NRRM; m++) Rr[i][m] = 0.0;
+            bool simOk = false;
+            double mfe4 = 0.0, ret4 = 0.0;
+            bool rch[NTG];
+            double mbk[NTG];
+            for(int tg = 0; tg < NTG; tg++) { rch[tg] = false; mbk[tg] = 0.0; }
+            int lv[2];
+            lv[0] = L4; lv[1] = L24;
+            for(int lk = 0; lk < 2; lk++)
+            {
+               if(lk > 0 && lv[1] == lv[0]) break;
+               g_L = lv[lk];
+               if(j0 + g_L >= nS) g_L = nS - j0 - 1;
+               if(g_L < 2) break;
+               CbBuildPath(j0, dir, E0, g_L);
+               simOk = true;
+               bool open = false;
+               for(int i = 0; i < NSL; i++)
+               {
+                  double sld = ((i < NSLF) ? g_cbSLpts[i] : slEdge) * pt;
+                  for(int m = 0; m < NRRM; m++)
+                  {
+                     double R0; int fl, jx;
+                     SimFixed(S, comm, sld, (m + 1) * sld, sld, R0, fl, jx);
+                     Rr[i][m] = R0;
+                     if((fl & 1) != 0 && lk == 0 && lv[1] > lv[0]) open = true;
+                  }
+               }
+               if(lk == 0)
+               {
+                  mfe4 = -1e18;
+                  for(int j = 0; j < g_L; j++) if(g_wF[j] > mfe4) mfe4 = g_wF[j];
+                  ret4 = g_wC[g_L - 1];
+                  // sopravvivenza: tra i trade che arrivano a +T entro 4 ore, escursione avversa massima prima di T (barra di arrivo inclusa)
+                  for(int tg = 0; tg < NTG; tg++)
+                  {
+                     double Tp = g_cbTG[tg] * pt;
+                     double mb2 = 0.0;
+                     for(int j = 0; j < g_L; j++)
+                     {
+                        if(-g_wA[j] > mb2) mb2 = -g_wA[j];
+                        if(g_wF[j] >= Tp) { rch[tg] = true; mbk[tg] = mb2; break; }
+                     }
+                  }
+               }
+               if(!open) break;
+            }
+            if(!simOk) { g_L = Lfull; continue; }
+            int kb = CbKB(k);
+            int sIdx = ((t * NKB) + kb) * 2 + part;
+            for(int tg = 0; tg < NTG; tg++)
+            {
+               if(!rch[tg]) continue;
+               g_cbReach[sIdx * NTG + tg]++;
+               for(int i = 0; i < NSLF; i++)
+                  if(mbk[tg] <= g_cbSLpts[i] * pt) g_cbSurv[(sIdx * NTG + tg) * NSLF + i]++;
+            }
+            g_L = Lfull;
+            int cell = ((w * NTF) + t) * NKB + kb;
+            for(int i = 0; i < NSL; i++)
+               for(int m = 0; m < NRRM; m++) StatAdd(g_cbR[CbIdxR(cell, i, m, part)], Rr[i][m], 0);
+            int ai = CbIdxRA(cell, part);
+            g_cbA[ai].n++;
+            g_cbA[ai].sl += slEdge;
+            g_cbA[ai].mfe += mfe4 / pt;
+            g_cbA[ai].ret += ret4 / pt;
+            int ia = BarAtOrBefore(g_ra, tc) - 1;
+            double atrE = (ia >= 0 && g_atrA[ia] > EPSILON) ? g_atrA[ia] : med * pt;
+            g_cbA[ai].mfeAtr += mfe4 / atrE;
+            if(ret4 > 0.0) g_cbA[ai].pos++;
+            g_cbEvents++;
+            if(dbg != INVALID_HANDLE && w == g_cbDbgW && t == g_cbDbgT)
+            {
+               string ln = TimeToString(D, TIME_DATE) + "," + IntegerToString(g_cbWS[w]) + "," + IntegerToString(g_cbWD[w]) + "," + g_cbName[t] + "," + IntegerToString(k) + "," + IntegerToString(dir) + "," +
+                           F(hi, 6) + "," + F(lo, 6) + "," + F(E0, 6) + "," + TimeToString(tc, TIME_DATE | TIME_MINUTES) + "," + F(slEdge, 1) + "," + F(S / pt, 1) + "," + F(mfe4 / pt, 1) + "," + F(ret4 / pt, 1);
+               for(int i = 0; i < NSL; i++)
+                  for(int m = 0; m < NRRM; m++) ln += "," + F(Rr[i][m], 4);
+               FileWriteString(dbg, ln + "\n");
+            }
+         }
+      }
+   }
+   if(dbg != INVALID_HANDLE) FileClose(dbg);
+   g_L = Lfull;
+   // SL di riferimento: la distanza fissa con la migliore E[R] 1:2 In-Sample (una scelta su 6, sull'IS)
+   double bestT = -1e18;
+   for(int i = 0; i < NSLF; i++)
+   {
+      SStat a;
+      ZeroMemory(a);
+      for(int c = 0; c < cells; c++) StatMerge(a, g_cbR[CbIdxR(c, i, 1, 0)]);
+      double sc = RankMetric(a);
+      if(sc > bestT) { bestT = sc; g_cbRef = i; }
+   }
+   PrintFormat("Parte A: %d eventi (range x TF con chiusura fuori), %d range orari x %d TF; SL di riferimento %s", g_cbEvents, g_cbNW, NTF, CbSLName(g_cbRef));
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| REPORT                                                             |
 //+------------------------------------------------------------------+
 void HW(const string s)
@@ -2305,25 +2793,42 @@ void HtmlFunnel()
    HW("</table><div class='note'>L'EA piazza al massimo una coppia al giorno e non ne piazza se c'&egrave; una posizione aperta: i giorni saltati o ripiazzati dipendono dalla configurazione di uscita (SL/TP larghi = posizioni pi&ugrave; lunghe = pi&ugrave; giorni saltati). Lo studio lo replica per ogni cella: se la posizione si chiude durante la finestra, ripiazza la coppia come l'EA.</div>");
 }
 
+double PctOf(const int a, const int b) { return (b > 0) ? 100.0 * a / b : 0.0; }
+
+// percentili di un vettore (lo ordina)
+string QRow(double &v[], const int n, const int d)
+{
+   if(n < 1) return "<td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>";
+   ArraySort(v);
+   double sum = 0.0;
+   for(int i = 0; i < n; i++) sum += v[i];
+   return "<td>" + F(sum / n, d) + "</td><td>" + F(Quantile(v, n, 0.25), d) + "</td><td>" + F(Quantile(v, n, 0.5), d) + "</td><td>" + F(Quantile(v, n, 0.75), d) + "</td><td>" + F(Quantile(v, n, 0.9), d) + "</td>";
+}
+
 void HtmlEventStudy()
 {
    int E = ArraySize(g_ev);
-   HW("<h2>" + g_pre + "3. Come si comporta il prezzo dopo lo sfondamento (lordo di costi)</h2>");
-   HW("<div class='note'>Misurato dall'ingresso. Direzionale: positivo = il prezzo prosegue nel verso dello sfondamento. Unit&agrave;: ATR (" + EnumToString(g_atrTF) + ", " + IntegerToString(InpATRPeriod) +
-      ") al momento del piazzamento; in punti con l'ATR mediano (" + F(g_medATRpts, 0) + " punti). Orizzonte: ore dopo l'ingresso. Tutti i " + IntegerToString(E) + " sfondamenti, senza saltare nulla.</div>");
+   HW("<h2>" + g_pre + "3. Come si comporta il prezzo dopo lo sfondamento (lordo di costi, in PUNTI dal livello rotto)</h2>");
+   HW("<div class='note'>Il livello rotto &egrave; il massimo del range (long) o il minimo (short). Distanze in PUNTI, direzionali: positivo = il prezzo prosegue nel verso dello sfondamento, negativo = torna dentro il range. Orizzonte: ore dopo l'ingresso. Tutti i " +
+      IntegerToString(E) + " sfondamenti, senza saltare nulla. Le soglie in punti derivano dall'ATR mediano della storia (" + F(g_medATRpts, 0) + " punti), uguale per tutte le definizioni. " +
+      Pick(InpAuto, "La definizione &egrave; stata scelta sull'In-Sample: le colonne su tutto il campione sono distorte verso l'alto, conta l'OOS (evidenziato solo con |t| &ge; " + F(ZThr(), 0) + " e almeno 20 trade OOS).", "") + "</div>");
 
-   HW("<h3>Rendimento direzionale medio a fine orizzonte</h3><table><tr><th>Ore</th><th>Medio (ATR)</th><th>Medio (punti)</th><th>Errore std.</th><th>t (tutto)</th><th>% positivi</th><th>N OOS</th><th>Medio OOS (ATR)</th><th>t OOS</th></tr>");
+   HW("<h3>Distanza dal livello rotto a fine orizzonte (punti)</h3><table><tr><th>Ore</th><th>Media</th><th>Mediana</th><th>P25</th><th>P75</th><th>% oltre il livello</th><th>t (tutto)</th><th>N OOS</th><th>Media OOS</th><th>t OOS</th></tr>");
    for(int h = 0; h < g_nH; h++)
    {
       double sum = 0.0, sum2 = 0.0, so = 0.0, so2 = 0.0;
       int pos = 0, no = 0;
+      double vv[];
+      ArrayResize(vv, E);
       for(int e = 0; e < E; e++)
       {
          double v = g_ev[e].ret[h];
+         vv[e] = v;
          sum += v; sum2 += v * v;
          if(v > 0.0) pos++;
          if(e >= g_split) { so += v; so2 += v * v; no++; }
       }
+      ArraySort(vv);
       double mean = sum / E;
       double var = (E > 1) ? (sum2 - sum * sum / E) / (E - 1) : 0.0;
       double se = (var > 0.0) ? MathSqrt(var / E) : 0.0;
@@ -2333,21 +2838,20 @@ void HtmlEventStudy()
       double seo = (vo > 0.0) ? MathSqrt(vo / no) : 0.0;
       double to = (seo > EPSILON) ? mo / seo : 0.0;
       string clsO = (no >= 20 && MathAbs(to) >= ZThr()) ? ((to > 0) ? " class='ok'" : " class='bad'") : "";
-      HW("<tr><th>" + IntegerToString(g_hor[h]) + "</th><td>" + F(mean, 3) + "</td><td>" + F(mean * g_medATRpts, 1) + "</td><td>" + F(se, 3) +
-         "</td><td>" + F(t, 2) + "</td><td>" + F(100.0 * pos / E, 1) + "%</td><td>" + IntegerToString(no) + "</td><td>" + F(mo, 3) + "</td><td" + clsO + ">" + F(to, 2) + "</td></tr>\n");
+      HW("<tr><th>" + IntegerToString(g_hor[h]) + "</th><td>" + F(mean, 0) + "</td><td>" + F(Quantile(vv, E, 0.5), 0) + "</td><td>" + F(Quantile(vv, E, 0.25), 0) + "</td><td>" + F(Quantile(vv, E, 0.75), 0) +
+         "</td><td>" + F(100.0 * pos / E, 1) + "%</td><td>" + F(t, 2) + "</td><td>" + IntegerToString(no) + "</td><td>" + F(mo, 0) + "</td><td" + clsO + ">" + F(to, 2) + "</td></tr>\n");
    }
-   HW("</table><div class='note'>" + Pick(InpAuto, "La definizione &egrave; stata scelta sull'In-Sample: le colonne su tutto il campione sono distorte verso l'alto, conta l'OOS (evidenziato solo con |t| &ge; " + F(ZThr(), 0) + " e almeno 20 trade OOS).", "Evidenziati solo i valori OOS con |t| &ge; " + F(ZThr(), 0) + ".") + "</div>");
+   HW("</table><div class='note'>&laquo;% oltre il livello&raquo; = quota di sfondamenti che a quell'orizzonte stanno ancora oltre il massimo/minimo rotto; il resto &egrave; rientrato nel range.</div>");
 
    double mf[], ma[];
    ArrayResize(mf, E);
    ArrayResize(ma, E);
-   double smf = 0.0, sma = 0.0;
-   int fake = 0;
+   int fake = 0, back4 = 0, back24 = 0, backAny = 0;
    double fh[];
    ArrayResize(fh, 0);
    for(int e = 0; e < E; e++)
    {
-      mf[e] = g_ev[e].mfe; ma[e] = g_ev[e].mae; smf += mf[e]; sma += ma[e];
+      mf[e] = g_ev[e].mfe; ma[e] = g_ev[e].mae;
       if(g_ev[e].fakeout != 0)
       {
          fake++;
@@ -2355,17 +2859,78 @@ void HtmlEventStudy()
          ArrayResize(fh, sz + 1);
          fh[sz] = g_ev[e].fakeHrs;
       }
+      if(g_ev[e].rt4 != 0) back4++;
+      if(g_ev[e].rt24 != 0) back24++;
+      if(g_ev[e].rtHrs >= 0.0) backAny++;
    }
-   ArraySort(mf);
-   ArraySort(ma);
+   HW("<h3>Quanto si allontana e quanto torna indietro (punti dal livello rotto)</h3><table><tr><th></th><th>Media</th><th>P25</th><th>Mediana</th><th>P75</th><th>P90</th></tr>");
+   HW("<tr><th class='rl'>Massima estensione oltre il livello (MFE)</th>" + QRow(mf, E, 0) + "</tr>");
+   HW("<tr><th class='rl'>Rientro massimo sotto il livello (positivo = tornato dentro il range, negativo = distanza minima rimasta sopra)</th>" + QRow(ma, E, 0) + "</tr></table>");
    ArraySort(fh);
-   HW("<h3>Escursione massima sull'orizzonte (ATR)</h3><table><tr><th></th><th>Media</th><th>P25</th><th>Mediana</th><th>P75</th><th>P90</th></tr>");
-   HW("<tr><th class='rl'>MFE (favorevole)</th><td>" + F(smf / E, 2) + "</td><td>" + F(Quantile(mf, E, 0.25), 2) + "</td><td>" + F(Quantile(mf, E, 0.5), 2) +
-      "</td><td>" + F(Quantile(mf, E, 0.75), 2) + "</td><td>" + F(Quantile(mf, E, 0.9), 2) + "</td></tr>");
-   HW("<tr><th class='rl'>MAE (avversa)</th><td>" + F(sma / E, 2) + "</td><td>" + F(Quantile(ma, E, 0.25), 2) + "</td><td>" + F(Quantile(ma, E, 0.5), 2) +
-      "</td><td>" + F(Quantile(ma, E, 0.75), 2) + "</td><td>" + F(Quantile(ma, E, 0.9), 2) + "</td></tr></table>");
-   HW("<div class='note'>Falsi breakout: <b>" + F(100.0 * fake / E, 1) + "%</b> degli sfondamenti torna a toccare il bordo OPPOSTO del range entro l'orizzonte" +
-      (fake > 0 ? " (dopo " + F(Quantile(fh, ArraySize(fh), 0.5), 1) + " ore, mediana)" : "") + ". MFE e MAE sono misurate su tutto l'orizzonte senza fermarsi allo SL: servono a dimensionare stop e target, non sono un risultato di trading.</div>");
+   HW("<div class='note'>Falsi breakout: <b>" + F(PctOf(fake, E), 1) + "%</b> degli sfondamenti torna a toccare il bordo OPPOSTO del range entro l'orizzonte" +
+      (fake > 0 ? " (dopo " + F(Quantile(fh, ArraySize(fh), 0.5), 1) + " ore, mediana)" : "") + ". MFE e rientro sono misurati su tutto l'orizzonte senza fermarsi allo SL: servono a dimensionare stop e target, non sono un risultato di trading.</div>");
+
+   // ritest del livello rotto
+   int rt4O = 0, rt24O = 0, nO = 0, rtc = 0, rtf = 0, rtn = 0, rtcO = 0, rtfO = 0, rtnO = 0, anyO = 0;
+   double rh[];
+   ArrayResize(rh, 0);
+   for(int e = 0; e < E; e++)
+   {
+      bool oo = (e >= g_split);
+      if(oo) { nO++; if(g_ev[e].rt4 != 0) rt4O++; if(g_ev[e].rt24 != 0) rt24O++; if(g_ev[e].rtHrs >= 0.0) anyO++; }
+      if(g_ev[e].rtHrs < 0.0) continue;
+      int sz = ArraySize(rh);
+      ArrayResize(rh, sz + 1);
+      rh[sz] = g_ev[e].rtHrs;
+      if(g_ev[e].rtRes > 0) { rtc++; if(oo) rtcO++; }
+      else if(g_ev[e].rtRes < 0) { rtf++; if(oo) rtfO++; }
+      else { rtn++; if(oo) rtnO++; }
+   }
+   ArraySort(rh);
+   int nrt = ArraySize(rh);
+   int nrtO = rtcO + rtfO + rtnO;
+   HW("<h3>Ritest del livello rotto (il prezzo torna a meno di " + F(g_tolPts, 0) + " punti dal livello)</h3><table><tr><th class='rl'></th><th>Tutti</th><th>OOS</th></tr>");
+   HW("<tr><th class='rl'>Ritest entro 4 ore</th><td>" + F(PctOf(back4, E), 1) + "%</td><td>" + F(PctOf(rt4O, nO), 1) + "%</td></tr>");
+   HW("<tr><th class='rl'>Ritest entro 24 ore</th><td>" + F(PctOf(back24, E), 1) + "%</td><td>" + F(PctOf(rt24O, nO), 1) + "%</td></tr>");
+   HW("<tr><th class='rl'>Ritest entro l'orizzonte (" + IntegerToString(InpMaxHoldHours) + " h)</th><td>" + F(PctOf(backAny, E), 1) + "%</td><td>" + F(PctOf(anyO, nO), 1) + "%</td></tr>");
+   HW("<tr><th class='rl'>Tempo al primo ritest (mediana, ore)</th><td>" + Pick(nrt > 0, F(Quantile(rh, nrt, 0.5), 1), "-") + "</td><td></td></tr>");
+   HW("<tr><th class='rl' colspan='3' style='background:#f6f8fa'>Dopo il ritest (% dei ritestati)</th></tr>");
+   HW("<tr><th class='rl'>Continuazione: sale di " + F(g_contPts, 0) + " punti oltre il livello prima di scendere di " + F(g_failPts, 0) + " sotto</th><td>" + F(PctOf(rtc, nrt), 1) + "%</td><td>" + F(PctOf(rtcO, nrtO), 1) + "%</td></tr>");
+   HW("<tr><th class='rl'>Fallimento: scende di " + F(g_failPts, 0) + " punti sotto il livello (falso breakout)</th><td>" + F(PctOf(rtf, nrt), 1) + "%</td><td>" + F(PctOf(rtfO, nrtO), 1) + "%</td></tr>");
+   HW("<tr><th class='rl'>Nessuno dei due entro l'orizzonte</th><td>" + F(PctOf(rtn, nrt), 1) + "%</td><td>" + F(PctOf(rtnO, nrtO), 1) + "%</td></tr></table>");
+   HW("<div class='note'>Se la continuazione dopo il ritest supera nettamente il fallimento, entrare sul ritest del livello (invece che sulla rottura) pu&ograve; migliorare il rapporto rischio/rendimento: lo stop sta appena sotto il livello. Se nello stesso momento il prezzo tocca sia la continuazione sia il fallimento si assume il fallimento.</div>");
+
+   // meta' del range e zona del giorno precedente
+   int mid = 0, midO = 0, pda = 0, pdh = 0, pdp = 0, pdr = 0, pdaO = 0, pdhO = 0, pdpO = 0, pdrO = 0;
+   double pdd[];
+   ArrayResize(pdd, 0);
+   for(int e = 0; e < E; e++)
+   {
+      bool oo = (e >= g_split);
+      if(g_ev[e].midHit != 0) { mid++; if(oo) midO++; }
+      if(g_ev[e].pdAhead != 0)
+      {
+         pda++; if(oo) pdaO++;
+         int sz = ArraySize(pdd);
+         ArrayResize(pdd, sz + 1);
+         pdd[sz] = g_ev[e].pdDist;
+         if(g_ev[e].pdHit != 0)
+         {
+            pdh++; if(oo) pdhO++;
+            if(g_ev[e].pdRes > 0) { pdp++; if(oo) pdpO++; }
+            else if(g_ev[e].pdRes < 0) { pdr++; if(oo) pdrO++; }
+         }
+      }
+   }
+   ArraySort(pdd);
+   HW("<h3>Zone: met&agrave; del range e massimo/minimo del giorno precedente</h3><table><tr><th class='rl'></th><th>Tutti</th><th>OOS</th></tr>");
+   HW("<tr><th class='rl'>Il prezzo torna a met&agrave; del range entro 24 ore</th><td>" + F(PctOf(mid, E), 1) + "%</td><td>" + F(PctOf(midO, nO), 1) + "%</td></tr>");
+   HW("<tr><th class='rl'>Zona del giorno precedente davanti all'ingresso (massimo per i long, minimo per gli short): % degli sfondamenti</th><td>" + F(PctOf(pda, E), 1) + "%</td><td>" + F(PctOf(pdaO, nO), 1) + "%</td></tr>");
+   HW("<tr><th class='rl'>&nbsp;&nbsp;distanza mediana dall'ingresso (punti)</th><td>" + Pick(ArraySize(pdd) > 0, F(Quantile(pdd, ArraySize(pdd), 0.5), 0), "-") + "</td><td></td></tr>");
+   HW("<tr><th class='rl'>&nbsp;&nbsp;toccata entro 24 ore (% di quelli con la zona davanti)</th><td>" + F(PctOf(pdh, pda), 1) + "%</td><td>" + F(PctOf(pdhO, pdaO), 1) + "%</td></tr>");
+   HW("<tr><th class='rl'>&nbsp;&nbsp;dopo il tocco: la supera di " + F(g_failPts, 0) + " punti (% dei toccati)</th><td>" + F(PctOf(pdp, pdh), 1) + "%</td><td>" + F(PctOf(pdpO, pdhO), 1) + "%</td></tr>");
+   HW("<tr><th class='rl'>&nbsp;&nbsp;dopo il tocco: respinta di " + F(g_failPts, 0) + " punti (% dei toccati)</th><td>" + F(PctOf(pdr, pdh), 1) + "%</td><td>" + F(PctOf(pdrO, pdhO), 1) + "%</td></tr></table>");
+   HW("<div class='note'>Una zona che respinge spesso il prezzo (respinta &gt; supera) &egrave; un bersaglio naturale per il take profit; se invece il prezzo la supera quasi sempre, il TP pu&ograve; stare oltre.</div>");
 
    HW("<h3>Quale soglia viene toccata per prima dopo l'ingresso?</h3><table><tr><th>Soglia</th><th>Favorevole prima</th><th>Avversa prima</th><th>Nessuna</th><th>P(fav | decisi)</th><th>z vs 50% (tutto)</th><th>P(fav | decisi) OOS</th><th>z OOS</th></tr>");
    for(int i = 0; i < NFP + NFR; i++)
@@ -2382,23 +2947,33 @@ void HtmlEventStudy()
       double pO = (upO + dnO > 0) ? (double)upO / (upO + dnO) : 0.5;
       double zO = (upO + dnO > 0) ? (pO - 0.5) / MathSqrt(0.25 / (upO + dnO)) : 0.0;
       string cls = (upO + dnO >= 20 && MathAbs(zO) >= ZThr()) ? ((zO > 0) ? " class='ok'" : " class='bad'") : "";
-      string lbl = (i < NFP) ? "&plusmn;" + F(g_fpX[i], 1) + " ATR" : "&plusmn;" + F(g_frX[i - NFP], 2) + " x range";
+      string lbl = "&plusmn;" + F(g_fpPts[MathMin(i, NFP - 1)], 0) + " punti";
+      if(i >= NFP)
+      {
+         double wm[];
+         ArrayResize(wm, E);
+         for(int e = 0; e < E; e++) wm[e] = g_ev[e].width / g_point;
+         ArraySort(wm);
+         lbl = "&plusmn;" + F(g_frX[i - NFP], 2) + " x range (~" + F(g_frX[i - NFP] * Quantile(wm, E, 0.5), 0) + " punti)";
+      }
       HW("<tr><th class='rl'>" + lbl + "</th><td>" + F(100.0 * up / E, 1) + "%</td><td>" + F(100.0 * dn / E, 1) + "%</td><td>" + F(100.0 * nn / E, 1) +
          "%</td><td>" + F(100.0 * p, 1) + "%</td><td>" + F(z, 2) + "</td><td>" + F(100.0 * pO, 1) + "%</td><td" + cls + ">" + F(zO, 2) + "</td></tr>\n");
    }
-   HW("</table><div class='note'>Con prezzo senza direzione P(fav | decisi) = 50%. Scarto significativo = lo sfondamento ha un contenuto direzionale prima dei costi. Se i due livelli cadono nella stessa barra si assume quello avverso.</div>");
+   HW("</table><div class='note'>Con prezzo senza direzione P(fav | decisi) = 50%. Scarto significativo = lo sfondamento ha un contenuto direzionale prima dei costi. Soglie dall'ingresso. Se i due livelli cadono nella stessa barra si assume quello avverso.</div>");
 }
 
 void BreakRow(const string label, const int dimType, const int val)
 {
    int E = ArraySize(g_ev);
    int C = ArraySize(g_cfg);
-   int ri = (g_atrRefIdx >= 0) ? g_atrRefIdx : g_refIdx;
+   int ri = (g_refPtIdx >= 0) ? g_refPtIdx : g_refIdx;
    SStat s, so;
    ZeroMemory(s);
    ZeroMemory(so);
-   double smfe = 0.0, smae = 0.0;
-   double wp[];
+   int fake = 0, rt24 = 0, rtc = 0, rtn = 0;
+   double mfa[], maa[], wp[];
+   ArrayResize(mfa, 0);
+   ArrayResize(maa, 0);
    ArrayResize(wp, 0);
    for(int e = 0; e < E; e++)
    {
@@ -2416,45 +2991,53 @@ void BreakRow(const string label, const int dimType, const int val)
       if(!m) continue;
       StatAdd(s, (double)g_R[e * C + ri], g_F[e * C + ri]);
       if(e >= g_split) StatAdd(so, (double)g_R[e * C + ri], g_F[e * C + ri]);
-      smfe += g_ev[e].mfe;
-      smae += g_ev[e].mae;
-      int sz = ArraySize(wp);
+      if(g_ev[e].fakeout != 0) fake++;
+      if(g_ev[e].rt24 != 0) rt24++;
+      if(g_ev[e].rtHrs >= 0.0) { rtn++; if(g_ev[e].rtRes > 0) rtc++; }
+      int sz = ArraySize(mfa);
+      ArrayResize(mfa, sz + 1);
+      ArrayResize(maa, sz + 1);
       ArrayResize(wp, sz + 1);
+      mfa[sz] = g_ev[e].mfe;
+      maa[sz] = g_ev[e].mae;
       wp[sz] = g_ev[e].width / g_point;
    }
    if(s.n == 0) return;
+   ArraySort(mfa);
+   ArraySort(maa);
    ArraySort(wp);
    double t = StatT(s);
    double tO = StatT(so);
    string cls = (so.n >= 20 && tO >= ZThr()) ? " class='ok'" : ((so.n >= 20 && tO <= -ZThr()) ? " class='bad'" : "");
    HW("<tr><th class='rl'>" + label + "</th><td>" + IntegerToString(s.n) + "</td><td>" + F(StatWR(s), 1) + "%</td><td>" + F(StatMean(s), 3) +
-      "</td><td>" + F(t, 2) + "</td><td>" + PfStr(StatPF(s)) + "</td><td>" + F(smfe / s.n, 2) + "</td><td>" + F(smae / s.n, 2) +
-      "</td><td>" + F(Quantile(wp, ArraySize(wp), 0.5), 0) + "</td><td>" + IntegerToString(so.n) + "</td><td>" + Pick(so.n > 0, F(StatMean(so), 3), "-") + "</td><td" + cls + ">" + Pick(so.n > 1, F(tO, 2), "-") + "</td></tr>\n");
+      "</td><td>" + F(t, 2) + "</td><td>" + PfStr(StatPF(s)) + "</td><td>" + F(Quantile(mfa, s.n, 0.5), 0) + "</td><td>" + F(Quantile(maa, s.n, 0.5), 0) + "</td><td>" + F(PctOf(fake, s.n), 1) + "%</td><td>" +
+      F(PctOf(rt24, s.n), 1) + "%</td><td>" + Pick(rtn > 0, F(PctOf(rtc, rtn), 1) + "%", "-") + "</td><td>" + F(Quantile(wp, s.n, 0.5), 0) + "</td><td>" + IntegerToString(so.n) + "</td><td>" + Pick(so.n > 0, F(StatMean(so), 3), "-") +
+      "</td><td" + cls + ">" + Pick(so.n > 1, F(tO, 2), "-") + "</td></tr>\n");
 }
 
 void HtmlBreakdown()
 {
    HW("<h2>" + g_pre + "4. Quali range funzionano meglio</h2>");
-   HW("<div class='note'>Configurazione di riferimento: SL " + F(InpRefSLATR, 2) + " ATR, TP " + F(InpRefRR * InpRefSLATR, 2) + " ATR (RR 1:" + F(InpRefRR, 1) +
+   HW("<div class='note'>Configurazione di riferimento: SL " + F(RefSLPoints(), 0) + " punti, TP " + F(InpRefRR * RefSLPoints(), 0) + " punti (RR 1:" + F(InpRefRR, 1) +
       "), netto di costi, su tutti gli sfondamenti (senza saltare giorni). Una dimensione alla volta. Le colonne &laquo;tutto il campione&raquo; includono i giorni su cui la definizione " + Pick(InpAuto, "&egrave; stata scelta (IS): sono distorte verso l'alto; ", "") + "Evidenziati solo scostamenti OOS con |t| &ge; " + F(ZThr(), 0) + " e almeno 20 trade OOS: con una ventina di celle guardate, un paio escono per puro caso. " +
       Pick(RequireRangeConfirmation, "Il filtro Min/Max range dell'EA &egrave; ATTIVO: le larghezze fuori limite non compaiono.", "Il filtro Min/Max range non &egrave; applicato: le righe &laquo;nei limiti / fuori limiti&raquo; ti dicono dove mettere MinRangePoints e MaxRangePoints.") + "</div>");
-   HW("<table><tr><th></th><th>N</th><th>Win %</th><th>E[R]</th><th>t</th><th>PF</th><th>MFE media (ATR)</th><th>MAE media (ATR)</th><th>Range mediano (pt)</th><th>N OOS</th><th>E[R] OOS</th><th>t OOS</th></tr>");
-   HW("<tr><th class='rl' colspan='12' style='background:#f6f8fa'>Direzione dello sfondamento</th></tr>");
+   HW("<table><tr><th></th><th>N</th><th>Win %</th><th>E[R]</th><th>t</th><th>PF</th><th>MFE mediana (pt dal livello)</th><th>Rientro mediano (pt)</th><th>Falsi breakout %</th><th>Ritest 24 h %</th><th>Continuaz. dopo ritest %</th><th>Range mediano (pt)</th><th>N OOS</th><th>E[R] OOS</th><th>t OOS</th></tr>");
+   HW("<tr><th class='rl' colspan='15' style='background:#f6f8fa'>Direzione dello sfondamento</th></tr>");
    BreakRow("Long (sopra il massimo)", 0, 1);
    BreakRow("Short (sotto il minimo)", 0, -1);
-   HW("<tr><th class='rl' colspan='12' style='background:#f6f8fa'>Giorno della settimana</th></tr>");
+   HW("<tr><th class='rl' colspan='15' style='background:#f6f8fa'>Giorno della settimana</th></tr>");
    for(int w = 1; w <= 5; w++) BreakRow(WdayName(w), 1, w);
-   HW("<tr><th class='rl' colspan='12' style='background:#f6f8fa'>Larghezza del range (quintili, in ATR)</th></tr>");
+   HW("<tr><th class='rl' colspan='15' style='background:#f6f8fa'>Larghezza del range (quintili, in PUNTI)</th></tr>");
    for(int b = 0; b < 5; b++)
    {
-      string lo = (b == 0) ? "0" : F(g_wEdge[b - 1], 1);
-      string hi = (b == 4) ? "inf" : F(g_wEdge[b], 1);
-      BreakRow("Range " + lo + " - " + hi + " ATR", 2, b);
+      string lo = (b == 0) ? "0" : F(g_wEdge[b - 1], 0);
+      string hi = (b == 4) ? "inf" : F(g_wEdge[b], 0);
+      BreakRow("Range " + lo + " - " + hi + " punti", 2, b);
    }
-   HW("<tr><th class='rl' colspan='12' style='background:#f6f8fa'>Limiti dell'EA (" + F(MinRangePoints, 0) + " - " + F(MaxRangePoints, 0) + " punti)</th></tr>");
+   HW("<tr><th class='rl' colspan='15' style='background:#f6f8fa'>Limiti dell'EA (" + F(MinRangePoints, 0) + " - " + F(MaxRangePoints, 0) + " punti)</th></tr>");
    BreakRow("Range nei limiti", 4, 1);
    BreakRow("Range fuori limiti", 4, 0);
-   HW("<tr><th class='rl' colspan='12' style='background:#f6f8fa'>Minuti dal piazzamento allo sfondamento (terzili)</th></tr>");
+   HW("<tr><th class='rl' colspan='15' style='background:#f6f8fa'>Minuti dal piazzamento allo sfondamento (terzili)</th></tr>");
    for(int b = 0; b < 3; b++)
    {
       string lo = (b == 0) ? "0" : F(g_dEdge[b - 1], 0);
@@ -2480,11 +3063,11 @@ void HtmlSweepTable(const string title, const string note, const string &lbl[], 
    }
    double tcrit = NormInvUpper(0.05 / MathMax(1, kTest));
    if(best >= 0 && StatMean(sIS[best * 2]) <= 0.0)
-      HW("<div class='warn'>Nessuna definizione ha E[R] positivo in-sample con la configurazione SL ATR di riferimento: la riga evidenziata &egrave; solo la meno negativa.</div>");
+      HW("<div class='warn'>Nessuna definizione ha E[R] positivo in-sample con la configurazione di riferimento (" + RefText() + "): la riga evidenziata &egrave; solo la meno negativa.</div>");
    HW("<div class='sc'><table><tr><th class='rl'>Definizione</th><th>Trade</th><th>Giorni senza range valido</th>"
       "<th>N IS</th><th>E[R] IS</th><th>t IS</th><th>N OOS</th><th>E[R] OOS</th><th>t OOS</th><th>p OOS</th>"
       "<th>N IS</th><th>E[R] IS</th><th>t IS</th><th>N OOS</th><th>E[R] OOS</th><th>t OOS</th><th>p OOS</th></tr>");
-   HW("<tr><th class='rl' style='background:#f6f8fa'></th><th style='background:#f6f8fa'></th><th style='background:#f6f8fa'></th><th colspan='7' style='background:#f6f8fa'>SL " + F(InpRefSLATR, 2) + " ATR / RR 1:" + F(InpRefRR, 1) +
+   HW("<tr><th class='rl' style='background:#f6f8fa'></th><th style='background:#f6f8fa'></th><th style='background:#f6f8fa'></th><th colspan='7' style='background:#f6f8fa'>" + RefText() +
       "</th><th colspan='7' style='background:#f6f8fa'>Uscite dell'EA</th></tr>");
    for(int k = 0; k < K; k++)
    {
@@ -2500,14 +3083,14 @@ void HtmlSweepTable(const string title, const string note, const string &lbl[], 
       }
       HW("</tr>\n");
    }
-   HW("</table></div><div class='note'>Riga evidenziata = migliore sull'IS (SL ATR). t IS verde = supera la soglia di Bonferroni su " + IntegerToString(kTest) + " test (" + IntegerToString(K) + " righe x le combinazioni valide da cui la definizione &egrave; stata scelta; t &ge; " + F(tcrit, 2) +
+   HW("</table></div><div class='note'>Riga evidenziata = migliore sull'IS (SL di riferimento in punti). t IS verde = supera la soglia di Bonferroni su " + IntegerToString(kTest) + " test (" + IntegerToString(K) + " righe x le combinazioni valide da cui la definizione &egrave; stata scelta; t &ge; " + F(tcrit, 2) +
       "). Se nessuna &egrave; verde, la differenza tra le righe &egrave; compatibile con il caso. Ogni riga ha eventi in parte diversi, quindi N cambia.</div>");
 }
 
 void HtmlOffsetSweep()
 {
    HW("<h2>" + g_pre + "5. Come si piazza la coppia: offset, chase, scadenza</h2>");
-   HW("<div class='note'>Stessa definizione di range e stessa finestra del vincitore; cambiano solo la distanza dei livelli dal range (offset, anche in frazioni di ATR), ChaseIfBroken e quanto dura l'ordine oltre la finestra. Due uscite uguali per tutte le righe (SL ATR di riferimento e uscite dell'EA).</div>");
+   HW("<div class='note'>Stessa definizione di range e stessa finestra del vincitore; cambiano solo la distanza dei livelli dal range (offset in punti), ChaseIfBroken e quanto dura l'ordine oltre la finestra. Due uscite uguali per tutte le righe (SL di riferimento in punti e uscite di default dell'EA).</div>");
    HtmlSweepTable("Offset / chase / scadenza", "L'OOS &egrave; gi&agrave; usato per il verdetto di questo orizzonte: non scegliere l'offset guardando l'OOS. Le righe sono varianti della stessa definizione e differenze piccole sono rumore.", g_s1Lbl, g_s1N, g_s1IS, g_s1OOS, g_s1All, g_s1Fn, ArraySize(g_s1Lbl), ArraySize(g_s1Lbl) * MathMax(1, g_kClass));
 }
 
@@ -2639,6 +3222,343 @@ void HtmlStability()
    HW("</table><div class='note'>Un edge reale non deve vivere in un solo anno. Anni con meno di 10 trade non sono colorati.</div>");
 }
 
+//+------------------------------------------------------------------+
+//| PARTE A: report                                                    |
+//+------------------------------------------------------------------+
+void CbPool(const int w0, const int w1, const int t0, const int t1, const int b0, const int b1, const int sl, const int m, SStat &sIS, SStat &sOOS)
+{
+   ZeroMemory(sIS);
+   ZeroMemory(sOOS);
+   for(int w = w0; w <= w1; w++)
+      for(int t = t0; t <= t1; t++)
+         for(int b = b0; b <= b1; b++)
+         {
+            int cell = ((w * NTF) + t) * NKB + b;
+            StatMerge(sIS, g_cbR[CbIdxR(cell, sl, m, 0)]);
+            StatMerge(sOOS, g_cbR[CbIdxR(cell, sl, m, 1)]);
+         }
+}
+
+void CbPoolAcc(const int w0, const int w1, const int t0, const int t1, const int b0, const int b1, const int part, SCbAcc &a)
+{
+   ZeroMemory(a);
+   for(int w = w0; w <= w1; w++)
+      for(int t = t0; t <= t1; t++)
+         for(int b = b0; b <= b1; b++)
+         {
+            int ai = CbIdxRA(((w * NTF) + t) * NKB + b, part);
+            a.n += g_cbA[ai].n; a.sl += g_cbA[ai].sl; a.mfe += g_cbA[ai].mfe; a.ret += g_cbA[ai].ret; a.mfeAtr += g_cbA[ai].mfeAtr; a.pos += g_cbA[ai].pos;
+         }
+}
+
+void CbAll(const SStat &a, const SStat &b, SStat &o)
+{
+   ZeroMemory(o);
+   StatMerge(o, a);
+   StatMerge(o, b);
+}
+
+// differenza tra le medie di due campioni (Welch): t
+double WelchT(const SStat &a, const SStat &b)
+{
+   if(a.n < 5 || b.n < 5) return 0.0;
+   double va = StatSD(a) * StatSD(a) / a.n, vb = StatSD(b) * StatSD(b) / b.n;
+   if(va + vb < EPSILON) return 0.0;
+   return (StatMean(a) - StatMean(b)) / MathSqrt(va + vb);
+}
+
+string CbCell(const SStat &s, const SCbAcc &a, const double sc, const bool lowMark)
+{
+   if(s.n == 0) return "<td>-</td>";
+   double m = StatMean(s);
+   string bg = (m != 0.0) ? " style='background:" + Heat(m, sc) + "'" : "";
+   string cls = (lowMark && s.n < 30) ? " class='lo'" : "";
+   return "<td" + cls + bg + " title='N " + IntegerToString(s.n) + " | win " + F(StatWR(s), 1) + "% | t " + F(StatT(s), 2) + " | MFE 4h medio " + F(a.n > 0 ? a.mfe / a.n : 0.0, 0) + " pt'>" + F(m, 3) + "</td>";
+}
+
+// tabella SL x RR per un sottoinsieme (time frame t, o tutti con t = -1)
+void HtmlCbSLTable(const string title, const int t, const bool full)
+{
+   int t0 = (t < 0) ? 0 : t, t1 = (t < 0) ? NTF - 1 : t;
+   HW("<h3>" + title + "</h3><table><tr><th class='rl'>SL dall'ingresso</th><th>Win 1:1</th><th>E[R] 1:1</th><th>Win 1:2</th><th>E[R] 1:2</th><th>Win 1:3</th><th>E[R] 1:3</th><th>E[R] 1:2 IS</th><th>E[R] 1:2 OOS</th><th>t OOS (1:2)</th></tr>");
+   int bestI = -1;
+   double bs = -1e18;
+   for(int i = 0; i < NSL; i++)
+   {
+      SStat xi, xo;
+      CbPool(0, g_cbNW - 1, t0, t1, 0, NKB - 1, i, 1, xi, xo);
+      double sc = RankMetric(xi);
+      if(xi.n >= g_minIS && sc > bs) { bs = sc; bestI = i; }
+   }
+   for(int i = 0; i < NSL; i++)
+   {
+      SStat si[NRRM], so[NRRM], sa[NRRM];
+      for(int m = 0; m < NRRM; m++) { CbPool(0, g_cbNW - 1, t0, t1, 0, NKB - 1, i, m, si[m], so[m]); CbAll(si[m], so[m], sa[m]); }
+      if(sa[0].n == 0) continue;
+      HW("<tr" + Pick(i == bestI, " class='bestrow'", "") + "><th class='rl'>" + CbSLName(i) + Pick(i == g_cbRef && t < 0, " (riferimento)", "") + "</th><td>" + F(StatWR(sa[0]), 1) + "%</td><td>" + F(StatMean(sa[0]), 3) + "</td><td>" + F(StatWR(sa[1]), 1) + "%</td><td>" + F(StatMean(sa[1]), 3) +
+         "</td><td>" + F(StatWR(sa[2]), 1) + "%</td><td>" + F(StatMean(sa[2]), 3) + "</td><td>" + F(StatMean(si[1]), 3) + "</td><td>" + F(StatMean(so[1]), 3) + "</td><td>" + F(StatT(so[1]), 2) + "</td></tr>\n");
+   }
+   HW("</table>");
+}
+
+void HtmlCandleStudy()
+{
+   if(g_cbNW <= 0) return;
+   double med = MathMax(1.0, g_medATRpts);
+   HW("<h1 id='parteA' style='margin-top:30px;border-top:3px solid #1f6feb;padding-top:10px'>Parte A &mdash; Rotture confermate dalla chiusura della candela, su ogni time frame</h1>");
+   HW("<div class='note'>Per ogni time frame (" + Pick(g_cbOn[0], "1 minuto", "dal TF di simulazione") + " &rarr; 3 ore) e per ogni range orario del giorno (ora di inizio &times; durata 1, 2, 3, 4, 6, 8, 12 ore, oggi, che finisce entro le 23:00): dopo la fine del range si osserva la <b>prima candela del time frame che CHIUDE fuori dal range</b> (sopra il massimo o sotto il minimo). "
+      "Si registra <b>k</b> = quante candele complete dopo la fine del range &egrave; avvenuta la rottura (k=1: subito la prima candela dopo il range; k=5: la quinta). Si entra a mercato alla chiusura di quella candela. "
+      "<b>Lo SL non &egrave; fissato a priori</b>: si provano 6 distanze dall'ingresso in punti (" + F(g_cbSLpts[0], 0) + ", " + F(g_cbSLpts[1], 0) + ", " + F(g_cbSLpts[2], 0) + ", " + F(g_cbSLpts[3], 0) + ", " + F(g_cbSLpts[4], 0) + ", " + F(g_cbSLpts[5], 0) +
+      ", multipli dell'ATR mediano della storia di " + F(med, 0) + " punti) pi&ugrave; lo SL sul livello rotto come riferimento, ciascuna con TP a 1R, 2R, 3R (R = distanza dello SL), e si misura quanti trade vincenti avrebbero retto ogni SL. Esiti con ordine intrabarra " +
+      Pick(InpOptimistic, "ottimista", "pessimista") + " sulle barre " + EnumToString(g_simTF) + ", costi inclusi (spread della barra" + Pick(InpCommissionPoints > 0.0, " + commissione", "") +
+      "), orizzonte massimo 24 ore. Tutte le distanze sono in <b>PUNTI</b>. Un evento per range, time frame e giorno; eventi di time frame e range diversi sullo stesso giorno non sono indipendenti. Taglio In-Sample / Out-Of-Sample: " + TimeToString(g_cut, TIME_DATE) +
+      ". Nota: l'EA reale entra con ordini stop al tocco del livello, non alla chiusura della candela: questa parte misura quanto vale aspettare la chiusura.</div>");
+   if(g_cbEvents < 100) { HW("<div class='warn'>Meno di 100 eventi in tutto: storia troppo corta per questa analisi.</div>"); return; }
+
+   // ---- A1: lo SL ideale
+   HW("<h2>A1. Quale SL: distanza dall'ingresso in punti</h2><div class='note'>Tutti i time frame, i range orari e i k insieme (poi per time frame). E[R] in R-multipli netti di costi: R &egrave; la distanza dello SL scelto, quindi gli SL stretti hanno R piccoli e i costi pesano di pi&ugrave;. Riga evidenziata = migliore sull'In-Sample (E[R] 1:2, una scelta su " + IntegerToString(NSL) +
+      "): l'OOS ne &egrave; il test. Lo SL &laquo;sul livello rotto&raquo; dipende dall'evento (candele che chiudono lontano dal livello hanno SL pi&ugrave; larghi).</div>");
+   HtmlCbSLTable("Tutti i time frame", -1, true);
+   for(int t = 0; t < NTF; t++)
+   {
+      if(!g_cbOn[t]) continue;
+      HtmlCbSLTable("Solo " + g_cbName[t], t, false);
+   }
+
+   // ---- A1b: sopravvivenza
+   HW("<h2>A1b. Quanti trade vincenti avrebbero retto ogni SL</h2><div class='note'>Tra i trade che arrivano a +T punti entro 4 ore dall'ingresso, la quota la cui escursione avversa massima PRIMA di arrivare a T &egrave; stata minore o uguale alla distanza dello SL. "
+      "&Egrave; la risposta diretta a &laquo;di quanti punti metto lo SL&raquo;: uno SL che salva il 90% dei vincenti ma &egrave; largo il doppio non &egrave; necessariamente migliore (vedi E[R] sopra).</div>");
+   for(int tg = 0; tg < NTG; tg++)
+   {
+      HW("<h3>Bersaglio +" + F(g_cbTG[tg], 0) + " punti: % dei trade che ci arrivano e sopravvivono allo SL (per time frame, tutti i k)</h3><table><tr><th class='rl'>SL (punti)</th>");
+      for(int t = 0; t < NTF; t++) if(g_cbOn[t]) HW("<th>" + g_cbName[t] + "</th>");
+      HW("<th>Tutti</th></tr>");
+      for(int i = 0; i < NSLF; i++)
+      {
+         HW("<tr><th class='rl'>" + F(g_cbSLpts[i], 0) + " pt</th>");
+         int allReach = 0, allSurv = 0;
+         for(int t = 0; t < NTF; t++)
+         {
+            if(!g_cbOn[t]) continue;
+            int rc = 0, sv = 0;
+            for(int b = 0; b < NKB; b++)
+               for(int pp = 0; pp < 2; pp++)
+               {
+                  int si = ((t * NKB) + b) * 2 + pp;
+                  rc += g_cbReach[si * NTG + tg];
+                  sv += g_cbSurv[(si * NTG + tg) * NSLF + i];
+               }
+            allReach += rc; allSurv += sv;
+            HW("<td>" + Pick(rc > 0, F(PctOf(sv, rc), 1) + "%", "-") + "</td>");
+         }
+         HW("<td>" + Pick(allReach > 0, F(PctOf(allSurv, allReach), 1) + "%", "-") + "</td></tr>\n");
+      }
+      HW("</table>");
+   }
+   HW("<h3>Per rottura immediata o tardiva (bersaglio +" + F(g_cbTG[0], 0) + " punti, tutti i time frame)</h3><table><tr><th class='rl'>SL (punti)</th>");
+   for(int b = 0; b < NKB; b++) HW("<th>" + CbKBName(b) + "</th>");
+   HW("</tr>");
+   for(int i = 0; i < NSLF; i++)
+   {
+      HW("<tr><th class='rl'>" + F(g_cbSLpts[i], 0) + " pt</th>");
+      for(int b = 0; b < NKB; b++)
+      {
+         int rc = 0, sv = 0;
+         for(int t = 0; t < NTF; t++)
+            for(int pp = 0; pp < 2; pp++)
+            {
+               int si = ((t * NKB) + b) * 2 + pp;
+               rc += g_cbReach[si * NTG];
+               sv += g_cbSurv[(si * NTG) * NSLF + i];
+            }
+         HW("<td>" + Pick(rc > 0, F(PctOf(sv, rc), 1) + "%", "-") + "</td>");
+      }
+      HW("</tr>\n");
+   }
+   HW("</table>");
+
+   // ---- A2: per time frame con lo SL di riferimento
+   int rf = g_cbRef;
+   HW("<h2>A2. Per time frame (SL di riferimento " + CbSLName(rf) + ", scelto sull'IS)</h2><div class='sc'><table><tr><th class='rl'>TF</th><th>Range osservati</th><th>% con chiusura fuori entro sera</th><th>Eventi</th>"
+      "<th>k=1 %</th><th>k=2 %</th><th>k=3 %</th><th>k=4-5 %</th><th>k=6-10 %</th><th>k=11+ %</th><th>MFE 4h medio (pt)</th><th>% con rendimento 4h &gt; 0</th>"
+      "<th>Win 1:1</th><th>E[R] 1:1</th><th>Win 1:2</th><th>E[R] 1:2</th><th>Win 1:3</th><th>E[R] 1:3</th><th>E[R] 1:2 IS</th><th>E[R] 1:2 OOS</th><th>t OOS</th></tr>");
+   for(int t = 0; t < NTF; t++)
+   {
+      if(!g_cbOn[t]) { HW("<tr><th class='rl'>" + g_cbName[t] + "</th><td colspan='20' class='rl'>non disponibile: la storia di simulazione &egrave; " + EnumToString(g_simTF) + "</td></tr>"); continue; }
+      int rng = 0, brk = 0;
+      for(int w = 0; w < g_cbNW; w++)
+         for(int pp = 0; pp < 2; pp++) { rng += g_cbRng[((w * NTF) + t) * 2 + pp]; brk += g_cbBrk[((w * NTF) + t) * 2 + pp]; }
+      SStat si[NRRM], so[NRRM], sa[NRRM];
+      for(int m = 0; m < NRRM; m++) { CbPool(0, g_cbNW - 1, t, t, 0, NKB - 1, rf, m, si[m], so[m]); CbAll(si[m], so[m], sa[m]); }
+      SCbAcc a0, a1, aa;
+      ZeroMemory(aa);
+      CbPoolAcc(0, g_cbNW - 1, t, t, 0, NKB - 1, 0, a0);
+      CbPoolAcc(0, g_cbNW - 1, t, t, 0, NKB - 1, 1, a1);
+      aa.n = a0.n + a1.n; aa.mfe = a0.mfe + a1.mfe; aa.pos = a0.pos + a1.pos;
+      int nev = sa[0].n;
+      if(nev == 0 || aa.n == 0) continue;
+      string kd = "";
+      for(int b = 0; b < NKB; b++)
+      {
+         SStat x, y;
+         CbPool(0, g_cbNW - 1, t, t, b, b, rf, 0, x, y);
+         kd += "<td>" + F(100.0 * (x.n + y.n) / nev, 1) + "</td>";
+      }
+      HW("<tr><th class='rl'>" + g_cbName[t] + "</th><td>" + IntegerToString(rng) + "</td><td>" + F(PctOf(brk, rng), 1) + "</td><td>" + IntegerToString(nev) + "</td>" + kd + "<td>" + F(aa.mfe / aa.n, 0) + "</td><td>" + F(100.0 * aa.pos / aa.n, 1) +
+         "</td><td>" + F(StatWR(sa[0]), 1) + "%</td><td>" + F(StatMean(sa[0]), 3) + "</td><td>" + F(StatWR(sa[1]), 1) + "%</td><td>" + F(StatMean(sa[1]), 3) + "</td><td>" + F(StatWR(sa[2]), 1) + "%</td><td>" + F(StatMean(sa[2]), 3) +
+         "</td><td>" + F(StatMean(si[1]), 3) + "</td><td>" + F(StatMean(so[1]), 3) + "</td><td>" + F(StatT(so[1]), 2) + "</td></tr>\n");
+   }
+   HW("</table></div><div class='note'>Le colonne k mostrano QUANTE candele dopo il range avviene la rottura (a TF fine la maggior parte delle rotture avviene molte candele dopo). Tutte le righe sono molte ipotesi: guarda l'OOS.</div>");
+
+   // ---- A3: matrici TF x k
+   HW("<h2>A3. Rotture subito o dopo diverse candele: time frame &times; k (SL di riferimento " + CbSLName(rf) + ")</h2><div class='note'>Ogni cella = E[R] (R-multipli, costi inclusi) degli eventi con la rottura alla k-esima candela dopo il range. Passa il mouse per N, win rate e MFE a 4 ore. Celle tenui = meno di 30 eventi. Rotture tardive (k alto) con E[R] pi&ugrave; alto indicano che aspettare conviene.</div>");
+   for(int mm = 0; mm < 4; mm++)
+   {
+      int m = (mm < 3) ? mm : 1;
+      bool oosOnly = (mm == 3);
+      HW("<h3>" + Pick(oosOnly, "E[R] 1:2 &mdash; solo Out-Of-Sample", "E[R] 1:" + IntegerToString(m + 1) + " &mdash; tutto il campione") + "</h3><table class='m'><tr><th></th>");
+      for(int b = 0; b < NKB; b++) HW("<th>" + CbKBName(b) + "</th>");
+      HW("</tr>");
+      for(int t = 0; t < NTF; t++)
+      {
+         if(!g_cbOn[t]) continue;
+         HW("<tr><th class='rl'>" + g_cbName[t] + "</th>");
+         for(int b = 0; b < NKB; b++)
+         {
+            SStat x, y, z;
+            CbPool(0, g_cbNW - 1, t, t, b, b, rf, m, x, y);
+            SCbAcc ax, ay, az;
+            ZeroMemory(az);
+            CbPoolAcc(0, g_cbNW - 1, t, t, b, b, 0, ax);
+            CbPoolAcc(0, g_cbNW - 1, t, t, b, b, 1, ay);
+            if(oosOnly) HW(CbCell(y, ay, 0.1, true));
+            else { CbAll(x, y, z); az.n = ax.n + ay.n; az.mfe = ax.mfe + ay.mfe; HW(CbCell(z, az, 0.1, true)); }
+         }
+         HW("</tr>\n");
+      }
+      HW("</table>");
+   }
+
+   // ---- A3b: rotture immediate contro tardive
+   HW("<h2>A3b. Rottura immediata (k=1) contro rottura tardiva (k&ge;3)</h2><table><tr><th class='rl'>TF</th><th>N k=1</th><th>E[R] 1:2 k=1</th><th>MFE 4h k=1 (pt)</th><th>N k&ge;3</th><th>E[R] 1:2 k&ge;3</th><th>MFE 4h k&ge;3 (pt)</th><th>Differenza E[R]</th><th>t della differenza</th><th>Differenza OOS</th><th>t OOS</th></tr>");
+   for(int t = 0; t < NTF; t++)
+   {
+      if(!g_cbOn[t]) continue;
+      SStat i1, o1, i3, o3, a1s, a3s;
+      CbPool(0, g_cbNW - 1, t, t, 0, 0, rf, 1, i1, o1);
+      CbPool(0, g_cbNW - 1, t, t, 2, NKB - 1, rf, 1, i3, o3);
+      CbAll(i1, o1, a1s);
+      CbAll(i3, o3, a3s);
+      if(a1s.n < 10 || a3s.n < 10) continue;
+      SCbAcc p1, q1, p3, q3;
+      CbPoolAcc(0, g_cbNW - 1, t, t, 0, 0, 0, p1); CbPoolAcc(0, g_cbNW - 1, t, t, 0, 0, 1, q1);
+      CbPoolAcc(0, g_cbNW - 1, t, t, 2, NKB - 1, 0, p3); CbPoolAcc(0, g_cbNW - 1, t, t, 2, NKB - 1, 1, q3);
+      double mf1 = (p1.n + q1.n > 0) ? (p1.mfe + q1.mfe) / (p1.n + q1.n) : 0.0;
+      double mf3 = (p3.n + q3.n > 0) ? (p3.mfe + q3.mfe) / (p3.n + q3.n) : 0.0;
+      double tAll = WelchT(a3s, a1s), tO = WelchT(o3, o1);
+      string c1 = (MathAbs(tAll) >= 2.0) ? ((tAll > 0) ? " class='ok'" : " class='bad'") : "";
+      string c2 = (o1.n >= 20 && o3.n >= 20 && MathAbs(tO) >= 2.0) ? ((tO > 0) ? " class='ok'" : " class='bad'") : "";
+      HW("<tr><th class='rl'>" + g_cbName[t] + "</th><td>" + IntegerToString(a1s.n) + "</td><td>" + F(StatMean(a1s), 3) + "</td><td>" + F(mf1, 0) + "</td><td>" + IntegerToString(a3s.n) + "</td><td>" + F(StatMean(a3s), 3) + "</td><td>" + F(mf3, 0) +
+         "</td><td>" + F(StatMean(a3s) - StatMean(a1s), 3) + "</td><td" + c1 + ">" + F(tAll, 2) + "</td><td>" + F(StatMean(o3) - StatMean(o1), 3) + "</td><td" + c2 + ">" + F(tO, 2) + "</td></tr>\n");
+   }
+   HW("</table><div class='note'>Differenza positiva = le rotture tardive rendono pi&ugrave; di quelle immediate (stesso TF, stessi range, SL di riferimento). t di Welch; evidenziato |t| &ge; 2. Sono pochi confronti ma non corretti per test multipli: conferma sempre con la colonna OOS.</div>");
+
+   // ---- A4: range orario (ora di inizio x durata), tutti i TF e tutti i k
+   int durs[7] = {1, 2, 3, 4, 6, 8, 12};
+   for(int part = 0; part < 2; part++)
+   {
+      HW("<h2>A4" + Pick(part == 0, "a", "b") + ". Quale range orario: E[R] 1:2 " + Pick(part == 0, "In-Sample", "Out-Of-Sample") + " (tutti i TF e tutti i k insieme, SL di riferimento)</h2>");
+      if(part == 0) HW("<div class='note'>Righe = ora di inizio del range (ora server), colonne = durata in ore. Un range che funziona deve vedersi sia nell'IS sia nell'OOS e nei TF vicini, non in una sola cella.</div>");
+      HW("<div class='sc'><table class='m'><tr><th>Inizio</th>");
+      for(int d = 0; d < 7; d++) HW("<th>" + IntegerToString(durs[d]) + " h</th>");
+      HW("</tr>");
+      for(int s = 0; s <= 22; s++)
+      {
+         HW("<tr><th class='rl'>" + StringFormat("%02d:00", s) + "</th>");
+         for(int d = 0; d < 7; d++)
+         {
+            int wi = -1;
+            for(int w = 0; w < g_cbNW; w++) if(g_cbWS[w] == s && g_cbWD[w] == durs[d]) wi = w;
+            if(wi < 0) { HW("<td>-</td>"); continue; }
+            SStat x, y;
+            CbPool(wi, wi, 0, NTF - 1, 0, NKB - 1, rf, 1, x, y);
+            SCbAcc ax, ay;
+            CbPoolAcc(wi, wi, 0, NTF - 1, 0, NKB - 1, 0, ax);
+            CbPoolAcc(wi, wi, 0, NTF - 1, 0, NKB - 1, 1, ay);
+            if(part == 0) HW(CbCell(x, ax, 0.1, false));
+            else HW(CbCell(y, ay, 0.1, false));
+         }
+         HW("</tr>\n");
+      }
+      HW("</table></div>");
+   }
+
+   // ---- A5: le prime combinazioni (range orario, TF, k) con il loro SL e RR migliori sull'IS
+   int cells = g_cbNW * NTF * NKB;
+   int bI[], bM[];
+   double bSc[];
+   ArrayResize(bI, cells);
+   ArrayResize(bM, cells);
+   ArrayResize(bSc, cells);
+   int nValid = 0;
+   for(int c = 0; c < cells; c++)
+   {
+      bI[c] = -1; bM[c] = -1; bSc[c] = -1e18;
+      if(g_cbR[CbIdxR(c, 0, 0, 0)].n < g_minIS) continue;
+      nValid++;
+      for(int i = 0; i < NSL; i++)
+         for(int m = 0; m < NRRM; m++)
+         {
+            double sc = RankMetric(g_cbR[CbIdxR(c, i, m, 0)]);
+            if(sc > bSc[c]) { bSc[c] = sc; bI[c] = i; bM[c] = m; }
+         }
+   }
+   int top[25];
+   int nt = 0;
+   for(int q = 0; q < 25; q++)
+   {
+      int bk = -1;
+      for(int c = 0; c < cells; c++)
+      {
+         if(bI[c] < 0) continue;
+         bool used = false;
+         for(int j = 0; j < nt; j++) if(top[j] == c) used = true;
+         if(used) continue;
+         if(bk < 0 || bSc[c] > bSc[bk]) bk = c;
+      }
+      if(bk < 0) break;
+      top[nt] = bk;
+      nt++;
+   }
+   double tcrit = NormInvUpper(0.05 / MathMax(1, nValid * NSL * NRRM));
+   HW("<h2>A5. Le migliori combinazioni (range orario &times; time frame &times; k), con lo SL e il RR migliori, scelti SOLO sull'In-Sample</h2><div class='note'>Per ogni combinazione con almeno " + IntegerToString(g_minIS) + " eventi IS si sceglie sull'IS lo SL (" + IntegerToString(NSL) + " opzioni) e il RR (1:1, 1:2, 1:3) con la t-stat migliore; la lista &egrave; ordinata su quel valore. Combinazioni valide: <b>" +
+      IntegerToString(nValid) + "</b> &times; " + IntegerToString(NSL * NRRM) + " scelte &rarr; soglia di Bonferroni t &ge; " + F(tcrit, 2) + " (verde): quasi mai superata, quindi il valore informativo &egrave; l'OOS. Le righe condividono molti eventi (gli stessi giorni, range e TF vicini).</div>");
+   if(nt == 0) { HW("<div class='warn'>Nessuna combinazione con abbastanza eventi In-Sample.</div>"); return; }
+   HW("<div class='sc'><table><tr><th class='rl'>Range</th><th>TF</th><th>Rottura</th><th>SL scelto</th><th>RR scelto</th><th>N IS</th><th>MFE 4h (pt)</th><th>Win IS</th><th>E[R] IS</th><th>t IS</th>"
+      "<th>N OOS</th><th>Win OOS</th><th>E[R] OOS</th><th>t OOS</th><th>p OOS</th></tr>");
+   int oosPos = 0;
+   for(int i = 0; i < nt; i++)
+   {
+      int c = top[i];
+      int t = (c / NKB) % NTF;
+      int w = (c / NKB) / NTF;
+      int b = c % NKB;
+      SStat a, o;
+      a = g_cbR[CbIdxR(c, bI[c], bM[c], 0)];
+      o = g_cbR[CbIdxR(c, bI[c], bM[c], 1)];
+      SCbAcc aI;
+      aI = g_cbA[CbIdxRA(c, 0)];
+      double p = NormUpper(StatT(o));
+      if(StatMean(o) > 0.0) oosPos++;
+      string tcl = (StatT(a) >= tcrit) ? " class='ok'" : "";
+      string slTxt = (bI[c] < NSLF) ? F(g_cbSLpts[bI[c]], 0) + " pt" : "livello rotto (~" + F(aI.n > 0 ? aI.sl / aI.n : 0.0, 0) + " pt)";
+      HW("<tr" + Pick(i == 0, " class='bestrow'", "") + "><th class='rl'>" + StringFormat("%02d:00 + %d h", g_cbWS[w], g_cbWD[w]) + "</th><td>" + g_cbName[t] + "</td><td>" + CbKBName(b) + "</td><td>" + slTxt + "</td><td>1:" + IntegerToString(bM[c] + 1) + "</td><td>" + IntegerToString(a.n) +
+         "</td><td>" + F(aI.n > 0 ? aI.mfe / aI.n : 0.0, 0) + "</td><td>" + F(StatWR(a), 1) + "%</td><td>" + F(StatMean(a), 3) + "</td><td" + tcl + ">" + F(StatT(a), 2) +
+         "</td><td>" + IntegerToString(o.n) + "</td><td>" + F(StatWR(o), 1) + "%</td><td>" + F(StatMean(o), 3) + "</td><td>" + F(StatT(o), 2) + "</td><td>" + Pick(o.n >= 20, F(p, 3), "-") + "</td></tr>\n");
+   }
+   HW("</table></div><div class='note'>Delle prime " + IntegerToString(nt) + ", " + IntegerToString(oosPos) + " hanno E[R] OOS positivo. Le righe condividono molti eventi: il conteggio vale poco; con i costi, senza edge, ne sono positive meno della met&agrave;.</div>");
+}
+
 void HtmlNotes()
 {
    HW("<h2 id='note'>Come leggere questo report e cosa NON dimostra</h2><ul>");
@@ -2650,7 +3570,7 @@ void HtmlNotes()
    HW("<li>Periodo: tutta la storia disponibile, alla risoluzione pi&ugrave; fine che copra almeno 3 anni (M1, poi M5, M15, M30, H1). Se il terminale limita le barre ('Max barre nel grafico') la storia analizzata &egrave; pi&ugrave; corta: la data di inizio &egrave; scritta in cima.</li>");
    HW("<li>Orizzonte " + IntegerToString(InpMaxHoldHours) + " ore, poi uscita a mercato. L'EA non ha time-stop: una posizione che si trascina oltre blocca anche i giorni successivi, ed &egrave; ci&ograve; che lo studio replica con i trade saltati.</li>");
    HW("<li>Un trade al giorno al massimo: con qualche anno di storia sono poche centinaia di trade per combinazione giornaliera, molti meno per le definizioni settimanali e mensili (range larghi, sfondamenti rari). La differenza tra due celle vicine &egrave; quasi sempre rumore: conta la struttura (zone intere della mappa che funzionano, anche fuori campione), non il singolo massimo.</li>");
-   HW("<li>ATR: SMA del true range come iATR, sul TF " + EnumToString(g_atrTF) + ", valutato sull'ultima barra chiusa prima del piazzamento. L'EA non usa ATR: le griglie ATR e range servono a capire se distanze adattive battono quelle fisse. In automatico i punti derivano dall'ATR mediano, cos&igrave; le griglie sono confrontabili.</li>");
+   HW("<li>ATR: SMA del true range come iATR, sul TF " + EnumToString(g_atrTF) + ", valutato sull'ultima barra chiusa prima del piazzamento. L'EA non usa ATR: le distanze principali del report sono in PUNTI (derivate dall'ATR mediano della storia, uguali per tutte le definizioni); le griglie in ATR e in multipli del range sono nell'appendice, da guardare dopo.</li>");
    HW("<li>R-multipli: confrontabili tra famiglie solo con sizing a rischio fisso per trade. L'EA usa lotti fissi (LotSize): con lotti fissi uno SL largo pesa di pi&ugrave; in denaro.</li>");
    HW("<li>La mappa contiene centinaia di combinazioni sullo stesso campione: la soglia di Bonferroni indica quanto deve essere forte l'IS per non essere data-mining. Le tre classi (giornaliero, settimanale, mensile) usano gli stessi giorni e lo stesso OOS: un OOS fortunato pu&ograve; confermarle tutte insieme, non sono test indipendenti.</li>");
    HW("</ul>");
@@ -2760,7 +3680,7 @@ void HtmlCalendar()
    string nm[2];
    string nmS[2];
    int nf = 0;
-   if(g_best[1] >= 0) { fin[nf] = g_best[1]; nm[nf] = "SL in ATR scelto sull'IS: " + CellDesc(g_best[1]); nmS[nf] = "SL ATR scelto"; nf++; }
+   if(g_best[0] >= 0) { fin[nf] = g_best[0]; nm[nf] = "SL/TP in punti scelti sull'IS: " + CellDesc(g_best[0]); nmS[nf] = "SL/TP punti scelti"; nf++; }
    if(g_refIdx >= 0) { fin[nf] = g_refIdx; nm[nf] = "Uscite di default dell'EA (SL/TP + BE + trailing)"; nmS[nf] = "Uscite EA"; nf++; }
    if(nf == 0 || E < 2) return;
    HW("<h2>" + g_pre + "8b. Calendario: giorno, settimana, mese</h2>");
@@ -2873,7 +3793,7 @@ void HtmlAutoSummary()
    int K = g_nR * g_nW;
    HW("<h2 id='sintesi'>Sintesi: giornaliero, settimanale, mensile</h2>");
    HW("<div class='note'>Lo script ha provato da solo <b>" + IntegerToString(K) + "</b> combinazioni di (definizione di range &times; finestra di ingresso) su tutta la storia disponibile. Per ogni orizzonte del range la combinazione migliore &egrave; scelta SOLO sull'In-Sample " +
-      "(SL " + F(InpRefSLATR, 2) + " ATR / RR 1:" + F(InpRefRR, 1) + ", metrica " + Pick(InpRankBy == RANK_TSTAT, "t-stat", Pick(InpRankBy == RANK_EXPECTANCY, "expectancy", "profit factor")) + Pick(InpSmoothRank, ", mediata sui vicini", "") +
+      "(" + RefText() + ", metrica " + Pick(InpRankBy == RANK_TSTAT, "t-stat", Pick(InpRankBy == RANK_EXPECTANCY, "expectancy", "profit factor")) + Pick(InpSmoothRank, ", mediata sui vicini", "") +
       "). L'unico numero onesto &egrave; l'Out-Of-Sample di quella scelta (un solo test). Dopo la sintesi trovi la mappa completa di ogni orizzonte e, per ognuno, l'analisi a fondo (uscite, trailing, giorno/settimana/mese). " +
       "I tre orizzonti usano gli stessi giorni: un OOS fortunato pu&ograve; confermarli tutti insieme.</div>");
    HW("<table><tr><th class='rl'>Orizzonte del range</th><th class='rl'>Definizione scelta (IS)</th><th>Finestra di ingresso</th><th>Combinazioni valide</th><th>t critico*</th><th>N IS</th><th>E[R] IS</th><th>t IS</th><th>N OOS</th>");
@@ -2926,7 +3846,7 @@ void HtmlAutoMap(const int cl)
    double tcrit = NormInvUpper(0.05 / MathMax(1, nValid));
 
    HW("<h2 id='mappa" + IntegerToString(cl) + "'>Mappa &mdash; orizzonte " + g_clsName[cl] + ": " + IntegerToString(nr) + " definizioni di range &times; " + IntegerToString(g_nW) + " finestre di ingresso</h2>");
-   HW("<div class='note'>Ogni cella &egrave; una combinazione (range + finestra di ingresso) con SL " + F(InpRefSLATR, 2) + " ATR / RR 1:" + F(InpRefRR, 1) + ", netto di costi, regola dell'EA applicata. Colonna = ora di inizio della finestra (ora server) per durata. " +
+   HW("<div class='note'>Ogni cella &egrave; una combinazione (range + finestra di ingresso) con " + RefText() + ", netto di costi, regola dell'EA applicata. Colonna = ora di inizio della finestra (ora server) per durata. " +
       "Celle tenui = meno di " + IntegerToString(g_minIS) + " trade IS. Contorno blu = combinazione scelta. Passa il mouse su una cella per N, t e win rate. " +
       "L'ultima riga e l'ultima colonna sono la media delle celle valide: una zona che funziona dovrebbe vedersi in entrambe le mappe (IS e OOS) e non in una sola cella.</div>");
    for(int part = 0; part < 2; part++)
@@ -3060,36 +3980,46 @@ void WriteClassBody()
    HtmlBreakdown();
    if(InpAuto && ArraySize(g_s1Lbl) > 0) HtmlOffsetSweep();
 
-   HW("<h2>" + g_pre + "6. Rischio/rendimento: SL e TP in PUNTI FISSI, in ATR, in multipli del RANGE</h2>");
-   HW("<div class='note'>Righe: SL. Colonne: RR 1:x (TP = x &middot; SL). SL e TP sono relativi al prezzo dell'ordine stop, come nell'EA. Celle tenui = meno di " + IntegerToString(g_minIS) +
-      " trade IS. Contorno blu = cella scelta (IS). Il win rate &egrave; colorato rispetto al breakeven 1/(1+RR): conta lo scarto, non il valore assoluto. SL = 1 x range &egrave; circa lo stop sul bordo opposto.</div>");
-   for(int f = 0; f < 3; f++)
-   {
-      HW("<h3 style='font-size:15px;border-top:1px solid #d0d7de;padding-top:10px'>" + FamName(f) + "</h3>");
-      HtmlMatrix("Expectancy (R) - In-Sample", f, 0, 0);
-      HtmlMatrix("Expectancy (R) - Out-Of-Sample", f, 0, 1);
-      HtmlMatrix("Win rate - tutto il campione", f, 1, 2);
-      HtmlMatrix("Profit factor - tutto il campione", f, 2, 2);
-      HtmlMatrix("t-stat dell'expectancy - tutto il campione", f, 3, 2);
-      HtmlMatrix("Max drawdown (R) - tutto il campione", f, 4, 2);
-   }
+   HW("<h2>" + g_pre + "6. Rischio/rendimento in PUNTI: SL e TP a distanza fissa</h2>");
+   HW("<div class='note'>Righe: SL in punti. Colonne: RR 1:x (TP = x &middot; SL). SL e TP sono relativi al prezzo dell'ordine stop, come nell'EA. Celle tenui = meno di " + IntegerToString(g_minIS) +
+      " trade IS. Contorno blu = cella scelta (IS). Il win rate &egrave; colorato rispetto al breakeven 1/(1+RR): conta lo scarto, non il valore assoluto. Le righe di SL sono multipli dell'ATR mediano (" + F(g_medATRpts, 0) + " punti) espressi gi&agrave; in punti.</div>");
+   HW("<h3 style='font-size:15px;border-top:1px solid #d0d7de;padding-top:10px'>" + FamName(0) + "</h3>");
+   HtmlMatrix("Expectancy (R) - In-Sample", 0, 0, 0);
+   HtmlMatrix("Expectancy (R) - Out-Of-Sample", 0, 0, 1);
+   HtmlMatrix("Win rate - tutto il campione", 0, 1, 2);
+   HtmlMatrix("Profit factor - tutto il campione", 0, 2, 2);
+   HtmlMatrix("t-stat dell'expectancy - tutto il campione", 0, 3, 2);
+   HtmlMatrix("Max drawdown (R) - tutto il campione", 0, 4, 2);
 
-   HW("<h2>" + g_pre + "6b. Trailing stop</h2>");
-   HW("<div class='note'>SL iniziale fisso (" + F(InpTrailSLATR, 2) + " ATR, o " + F(g_cfg[g_base[3]].sl / g_point, 0) + " punti in modalit&agrave; punti), " +
+   HW("<h2>" + g_pre + "6b. Trailing stop in PUNTI</h2>");
+   HW("<div class='note'>SL iniziale fisso (" + F(g_cfg[g_base[3]].sl / g_point, 0) + " punti), " +
       Pick(InpTrailTPRR > 0.0, "TP a RR " + F(InpTrailTPRR, 1), "nessun TP") + ". Righe: soglia di attivazione. Colonne: distanza dello stop dal prezzo corrente (come l'EA: lo stop sale a gradini, solo se supera il precedente di almeno lo step). Step = " +
       F(InpTrailStepRatio, 2) + " x distanza. Confronta con le righe corrispondenti delle tabelle RR: il trailing aggiunge valore oppure no?</div>");
-   for(int f = 3; f < 5; f++)
-   {
-      HW("<h3 style='font-size:15px;border-top:1px solid #d0d7de;padding-top:10px'>" + FamName(f) + "</h3>");
-      HtmlMatrix("Expectancy (R) - In-Sample", f, 0, 0);
-      HtmlMatrix("Expectancy (R) - Out-Of-Sample", f, 0, 1);
-      HtmlMatrix("Win rate - tutto il campione", f, 1, 2);
-      HtmlMatrix("Profit factor - tutto il campione", f, 2, 2);
-   }
+   HW("<h3 style='font-size:15px;border-top:1px solid #d0d7de;padding-top:10px'>" + FamName(3) + "</h3>");
+   HtmlMatrix("Expectancy (R) - In-Sample", 3, 0, 0);
+   HtmlMatrix("Expectancy (R) - Out-Of-Sample", 3, 0, 1);
+   HtmlMatrix("Win rate - tutto il campione", 3, 1, 2);
+   HtmlMatrix("Profit factor - tutto il campione", 3, 2, 2);
 
    HtmlTop10();
    HtmlStability();
    HtmlCalendar();
+
+   HW("<h2>" + g_pre + "A. Appendice: distanze in ATR e in multipli del range (da guardare dopo)</h2>");
+   HW("<div class='note'>Stesse prove con SL/TP espressi in ATR (" + EnumToString(g_atrTF) + ", " + IntegerToString(InpATRPeriod) + ", valutato al piazzamento) e in multipli della larghezza del range. Servono a capire se distanze adattive battono quelle fisse in punti.</div>");
+   for(int f = 1; f < 3; f++)
+   {
+      HW("<h3 style='font-size:15px;border-top:1px solid #d0d7de;padding-top:10px'>" + FamName(f) + "</h3>");
+      HtmlMatrix("Expectancy (R) - In-Sample", f, 0, 0);
+      HtmlMatrix("Expectancy (R) - Out-Of-Sample", f, 0, 1);
+      HtmlMatrix("Win rate - tutto il campione", f, 1, 2);
+      HtmlMatrix("Profit factor - tutto il campione", f, 2, 2);
+   }
+   HW("<h3 style='font-size:15px;border-top:1px solid #d0d7de;padding-top:10px'>" + FamName(4) + "</h3>");
+   HtmlMatrix("Expectancy (R) - In-Sample", 4, 0, 0);
+   HtmlMatrix("Expectancy (R) - Out-Of-Sample", 4, 0, 1);
+   HtmlMatrix("Win rate - tutto il campione", 4, 1, 2);
+   HtmlMatrix("Profit factor - tutto il campione", 4, 2, 2);
 }
 
 //+------------------------------------------------------------------+
@@ -3104,11 +4034,11 @@ void WriteCSV(const string suffix)
    int h = FileOpen(base + "_trades.csv", FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(h != INVALID_HANDLE)
    {
-      string head = "day,dir,wday,part,place_time,fill_time,delay_min,range_pts,range_atr,atr_pts,spread_pts,buy_px,sell_px,gap_delta_pts,amb_trigger,mfe_atr,mae_atr,fakeout,fakeout_hours";
-      for(int i = 0; i < g_nH; i++) head += ",ret_" + IntegerToString(g_hor[i]) + "h_atr";
-      for(int i = 0; i < NFP; i++) head += ",fp_" + F(g_fpX[i], 1) + "atr";
+      string head = "day,dir,wday,part,place_time,fill_time,delay_min,range_pts,range_atr,atr_pts,spread_pts,buy_px,sell_px,gap_delta_pts,amb_trigger,mfe_pts,pullback_pts,fakeout,fakeout_hours";
+      for(int i = 0; i < g_nH; i++) head += ",ret_" + IntegerToString(g_hor[i]) + "h_pts";
+      for(int i = 0; i < NFP; i++) head += ",fp_" + F(g_fpPts[i], 0) + "pt";
       for(int i = 0; i < NFR; i++) head += ",fp_" + F(g_frX[i], 2) + "range";
-      head += ",ea_R,ea_executed";
+      head += ",retest4,retest24,retest_hours,retest_result,mid_hit,pd_ahead,pd_hit,pd_result,pd_dist_pts,ea_R,ea_executed";
       FileWriteString(h, head + "\n");
       for(int e = 0; e < E; e++)
       {
@@ -3120,6 +4050,8 @@ void WriteCSV(const string suffix)
          for(int i = 0; i < g_nH; i++) ln += "," + F(g_ev[e].ret[i], 4);
          for(int i = 0; i < NFP; i++) ln += "," + IntegerToString(g_ev[e].fp[i]);
          for(int i = 0; i < NFR; i++) ln += "," + IntegerToString(g_ev[e].fr[i]);
+         ln += "," + IntegerToString(g_ev[e].rt4) + "," + IntegerToString(g_ev[e].rt24) + "," + F(g_ev[e].rtHrs, 2) + "," + IntegerToString(g_ev[e].rtRes) + "," + IntegerToString(g_ev[e].midHit) + "," +
+               IntegerToString(g_ev[e].pdAhead) + "," + IntegerToString(g_ev[e].pdHit) + "," + IntegerToString(g_ev[e].pdRes) + "," + F(g_ev[e].pdDist, 1);
          ln += "," + F((double)g_R[e * C + g_refIdx], 4) + "," + Pick(g_xR[e * C + g_refIdx] != XR_SKIP, "1", "0");
          FileWriteString(h, ln + "\n");
       }
@@ -3164,7 +4096,7 @@ void WriteCSV(const string suffix)
                SStat a, b;
                a = g_s1IS[k * 2 + c];
                b = g_s1OOS[k * 2 + c];
-               FileWriteString(h, "\"" + g_s1Lbl[k] + "\"," + IntegerToString(g_s1N[k]) + "," + Pick(c == 0, "ATR_ref", "EA_exit") + "," + IntegerToString(a.n) + "," + F(StatMean(a), 4) + "," + F(StatT(a), 3) + "," +
+               FileWriteString(h, "\"" + g_s1Lbl[k] + "\"," + IntegerToString(g_s1N[k]) + "," + Pick(c == 0, "PT_ref", "EA_exit") + "," + IntegerToString(a.n) + "," + F(StatMean(a), 4) + "," + F(StatT(a), 3) + "," +
                                IntegerToString(b.n) + "," + F(StatMean(b), 4) + "," + F(StatT(b), 3) + "\n");
             }
          FileClose(h);
@@ -3178,7 +4110,7 @@ void WriteMapCSV()
    string base = InpFilePrefix + "_" + _Symbol;
    int h = FileOpen(base + "_map.csv", FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(h == INVALID_HANDLE) return;
-   FileWriteString(h, "class,range,mode,days_back,lookback_bars,rhs,rms,rhe,rme,span,ws_min,we_min,valid,winner,trades,cfg,n_is,er_is,t_is,wr_is,n_oos,er_oos,t_oos,wr_oos,score_is\n");
+   FileWriteString(h, "class,range,mode,days_back,lookback_bars,rhs,rms,rhe,rme,span,ws_min,we_min,valid,winner,trades,cfg,n_is,er_is,t_is,wr_is,n_oos,er_oos,t_oos,wr_oos,score_is,ref_sl_pts\n");
    for(int r = 0; r < g_nR; r++)
       for(int w = 0; w < g_nW; w++)
       {
@@ -3192,8 +4124,8 @@ void WriteMapCSV()
             b = g_mOOS[k * 2 + c];
             string ln = g_clsTag[g_rCls[r]] + ",\"" + g_rLbl[r] + "\"," + IntegerToString(g_rDef[r].mode) + "," + IntegerToString(g_rDef[r].daysBack) + "," + IntegerToString(g_rDef[r].lookback) + "," +
                         IntegerToString(g_rDef[r].rhs) + "," + IntegerToString(g_rDef[r].rms) + "," + IntegerToString(g_rDef[r].rhe) + "," + IntegerToString(g_rDef[r].rme) + "," + IntegerToString(g_rDef[r].span) + "," +
-                        IntegerToString(g_wS[w]) + "," + IntegerToString(g_wE[w]) + "," + Pick(g_mValid[k], "1", "0") + "," + Pick(win, "1", "0") + "," + IntegerToString(g_mN[k]) + "," + Pick(c == 0, "ATR_ref", "EA_exit") + "," +
-                        IntegerToString(a.n) + "," + F(StatMean(a), 5) + "," + F(StatT(a), 4) + "," + F(StatWR(a), 2) + "," + IntegerToString(b.n) + "," + F(StatMean(b), 5) + "," + F(StatT(b), 4) + "," + F(StatWR(b), 2) + "," + F(g_mScore[k], 4);
+                        IntegerToString(g_wS[w]) + "," + IntegerToString(g_wE[w]) + "," + Pick(g_mValid[k], "1", "0") + "," + Pick(win, "1", "0") + "," + IntegerToString(g_mN[k]) + "," + Pick(c == 0, "PT_ref", "EA_exit") + "," +
+                        IntegerToString(a.n) + "," + F(StatMean(a), 5) + "," + F(StatT(a), 4) + "," + F(StatWR(a), 2) + "," + IntegerToString(b.n) + "," + F(StatMean(b), 5) + "," + F(StatT(b), 4) + "," + F(StatWR(b), 2) + "," + F(g_mScore[k], 4) + "," + F(RefSLPoints(), 0);
             FileWriteString(h, ln + "\n");
          }
       }
@@ -3239,7 +4171,6 @@ bool AnalyzeCur()
       PrintFormat("Solo %d sfondamenti: troppo pochi per qualunque statistica (storia corta o finestra/range da controllare: ora SERVER).", E);
       return false;
    }
-   g_medATRpts = MedianATRPoints();
    AssignBuckets();
    BuildConfigs();
    SimulateEvents(g_ev, g_cfg, g_R, g_F, g_XJ, true);
@@ -3262,6 +4193,8 @@ void OnStart()
    if(!LoadAllData()) { Comment(""); return; }
    g_cut = g_dataFirst + (datetime)((double)(g_dataLast - g_dataFirst) * InpISPercent / 100.0);
    g_minIS = MinTradesIS();
+   g_medATRpts = MedianATRAll();
+   SetScales();
    for(int i = 0; i < NCLS; i++) { g_win[i] = -1; g_winNeg[i] = false; }
    ArrayResize(g_s1Lbl, 0);
 
@@ -3288,18 +4221,20 @@ void OnStart()
    }
    else
    {
+      if(!RunCandleStudy()) { Comment(""); return; }
       if(!RunAutoMap()) { Comment(""); return; }
       ScoreMap();
-      g_nCls = 0;
+      g_nCls = 1;                                   // la parte A conta come un gruppo di test in piu'
       for(int cl = 0; cl < NCLS; cl++) if(g_win[cl] >= 0) g_nCls++;
-      if(g_nCls < 1) g_nCls = 1;
       RunEaRow();
       if(InpWriteCSV) WriteMapCSV();
       bool html = (InpWriteHTML && HtmlOpen());
       if(html)
       {
          HtmlGlobalInfo();
-         HW("<div class='note'>Indice: <a href='#sintesi'>Sintesi</a> &middot; Mappe: <a href='#mappa0'>giornaliero</a>, <a href='#mappa1'>settimanale</a>, <a href='#mappa2'>mensile</a> &middot; Analisi a fondo: <a href='#analisi0'>giornaliero</a>, <a href='#analisi1'>settimanale</a>, <a href='#analisi2'>mensile</a> &middot; <a href='#note'>Come leggere il report</a></div>");
+         HW("<div class='note'>Indice: <a href='#parteA'>Parte A: rotture a candela chiusa</a> &middot; Parte B (replica dell'EA): <a href='#sintesi'>Sintesi</a> &middot; Mappe: <a href='#mappa0'>giornaliero</a>, <a href='#mappa1'>settimanale</a>, <a href='#mappa2'>mensile</a> &middot; Analisi a fondo: <a href='#analisi0'>giornaliero</a>, <a href='#analisi1'>settimanale</a>, <a href='#analisi2'>mensile</a> &middot; <a href='#note'>Come leggere il report</a></div>");
+         HtmlCandleStudy();
+         HW("<h1 id='parteB' style='margin-top:40px;border-top:3px solid #1f6feb;padding-top:10px'>Parte B &mdash; Replica dell'EA (ordini stop al tocco del livello)</h1>");
          HtmlAutoSummary();
          for(int cl = 0; cl < NCLS; cl++) HtmlAutoMap(cl);
       }

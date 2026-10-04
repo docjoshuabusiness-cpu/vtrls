@@ -10,13 +10,13 @@ combos = {}
 for r in rows:
     key = (r["range"], r["ws_min"], r["we_min"])
     combos.setdefault(key, {})[r["cfg"]] = r
-keys = [k for k in combos if int(combos[k]["ATR_ref"]["n_is"]) >= 10]
+keys = [k for k in combos if int(combos[k]["PT_ref"]["n_is"]) >= 10]
 random.seed(7)
-win = [k for k in combos if combos[k]["ATR_ref"]["winner"] == "1"]
+win = [k for k in combos if combos[k]["PT_ref"]["winner"] == "1"]
 pick = list(dict.fromkeys(win + random.sample(keys, min(nsel, len(keys)))))
 bad = 0
 for k in pick:
-    r = combos[k]["ATR_ref"]
+    r = combos[k]["PT_ref"]
     ws, we = int(r["ws_min"]), int(r["we_min"])
     ov = [f"InpAuto=0", f"RangeMode={r['mode']}", f"RangeDaysBack={r['days_back']}", f"RangeBarsLookback={r['lookback_bars']}",
           f"RangeHourStart={r['rhs']}", f"RangeMinuteStart={r['rms']}", f"RangeHourEnd={r['rhe']}", f"RangeMinuteEnd={r['rme']}",
@@ -24,9 +24,10 @@ for k in pick:
     env = dict(os.environ, VPINP=",".join(ov), VPTF=tf, MDRB_QUIET="1", GEN_ROUND="1e7")
     subprocess.run(["./mdrb_study_fast", days, kappa, "0"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     grid = list(csv.DictReader(open(F + "MDRB_Study_EURUSD_grid.csv")))
-    ref = [g for g in grid if g["family"] == "1" and abs(float(g["sl"]) - 1.0) < 1e-9 and abs(float(g["rr_or_tp"]) - 2.0) < 1e-9][0]
+    refpts = float(combos[k]["PT_ref"]["ref_sl_pts"])
+    ref = [g for g in grid if g["family"] == "0" and abs(float(g["sl"]) - refpts * 1e-5) < 2e-7 and abs(float(g["rr_or_tp"]) - 2.0) < 1e-9][0]
     ea = [g for g in grid if g["family"] == "5"][0]
-    for name, g, m in (("ATR_ref", ref, combos[k]["ATR_ref"]), ("EA_exit", ea, combos[k]["EA_exit"])):
+    for name, g, m in (("PT_ref", ref, combos[k]["PT_ref"]), ("EA_exit", ea, combos[k]["EA_exit"])):
         ok = (int(g["n_is"]) == int(m["n_is"]) and int(g["n_oos"]) == int(m["n_oos"])
               and abs(float(g["er_is"]) - float(m["er_is"])) < 2e-4 and abs(float(g["er_oos"]) - float(m["er_oos"])) < 2e-4
               and abs(float(g["t_is"]) - float(m["t_is"])) < 2e-2 and abs(float(g["t_oos"]) - float(m["t_oos"])) < 2e-2)

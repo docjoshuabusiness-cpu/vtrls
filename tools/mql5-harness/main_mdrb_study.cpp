@@ -21,7 +21,7 @@ static void applyOverrides() {
       OV(RequireRangeConfirmation) OV(MinRangePoints) OV(MaxRangePoints) OV(TradeHourStart) OV(TradeMinuteStart) OV(TradeHourEnd) OV(TradeMinuteEnd)
       OV(ExpireExtraMinutes) OV(PendingOrderOffsetPoints) OV(ChaseIfBroken) OV(StopLossPoints) OV(TakeProfitPoints) OV(UseTakeProfit)
       OV(UsaBreakEven) OV(BreakEvenAttivazione) OV(BreakEvenOffset) OV(UsaTrailingStop) OV(TrailingStartProfit) OV(TrailingStep) OV(TrailingOffset)
-      OV(InpMaxHoldHours) OV(InpOptimistic) OV(InpMonthsBack) OV(InpAuto) OV(InpFastPath) OV(InpSpreadPoints) OV(InpCommissionPoints) OV(InpISPercent) OV(InpMinTrades)
+      OV(InpMaxHoldHours) OV(InpOptimistic) OV(InpMonthsBack) OV(InpAuto) OV(InpFastPath) OV(g_cbDbgW) OV(g_cbDbgT) OV(InpSpreadPoints) OV(InpCommissionPoints) OV(InpISPercent) OV(InpMinTrades)
       else if(k == "Timeframe") Timeframe = (ENUM_TIMEFRAMES)(int)v;
       else if(k == "InpSimTF") InpSimTF = (ENUM_TIMEFRAMES)(int)v;
       else if(k == "StopsLevel") g_stopsLevel = (long)v;
