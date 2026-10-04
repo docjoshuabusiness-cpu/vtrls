@@ -1,5 +1,5 @@
 #!/bin/bash
-# Batteria differenziale MDRB: l'EA MultiDayRangeBreakout reale (broker simulato, tick per tick) contro MDRB_Study_v1.0.
+# Batteria differenziale MDRB: l'EA MultiDayRangeBreakout reale (broker simulato, tick per tick) contro MDRB_AutoStudy.
 # Richiede g++ e python3. Dati sintetici, griglia prezzi fine (GEN_ROUND) per evitare il rumore float dell'EA ai soglie esatte.
 set -e
 cd "$(dirname "$0")"

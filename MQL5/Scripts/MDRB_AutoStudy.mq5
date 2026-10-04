@@ -1,7 +1,8 @@
 //+------------------------------------------------------------------+
-//|  MDRB_Study_v1.0.mq5  (versione 1.10: analisi AUTOMATICA)         |
+//|  MDRB_AutoStudy.mq5  (versione 2.00: analisi AUTOMATICA)           |
 //|  SCRIPT di studio statistico per MultiDayRangeBreakout (v3.00)    |
-//|  Si trascina su un grafico e basta: gira UNA volta sulla storia   |
+//|  Si trascina su un grafico e basta (NESSUN input, nessuna finestra |
+//|  di scelta): gira UNA volta sulla storia                          |
 //|  disponibile, prova DA SOLO tutte le modalita' di range, finestre |
 //|  orarie, offset e uscite per orizzonte GIORNALIERO, SETTIMANALE e |
 //|  MENSILE, e scrive un unico report. Non apre ordini.              |
@@ -27,64 +28,58 @@
 //|  soglia di Bonferroni, stabilita' annuale, equity.                 |
 //|  Output: report HTML + CSV in MQL5/Files, riepilogo nel log.       |
 //+------------------------------------------------------------------+
-#property copyright "Advanced Quant Systems - MDRB Study v1.1"
-#property version   "1.10"
+#property copyright "Advanced Quant Systems - MDRB AutoStudy v2.0"
+#property version   "2.00"
 #property strict
-#property script_show_inputs
 
 //=== PARAMETRI DELL'EA (stessi nomi e significato) ===
-// NON serve toccare nulla: lo script analizza DA SOLO tutte le modalita' di range, le finestre orarie, le
-// distanze/offset e le uscite, per orizzonte giornaliero, settimanale e mensile, su tutta la storia disponibile.
-// I valori qui sotto servono solo alla riga di confronto "EA con i tuoi input" (cosa fa l'EA oggi).
-input group "=== EA: RANGE (solo per la riga di confronto) ==="
+// Lo script NON ha input: analizza DA SOLO tutte le modalita' di range, le finestre orarie, le distanze/offset e le
+// uscite, per orizzonte giornaliero, settimanale e mensile, su tutta la storia disponibile.
+// I valori qui sotto sono i DEFAULT dell'EA v3.00 e servono solo alla riga di confronto "EA con i parametri di default".
 enum ENUM_RANGE_MODE
   {
    RANGE_BARS    = 0,
    RANGE_TIME    = 1,
    RANGE_PREV_D1 = 2
   };
-input ENUM_RANGE_MODE RangeMode = RANGE_BARS;
-input ENUM_TIMEFRAMES Timeframe = PERIOD_CURRENT;  // TF delle barre del range (PERIOD_CURRENT = TF del grafico)
-input int RangeDaysBack = 1;
-input int RangeBarsLookback = 25;
-input int RangeHourStart = 16;
-input int RangeMinuteStart = 0;
-input int RangeHourEnd = 0;
-input int RangeMinuteEnd = 0;
-input int RangeDaySpan = 1;
-input bool RequireRangeConfirmation = false;       // EA: true. Qui false = studia TUTTE le larghezze (le tabelle dicono dove mettere Min/Max)
-input double MinRangePoints = 50;
-input double MaxRangePoints = 500;
+ENUM_RANGE_MODE RangeMode = RANGE_BARS;
+ENUM_TIMEFRAMES Timeframe = PERIOD_CURRENT;  // TF delle barre del range (PERIOD_CURRENT = TF del grafico)
+int RangeDaysBack = 1;
+int RangeBarsLookback = 25;
+int RangeHourStart = 16;
+int RangeMinuteStart = 0;
+int RangeHourEnd = 0;
+int RangeMinuteEnd = 0;
+int RangeDaySpan = 1;
+bool RequireRangeConfirmation = false;       // EA: true. Qui false = studia TUTTE le larghezze (le tabelle dicono dove mettere Min/Max)
+double MinRangePoints = 50;
+double MaxRangePoints = 500;
 
-input group "=== EA: FINESTRA DI ENTRATA (ora server) ==="
-input int TradeHourStart = 10;
-input int TradeMinuteStart = 0;
-input int TradeHourEnd = 11;
-input int TradeMinuteEnd = 0;
-input int ExpireExtraMinutes = 0;
-input int PendingOrderOffsetPoints = 20;
-input bool ChaseIfBroken = false;
+int TradeHourStart = 10;
+int TradeMinuteStart = 0;
+int TradeHourEnd = 11;
+int TradeMinuteEnd = 0;
+int ExpireExtraMinutes = 0;
+int PendingOrderOffsetPoints = 20;
+bool ChaseIfBroken = false;
 
-input group "=== EA: USCITE (riga 'EA' del report) ==="
-input double StopLossPoints = 100;
-input double TakeProfitPoints = 200;
-input bool UseTakeProfit = true;
-input bool UsaBreakEven = true;
-input int BreakEvenAttivazione = 100;
-input int BreakEvenOffset = 10;
-input bool UsaTrailingStop = true;
-input int TrailingStartProfit = 150;
-input int TrailingStep = 20;
-input int TrailingOffset = 30;
+double StopLossPoints = 100;
+double TakeProfitPoints = 200;
+bool UseTakeProfit = true;
+bool UsaBreakEven = true;
+int BreakEvenAttivazione = 100;
+int BreakEvenOffset = 10;
+bool UsaTrailingStop = true;
+int TrailingStartProfit = 150;
+int TrailingStep = 20;
+int TrailingOffset = 30;
 
-input group "=== COSTI ==="
-input int    InpSpreadPoints = -1;                  // Spread in punti (-1 = usa lo spread registrato nella barra)
-input double InpCommissionPoints = 0.0;             // Commissione round-turn in punti
+int    InpSpreadPoints = -1;                  // Spread in punti (-1 = usa lo spread registrato nella barra)
+double InpCommissionPoints = 0.0;             // Commissione round-turn in punti
 
-input group "=== OUTPUT ==="
-input bool   InpWriteHTML = true;
-input bool   InpWriteCSV = true;
-input string InpFilePrefix = "MDRB_Study";
+bool   InpWriteHTML = true;
+bool   InpWriteCSV = true;
+string InpFilePrefix = "MDRB_Study";
 
 //=== PARAMETRI INTERNI (NON sono input: l'analisi e' automatica e non richiede scelte) ===
 enum ENUM_RANK_BY { RANK_TSTAT, RANK_EXPECTANCY, RANK_PF };
@@ -582,7 +577,7 @@ bool Setup()
    if(g_weMin == 0) g_weMin = 1440;
    if(ExpireExtraMinutes < 0) { Print("Errore: ExpireExtraMinutes negativo"); return false; }
    if(g_weMin + ExpireExtraMinutes > 1440)
-      Warn("Con i tuoi input (fine finestra + ExpireExtraMinutes oltre la mezzanotte) l'EA reale non piazza la coppia del giorno dopo se quella di oggi e' ancora viva a mezzanotte, lo studio si': la riga 'EA con i tuoi input' non e' fedele.");
+      Warn("Con i parametri dell'EA (fine finestra + ExpireExtraMinutes oltre la mezzanotte) l'EA reale non piazza la coppia del giorno dopo se quella di oggi e' ancora viva a mezzanotte, lo studio si': la riga 'EA con i parametri di default' non e' fedele.");
 
    if(StopLossPoints <= 0.0) { Print("Errore: StopLossPoints deve essere > 0"); return false; }
    if(InpMaxHoldHours < 1) { Print("Errore: InpMaxHoldHours minimo 1"); return false; }
@@ -2168,7 +2163,7 @@ void HtmlMatrix(const string title, const int fam, const int metric, const int p
 
 void HtmlStart()
 {
-   HW("<!DOCTYPE html><html><head><meta charset='utf-8'><title>MDRB Study</title><style>");
+   HW("<!DOCTYPE html><html><head><meta charset='utf-8'><title>MDRB AutoStudy</title><style>");
    HW("body{font-family:Segoe UI,Arial,sans-serif;margin:24px auto;max-width:1180px;padding:0 14px;color:#1b1f24;background:#fafbfc;font-size:14px}");
    HW("h1{font-size:22px;margin-bottom:4px}h2{font-size:17px;margin-top:34px;border-bottom:1px solid #d0d7de;padding-bottom:4px}h3{font-size:14px;margin:20px 0 4px}");
    HW("table{border-collapse:collapse;margin:6px 0 4px;font-size:12.5px}th,td{border:1px solid #d0d7de;padding:3px 8px;text-align:right}");
@@ -2255,7 +2250,7 @@ void HtmlVerdict()
          F(g_stAll[c].dd, 1) + "</td><td class='rl' style='text-align:left'>" + v + "</td></tr>\n");
    }
    HW("</table><div class='note'>* soglia t (one-sided 5%) con correzione di Bonferroni sul numero di celle della famiglia: conservativa perch&eacute; le celle sono correlate, ma &egrave; l'ordine di grandezza giusto per il data-mining. "
-      "La riga &laquo;Uscita EA&raquo; non &egrave; stata scelta tra le celle: &egrave; la configurazione di uscita dei tuoi input (SL/TP + break-even + trailing) sulla definizione analizzata.</div>");
+      "La riga &laquo;Uscita EA&raquo; non &egrave; stata scelta tra le celle: &egrave; la configurazione di uscita di default dell'EA v3.00 (SL/TP + break-even + trailing) sulla definizione analizzata.</div>");
 
    HW("<h3>La mappa delle celle si ripete fuori campione?</h3><table><tr><th class='rl'>Famiglia</th><th>Celle confrontate</th><th>Spearman IS-OOS (E[R])</th><th class='rl'>Lettura</th></tr>");
    for(int f = 0; f < 5; f++)
@@ -2677,7 +2672,7 @@ bool HtmlOpen()
    g_fh = FileOpen(fn, FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(g_fh == INVALID_HANDLE) { Print("Errore: impossibile creare ", fn, " (", GetLastError(), ")"); return false; }
    HtmlStart();
-   HW("<h1>MDRB Study - " + _Symbol + "</h1>");
+   HW("<h1>MDRB AutoStudy v2.0 - " + _Symbol + "</h1>");
    return true;
 }
 
@@ -2727,7 +2722,7 @@ void HtmlClassIntro()
    for(int i = 0; i < E; i++) wq[i] = g_ev[i].width / g_point;
    ArraySort(wq);
    HW("<div class='note'>Larghezza del range dei trade (punti): P10 " + F(Quantile(wq, E, 0.1), 0) + " / mediana " + F(Quantile(wq, E, 0.5), 0) + " / P90 " + F(Quantile(wq, E, 0.9), 0) +
-      " (limiti Min/Max dell'EA nei suoi input: " + F(MinRangePoints, 0) + " - " + F(MaxRangePoints, 0) + ").</div>");
+      " (limiti Min/Max di default dell'EA: " + F(MinRangePoints, 0) + " - " + F(MaxRangePoints, 0) + ").</div>");
    if(g_curNeg) HW("<div class='warn'>Nessuna combinazione valida di questo orizzonte ha E[R] In-Sample positivo con l'uscita di riferimento: questa &egrave; solo la meno negativa, analizzata a fondo per riferimento. Non &egrave; un candidato edge.</div>");
    if(E < 150) HW("<div class='warn'>Meno di 150 trade: le griglie sono rumore. La storia disponibile &egrave; corta o la finestra &egrave; stretta.</div>");
    if(E - g_split < 30) HW("<div class='warn'>Meno di 30 trade in OOS: il verdetto OOS non &egrave; affidabile.</div>");
@@ -2766,7 +2761,7 @@ void HtmlCalendar()
    string nmS[2];
    int nf = 0;
    if(g_best[1] >= 0) { fin[nf] = g_best[1]; nm[nf] = "SL in ATR scelto sull'IS: " + CellDesc(g_best[1]); nmS[nf] = "SL ATR scelto"; nf++; }
-   if(g_refIdx >= 0) { fin[nf] = g_refIdx; nm[nf] = "Uscite dell'EA (SL/TP + BE + trailing dei tuoi input)"; nmS[nf] = "Uscite EA"; nf++; }
+   if(g_refIdx >= 0) { fin[nf] = g_refIdx; nm[nf] = "Uscite di default dell'EA (SL/TP + BE + trailing)"; nmS[nf] = "Uscite EA"; nf++; }
    if(nf == 0 || E < 2) return;
    HW("<h2>" + g_pre + "8b. Calendario: giorno, settimana, mese</h2>");
    HW("<div class='note'>Trade eseguiti secondo la regola dell'EA, in R. Giorno = un trade; settimana = luned&igrave;-domenica; mese = mese solare (giorno di piazzamento). Un edge reale non dipende da pochi mesi fortunati: guarda la quota di periodi positivi e la t. Le righe settimana e mese sommano le R dei trade del periodo. " + Pick(InpAuto, "Attenzione: la definizione e la cella sono state scelte sull'In-Sample, quindi su tutto il periodo questi numeri sono distorti verso l'alto (evidenziati solo con |t| &ge; " + F(ZThr(), 0) + "): guarda soprattutto i mesi dopo il taglio IS/OOS.", "") + "</div>");
@@ -2889,9 +2884,9 @@ void HtmlAutoSummary()
       if(k < 0) { HW("<tr><th class='rl'>" + g_clsName[cl] + "</th><td colspan='13' class='rl'>nessuna combinazione con almeno " + IntegerToString(g_minIS) + " trade IS</td></tr>"); continue; }
       SumRow(g_clsName[cl], g_rLbl[k / g_nW], HHMM(g_wS[k % g_nW]) + "-" + HHMM(g_wE[k % g_nW]), ValidInClass(cl), g_mIS[k * 2], g_mOOS[k * 2], g_mOOS[k * 2 + 1], true, g_winNeg[cl]);
    }
-   SumRow("EA con i tuoi input (non scelta)", RangeText(g_def), HHMM(g_def.wsMin) + "-" + HHMM(g_def.weMin), 1, g_eaIS[0], g_eaOOS[0], g_eaOOS[1], false, false);
+   SumRow("EA con i parametri di default v3.00 (non scelta)", RangeText(g_def), HHMM(g_def.wsMin) + "-" + HHMM(g_def.weMin), 1, g_eaIS[0], g_eaOOS[0], g_eaOOS[1], false, false);
    HW("</table><div class='note'>* soglia t (one-sided 5%) con correzione di Bonferroni sul numero di combinazioni valide dell'orizzonte: conservativa perch&eacute; le combinazioni sono correlate, ma &egrave; l'ordine di grandezza giusto per il data-mining. ");
-   HW("L'ultima riga non &egrave; stata scelta: sono i parametri dell'EA nei suoi input; vale come test unico solo se quegli input non sono mai stati ottimizzati su questa storia (altrimenti questo OOS non &egrave; fuori campione). La soglia di significativit&agrave; dei vincitori &egrave; corretta per i " + IntegerToString(g_nCls) + " orizzonti letti insieme (p &lt; " + F(100.0 * AlphaCls(), 2) + "%). Se la scelta per un orizzonte ha OOS negativo o non significativo, per quell'orizzonte non c'&egrave; un edge dimostrato.</div>");
+   HW("L'ultima riga non &egrave; stata scelta: sono i parametri di DEFAULT dell'EA v3.00 (se nel tuo EA hai cambiato i valori, la riga non li rappresenta); vale come test unico solo se non sono stati ottimizzati su questa storia (altrimenti questo OOS non &egrave; fuori campione). La soglia di significativit&agrave; dei vincitori &egrave; corretta per i " + IntegerToString(g_nCls) + " orizzonti letti insieme (p &lt; " + F(100.0 * AlphaCls(), 2) + "%). Se la scelta per un orizzonte ha OOS negativo o non significativo, per quell'orizzonte non c'&egrave; un edge dimostrato.</div>");
 }
 
 void MapCell(const int k, const int part, const double sc)
@@ -3261,6 +3256,8 @@ void OnStart()
 {
    uint t0 = GetTickCount();
    ArrayResize(g_warn, 0);
+   Print("MDRB AutoStudy v2.0: analisi automatica senza input. Puo' richiedere diversi minuti: l'avanzamento e' scritto sul grafico.");
+   Comment("MDRB AutoStudy v2.0: avvio dell'analisi automatica...");
    if(!Setup()) return;
    if(!LoadAllData()) { Comment(""); return; }
    g_cut = g_dataFirst + (datetime)((double)(g_dataLast - g_dataFirst) * InpISPercent / 100.0);

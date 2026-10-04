@@ -1,7 +1,7 @@
 # Harness di verifica per gli script MQL5
 
 Non e' MetaTrader: e' un header C++ (`mql5_mock.h`) che simula le API MQL5 usate da
-`MQL5/Scripts/VP_RR_Study_v1.0.mq5`, `MQL5/Scripts/MDRB_Study_v1.0.mq5` e dai due EA corrispondenti
+`MQL5/Scripts/VP_RR_Study_v1.0.mq5`, `MQL5/Scripts/MDRB_AutoStudy.mq5` e dai due EA corrispondenti
 (`VolumeProfile_v1.0_EA_*.mq5`, `MultiDayRangeBreakout.mq5`), piu' un
 preprocessore (`prep.py`) che traduce i costrutti MQL5 non C++ (`input`, array dinamici `T a[]`).
 Serve a compilare e far girare il codice su dati sintetici **senza MetaEditor** e a controllare che:
