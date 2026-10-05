@@ -28,12 +28,17 @@ Serve a compilare e far girare il codice su dati sintetici **senza MetaEditor** 
    AddressSanitizer pulito; test nullo (random walk a costi zero: i vincitori scelti sull'IS non si confermano
    OOS oltre il ~5%, `auto_null.py`) e test di potenza (il salto giornaliero del livello medio nei dati sintetici
    deve emergere nelle finestre notturne e confermarsi OOS). Controlli aggiunti con la Parte A / modalita' PERSONALIZZATA:
-   - `cb_check.py`: eventi della Parte A (prima candela che chiude fuori dal range, k candele dopo, entrata alla
-     chiusura) e i 21 esiti SL x RR ricalcolati in Python da zero sui dati M1 esportati (`MDRB_DUMP_M1=1`);
+   - `cb_check.py`: eventi della Parte A (prima candela che chiude fuori dal range, k = candele trascorse, entrata alla
+     chiusura), i 21 esiti SL x RR, MFE/rientro a 4 ore e la sopravvivenza (escursione avversa prima del bersaglio)
+     ricalcolati in Python da zero sui dati M1 esportati (`MDRB_DUMP_M1=1`); con finestra `-2` verifica tutte le
+     finestre di un time frame e le statistiche aggregate su eventi distinti (un evento per candela d'ingresso);
+     il generatore accetta `GEN_GAPS=p` (barre M1 mancanti a caso) e `GEN_BREAK=1` (pausa giornaliera 22-23), perche'
+     con dati densi alcuni difetti (buffer delle candele, k) non si vedono;
    - `event_check.py`: ritest del livello, meta' range, zona del giorno prima, falsi breakout, MFE e rientro in punti
      ricalcolati in Python dal CSV dei trade;
-   - `custom_check.py`: ogni filtro PERSONALIZZATO (giorni, periodo, larghezza, range orario, finestra, time frame)
-     restringe davvero l'universo e nient'altro;
+   - `custom_check.py`: ogni filtro PERSONALIZZATO (giorni con separatori/intervalli/nomi, periodo con ultimo giorno incluso,
+     larghezza, range orario con ora o durata da sole, finestra, time frame) restringe davvero l'universo e nient'altro, e le
+     scelte incoerenti fermano lo script con un messaggio chiaro;
    - metro di misura PUNTI / ATR / ENTRAMBI: struttura del report attesa per ciascuno.
 
 Uso: `./run_all.sh` (richiede `g++` e `python3`; crea la cartella `build/`; include `run_mdrb.sh`).
