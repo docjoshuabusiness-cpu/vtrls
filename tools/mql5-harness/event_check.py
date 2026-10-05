@@ -42,7 +42,14 @@ for r in rows:
     if wF[0] < 0.0: wF[0] = 0.0
     edge = hi if d > 0 else lo
     Lrel = d * (edge - E0)
-    jr = next((j for j in range(Lh) if wA[j] <= Lrel + tol * pt + gt), -1)
+    band = Lrel + tol * pt + gt
+    departed = band < 0.0
+    jr = -1
+    for j in range(Lh):
+        if not departed:
+            if wF[j] > band: departed = True
+            continue
+        if wA[j] <= band: jr = j; break
     rt4 = rt24 = 0; rth = -1.0; res = 0
     if jr >= 0:
         rth = (jr + 1) * 60 / 3600.0

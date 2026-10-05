@@ -32,6 +32,9 @@ static std::vector<MqlRates> aggregate(const std::vector<MqlRates>& m1, int per,
 static void gen(int days, double kappa, double sigma, unsigned long long seed) {
    rs = seed;
    if(getenv("GEN_ROUND")) g_gridF = atof(getenv("GEN_ROUND"));
+   // GEN_GAPS=p: ogni barra M1 manca con probabilita' p (come i buchi dello storico reale); GEN_BREAK=1: nessuna barra tra le 22:00 e le 23:00 (pausa giornaliera)
+   double gapP = getenv("GEN_GAPS") ? atof(getenv("GEN_GAPS")) : 0.0;
+   bool dayBreak = getenv("GEN_BREAK") && atoi(getenv("GEN_BREAK")) != 0;
    std::vector<MqlRates> m1;
    struct tm g; memset(&g, 0, sizeof g);
    g.tm_year = 2023 - 1900; g.tm_mon = 0; g.tm_mday = 2;     // Monday 2023-01-02
@@ -55,8 +58,10 @@ static void gen(int days, double kappa, double sigma, unsigned long long seed) {
          MqlRates r; r.time = day0 + mnt * 60; r.open = std::round(o * g_gridF) / g_gridF; r.high = std::round(h * g_gridF) / g_gridF; r.low = std::round(l * g_gridF) / g_gridF; r.close = std::round(c * g_gridF) / g_gridF;
          r.high = std::max(r.high, std::max(r.open, r.close)); r.low = std::min(r.low, std::min(r.open, r.close));
          r.tick_volume = (long)(40 + 260 * act * urand()); r.spread = 12; r.real_volume = 0;
-         m1.push_back(r);
          p = c;
+         if(gapP > 0.0 && urand() < gapP) continue;
+         if(dayBreak && mnt >= 22 * 60 && mnt < 23 * 60) continue;
+         m1.push_back(r);
       }
    }
    g_store[(int)PERIOD_M1] = m1;

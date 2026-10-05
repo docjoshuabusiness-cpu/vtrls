@@ -125,6 +125,10 @@ template<typename... Args> void PrintFormat(const string& fmt, Args... args) {
    std::cout << StringFormat(fmt, args...) << std::endl;
 }
 template<typename... Args> void Comment(Args... args) {}
+template<typename... Args> void Alert(Args... args) { std::ostringstream o; (prt_one(o, args), ...); fprintf(stderr, "ALERT: %s\n", o.str().c_str()); }
+inline ushort StringGetCharacter(const string& s, int pos) { return (pos >= 0 && pos < (int)s.size()) ? (ushort)(unsigned char)s[(size_t)pos] : (ushort)0; }
+inline string ShortToString(ushort c) { return string(1, (char)c); }
+inline bool StringToLower(string& s) { for(auto& ch : s) ch = (char)tolower((unsigned char)ch); return true; }
 
 // ---- time
 struct MqlDateTime { int year; int mon; int day; int hour; int min; int sec; int day_of_week; int day_of_year; };
@@ -242,6 +246,7 @@ inline int CopyTime(const string&, ENUM_TIMEFRAMES tf, datetime from, datetime t
 #define FILE_READ 2
 #define FILE_TXT 4
 #define FILE_ANSI 8
+#define FILE_SHARE_READ 128
 #define FILE_BIN 16
 #define FILE_COMMON 32
 extern std::vector<FILE*> g_files;

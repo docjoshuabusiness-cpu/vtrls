@@ -34,7 +34,7 @@ for sd in range(seeds):
         tcrit = lo
         n += 1
         if n_oos >= 20: tclip.append(max(-5.0, min(5.0, t_oos)))
-        c = (er_oos > 0 and p < 0.05 and n_oos >= 20)
+        c = (er_oos > 0 and p < 0.05 and n_oos >= 30)
         conf += c
         isflag += (t_is >= tcrit)
         oos_pos += (er_oos > 0)
