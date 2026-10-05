@@ -52,7 +52,7 @@ input ENUM_UNIT     UnitMode = UNIT_POINTS;          // metro di misura delle di
 input group "=== SCELTE (contano SOLO se PERSONALIZZATO; 0 o -1 = tutti) ==="
 input datetime ChFrom = 0;              // periodo: da (0 = dall'inizio della storia)
 input datetime ChTo = 0;                // periodo: a (0 = fino a oggi)
-input string   ChWeekdays = "1,2,3,4,5";// giorni della settimana da includere (1=lunedi ... 5=venerdi)
+input string   ChWeekdays = "1,2,3,4,5";// giorni da includere: numeri 1=lunedi...5=venerdi, intervalli (1-5) o nomi (mon;wed;fri)
 input int      ChRangeHourStart = -1;   // range orario: ora di inizio, ora server (-1 = tutte)
 input int      ChRangeHours = 0;        // range orario: durata in ore (0 = tutte)
 input int      ChTFMin = 1;             // parte A, time frame minimo in minuti (1, 5, 15, 30, 60, 120, 180)
@@ -3822,7 +3822,7 @@ void HtmlCandleStudy()
       "<b>Lo SL non &egrave; fissato a priori</b>: si provano 6 distanze dall'ingresso in punti (" + F(g_cbSLpts[0], 0) + ", " + F(g_cbSLpts[1], 0) + ", " + F(g_cbSLpts[2], 0) + ", " + F(g_cbSLpts[3], 0) + ", " + F(g_cbSLpts[4], 0) + ", " + F(g_cbSLpts[5], 0) +
       ", multipli dell'ATR mediano della storia di " + F(med, 0) + " punti) pi&ugrave; lo SL sul livello rotto come riferimento, ciascuna con TP a 1R, 2R, 3R (R = distanza dello SL), e si misura quanti trade vincenti avrebbero retto ogni SL. Esiti con ordine intrabarra " +
       Pick(InpOptimistic, "ottimista", "pessimista") + " sulle barre " + EnumToString(g_simTF) + ", costi inclusi (spread della barra" + Pick(InpCommissionPoints > 0.0, " + commissione", "") +
-      "), orizzonte massimo 24 ore. Tutte le distanze sono in <b>PUNTI</b>. Un evento per range, time frame e giorno; eventi di time frame e range diversi sullo stesso giorno non sono indipendenti. Taglio In-Sample / Out-Of-Sample: " + TimeToString(g_cut, TIME_DATE) +
+      "), orizzonte massimo 24 ore. Tutte le distanze sono in <b>PUNTI</b>. Le statistiche aggregate (t, Welch) contano ogni trade distinto una volta sola: finestre diverse che rompono sulla stessa candela condividono lo stesso ingresso e lo stesso percorso, quindi non sono prove indipendenti; time frame diversi sullo stesso giorno restano comunque correlati. Taglio In-Sample / Out-Of-Sample: " + TimeToString(g_cut, TIME_DATE) +
       ". Nota: l'EA reale entra con ordini stop al tocco del livello, non alla chiusura della candela: questa parte misura quanto vale aspettare la chiusura.</div>");
    if(g_cbEvents < 100) { HW("<div class='warn'>Meno di 100 eventi in tutto: storia troppo corta" + Pick(g_custom, " o filtri troppo stretti (periodo, giorni, range orario, time frame, larghezza)", "") + " per questa analisi.</div>"); return; }
 
@@ -4770,7 +4770,7 @@ void HtmlGridsPoints(const bool appendix)
    HtmlMatrix("t-stat dell'expectancy - tutto il campione", 0, 3, 2);
    HtmlMatrix("Max drawdown (R) - tutto il campione", 0, 4, 2);
 
-   HW("<h2>" + g_pre + "6b. Trailing stop in PUNTI</h2>");
+   HW("<h2>" + g_pre + Pick(appendix, "A. Appendice (continua): trailing stop in PUNTI", "6b. Trailing stop in PUNTI") + "</h2>");
    HW("<div class='note'>SL iniziale fisso (" + F(g_cfg[g_base[3]].sl / g_point, 0) + " punti), " +
       Pick(InpTrailTPRR > 0.0, "TP a RR " + F(InpTrailTPRR, 1), "nessun TP") + ". Righe: soglia di attivazione. Colonne: distanza dello stop dal prezzo corrente (come l'EA: lo stop sale a gradini, solo se supera il precedente di almeno lo step). Step = " +
       F(InpTrailStepRatio, 2) + " x distanza. Confronta con le righe corrispondenti delle tabelle RR: il trailing aggiunge valore oppure no?</div>");

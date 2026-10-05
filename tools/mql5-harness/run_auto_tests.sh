@@ -57,8 +57,8 @@ for u in 0 1 2; do
 import re, sys
 u = int(sys.argv[1]); h = open("out/MQL5/Files/MDRB_Study_EURUSD.html", encoding="utf-8", errors="ignore").read()
 has_atr_tab = "Stessa distanza espressa in ATR" in h
-appx = "GA. Appendice" in h
-appx_pt = "A. Appendice: rischio/rendimento in PUNTI" in h
+appx = "A. Appendice: distanze in ATR" in h          # appendice con le griglie ATR (metro PUNTI)
+appx_pt = "A. Appendice: rischio/rendimento in PUNTI" in h     # appendice con le griglie in punti (metro ATR)
 ok = (u == 0 and appx and not has_atr_tab and not appx_pt) or (u == 1 and has_atr_tab and appx_pt and not appx) or (u == 2 and has_atr_tab and not appx and not appx_pt)
 print("unita'", u, "OK" if ok else "FALLITO")
 sys.exit(0 if ok else 1)
