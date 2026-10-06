@@ -62,7 +62,7 @@ for D in days[:-1]:
     if D > last: break
     part = 1 if D >= cutv else 0
     endDay = D + 86400
-    for e in range(1, 24):
+    for e in range(23, 0, -1):          # come lo script: dall'ultima ora, un evento distinto va al range piu' recente
         if (e * 3600) % sec != 0: continue
         E = D + e * 3600
         c0 = bisect.bisect_left(ctimes, E)
@@ -137,8 +137,18 @@ for key in order:
     for idx, Rv in enumerate(exp[key][4]):
         i, m = divmod(idx, 3)
         a = U.setdefault((i, m + 1, part), [0, 0.0, 0.0]); a[0] += 1; a[1] += Rv; a[2] += Rv * Rv
+KC = collections.Counter(); seen_k = set()
+for key in order:
+    if key not in got: continue
+    tc = exp[key][3]; d = key[3]; kb = kbucket(key[2])
+    if (tc, d, kb) in seen_k: continue
+    seen_k.add((tc, d, kb)); KC[kb] += 1
 nbad = 0; ncmp = 0
 for r in dd:
+    if r["kind"] == "c2k":
+        ncmp += 1
+        if int(r["n"]) != KC[int(r["kb"])]:
+            nbad += 1; print("istogramma k diverso", r["kb"], "script", r["n"], "python", KC[int(r["kb"])])
     if r["kind"] == "u":
         ncmp += 1
         ref = U.get((int(r["sl"]), int(r["m"]), int(r["part"])), [0, 0.0, 0.0]); nn = int(r["n"])

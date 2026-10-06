@@ -39,7 +39,11 @@ Serve a compilare e far girare il codice su dati sintetici **senza MetaEditor** 
    - `custom_check.py`: ogni filtro PERSONALIZZATO (giorni con separatori/intervalli/nomi, periodo con ultimo giorno incluso,
      larghezza, range orario con ora o durata da sole, finestra, time frame) restringe davvero l'universo e nient'altro, e le
      scelte incoerenti fermano lo script con un messaggio chiaro;
-   - metro di misura PUNTI / ATR / ENTRAMBI: struttura del report attesa per ciascuno.
+   - metro di misura PUNTI / ATR / ENTRAMBI: struttura del report attesa per ciascuno;
+   - `cb2_check.py`: la parte A2 (range = ultime N candele di un time frame) ricalcolata in Python da zero, con eventi
+     distinti, istogramma di k e range osservati; `cb_check.py` verifica anche larghezza dei range e fasce (terzili IS);
+   - riepilogo di testo da copiare (`*_RIEPILOGO.txt`, oppure `_parte1/_parte2` oltre `g_digLimit` caratteri): nessun HTML
+     residuo, sezioni chiave presenti, un file con limite alto e due parti con limite basso (in `custom_check.py`).
 
 Uso: `./run_all.sh` (richiede `g++` e `python3`; crea la cartella `build/`; include `run_mdrb.sh`).
 

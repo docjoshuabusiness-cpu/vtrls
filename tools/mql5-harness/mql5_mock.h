@@ -128,6 +128,7 @@ template<typename... Args> void Comment(Args... args) {}
 template<typename... Args> void Alert(Args... args) { std::ostringstream o; (prt_one(o, args), ...); fprintf(stderr, "ALERT: %s\n", o.str().c_str()); }
 inline ushort StringGetCharacter(const string& s, int pos) { return (pos >= 0 && pos < (int)s.size()) ? (ushort)(unsigned char)s[(size_t)pos] : (ushort)0; }
 inline string ShortToString(ushort c) { return string(1, (char)c); }
+inline string StringSubstr(const string& s, int start, int len = -1) { if(start < 0 || start >= (int)s.size()) return string(); return (len < 0) ? s.substr((size_t)start) : s.substr((size_t)start, (size_t)len); }
 inline bool StringToLower(string& s) { for(auto& ch : s) ch = (char)tolower((unsigned char)ch); return true; }
 
 // ---- time
@@ -258,6 +259,9 @@ inline int FileOpen(const string& name, int flags) {
    return (int)g_files.size() - 1;
 }
 inline unsigned FileWriteString(int h, const string& s) { if(h < 0) return 0; fwrite(s.data(), 1, s.size(), g_files[h]); return (unsigned)s.size(); }
+inline unsigned long long FileSize(int h) { if(h < 0 || !g_files[h]) return 0; long cur = ftell(g_files[h]); fseek(g_files[h], 0, SEEK_END); long n = ftell(g_files[h]); fseek(g_files[h], cur, SEEK_SET); return (unsigned long long)n; }
+inline string FileReadString(int h, int len = 0) { if(h < 0 || !g_files[h] || len <= 0) return string(); string s((size_t)len, '\0'); size_t r = fread(&s[0], 1, (size_t)len, g_files[h]); s.resize(r); return s; }
+inline bool FileDelete(const string& name) { string path = g_datapath + "/MQL5/Files/" + name; return remove(path.c_str()) == 0; }
 inline void FileClose(int h) { if(h >= 0 && g_files[h]) { fclose(g_files[h]); g_files[h] = nullptr; } }
 
 inline datetime TimeTradeServer() { extern datetime g_now; return g_now; }

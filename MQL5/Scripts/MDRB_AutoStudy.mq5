@@ -2602,6 +2602,7 @@ int          g_cbReach[], g_cbSurv[];              // sopravvivenza: [((t*NKB+kb
 double       g_cbSLpts[NSLF];                      // le 6 distanze fisse dello SL dall'ingresso, in punti
 double       g_cbTG[NTG];                          // bersagli per l'analisi di sopravvivenza, in punti
 int          g_cbRef = 3;                          // SL di riferimento (scelto sull'IS, una volta)
+int          g_cbRefSrc = 0;                       // 0 = scelto sull'IS della parte A, 1 = sull'IS della parte A2, 2 = valore di default (nessun evento IS)
 int          g_cbDbgW = -1, g_cbDbgT = -1;         // solo test: esporta gli eventi di una coppia (range, TF)
 int          g_cbEvents = 0;
 int          g_cbL4 = 0, g_cbL24 = 0;              // orizzonti a 4 h e 24 h in barre di simulazione
@@ -2658,6 +2659,13 @@ int C2IdxR(const int t, const int ni, const int ei, const int sl, const int m, c
 int C2IdxU(const int t, const int ni, const int sl, const int m, const int part) { return (((((t * NNC) + ni) * NSL + sl) * NRRM) + m) * 2 + part; }
 int CbIdxRUa(const int t, const int sl, const int m, const int part) { return ((((t * NSL) + sl) * NRRM) + m) * 2 + part; }
 int CbIdxRUk(const int t, const int kb, const int sl, const int m, const int part) { return (((((t * NKB) + kb) * NSL) + sl) * NRRM + m) * 2 + part; }
+
+string CbRefWhy()
+{
+   if(g_cbRefSrc == 0) return "scelto sull'In-Sample nella parte A";
+   if(g_cbRefSrc == 1) return "scelto sull'In-Sample della parte A2 (la parte A non ha eventi In-Sample)";
+   return "valore di default (nessun evento In-Sample per sceglierlo)";
+}
 
 string CbSLName(const int sl)
 {
@@ -2980,8 +2988,10 @@ bool CbGetEvent(const int t, const int hit, const int dir, const double hi, cons
 void CbRunN(const datetime D, const int part)
 {
    long seenU[NTF * NNC * 24];
+   long seenUK[NTF * NNC * 24];
    int seenNU[NTF * NNC];
-   for(int i = 0; i < NTF * NNC; i++) seenNU[i] = 0;
+   int seenNUK[NTF * NNC];
+   for(int i = 0; i < NTF * NNC; i++) { seenNU[i] = 0; seenNUK[i] = 0; }
    datetime endDay = D + 86400;
    double pt = g_point;
    int nS = ArraySize(g_rs);
@@ -2996,7 +3006,7 @@ void CbRunN(const datetime D, const int part)
       {
          int N = g_c2N[ni];
          int tn = t * NNC + ni;
-         for(int e = 1; e <= NEH; e++)
+         for(int e = NEH; e >= 1; e--)      // dall'ultima ora: un evento distinto e' attribuito al range piu' recente (k piu' piccolo)
          {
             if(((long)e * 3600) % sec != 0) continue;
             datetime E = D + (datetime)e * 3600;
@@ -3055,8 +3065,16 @@ void CbRunN(const datetime D, const int part)
             for(int i = 0; i < NSL; i++)
                for(int m = 0; m < NRRM; m++) StatAdd(g_c2R[C2IdxR(t, ni, ei, i, m, part)], ev.R[i * NRRM + m], 0);
             long keyU = (long)ev.tc * 2 + (dir > 0 ? 1 : 0);
-            bool newU = true;
+            long keyUK = keyU * 8 + kb;
+            bool newU = true, newUK = true;
             for(int q = 0; q < seenNU[tn]; q++) if(seenU[tn * 24 + q] == keyU) { newU = false; break; }
+            for(int q = 0; q < seenNUK[tn]; q++) if(seenUK[tn * 24 + q] == keyUK) { newUK = false; break; }
+            if(newUK)
+            {
+               seenUK[tn * 24 + seenNUK[tn]] = keyUK;
+               seenNUK[tn]++;
+               g_c2K[tn * NKB + kb]++;      // il k si conta per ogni (candela d'ingresso, direzione, k): un trade e' tardivo per un range e immediato per un altro
+            }
             if(newU)
             {
                seenU[tn * 24 + seenNU[tn]] = keyU;
@@ -3069,7 +3087,6 @@ void CbRunN(const datetime D, const int part)
                g_c2A[ai].mfe += ev.mfe4 / pt;
                g_c2A[ai].ret += ev.ret4 / pt;
                if(ev.ret4 > 0.0) g_c2A[ai].pos++;
-               g_c2K[tn * NKB + kb]++;
             }
             g_cbEvents2++;
             if(g_cbDbg2H != INVALID_HANDLE && g_cbDbg2 == tn)
@@ -3390,6 +3407,9 @@ bool RunCandleStudy()
                FileWriteString(dd, "wr," + IntegerToString(wb) + ",0,0," + IntegerToString(pp) + "," + IntegerToString(g_cbWRng[wi3]) + "," + DoubleToString(g_cbWRngW[wi3], 6) + "," + IntegerToString(g_cbWBrk[wi3]) + "\n");
             }
          if(g_cbDbg2 >= 0)
+            for(int kb = 0; kb < NKB; kb++)
+               FileWriteString(dd, "c2k," + IntegerToString(kb) + ",0,0,0," + IntegerToString(g_c2K[g_cbDbg2 * NKB + kb]) + ",0,0\n");
+         if(g_cbDbg2 >= 0)
             for(int pp = 0; pp < 2; pp++)
             {
                int ti = g_cbDbg2 * 2 + pp;
@@ -3401,13 +3421,32 @@ bool RunCandleStudy()
    g_L = Lfull;
    // SL di riferimento: la distanza fissa con la migliore E[R] 1:2 In-Sample (una scelta su 6, sull'IS)
    double bestT = -1e18;
+   int nIS = 0;
    for(int i = 0; i < NSLF; i++)
    {
       SStat a;
       ZeroMemory(a);
       for(int c = 0; c < cells; c++) StatMerge(a, g_cbR[CbIdxR(c, i, 1, 0)]);
+      nIS = MathMax(nIS, a.n);
       double sc = RankMetric(a);
       if(sc > bestT) { bestT = sc; g_cbRef = i; }
+   }
+   g_cbRefSrc = 0;
+   if(nIS == 0)
+   {
+      // la parte A non ha eventi In-Sample (nessuna finestra oraria o campione vuoto): si sceglie sull'IS della parte A2, altrimenti resta il valore di default
+      g_cbRef = 3;
+      g_cbRefSrc = 2;
+      bestT = -1e18;
+      for(int i = 0; i < NSLF; i++)
+      {
+         SStat a;
+         ZeroMemory(a);
+         for(int t = 0; t < NTF; t++)
+            for(int ni = 0; ni < NNC; ni++) StatMerge(a, g_c2U[C2IdxU(t, ni, i, 1, 0)]);
+         double sc = RankMetric(a);
+         if(a.n > 0 && sc > bestT) { bestT = sc; g_cbRef = i; g_cbRefSrc = 1; }
+      }
    }
    PrintFormat("Parte A: %d eventi (range orari x TF con chiusura fuori), %d range orari x %d TF; SL di riferimento %s; parte A2 (range a N candele): %d eventi", g_cbEvents, g_cbNW, NTF, CbSLName(g_cbRef), g_cbEvents2);
    return true;
@@ -4494,6 +4533,12 @@ void HtmlCandleStudy()
 }
 
 // cella E[R] con tooltip, per le tabelle della parte A2 e della larghezza
+string DurTxt(const double hours)
+{
+   if(hours < 2.0) return F(hours * 60.0, 0) + " min";
+   return F(hours, 1) + " h";
+}
+
 string C2Cell(const SStat &s, const SCbAcc &a)
 {
    if(s.n == 0) return "<td>-</td>";
@@ -4513,7 +4558,7 @@ void HtmlCandleWidth()
    HW("<h2 id='parteA6'>A6. Larghezza dei range orari in punti</h2>");
    HW("<div class='note'>Larghezza = massimo meno minimo del range, in punti, calcolata sulle barre " + EnumToString(g_simTF) + " dentro la finestra: &egrave; la <b>stessa per ogni time frame</b> (il time frame decide solo quale candela conferma la rottura, vedi A7 e la parte A2). " +
       "Ogni cella = larghezza MEDIANA nei giorni con un range valido; passa il mouse per P10-P90 e per il numero di giorni. ATR mediano della storia: " + F(med, 0) + " punti, quindi 1 ATR = " + F(med, 0) + " punti. " +
-      "La larghezza serve a dimensionare lo SL: una rottura da un range largo ha un SL sul livello rotto largo.</div>");
+      "Lo SL sul livello rotto dipende da quanto la candela di conferma chiude oltre il livello, non dalla larghezza del range: A7 mostra empiricamente se le due cose si muovono insieme.</div>");
    double mx = 1.0;
    for(int w = 0; w < g_cbNW; w++) if(g_cbWmed[w] > mx) mx = g_cbWmed[w];
    HW("<div class='sc'><table class='m'><tr><th>Inizio</th>");
@@ -4560,6 +4605,7 @@ void HtmlCandleWidth()
          a0 = g_cbAW[i0];
          a1 = g_cbAW[i0 + 1];
          int nev = a0.n + a1.n;
+         if(nev == 0) continue;
          double mf = (nev > 0) ? (a0.mfe + a1.mfe) / nev : 0.0;
          double sl = (nev > 0) ? (a0.sl + a1.sl) / nev : 0.0;
          double pos = (nev > 0) ? 100.0 * (a0.pos + a1.pos) / nev : 0.0;
@@ -4579,12 +4625,11 @@ void HtmlCandleWidth()
       CbAll(wi0, wo0, ww);
       if(nn.n < 10 || ww.n < 10) continue;
       double tAll = WelchT(ww, nn), tO = WelchT(wo0, no0);
-      string c1 = (MathAbs(tAll) >= 2.0) ? ((tAll > 0) ? " class='ok'" : " class='bad'") : "";
-      string c2 = (no0.n >= 20 && wo0.n >= 20 && MathAbs(tO) >= 2.0) ? ((tO > 0) ? " class='ok'" : " class='bad'") : "";
+      bool oosOk = (no0.n >= 20 && wo0.n >= 20);
       HW("<tr><th class='rl'>" + g_cbName[t] + "</th><td>" + IntegerToString(nn.n) + "</td><td>" + F(StatMean(nn), 3) + "</td><td>" + IntegerToString(ww.n) + "</td><td>" + F(StatMean(ww), 3) + "</td><td>" + F(StatMean(ww) - StatMean(nn), 3) +
-         "</td><td" + c1 + ">" + F(tAll, 2) + "</td><td>" + F(StatMean(wo0) - StatMean(no0), 3) + "</td><td" + c2 + ">" + F(tO, 2) + "</td></tr>\n");
+         "</td><td>" + F(tAll, 2) + "</td><td>" + Pick(oosOk, F(StatMean(wo0) - StatMean(no0), 3), "-") + "</td><td>" + Pick(oosOk, F(tO, 2), "-") + "</td></tr>\n");
    }
-   HW("</table><div class='note'>Differenza positiva = i range larghi (per la loro finestra) rendono di piu' di quelli stretti. t di Welch, evidenziato |t| &ge; 2: sono pochi confronti non corretti per test multipli, conferma sempre con la colonna OOS.</div>");
+   HW("</table><div class='note'>Differenza positiva = i range larghi (per la loro finestra) rendono di piu' di quelli stretti. Il t di Welch &egrave; solo <b>indicativo</b>: i due gruppi possono contenere lo stesso trade (una finestra stretta e una larga rotte dalla stessa candela) e i trade dello stesso giorno sono dipendenti, quindi il campione efficace &egrave; molto minore; i confronti non sono corretti per test multipli. Conta la colonna OOS (mostrata solo con almeno 20 eventi per gruppo).</div>");
 }
 
 // parte A2: range definito da N candele del time frame
@@ -4595,8 +4640,18 @@ void HtmlCandleN()
    HW("<h1 id='parteA2' style='margin-top:36px;border-top:3px solid #1f6feb;padding-top:10px'>Parte A2 &mdash; Range definito da N candele di ogni time frame</h1>");
    HW("<div class='note'>Qui il range cambia davvero con il time frame: &egrave; il massimo e il minimo delle <b>ultime N candele del time frame</b> (N = " + IntegerToString(g_c2N[0]) + Pick(g_c2NN > 1, ", " + IntegerToString(g_c2N[1]) + ", " + IntegerToString(g_c2N[2]) + ", " + IntegerToString(g_c2N[3]) + ", " + IntegerToString(g_c2N[4]) + ", " + IntegerToString(g_c2N[5]), "") +
       ") che finiscono a ogni ora piena (solo le ore allineate al time frame, dalle 01:00 alle 23:00). Dopo la fine del range si cerca la <b>prima candela dello stesso time frame che chiude fuori</b>, entro la sera; ingresso a mercato alla chiusura, stessi SL, stessi TP e stesse uscite della parte A. " +
-      "Le N candele devono essere quasi contigue (niente range a cavallo di weekend o di buchi dello storico). Larghezza e durata sono misurate sui range osservati. L'SL di riferimento &egrave; quello scelto sull'IS nella parte A (" + CbSLName(rf) + "). " +
+      "Le N candele devono essere quasi contigue (niente range a cavallo di weekend o di buchi dello storico). Larghezza e durata sono misurate sui range osservati. L'SL di riferimento &egrave; " + CbRefWhy() + ": " + CbSLName(rf) + ". " +
       "Le righe contano ogni trade distinto una volta sola (ore di fine diverse sulla stessa candela d'ingresso non sono prove indipendenti). Molte ipotesi: conta l'OOS.</div>");
+   if(g_custom && ChBarsTF != PERIOD_CURRENT)
+   {
+      bool tfOk = false;
+      for(int t = 0; t < NTF; t++) if(g_cbOn[t] && g_cbSec[t] == PeriodSeconds(ChBarsTF)) tfOk = true;
+      if(!tfOk)
+      {
+         HW("<div class='warn'>Parte A2 non disponibile: il time frame scelto (ChBarsTF = " + EnumToString(ChBarsTF) + ") non &egrave; tra quelli della parte A2 (M1, M5, M15, M30, H1, H2, H3) o &egrave; fuori dal filtro ChTFMin / ChTFMax.</div>");
+         return;
+      }
+   }
    if(g_cbEvents2 < 100) { HW("<div class='warn'>Meno di 100 eventi in tutto: storia troppo corta" + Pick(g_custom, " o filtri troppo stretti", "") + " per questa analisi.</div>"); return; }
 
    // campioni di larghezza e durata per (time frame, N)
@@ -4638,7 +4693,7 @@ void HtmlCandleN()
       sMed[tn] = Quantile(ts, cnt[tn], 0.5);
    }
 
-   HW("<h2 id='parteA8'>A8. Per time frame e numero di candele: larghezza, durata e rottura del range</h2><div class='sc'><table><tr><th class='rl'>TF</th><th>N candele</th><th>Durata mediana (ore)</th><th>Larghezza mediana (pt)</th><th>P10 - P90 (pt)</th><th>Range osservati</th><th>% con chiusura fuori entro sera</th><th>Eventi distinti</th><th>k=1 %</th><th>k&ge;3 %</th>" +
+   HW("<h2 id='parteA8'>A8. Per time frame e numero di candele: larghezza, durata e rottura del range</h2><div class='sc'><table><tr><th class='rl'>TF</th><th>N candele</th><th>Durata mediana</th><th>Larghezza mediana (pt)</th><th>P10 - P90 (pt)</th><th>Range osservati</th><th>% con chiusura fuori entro sera</th><th>Eventi distinti</th><th>k=1 %</th><th>k&ge;3 %</th>" +
       "<th>SL sul livello rotto medio (pt)</th><th>MFE 4h medio (pt)</th><th>Win 1:2</th><th>E[R] 1:2</th><th>E[R] 1:2 IS</th><th>E[R] 1:2 OOS</th><th>t OOS</th></tr>");
    for(int t = 0; t < NTF; t++)
    {
@@ -4657,18 +4712,19 @@ void HtmlCandleN()
          a0 = g_c2A[tn * 2];
          a1 = g_c2A[tn * 2 + 1];
          int nev = a0.n + a1.n;
+         if(nev == 0) continue;
          int ktot = 0, k1 = g_c2K[tn * NKB], k3 = 0;
          for(int kb = 0; kb < NKB; kb++) { ktot += g_c2K[tn * NKB + kb]; if(kb >= 2) k3 += g_c2K[tn * NKB + kb]; }
          double mf = (nev > 0) ? (a0.mfe + a1.mfe) / nev : 0.0;
          double sl = (nev > 0) ? (a0.sl + a1.sl) / nev : 0.0;
-         HW("<tr><th class='rl'>" + g_cbName[t] + "</th><td>" + IntegerToString(g_c2N[ni]) + "</td><td>" + F(sMed[tn], 1) + "</td><td>" + F(wMed[tn], 0) + "</td><td>" + F(wP10[tn], 0) + " - " + F(wP90[tn], 0) + "</td><td>" + IntegerToString(rng) + "</td><td>" + F(PctOf(brk, rng), 1) + "</td><td>" + IntegerToString(nev) +
+         HW("<tr><th class='rl'>" + g_cbName[t] + "</th><td>" + IntegerToString(g_c2N[ni]) + "</td><td>" + DurTxt(sMed[tn]) + "</td><td>" + F(wMed[tn], 0) + "</td><td>" + F(wP10[tn], 0) + " - " + F(wP90[tn], 0) + "</td><td>" + IntegerToString(rng) + "</td><td>" + F(PctOf(brk, rng), 1) + "</td><td>" + IntegerToString(nev) +
             "</td><td>" + F(PctOf(k1, ktot), 1) + "</td><td>" + F(PctOf(k3, ktot), 1) + "</td><td>" + F(sl, 0) + "</td><td>" + F(mf, 0) + "</td><td>" + F(StatWR(xa), 1) + "%</td><td>" + F(StatMean(xa), 3) + "</td><td>" + F(StatMean(xi), 3) + "</td><td>" + F(StatMean(xo), 3) + "</td><td>" + F(StatT(xo), 2) + "</td></tr>\n");
       }
    }
-   HW("</table></div><div class='note'>A parita' di N, il range di un time frame piu' grosso copre molto piu' tempo e piu' punti: la colonna Durata dice quante ore pesano le N candele. Per confrontare range di durata simile guarda le righe con durata mediana vicina (per esempio 25 candele M5 contro 5 candele M30), non lo stesso N.</div>");
+   HW("</table></div><div class='note'>A parita' di N, il range di un time frame piu' grosso copre molto piu' tempo e piu' punti: la colonna Durata dice quante ore pesano le N candele. Per confrontare range di durata simile guarda le righe con durata mediana vicina (per esempio 12 candele M15 contro 3 candele H1, entrambe 3 ore), non lo stesso N; le righe con durata uguale hanno comunque insiemi diversi di ore di fine.</div>");
 
    // matrici TF x N
-   string mt[4] = {"E[R] 1:2 &mdash; tutto il campione", "E[R] 1:2 &mdash; solo Out-Of-Sample", "Larghezza mediana del range (punti)", "Durata mediana del range (ore)"};
+   string mt[4] = {"E[R] 1:2 &mdash; tutto il campione", "E[R] 1:2 &mdash; solo Out-Of-Sample", "Larghezza mediana del range (punti)", "Durata mediana del range"};
    HW("<h2>A8b. Matrici time frame &times; numero di candele</h2>");
    for(int mm = 0; mm < 4; mm++)
    {
@@ -4683,7 +4739,7 @@ void HtmlCandleN()
          {
             int tn = t * NNC + ni;
             if(g_c2Rng[tn * 2] + g_c2Rng[tn * 2 + 1] == 0) { HW("<td>-</td>"); continue; }
-            if(mm >= 2) { HW("<td>" + F(mm == 2 ? wMed[tn] : sMed[tn], mm == 2 ? 0 : 1) + "</td>"); continue; }
+            if(mm >= 2) { HW("<td>" + (mm == 2 ? F(wMed[tn], 0) : DurTxt(sMed[tn])) + "</td>"); continue; }
             SStat xi, xo, xa;
             xi = g_c2U[C2IdxU(t, ni, rf, 1, 0)];
             xo = g_c2U[C2IdxU(t, ni, rf, 1, 1)];
@@ -4742,7 +4798,7 @@ void HtmlCandleN()
    }
    double tcrit = NormInvUpper(0.05 / MathMax(1, nValid * NSL * NRRM));
    HW("<h2 id='parteA8c'>A8c. Le migliori combinazioni (time frame &times; N candele &times; ora di fine), con SL e RR scelti SOLO sull'In-Sample</h2><div class='note'>Combinazioni con almeno " + IntegerToString(g_minIS) + " eventi IS: <b>" + IntegerToString(nValid) + "</b> &times; " + IntegerToString(NSL * NRRM) +
-      " scelte &rarr; soglia di Bonferroni t &ge; " + F(tcrit, 2) + " (verde). Qui le combinazioni non sono deduplicate (ore di fine vicine condividono eventi): il valore informativo &egrave; l'OOS.</div>");
+      " scelte &rarr; soglia di Bonferroni t &ge; " + F(tcrit, 2) + " (verde). Qui le combinazioni non sono deduplicate (ore di fine vicine condividono eventi): il valore informativo &egrave; l'OOS. Il p OOS di ogni riga &egrave; <b>grezzo</b>: leggendo 20 righe la soglia corretta &egrave; dell'ordine di " + F(0.05 / 20.0, 4) + ".</div>");
    if(nt == 0) { HW("<div class='warn'>Nessuna combinazione con abbastanza eventi In-Sample.</div>"); return; }
    HW("<div class='sc'><table><tr><th class='rl'>Range</th><th>TF</th><th>SL scelto</th><th>RR scelto</th><th>N IS</th><th>Win IS</th><th>E[R] IS</th><th>t IS</th><th>N OOS</th><th>Win OOS</th><th>E[R] OOS</th><th>t OOS</th><th>p OOS</th></tr>");
    int oosPos = 0;
@@ -4773,7 +4829,7 @@ void WriteCbCSV()
    {
       FileWriteString(h, "start_hour,duration_h,days,median_pts,p10_pts,p90_pts,tercile1_is_pts,tercile2_is_pts\n");
       for(int w = 0; w < g_cbNW; w++)
-         FileWriteString(h, IntegerToString(g_cbWS[w]) + "," + IntegerToString(g_cbWD[w]) + "," + IntegerToString(g_cbWn[w]) + "," + F(g_cbWmed[w], 2) + "," + F(g_cbWp10[w], 2) + "," + F(g_cbWp90[w], 2) + "," + F(g_cbWc1[w], 2) + "," + F(g_cbWc2[w], 2) + "\n");
+         FileWriteString(h, IntegerToString(g_cbWS[w]) + "," + IntegerToString(g_cbWD[w]) + "," + IntegerToString(g_cbWn[w]) + "," + Pick(g_cbWn[w] > 0, F(g_cbWmed[w], 2) + "," + F(g_cbWp10[w], 2) + "," + F(g_cbWp90[w], 2), ",,") + "," + Pick(g_cbWc1[w] >= 0.0, F(g_cbWc1[w], 2) + "," + F(g_cbWc2[w], 2), ",") + "\n");
       FileClose(h);
    }
    int rf = g_cbRef;
@@ -4791,8 +4847,13 @@ void WriteCbCSV()
             if(a.n + o.n == 0) continue;
             string ln = g_cbName[t] + "," + IntegerToString(g_c2N[ni]) + "," + IntegerToString(ei + 1) + "," + F(g_cbSLpts[rf], 0) + "," + IntegerToString(a.n) + "," + IntegerToString(o.n);
             for(int part = 0; part < 2; part++)
-               for(int m = 0; m < NRRM; m++) ln += "," + F(StatMean(g_c2R[C2IdxR(t, ni, ei, rf, m, part)]), 4);
-            ln += "," + F(StatT(o), 3);
+               for(int m = 0; m < NRRM; m++)
+               {
+                  SStat cs;
+                  cs = g_c2R[C2IdxR(t, ni, ei, rf, m, part)];
+                  ln += "," + Pick(cs.n > 0, F(StatMean(cs), 4), "");
+               }
+            ln += "," + Pick(o.n > 1, F(StatT(o), 3), "");
             FileWriteString(h, ln + "\n");
          }
    FileClose(h);
@@ -5295,7 +5356,7 @@ void HtmlAutoSummary()
    }
    SumRow("EA con i parametri di default v3.00 (non scelta)" + Pick(g_userWidth, " + filtro di larghezza scelto", " (con il filtro range " + F(MinRangePoints, 0) + "-" + F(MaxRangePoints, 0) + " pt dell'EA)"), RangeText(g_def), HHMM(g_def.wsMin) + "-" + HHMM(g_def.weMin), 1, g_eaIS[0], g_eaOOS[0], g_eaOOS[1], false, false);
    HW("</table><div class='note'>* soglia t (one-sided 5%) con correzione di Bonferroni sul numero di combinazioni valide dell'orizzonte: conservativa perch&eacute; le combinazioni sono correlate, ma &egrave; l'ordine di grandezza giusto per il data-mining. ");
-   HW("L'ultima riga non &egrave; stata scelta: sono i parametri di DEFAULT dell'EA v3.00 (se nel tuo EA hai cambiato i valori, la riga non li rappresenta); vale come test unico solo se non sono stati ottimizzati su questa storia (altrimenti questo OOS non &egrave; fuori campione). La soglia di significativit&agrave; dei vincitori &egrave; corretta per i " + IntegerToString(g_nCls) + " orizzonti letti insieme (p &lt; " + F(100.0 * AlphaCls(), 2) + "%). Se la scelta per un orizzonte ha OOS negativo o non significativo, per quell'orizzonte non c'&egrave; un edge dimostrato.</div>");
+   HW("L'ultima riga non &egrave; stata scelta: sono i parametri di DEFAULT dell'EA v3.00 (se nel tuo EA hai cambiato i valori, la riga non li rappresenta); vale come test unico solo se non sono stati ottimizzati su questa storia (altrimenti questo OOS non &egrave; fuori campione). La soglia di significativit&agrave; dei vincitori &egrave; corretta per i " + IntegerToString(g_nCls) + " gruppi di test letti insieme (orizzonti con un vincitore e parte A / parte A2 se prodotte; p &lt; " + F(100.0 * AlphaCls(), 2) + "%). Se la scelta per un orizzonte ha OOS negativo o non significativo, per quell'orizzonte non c'&egrave; un edge dimostrato.</div>");
 }
 
 void MapCell(const int k, const int part, const double sc)
@@ -5717,6 +5778,270 @@ bool AnalyzeCur()
 }
 
 //+------------------------------------------------------------------+
+//| Riepilogo di testo da copiare e incollare per l'analisi            |
+//+------------------------------------------------------------------+
+int g_digLimit = 70000;     // caratteri massimi per file di riepilogo: oltre questo limite il riepilogo si divide in due parti
+
+string DgDecode(string s)
+{
+   StringReplace(s, "&egrave;", "e'");
+   StringReplace(s, "&Egrave;", "E'");
+   StringReplace(s, "&eacute;", "e'");
+   StringReplace(s, "&agrave;", "a'");
+   StringReplace(s, "&ugrave;", "u'");
+   StringReplace(s, "&ograve;", "o'");
+   StringReplace(s, "&igrave;", "i'");
+   StringReplace(s, "&rarr;", "->");
+   StringReplace(s, "&middot;", "-");
+   StringReplace(s, "&mdash;", "-");
+   StringReplace(s, "&laquo;", "\"");
+   StringReplace(s, "&raquo;", "\"");
+   StringReplace(s, "&times;", "x");
+   StringReplace(s, "&ge;", ">=");
+   StringReplace(s, "&plusmn;", "+/-");
+   StringReplace(s, "&minus;", "-");
+   StringReplace(s, "&nbsp;", " ");
+   StringReplace(s, "&deg;", " gradi");
+   StringReplace(s, "&lt;", "<");
+   StringReplace(s, "&gt;", ">");
+   StringReplace(s, "&amp;", "&");
+   return s;
+}
+
+// toglie i tag HTML da un frammento, decodifica le entita' e pulisce gli spazi
+string DgStrip(const string raw)
+{
+   string out = "";
+   int p = 0, n = StringLen(raw);
+   while(p < n)
+   {
+      int a = StringFind(raw, "<", p);
+      if(a < 0) { out += StringSubstr(raw, p); break; }
+      out += StringSubstr(raw, p, a - p);
+      int b = StringFind(raw, ">", a);
+      if(b < 0) break;
+      p = b + 1;
+   }
+   out = DgDecode(out);
+   StringTrimLeft(out);
+   StringTrimRight(out);
+   return out;
+}
+
+void DgAdd(string &lines[], int &n, const string s)
+{
+   if(n >= ArraySize(lines)) ArrayResize(lines, n + 4096, 4096);
+   lines[n] = s;
+   n++;
+}
+
+// sezioni poco utili per un'analisi a distanza (griglie complete, trailing, calendario, appendici, note di lettura)
+bool DgExcluded(const string t)
+{
+   if(StringFind(t, "Rischio/rendimento") >= 0) return true;
+   if(StringFind(t, "Trailing stop") >= 0) return true;
+   if(StringFind(t, "Calendario") >= 0) return true;
+   if(StringFind(t, "Appendice") >= 0) return true;
+   if(StringFind(t, "Come leggere") >= 0) return true;
+   if(StringFind(t, "Distanze in ATR") >= 0) return true;
+   return false;
+}
+
+// converte il report HTML in righe di testo: titoli, tabelle (celle separate da " | ", al massimo rowCap righe per tabella) e avvisi; scarta note, grafici e sezioni escluse
+int DgParse(const string h, const int rowCap, string &lines[])
+{
+   int nl = 0;
+   int n = StringLen(h);
+   int p = 0;
+   bool skip = false, skip3 = false, inTbl = false;
+   int rows = 0, omitted = 0;
+   string row = "";
+   while(p < n)
+   {
+      int a = StringFind(h, "<", p);
+      if(a < 0) break;
+      int b = StringFind(h, ">", a);
+      if(b < 0) break;
+      string tl = StringSubstr(h, a + 1, b - a - 1);
+      StringToLower(tl);
+      p = b + 1;
+      string nm = tl;
+      int sp = StringFind(nm, " ");
+      if(sp > 0) nm = StringSubstr(nm, 0, sp);
+      if(nm == "style") { int e = StringFind(h, "</style>", p); p = (e < 0) ? n : e + 8; continue; }
+      if(nm == "svg") { int e = StringFind(h, "</svg>", p); p = (e < 0) ? n : e + 6; continue; }
+      if(nm == "ul") { int e = StringFind(h, "</ul>", p); p = (e < 0) ? n : e + 5; continue; }
+      if(nm == "div")
+      {
+         if(StringFind(tl, "class='note'") >= 0) { int e = StringFind(h, "</div>", p); p = (e < 0) ? n : e + 6; }
+         else if(StringFind(tl, "class='warn'") >= 0)
+         {
+            int e = StringFind(h, "</div>", p);
+            if(e < 0) e = n;
+            if(!skip && !skip3) DgAdd(lines, nl, "ATTENZIONE: " + DgStrip(StringSubstr(h, p, e - p)));
+            p = (e >= n) ? n : e + 6;
+         }
+         continue;
+      }
+      if(nm == "h1" || nm == "h2" || nm == "h3")
+      {
+         string close = "</" + nm + ">";
+         int e = StringFind(h, close, p);
+         if(e < 0) e = n;
+         string title = DgStrip(StringSubstr(h, p, e - p));
+         p = (e >= n) ? n : e + 5;
+         if(nm != "h3") { skip = DgExcluded(title); skip3 = false; if(!skip) { DgAdd(lines, nl, ""); DgAdd(lines, nl, "## " + title); } }
+         else
+         {
+            // matrici complete della mappa (sessioni, definizioni x finestre): le migliori combinazioni e la qualita' dei candidati sono gia' nelle tabelle
+            skip3 = (StringFind(title, "Range orari di") == 0 || StringFind(title, "E[R] In-Sample") == 0 || StringFind(title, "E[R] Out-Of-Sample") == 0);
+            if(!skip && !skip3) DgAdd(lines, nl, "### " + title);
+         }
+         continue;
+      }
+      if(nm == "table") { inTbl = true; rows = 0; omitted = 0; row = ""; continue; }
+      if(nm == "/table")
+      {
+         if(!skip && !skip3 && omitted > 0) DgAdd(lines, nl, "(... " + IntegerToString(omitted) + " righe omesse)");
+         inTbl = false;
+         continue;
+      }
+      if(nm == "tr") { row = ""; continue; }
+      if(nm == "td" || nm == "th")
+      {
+         int e1 = StringFind(h, "</td>", p), e2 = StringFind(h, "</th>", p);
+         int e = e1;
+         if(e < 0 || (e2 >= 0 && e2 < e)) e = e2;
+         if(e < 0) e = n;
+         if(inTbl && !skip && !skip3)
+         {
+            string cell = DgStrip(StringSubstr(h, p, e - p));
+            row += Pick(StringLen(row) > 0, " | ", "") + cell;
+         }
+         p = (e >= n) ? n : e + 5;
+         continue;
+      }
+      if(nm == "/tr")
+      {
+         if(inTbl && !skip && !skip3 && StringLen(row) > 0)
+         {
+            if(rows < rowCap) DgAdd(lines, nl, row);
+            else omitted++;
+            rows++;
+         }
+         row = "";
+         continue;
+      }
+   }
+   return nl;
+}
+
+// intestazione del riepilogo: impostazioni, copertura dei dati, avvisi e legenda
+int DgHeader(string &L[])
+{
+   int n = 0;
+   DgAdd(L, n, "=== MDRB AutoStudy v2.0 - RIEPILOGO DEI DATI (testo da incollare per l'analisi) ===");
+   DgAdd(L, n, "Simbolo: " + _Symbol + " | punto: " + F(g_point, _Digits) + " | dati aggiornati al: " + TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES) + " (ora server)");
+   DgAdd(L, n, "Modalita': " + DgStrip(ChoicesText()) + " | metro: " + Pick(g_unit == UNIT_POINTS, "punti", Pick(g_unit == UNIT_ATR, "ATR", "punti e ATR")));
+   datetime lastShown = (g_toDay > 0 && g_toDay < g_dataLast) ? g_toDay - 86400 : g_dataLast;
+   DgAdd(L, n, "Storia analizzata: " + TimeToString(g_dataFirst, TIME_DATE) + " -> " + TimeToString(lastShown, TIME_DATE) + " | simulazione " + EnumToString(g_simTF) + " | taglio In-Sample/Out-Of-Sample: " + TimeToString(g_cut, TIME_DATE) + " (" + IntegerToString(InpISPercent) + "% del tempo IS)");
+   DgAdd(L, n, "Costi: spread " + Pick(InpSpreadPoints >= 0, IntegerToString(InpSpreadPoints) + " pt fissi", "da barra") + " + commissione " + F(InpCommissionPoints, 1) + " pt | ATR " + EnumToString(g_atrTF) + "(" + IntegerToString(InpATRPeriod) + ") mediano della storia: " + F(g_medATRpts, 0) + " punti | orizzonte massimo " + IntegerToString(InpMaxHoldHours) + " h | ora del server rispetto a GMT: " + StringFormat("%+d", g_srvOff));
+   for(int i = 0; i < ArraySize(g_warn); i++) DgAdd(L, n, "AVVISO: " + DgStrip(g_warn[i]));
+   DgAdd(L, n, "LEGENDA: distanze in PUNTI (1 punto = SYMBOL_POINT). R = multiplo del rischio (distanza dello SL) al netto di spread e commissione; E[R] = R medio per trade; Win = % trade vincenti; t = statistica t dell'E[R]; p = p-value unilaterale (approssimazione normale).");
+   DgAdd(L, n, "LEGENDA: IS = In-Sample (parte iniziale, usata per scegliere), OOS = Out-Of-Sample (parte finale, test unico). Con molte combinazioni provate conta solo l'OOS e la soglia di Bonferroni dove indicata (t critico).");
+   DgAdd(L, n, "LEGENDA: Parte A = ingresso a mercato alla CHIUSURA della prima candela del time frame fuori dal range; k = candele trascorse dalla fine del range; SL = 6 distanze fisse (multipli dell'ATR mediano) piu' 'livello rotto'; RR 1:1, 1:2, 1:3; i range orari sono finestre (ora di inizio + durata in ore, ora server).");
+   DgAdd(L, n, "LEGENDA: Parte A2 = range definito dalle ultime N candele del time frame che finiscono a ogni ora piena. Parte B = replica dell'EA (coppia di ordini stop al tocco del livello, finestra di ingresso in ora server, un trade al giorno); G/S/M = orizzonte giornaliero/settimanale/mensile.");
+   DgAdd(L, n, "File completi in MQL5/Files: " + InpFilePrefix + "_" + g_symF + ".html (report), *_map.csv (tutta la mappa), *_trades.csv / *_grid.csv (analisi a fondo), *_widths.csv, *_partA2.csv. Questo testo e' un estratto: le griglie complete, il trailing, il calendario e le note di lettura sono solo nell'HTML.");
+   return n;
+}
+
+// punti chiave in testa al riepilogo: le prime righe della sintesi della parte B e delle migliori combinazioni della parte A (A5) e della parte A2 (A8c)
+int DgKeyPoints(const string &body[], const int nb, string &K[], int n)
+{
+   string heads[3] = {"## Sintesi", "## A5.", "## A8c."};
+   int takes[3] = {8, 5, 5};
+   DgAdd(K, n, "PUNTI CHIAVE (prime righe di Sintesi, A5 e A8c; il dettaglio e' nelle sezioni sotto):");
+   for(int q = 0; q < 3; q++)
+      for(int i = 0; i < nb; i++)
+         if(StringFind(body[i], heads[q]) == 0)
+         {
+            DgAdd(K, n, body[i]);
+            int c = 0;
+            for(int j = i + 1; j < nb && c < takes[q]; j++)
+            {
+               if(StringLen(body[j]) == 0 || StringFind(body[j], "## ") == 0 || StringFind(body[j], "### ") == 0) break;
+               DgAdd(K, n, "  " + body[j]);
+               c++;
+            }
+            break;
+         }
+   return n;
+}
+
+void DgWriteFile(const string name, const string &head[], const int nh, const string &body[], const int from, const int to, const string note)
+{
+   int h = FileOpen(name, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_SHARE_READ);
+   if(h == INVALID_HANDLE) { FileFail(name); return; }
+   if(StringLen(note) > 0) FileWriteString(h, note + "\n");
+   for(int i = 0; i < nh; i++) FileWriteString(h, head[i] + "\n");
+   for(int i = from; i < to; i++) FileWriteString(h, body[i] + "\n");
+   FileClose(h);
+   Print("Riepilogo: ", TerminalInfoString(TERMINAL_DATA_PATH), "\\MQL5\\Files\\", name);
+}
+
+// legge il report HTML appena scritto e produce il riepilogo di testo (un file, oppure due parti se supera g_digLimit caratteri)
+void WriteDigest()
+{
+   string src = InpFilePrefix + "_" + g_symF + ".html";
+   int hf = FileOpen(src, FILE_READ | FILE_BIN | FILE_ANSI | FILE_SHARE_READ);
+   if(hf == INVALID_HANDLE) { Print("Riepilogo: impossibile rileggere ", src, " (errore ", GetLastError(), ")"); return; }
+   int sz = (int)FileSize(hf);
+   string html = FileReadString(hf, sz);
+   FileClose(hf);
+   string body[];
+   int nb = 0;
+   long total = 0;
+   int caps[3] = {80, 40, 20};
+   string head[];
+   int nh = DgHeader(head);
+   long hTot = 0;
+   for(int ci = 0; ci < 3; ci++)
+   {
+      nb = DgParse(html, caps[ci], body);
+      total = 0;
+      for(int i = 0; i < nb; i++) total += StringLen(body[i]) + 1;
+      nh = DgHeader(head);
+      nh = DgKeyPoints(body, nb, head, nh);
+      hTot = 0;
+      for(int i = 0; i < nh; i++) hTot += StringLen(head[i]) + 1;
+      if(total + hTot <= 2 * (long)g_digLimit) break;      // entra in due file: non serve tagliare altre righe
+   }
+   string base = InpFilePrefix + "_" + g_symF + "_RIEPILOGO";
+   FileDelete(base + ".txt");           // niente file vecchi di una esecuzione precedente (singolo o in due parti)
+   FileDelete(base + "_parte1.txt");
+   FileDelete(base + "_parte2.txt");
+   if(total + hTot <= g_digLimit)
+   {
+      DgWriteFile(base + ".txt", head, nh, body, 0, nb, "");
+      return;
+   }
+   // due parti: si divide al titolo di sezione piu' vicino alla meta'
+   long half = (total + hTot) / 2, cum = hTot;
+   int cut = nb / 2;
+   for(int i = 0; i < nb; i++)
+   {
+      cum += StringLen(body[i]) + 1;
+      if(cum >= half && StringFind(body[i], "## ") == 0) { cut = i; break; }
+      if(cum >= half + half / 3) { cut = i; break; }
+   }
+   DgWriteFile(base + "_parte1.txt", head, nh, body, 0, cut, "[PARTE 1 DI 2: invia insieme anche la parte 2. Questo file contiene l'intestazione, la Parte A e l'inizio del resto]");
+   string mini[];
+   int nm = 0;
+   DgAdd(mini, nm, "Simbolo: " + _Symbol + " | " + DgStrip(ChoicesText()) + " | taglio IS/OOS: " + TimeToString(g_cut, TIME_DATE) + " | ATR mediano: " + F(g_medATRpts, 0) + " punti (legenda e avvisi nella parte 1)");
+   DgWriteFile(base + "_parte2.txt", mini, nm, body, cut, nb, "[PARTE 2 DI 2: continuazione del riepilogo, vedi la parte 1 per intestazione e legenda]");
+}
+
+//+------------------------------------------------------------------+
 //| OnStart                                                            |
 //+------------------------------------------------------------------+
 void OnStart()
@@ -5780,7 +6105,7 @@ void OnStart()
       bool anyWin = false;
       for(int cl = 0; cl < NCLS; cl++) if(g_win[cl] >= 0) anyWin = true;
       if(!anyWin) Warn("Nessuna combinazione ha abbastanza trade In-Sample (minimo " + IntegerToString(g_minIS) + ")." + Pick(g_custom, " Con PERSONALIZZATO controllare i filtri scelti: periodo, giorni, range, finestra di ingresso e larghezza possono escludere tutti i giorni.", " La storia disponibile e' troppo corta."));
-      g_nCls = 2;                                   // la parte A e la parte A2 contano come due gruppi di test in piu'
+      g_nCls = ((g_cbEvents >= 100) ? 1 : 0) + ((g_cbEvents2 >= 100) ? 1 : 0);      // la parte A e la parte A2 (se prodotte) contano come gruppi di test in piu'
       for(int cl = 0; cl < NCLS; cl++) if(g_win[cl] >= 0) g_nCls++;
       RunEaRow();
       if(InpWriteCSV) { WriteMapCSV(); WriteCbCSV(); }
@@ -5825,6 +6150,7 @@ void OnStart()
          PrintSummary(g_clsName[cl]);
       }
       if(html) HtmlClose();
+      if(html) WriteDigest();
    }
    Comment("MDRB AutoStudy completato in " + F((GetTickCount() - t0) / 1000.0, 0) + " s. Report: MQL5/Files/" + InpFilePrefix + "_" + g_symF + ".html");
    PrintFormat("Completato in %.1f s", (GetTickCount() - t0) / 1000.0);

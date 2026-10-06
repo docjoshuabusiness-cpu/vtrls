@@ -73,11 +73,44 @@ for ov, frag in (("AnalysisMode=1,ChMinRangePts=800,ChMaxRangePts=300", "ChMinRa
 run("AnalysisMode=1,ChBars=7,ChBarsTF=15")
 a2 = list(csv.DictReader(open(F + "MDRB_Study_EURUSD_partA2.csv")))
 check(len(a2) > 5 and all(r["n_candles"] == "7" and r["tf"] == "M15" for r in a2), f"parte A2: ChBars=7/ChBarsTF=M15 non rispettati ({len(a2)} righe)")
+# 10b. time frame scelto fuori dalla griglia della parte A2: messaggio chiaro, non "storia troppo corta"
+run("AnalysisMode=1,ChBars=7,ChBarsTF=16408")
+html = open(F + "MDRB_Study_EURUSD.html", encoding="utf-8", errors="ignore").read()
+check("Parte A2 non disponibile" in html and "ChBarsTF" in html, "parte A2: messaggio per un time frame fuori dalla griglia")
+# 10c. nessuna finestra oraria possibile (22:00 + 2 h supera le 23:00): la parte A2 sceglie lo SL di riferimento sul proprio In-Sample e lo dichiara
+run("AnalysisMode=1,ChRangeHourStart=22,ChRangeHours=2,ChBars=12")
+html = open(F + "MDRB_Study_EURUSD.html", encoding="utf-8", errors="ignore").read()
+check("Parte A non disponibile" in html and ("scelto sull'In-Sample della parte A2" in html or "valore di default" in html), "parte A2: SL di riferimento dichiarato quando la parte A non ha finestre")
 # 11. file di larghezza e parte A2 in modalita' TUTTO: struttura e coerenza
 run("")
 wr = list(csv.DictReader(open(F + "MDRB_Study_EURUSD_widths.csv")))
-check(len(wr) == 132 and all(float(r["p10_pts"]) <= float(r["median_pts"]) <= float(r["p90_pts"]) and (float(r["tercile1_is_pts"]) <= float(r["tercile2_is_pts"])) for r in wr if int(r["days"]) > 30), f"larghezze: struttura/coerenza ({len(wr)} righe)")
+check(len(wr) == 132 and all(float(r["p10_pts"]) <= float(r["median_pts"]) <= float(r["p90_pts"]) and (r["tercile1_is_pts"] == "" or float(r["tercile1_is_pts"]) <= float(r["tercile2_is_pts"])) for r in wr if int(r["days"]) > 0), f"larghezze: struttura/coerenza ({len(wr)} righe)")
+check(all(r["tercile1_is_pts"] != "-1.00" for r in wr), "larghezze: sentinella -1 nel CSV")
 a2 = list(csv.DictReader(open(F + "MDRB_Study_EURUSD_partA2.csv")))
 check(len(a2) > 100 and {r["tf"] for r in a2} >= {"M1", "M5", "M15", "H1"} and {r["n_candles"] for r in a2} == {"3", "5", "8", "12", "20", "25"}, f"parte A2: TF/N attesi ({len(a2)} righe)")
+# 12. riepilogo di testo da copiare: un file solo se sta nel limite, altrimenti due parti; niente HTML residuo, sezioni chiave presenti
+import glob, re
+def digests():
+    return sorted(glob.glob(F + "MDRB_Study_EURUSD_RIEPILOGO*.txt"))
+def clean():
+    for f in digests(): os.remove(f)
+clean(); run("g_digLimit=900000", days="400")
+d1 = digests()
+check(len(d1) == 1 and d1[0].endswith("_RIEPILOGO.txt"), f"riepilogo: con limite alto atteso 1 file, trovati {[os.path.basename(x) for x in d1]}")
+if d1:
+    txt = open(d1[0], encoding="latin-1").read()
+    check(not re.search(r"<(table|td|tr|th|div|span|b|h[123])[ >]", txt) and not re.search(r"&[a-z]+;", txt), "riepilogo: tag o entita' HTML residui")
+    for key in ("PUNTI CHIAVE", "LEGENDA", "A1. Quale SL", "A5. Le migliori combinazioni", "A7. Larghezza del range", "A8c.", "Sintesi:", "G1. Verdetto", "G3. Come si comporta"):
+        check(key in txt, f"riepilogo: sezione '{key}' mancante")
+    check("Come leggere questo report" not in txt and "Appendice" not in txt, "riepilogo: sezioni escluse presenti")
+clean(); run("g_digLimit=30000", days="400")
+d2 = digests()
+check(len(d2) == 2 and d2[0].endswith("parte1.txt") and d2[1].endswith("parte2.txt"), f"riepilogo: con limite basso attese 2 parti, trovate {[os.path.basename(x) for x in d2]}")
+if len(d2) == 2:
+    t1 = open(d2[0], encoding="latin-1").read(); t2 = open(d2[1], encoding="latin-1").read()
+    check("PARTE 1 DI 2" in t1 and "PARTE 2 DI 2" in t2 and "LEGENDA" in t1 and "## " in t2, "riepilogo: intestazioni delle due parti")
+    both = t1 + t2
+    check(all(k in both for k in ("A8c.", "Sintesi:", "G1. Verdetto")), "riepilogo: sezioni chiave perse dividendo in due parti")
+clean()
 print(f"modalita' personalizzata: filtri verificati, problemi {bad}")
 sys.exit(1 if bad else 0)

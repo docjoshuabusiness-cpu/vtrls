@@ -21,7 +21,7 @@ static void applyOverrides() {
       OV(RequireRangeConfirmation) OV(MinRangePoints) OV(MaxRangePoints) OV(TradeHourStart) OV(TradeMinuteStart) OV(TradeHourEnd) OV(TradeMinuteEnd)
       OV(ExpireExtraMinutes) OV(PendingOrderOffsetPoints) OV(ChaseIfBroken) OV(StopLossPoints) OV(TakeProfitPoints) OV(UseTakeProfit)
       OV(UsaBreakEven) OV(BreakEvenAttivazione) OV(BreakEvenOffset) OV(UsaTrailingStop) OV(TrailingStartProfit) OV(TrailingStep) OV(TrailingOffset)
-      OV(InpMaxHoldHours) OV(InpOptimistic) OV(InpMonthsBack) OV(InpAuto) OV(InpFastPath) OV(AnalysisMode) OV(UnitMode) OV(ChFrom) OV(ChTo) OV(ChRangeHourStart) OV(ChRangeHours) OV(ChTFMin) OV(ChTFMax) OV(ChEntryHourStart) OV(ChEntryHourEnd) OV(ChBars) OV(ChDays) OV(ChMinRangePts) OV(ChMaxRangePts) OV(g_cbDbgW) OV(g_cbDbgT) OV(g_cbDbg2) OV(InpSpreadPoints) OV(InpCommissionPoints) OV(InpISPercent) OV(InpMinTrades)
+      OV(InpMaxHoldHours) OV(InpOptimistic) OV(InpMonthsBack) OV(InpAuto) OV(InpFastPath) OV(AnalysisMode) OV(UnitMode) OV(ChFrom) OV(ChTo) OV(ChRangeHourStart) OV(ChRangeHours) OV(ChTFMin) OV(ChTFMax) OV(ChEntryHourStart) OV(ChEntryHourEnd) OV(ChBars) OV(ChDays) OV(ChMinRangePts) OV(ChMaxRangePts) OV(g_cbDbgW) OV(g_cbDbgT) OV(g_cbDbg2) OV(g_digLimit) OV(InpSpreadPoints) OV(InpCommissionPoints) OV(InpISPercent) OV(InpMinTrades)
       else if(k == "ChWeekdays") { ChWeekdays = kv.substr(eq + 1); }
       else if(k == "ChBarsTF") ChBarsTF = (ENUM_TIMEFRAMES)(int)v;
       else if(k == "Timeframe") Timeframe = (ENUM_TIMEFRAMES)(int)v;
