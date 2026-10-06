@@ -21,7 +21,7 @@ static void applyOverrides() {
       OV(RequireRangeConfirmation) OV(MinRangePoints) OV(MaxRangePoints) OV(TradeHourStart) OV(TradeMinuteStart) OV(TradeHourEnd) OV(TradeMinuteEnd)
       OV(ExpireExtraMinutes) OV(PendingOrderOffsetPoints) OV(ChaseIfBroken) OV(StopLossPoints) OV(TakeProfitPoints) OV(UseTakeProfit)
       OV(UsaBreakEven) OV(BreakEvenAttivazione) OV(BreakEvenOffset) OV(UsaTrailingStop) OV(TrailingStartProfit) OV(TrailingStep) OV(TrailingOffset)
-      OV(InpMaxHoldHours) OV(InpOptimistic) OV(InpMonthsBack) OV(InpAuto) OV(InpFastPath) OV(AnalysisMode) OV(UnitMode) OV(ChFrom) OV(ChTo) OV(ChRangeHourStart) OV(ChRangeHours) OV(ChTFMin) OV(ChTFMax) OV(ChEntryHourStart) OV(ChEntryHourEnd) OV(ChBars) OV(ChDays) OV(ChMinRangePts) OV(ChMaxRangePts) OV(g_cbDbgW) OV(g_cbDbgT) OV(g_cbDbg2) OV(g_digLimit) OV(InpSpreadPoints) OV(InpCommissionPoints) OV(InpISPercent) OV(InpMinTrades)
+      OV(InpMaxHoldHours) OV(InpOptimistic) OV(InpMonthsBack) OV(InpAuto) OV(InpFastPath) OV(AnalysisMode) OV(UnitMode) OV(ChFrom) OV(ChTo) OV(ChRangeHourStart) OV(ChRangeHours) OV(ChTFMin) OV(ChTFMax) OV(ChEntryHourStart) OV(ChEntryHourEnd) OV(ChBars) OV(ChDays) OV(ChMinRangePts) OV(ChMaxRangePts) OV(g_cbDbgW) OV(g_cbDbgT) OV(g_cbDbg2) OV(g_digLimit) OV(g_doConf) OV(g_doAnat) OV(InpSpreadPoints) OV(InpCommissionPoints) OV(InpISPercent) OV(InpMinTrades)
       else if(k == "ChWeekdays") { ChWeekdays = kv.substr(eq + 1); }
       else if(k == "ChBarsTF") ChBarsTF = (ENUM_TIMEFRAMES)(int)v;
       else if(k == "Timeframe") Timeframe = (ENUM_TIMEFRAMES)(int)v;
@@ -42,6 +42,7 @@ int main(int argc, char** argv) {
    applyOverrides();
    gen(days, kappa, sigma_default(), 88172645463325252ULL + 7919ULL * (unsigned long long)scenario);
    InpMonthsBack = 0;
+   if(envs("MDRB_NEW", "1") == "0") { g_doConf = false; g_doAnat = false; }
    if(envs("MDRB_QUIET", "0") == "1") g_quiet = true;
    if(envs("MDRB_DUMP_M1", "0") == "1") {
       FILE* fm = fopen("m1.csv", "w");

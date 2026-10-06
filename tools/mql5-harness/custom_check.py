@@ -100,7 +100,7 @@ check(len(d1) == 1 and d1[0].endswith("_RIEPILOGO.txt"), f"riepilogo: con limite
 if d1:
     txt = open(d1[0], encoding="latin-1").read()
     check(not re.search(r"<(table|td|tr|th|div|span|b|h[123])[ >]", txt) and not re.search(r"&[a-z]+;", txt), "riepilogo: tag o entita' HTML residui")
-    for key in ("PUNTI CHIAVE", "LEGENDA", "A1. Quale SL", "A5. Le migliori combinazioni", "A7. Larghezza del range", "A8c.", "Sintesi:", "G1. Verdetto", "G3. Come si comporta"):
+    for key in ("RIEPILOGO GENERALE", "CONCLUSIONE AUTOMATICA", "LEGENDA", "A1. Quale SL", "A5. Le migliori combinazioni", "A7. Larghezza del range", "A8c.", "Sintesi:", "G1. Verdetto", "G2b. Anatomia del range", "G3. Come si comporta", "G4c. Conferma a candela chiusa"):
         check(key in txt, f"riepilogo: sezione '{key}' mancante")
     check("Come leggere questo report" not in txt and "Appendice" not in txt, "riepilogo: sezioni escluse presenti")
 clean(); run("g_digLimit=30000", days="400")

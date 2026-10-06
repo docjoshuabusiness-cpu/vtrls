@@ -45,6 +45,14 @@ Serve a compilare e far girare il codice su dati sintetici **senza MetaEditor** 
    - riepilogo di testo da copiare (`*_RIEPILOGO.txt`, oppure `_parte1/_parte2` oltre `g_digLimit` caratteri): nessun HTML
      residuo, sezioni chiave presenti, un file con limite alto e due parti con limite basso (in `custom_check.py`).
 
+   - `bc_check.py` (Parte B, variante a conferma a chiusura di candela, 7 time frame): la candela di conferma (prima candela del TF che chiude oltre
+     il livello + offset, dopo il piazzamento ed entro la scadenza), l'ingresso, lo slippage del prezzo pagato, le 19 uscite SL x RR, MFE/rientro/falsi
+     breakout e la completezza (nessun evento mancante o in piu', con il piazzamento preso dalle righe al tocco) ricalcolati in Python dai dati M1;
+   - `rd_check.py` (Parte B, anatomia del range): ogni giorno con un range valido (range, durata, posizione di chiusura, eta' e lato dell'ultimo estremo,
+     contesto rispetto al D1 del giorno prima, compressione, ATR) e gli esiti puri a tre orizzonti (finestra, 4 h, 24 h) ricalcolati in Python;
+   - il riepilogo generale in testa al report e al file di testo (`RIEPILOGO GENERALE`, `CONCLUSIONE AUTOMATICA`) e le sezioni `2b` e `4c` sono controllate
+     nel riepilogo di testo da `custom_check.py`.
+
 Uso: `./run_all.sh` (richiede `g++` e `python3`; crea la cartella `build/`; include `run_mdrb.sh`).
 
 Nota: sui prezzi tondi l'EA reale puo' fallire confronti a soglia esatta per rumore float

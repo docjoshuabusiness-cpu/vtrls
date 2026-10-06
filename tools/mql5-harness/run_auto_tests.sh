@@ -26,7 +26,10 @@ done
 for g in "GEN_GAPS=0.01" "GEN_BREAK=1 GEN_GAPS=0.003"; do
   env $g VPINP="" ./mdrb_study_san 90 0.002 0 >/dev/null 2>err_auto.txt || { echo "ERRORE ASan dati con buchi ($g)"; head -8 err_auto.txt; fail=1; }
 done
-cp $H/auto_null.py $H/cb_check.py $H/cb2_check.py $H/event_check.py $H/custom_check.py .
+for g in "GEN_GAPS=0.01" "GEN_BREAK=1 GEN_GAPS=0.003"; do      # modalita' classica: conferma a chiusura e anatomia del range
+  env $g VPINP="InpAuto=0,RangeMode=1,RangeHourStart=0,RangeHourEnd=8,RangeDaysBack=0,TradeHourStart=9,TradeHourEnd=12" ./mdrb_study_san 90 0.002 0 >/dev/null 2>err_auto.txt || { echo "ERRORE ASan classica ($g)"; head -8 err_auto.txt; fail=1; }
+done
+cp $H/auto_null.py $H/cb_check.py $H/cb2_check.py $H/event_check.py $H/custom_check.py $H/bc_check.py $H/rd_check.py .
 echo "== A4. test nullo: random walk a costi zero, 12 storie (36 vincitori): confermati OOS ~5% atteso, massimo 5 =="
 python3 auto_null.py 900 0.0 12 0 5 - | tail -6 || fail=1
 echo "== A5. test di potenza: salto giornaliero del livello medio (effetto reale nei dati): i vincitori giornalieri devono confermarsi =="
@@ -52,6 +55,37 @@ for ov in "InpAuto=0" "InpAuto=0,RangeMode=1,RangeHourStart=0,RangeHourEnd=8,Ran
   off=$(echo "$ov" | grep -o "PendingOrderOffsetPoints=[0-9]*" | cut -d= -f2 || true); off=${off:-20}
   VPINP="$ov" ./mdrb_study_fast 300 0.002 1 >/dev/null 2>&1
   python3 event_check.py $off || fail=1
+done
+echo "== A7b. Parte B, variante a chiusura su 7 time frame: candela di conferma, ingresso, R, MFE/rientro e completezza contro il ricalcolo indipendente; dati con buchi =="
+for gaps in "" "GEN_GAPS=0.004" "GEN_BREAK=1 GEN_GAPS=0.002"; do
+  echo "-- dati: ${gaps:-completi}"
+  for def in "10 9 12 30 0 8" "20 20 23 0 0 8" "0 9 11 0 6 8"; do      # offset, ora inizio e fine finestra, scadenza extra (min), ora inizio e fine range
+    set -- $def; off=$1; wsh=$2; weh=$3; ex=$4; rhs=$5; rhe=$6
+    ov="InpAuto=0,RangeMode=1,RangeHourStart=$rhs,RangeHourEnd=$rhe,RangeDaysBack=0,TradeHourStart=$wsh,TradeHourEnd=$weh,ExpireExtraMinutes=$ex,PendingOrderOffsetPoints=$off,InpSpreadPoints=2"
+    env $gaps VPINP="$ov" ./mdrb_study_fast 300 0.002 1 >/dev/null 2>&1
+    rs=$(python3 -c "import re;h=open('out/MQL5/Files/MDRB_Study_EURUSD.html',encoding='utf-8',errors='ignore').read();print(re.search(r'ATR mediano (\d+) punti',h).group(1))")
+    for tf in 60 300 900 1800 3600 7200 10800; do
+      o=$(python3 bc_check.py $tf $off $((weh*60)) $ex $((wsh*60)) 2 --rhs $((rhs*60)) --rhe $((rhe*60)) --days-back 0 --ref-sl $rs --min-events 0 2>&1) || { echo "$o" | head -12; fail=1; }
+      echo "def $off/$wsh-$weh/+$ex/$rhs-$rhe: $(echo "$o" | tail -1)"
+    done
+  done
+done
+echo "== A10. Parte B, anatomia del range: giorni, caratteristiche, contesto D1, ATR, esiti w/h4/h24 contro il ricalcolo indipendente; dati con buchi =="
+rd_run() {  # $1 = override del VPINP, poi gli argomenti di rd_check.py
+  local ov="$1"; shift
+  env $gaps VPINP="InpAuto=0,RequireRangeConfirmation=0,$ov,InpSpreadPoints=2" ./mdrb_study_fast 300 0.002 1 >/dev/null 2>&1
+  local cut lastd o
+  cut=$(awk -F, '$3=="OOS"{print $1; exit}' out/MQL5/Files/MDRB_Study_EURUSD_range_days.csv)
+  lastd=$(python3 -c "import time;l=open('m1.csv').read().strip().split('\n')[-1].split(',')[0];print(time.strftime('%Y.%m.%d',time.gmtime(int(l))))")
+  o=$(python3 rd_check.py --spread 2 --atr-tf H1 --cut "$cut" --to-day "$lastd" "$@" 2>&1) || { echo "$o" | head -14; fail=1; }
+  echo "$(echo "$o" | grep -c 'differenze 0') controlli senza differenze, $(echo "$o" | grep -E '^[a-zA-Z].*differenze [1-9]' | wc -l) con differenze"
+}
+for gaps in "" "GEN_GAPS=0.004" "GEN_BREAK=1 GEN_GAPS=0.002"; do
+  echo "-- dati: ${gaps:-completi}"
+  rd_run "RangeMode=1,RangeHourStart=0,RangeHourEnd=8,RangeDaysBack=0,TradeHourStart=9,TradeHourEnd=12" --mode time --rhs 0 --rhe 8 --days-back 0 --ws-min 540 --we-min 720
+  rd_run "RangeMode=1,RangeHourStart=8,RangeHourEnd=10,RangeDaysBack=0,TradeHourStart=9,TradeHourEnd=12" --mode time --rhs 8 --rhe 10 --days-back 0 --ws-min 540 --we-min 720
+  rd_run "RangeMode=1,RangeHourStart=0,RangeHourEnd=8,RangeDaysBack=0,TradeHourStart=20,TradeHourEnd=23" --mode time --rhs 0 --rhe 8 --days-back 0 --ws-min 1200 --we-min 1380
+  rd_run "RangeMode=2,RangeDaysBack=1,RangeDaySpan=2,TradeHourStart=10,TradeHourEnd=11" --mode d1 --days-back 1 --span 2 --ws-min 600 --we-min 660
 done
 unset MDRB_DUMP_M1
 echo "== A8. modalita' PERSONALIZZATA: giorni, periodo, larghezza, range orario, finestra, time frame =="

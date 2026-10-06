@@ -33,7 +33,7 @@ def merge_literals(text):
     return text
 t = merge_literals(t)
 t = t.replace("      placed = true;\n      prevExpiry = pX[p];\n",
-              "      placed = true;\n      prevExpiry = pX[p];\n      if(tMin == 0) HarnessPlace(D, g_rs[jp].time, buyPx, sellPx, pX[p]);\n")
+              "      placed = true;\n      prevExpiry = pX[p];\n      if(tMin == 0 && g_conf < 0) HarnessPlace(D, g_rs[jp].time, buyPx, sellPx, pX[p]);\n")
 assert "HarnessPlace(" in t
 open("study_mdrb_pp.cpp", "w", encoding="utf-8").write(t)
 subprocess.check_call([sys.executable, os.path.join(here, "prep.py"), os.path.join(root, "Experts", "MultiDayRangeBreakout.mq5"), "ea_mdrb_tmp.cpp"])
