@@ -26,7 +26,7 @@ done
 for g in "GEN_GAPS=0.01" "GEN_BREAK=1 GEN_GAPS=0.003"; do
   env $g VPINP="" ./mdrb_study_san 90 0.002 0 >/dev/null 2>err_auto.txt || { echo "ERRORE ASan dati con buchi ($g)"; head -8 err_auto.txt; fail=1; }
 done
-cp $H/auto_null.py $H/cb_check.py $H/event_check.py $H/custom_check.py .
+cp $H/auto_null.py $H/cb_check.py $H/cb2_check.py $H/event_check.py $H/custom_check.py .
 echo "== A4. test nullo: random walk a costi zero, 12 storie (36 vincitori): confermati OOS ~5% atteso, massimo 5 =="
 python3 auto_null.py 900 0.0 12 0 5 - | tail -6 || fail=1
 echo "== A5. test di potenza: salto giornaliero del livello medio (effetto reale nei dati): i vincitori giornalieri devono confermarsi =="
@@ -39,6 +39,12 @@ for gaps in "" "GEN_GAPS=0.004" "GEN_BREAK=1 GEN_GAPS=0.002"; do
     set -- $combo
     env $gaps VPINP="g_cbDbgW=$1,g_cbDbgT=$2,InpSpreadPoints=2" ./mdrb_study_fast 150 0.002 1 >/dev/null 2>&1
     python3 cb_check.py $1 $2 2 || fail=1
+  done
+  echo "-- parte A2 (range = ultime N candele): dati: ${gaps:-completi}"
+  for combo in "2 3" "0 0" "4 5" "1 1" "5 2"; do
+    set -- $combo
+    env $gaps VPINP="g_cbDbg2=$(( $1 * 6 + $2 )),InpSpreadPoints=2" ./mdrb_study_fast 150 0.002 1 >/dev/null 2>&1
+    python3 cb2_check.py $1 $2 2 || fail=1
   done
 done
 echo "== A7. Parte B: ritest, meta' range, zona del giorno prima, falsi breakout, MFE e rientro contro il ricalcolo indipendente =="
@@ -59,7 +65,8 @@ u = int(sys.argv[1]); h = open("out/MQL5/Files/MDRB_Study_EURUSD.html", encoding
 has_atr_tab = "Stessa distanza espressa in ATR" in h
 appx = "A. Appendice: distanze in ATR" in h          # appendice con le griglie ATR (metro PUNTI)
 appx_pt = "A. Appendice: rischio/rendimento in PUNTI" in h     # appendice con le griglie in punti (metro ATR)
-ok = (u == 0 and appx and not has_atr_tab and not appx_pt) or (u == 1 and has_atr_tab and appx_pt and not appx) or (u == 2 and has_atr_tab and not appx and not appx_pt)
+new_sections = all(x in h for x in ("A6. Larghezza dei range orari", "A7. Larghezza del range e time frame", "Parte A2", "A8. Per time frame e numero di candele", "A8c."))
+ok = new_sections and ((u == 0 and appx and not has_atr_tab and not appx_pt) or (u == 1 and has_atr_tab and appx_pt and not appx) or (u == 2 and has_atr_tab and not appx and not appx_pt))
 print("unita'", u, "OK" if ok else "FALLITO")
 sys.exit(0 if ok else 1)
 PYU

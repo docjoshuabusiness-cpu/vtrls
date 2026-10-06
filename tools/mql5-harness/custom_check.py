@@ -69,5 +69,15 @@ for ov, frag in (("AnalysisMode=1,ChMinRangePts=800,ChMaxRangePts=300", "ChMinRa
                  ("AnalysisMode=1,ChRangeHours=30", "ChRangeHours"), ("AnalysisMode=1,ChEntryHourStart=10,ChEntryHourEnd=10", "ChEntryHourStart")):
     err = run_err(ov)
     check("ALERT: Errore" in err and frag in err, f"validazione '{ov}': nessun errore chiaro ({err[:120]!r})")
+# 10. parte A2 personalizzata: ChBars = numero di candele, ChBarsTF = time frame
+run("AnalysisMode=1,ChBars=7,ChBarsTF=15")
+a2 = list(csv.DictReader(open(F + "MDRB_Study_EURUSD_partA2.csv")))
+check(len(a2) > 5 and all(r["n_candles"] == "7" and r["tf"] == "M15" for r in a2), f"parte A2: ChBars=7/ChBarsTF=M15 non rispettati ({len(a2)} righe)")
+# 11. file di larghezza e parte A2 in modalita' TUTTO: struttura e coerenza
+run("")
+wr = list(csv.DictReader(open(F + "MDRB_Study_EURUSD_widths.csv")))
+check(len(wr) == 132 and all(float(r["p10_pts"]) <= float(r["median_pts"]) <= float(r["p90_pts"]) and (float(r["tercile1_is_pts"]) <= float(r["tercile2_is_pts"])) for r in wr if int(r["days"]) > 30), f"larghezze: struttura/coerenza ({len(wr)} righe)")
+a2 = list(csv.DictReader(open(F + "MDRB_Study_EURUSD_partA2.csv")))
+check(len(a2) > 100 and {r["tf"] for r in a2} >= {"M1", "M5", "M15", "H1"} and {r["n_candles"] for r in a2} == {"3", "5", "8", "12", "20", "25"}, f"parte A2: TF/N attesi ({len(a2)} righe)")
 print(f"modalita' personalizzata: filtri verificati, problemi {bad}")
 sys.exit(1 if bad else 0)

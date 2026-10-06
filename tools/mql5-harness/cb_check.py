@@ -48,6 +48,7 @@ def sim(j0, d, E0, SLd, TPd, Lh):
 L4 = 240; L24 = 1440
 def kbucket(k): return 0 if k <= 1 else 1 if k == 2 else 2 if k == 3 else 3 if k <= 5 else 4 if k <= 10 else 5
 exp = {}
+obs = []                                    # range osservati (con almeno una candela dopo la fine): (giorno, ws, wd, larghezza, rotto)
 order = []                                  # ordine di generazione degli eventi (giorno, finestra) come nello script
 last = T[-1]
 days = sorted(set(t - t % 86400 for t in T))
@@ -63,13 +64,17 @@ for D in days[:-1]:               # lo script esclude l'ultimo giorno D1 (potreb
         endDay = D + 86400
         ci = bisect.bisect_left(ctimes, re0)
         hit = None
+        seen = False
         for q in range(ci, len(ctimes)):
             ct = ctimes[q]
             if ct + sec > endDay: break
             if ct < re0: continue
+            seen = True
             cc = cand[ct][2]
             if cc > hi: hit = (ct, 1); break
             if cc < lo: hit = (ct, -1); break
+        if not seen: continue
+        obs.append((D, ws, wd, (hi - lo) / pt, hit is not None))
         if hit is None: continue
         ct, d = hit
         k = (ct - re0) // sec + 1
@@ -144,6 +149,7 @@ if w_idx < 0:
     dd = list(csv.DictReader(open("out/MQL5/Files/MDRB_Study_EURUSD_cb_dedup_debug.csv")))
     nbad = 0; ncmp = 0
     for r in dd:
+        if r["kind"] not in ("a", "k"): continue
         i, m, part = int(r["sl"]), int(r["m"]), int(r["part"])
         ref = A.get((i, m, part), [0, 0.0, 0.0]) if r["kind"] == "a" else K.get((int(r["kb"]), i, m, part), [0, 0.0, 0.0])
         ncmp += 1
@@ -151,6 +157,75 @@ if w_idx < 0:
         if nn != ref[0] or abs(float(r["sum"]) - ref[1]) > 5e-4 * max(1, nn) or abs(float(r["sum2"]) - ref[2]) > 5e-4 * max(1, nn):
             nbad += 1
             if nbad <= 6: print("aggregato distinto diverso", r["kind"], r["kb"], i, m, part, "script", nn, round(float(r["sum"]), 4), "python", ref[0], round(ref[1], 4))
+    # larghezza dei range orari: statistiche per finestra, terzili sull'IS, fasce, eventi distinti per fascia, range osservati per fascia
+    wd_rows = list(csv.DictReader(open("out/MQL5/Files/MDRB_Study_EURUSD_cb_width_debug.csv")))
+    cutv = int([r for r in wd_rows if r["kind"] == "meta"][0]["w"])
+    def quant(a, p):
+        pos = p * (len(a) - 1); i0 = int(math.floor(pos)); i1 = min(i0 + 1, len(a) - 1); fr = pos - i0
+        return a[i0] * (1 - fr) + a[i1] * fr
+    widths = {}
+    for D in days[:-1]:
+        if D > last: break
+        for wi, (ws_, wd_) in enumerate(wins):
+            rs0 = D + ws_ * 3600; re0 = rs0 + wd_ * 3600
+            ja, jb = lower(rs0), lower(re0)
+            if jb - ja < max(1, int(0.6 * wd_ * 3600 / 60)): continue
+            hi = max(H[ja:jb]); lo = min(L[ja:jb])
+            if not (hi > lo) or lo <= 0 or (hi - lo) < 2.0 * S: continue
+            widths[(D, wi)] = (hi - lo) / pt
+    cuts = {}
+    wbad = 0
+    for r in wd_rows:
+        if r["kind"] != "win": continue
+        wi = int(r["w"])
+        allv = sorted(v for (D, w2), v in widths.items() if w2 == wi)
+        isv = sorted(v for (D, w2), v in widths.items() if w2 == wi and D < cutv)
+        c1, c2 = (quant(isv, 1 / 3.0), quant(isv, 2 / 3.0)) if len(isv) >= 30 else (-1.0, -1.0)
+        cuts[wi] = (c1, c2)
+        got_ = (int(r["n"]), float(r["med"]), float(r["p10"]), float(r["p90"]), float(r["c1"]), float(r["c2"]))
+        exp_ = (len(allv), quant(allv, 0.5) if allv else 0.0, quant(allv, 0.1) if allv else 0.0, quant(allv, 0.9) if allv else 0.0, c1, c2)
+        if got_[0] != exp_[0] or any(abs(a - b) > 2e-3 for a, b in zip(got_[1:], exp_[1:])):
+            wbad += 1
+            if wbad <= 5: print("larghezza finestra diversa", r["ws"], r["wd"], got_, exp_)
+    def wbucket(wi, wp):
+        c1, c2 = cuts[wi]
+        if c1 < 0: return -1
+        return 0 if wp < c1 else (1 if wp < c2 else 2)
+    winidx = {w: i for i, w in enumerate(wins)}
+    WS, seenW = {}, set()
+    for key in order:
+        if key not in got: continue
+        D, ws_, wd_, k, d = key
+        wi = winidx[(ws_, wd_)]
+        wb = wbucket(wi, widths[(D, wi)])
+        if wb < 0: continue
+        tc = exp[key][3]; part = got[key][7]
+        if (tc, d, wb) in seenW: continue
+        seenW.add((tc, d, wb))
+        for idx, Rv in enumerate(exp[key][4]):
+            i, m = divmod(idx, 3)
+            a = WS.setdefault((wb, i, m + 1, part), [0, 0.0, 0.0]); a[0] += 1; a[1] += Rv; a[2] += Rv * Rv
+    RG = {}
+    for (D, ws_, wd_, wp, brk_) in obs:
+        wi = winidx[(ws_, wd_)]
+        wb = wbucket(wi, widths[(D, wi)])
+        if wb < 0: continue
+        part = 1 if D >= cutv else 0
+        a = RG.setdefault((wb, part), [0, 0.0, 0]); a[0] += 1; a[1] += wp; a[2] += 1 if brk_ else 0
+    for r in dd:
+        if r["kind"] == "w":
+            ncmp += 1
+            ref = WS.get((int(r["kb"]), int(r["sl"]), int(r["m"]), int(r["part"])), [0, 0.0, 0.0]); nn = int(r["n"])
+            if nn != ref[0] or abs(float(r["sum"]) - ref[1]) > 5e-4 * max(1, nn) or abs(float(r["sum2"]) - ref[2]) > 5e-4 * max(1, nn):
+                nbad += 1
+                if nbad <= 6: print("fascia di larghezza diversa", r["kb"], r["sl"], r["m"], r["part"], "script", nn, round(float(r["sum"]), 4), "python", ref[0], round(ref[1], 4))
+        elif r["kind"] == "wr":
+            ncmp += 1
+            ref = RG.get((int(r["kb"]), int(r["part"])), [0, 0.0, 0])
+            if int(r["n"]) != ref[0] or abs(float(r["sum"]) - ref[1]) > 1e-3 * max(1, ref[0]) or int(float(r["sum2"])) != ref[2]:
+                nbad += 1
+                if nbad <= 6: print("range per fascia diversi", r["kb"], r["part"], "script", r["n"], r["sum"], r["sum2"], "python", ref)
+    nbad += wbad
     tot_a = sum(v[0] for (i, m, p), v in A.items() if i == 3 and m == 2)
     msg += f" | aggregati su eventi distinti: {ncmp} celle, differenze {nbad} (eventi totali {len(order)} -> distinti {tot_a})"
     bad += nbad
