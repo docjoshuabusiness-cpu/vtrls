@@ -5062,6 +5062,7 @@ struct SCvInfo
 {
    bool   ok;
    int    days, n, longs, shorts, noFill, skip, repl;
+   int    dup;        // 0 = variante distinta; altrimenti 1 + indice della prima variante con gli STESSI ingressi e gli stessi esiti (es. H1 e H2 con una finestra di un'ora)
    double fakePct, rt24Pct, mfeMed, pullMed, delayMed, slipMed, widthMed;
 };
 SCvInfo g_cvI[];                     // [cl * NCV + v]
@@ -5190,6 +5191,16 @@ void ConfirmStudy(const int cl, const string suffix)
       for(int c = 0; c < C; c++) { g_cvIS[idx * C + c] = tIS[c]; g_cvOOS[idx * C + c] = tOOS[c]; }
       g_cvI[idx].skip = skip[0];
       g_cvI[idx].repl = repl[0];
+      for(int w = 0; w < v && g_cvI[idx].dup == 0; w++)
+      {
+         int wi = g_curCls * NCV + w;
+         if(!g_cvI[wi].ok || g_cvI[wi].n != E || g_cvI[wi].dup != 0) continue;
+         bool same = (g_cvI[wi].longs == g_cvI[idx].longs && g_cvI[wi].shorts == g_cvI[idx].shorts);
+         for(int c = 0; c < C && same; c++)
+            if(g_cvIS[wi * C + c].n != g_cvIS[idx * C + c].n || g_cvOOS[wi * C + c].n != g_cvOOS[idx * C + c].n ||
+               MathAbs(g_cvIS[wi * C + c].sum - g_cvIS[idx * C + c].sum) > 1e-9 || MathAbs(g_cvOOS[wi * C + c].sum - g_cvOOS[idx * C + c].sum) > 1e-9) same = false;
+         if(same) g_cvI[idx].dup = w + 1;
+      }
       // qualita' delle rotture di questa variante
       double mf[], pb[], dl[], sp[], wd[];
       ArrayResize(mf, E); ArrayResize(pb, E); ArrayResize(dl, E); ArrayResize(sp, E); ArrayResize(wd, E);
@@ -5273,7 +5284,7 @@ void ConfirmStudy(const int cl, const string suffix)
    for(int v = 1; v < NCV; v++)
    {
       int idx = g_curCls * NCV + v;
-      if(!g_cvI[idx].ok) continue;
+      if(!g_cvI[idx].ok || g_cvI[idx].dup != 0) continue;
       SStat s;
       s = g_cvIS[idx * C];
       if(s.n < g_minIS) continue;
@@ -5301,7 +5312,9 @@ string ConfRow(const int cl, const int v, const bool best)
    int n = g_cvI[idx].n;
    int dys = MathMax(1, g_cvI[idx].days);
    string cls = (so.n >= 20 && MathAbs(StatT(so)) >= ZThr()) ? ((StatT(so) > 0) ? " class='ok'" : " class='bad'") : "";
-   string s = "<tr" + Pick(best, " class='bestrow'", "") + "><th class='rl'>" + ConfName(v) + "</th><td>" + IntegerToString(n) + "</td><td>" + F(100.0 * n / dys, 1) + "</td><td>" + IntegerToString(g_cvI[idx].longs) + "/" + IntegerToString(g_cvI[idx].shorts) + "</td>";
+   string nm = ConfName(v);
+   if(g_cvI[idx].dup != 0) nm += " (stessi ingressi e stessi esiti di: " + ((g_cvI[idx].dup == 1) ? "tocco" : g_cbName[g_cvI[idx].dup - 2]) + ")";
+   string s = "<tr" + Pick(best, " class='bestrow'", "") + "><th class='rl'>" + nm + "</th><td>" + IntegerToString(n) + "</td><td>" + F(100.0 * n / dys, 1) + "</td><td>" + IntegerToString(g_cvI[idx].longs) + "/" + IntegerToString(g_cvI[idx].shorts) + "</td>";
    if(n == 0) return s + "<td colspan='17' class='rl'>nessun ingresso</td></tr>\n";
    s += "<td>" + F(g_cvI[idx].delayMed, 0) + "</td><td>" + F(g_cvI[idx].slipMed, 1) + "</td><td>" + F(g_cvI[idx].fakePct, 1) + "%</td><td>" + F(g_cvI[idx].mfeMed, 0) + "</td><td>" + F(g_cvI[idx].pullMed, 0) + "</td>";
    s += "<td>" + IntegerToString(si.n) + "</td><td>" + F(StatWR(si), 1) + "%</td><td>" + F(StatMean(si), 3) + "</td><td>" + F(StatT(si), 2) + "</td><td>" + IntegerToString(so.n) + "</td><td>" + F(StatWR(so), 1) + "%</td><td>" + F(StatMean(so), 3) +
@@ -5316,7 +5329,7 @@ void HtmlConfirm(const int cl)
    HW("<h2>" + g_pre + "4c. Conferma a candela chiusa su tutti i time frame: conviene aspettare la chiusura?</h2>");
    if(!g_cvI[cl * NCV].ok) { HW("<div class='warn'>Variante a conferma non calcolata per questa definizione.</div>"); return; }
    int nOk = 0;
-   for(int v = 1; v < NCV; v++) if(g_cvI[cl * NCV + v].ok) nOk++;
+   for(int v = 1; v < NCV; v++) if(g_cvI[cl * NCV + v].ok && g_cvI[cl * NCV + v].dup == 0) nOk++;
    if(nOk == 0) { HW("<div class='warn'>Nessun time frame disponibile per la conferma (la storia di simulazione &egrave; " + EnumToString(g_simTF) + Pick(g_custom, " oppure i time frame sono esclusi dal filtro scelto", "") + ").</div>"); return; }
    HW("<div class='note'>Stesso range, stessa finestra di ingresso (" + HHMM(g_cur.wsMin) + "-" + HHMM(g_cur.weMin) + "), stesso offset (" + IntegerToString(g_cur.offsetPts) + " pt), stesse uscite dell'ingresso al tocco; cambia solo l'ingresso: invece dell'ordine stop si aspetta la <b>chiusura della prima candela</b> del time frame che chiude oltre il livello (massimo + offset per i long, minimo &minus; offset per gli short), entro la scadenza della coppia, e si entra a mercato a quel prezzo (long all'ask, short al bid). " +
       "Lo SL e il TP si misurano dal prezzo di ingresso (non dal livello). Le colonne MFE, rientro e falsi breakout restano misurate dal livello rotto, cos&igrave; sono confrontabili col tocco; &laquo;ingresso oltre il livello&raquo; &egrave; il costo della conferma: di quanto l'ingresso &egrave; peggiore del livello. Time frame: M1 &rarr; H3 (quelli compatibili con la simulazione " + EnumToString(g_simTF) + "); " +
@@ -5327,7 +5340,7 @@ void HtmlConfirm(const int cl)
    HW("</table></div>");
    int bv = g_cvBest[cl];
    int nValidTF = 0;
-   for(int v = 1; v < NCV; v++) if(g_cvI[cl * NCV + v].ok && g_cvIS[(cl * NCV + v) * C].n >= g_minIS) nValidTF++;
+   for(int v = 1; v < NCV; v++) if(g_cvI[cl * NCV + v].ok && g_cvI[cl * NCV + v].dup == 0 && g_cvIS[(cl * NCV + v) * C].n >= g_minIS) nValidTF++;
    HW("<table><tr><th class='rl'>Esito della conferma</th><th class='rl'>Time frame scelto (IS)</th><th>N OOS</th><th>E[R] OOS</th><th>t OOS</th><th>E[R] OOS al tocco</th><th class='rl'>Esito</th></tr>");
    if(bv < 0) HW("<tr><th class='rl'>Variante a conferma</th><td colspan='6' class='rl'>nessun time frame con almeno " + IntegerToString(g_minIS) + " ingressi In-Sample</td></tr>");
    else
@@ -5347,7 +5360,7 @@ void HtmlConfirm(const int cl)
    for(int v = 1; v < NCV; v++)
    {
       int idx = cl * NCV + v;
-      if(!g_cvI[idx].ok || g_cvI[idx].n == 0) continue;
+      if(!g_cvI[idx].ok || g_cvI[idx].n == 0 || g_cvI[idx].dup != 0) continue;
       SStat pi, po, ci, co, ui, uo;
       pi = g_cvPD[idx * 2]; po = g_cvPD[idx * 2 + 1];
       ci = g_cvCF[idx * 2]; co = g_cvCF[idx * 2 + 1];
@@ -5369,7 +5382,7 @@ void HtmlConfirm(const int cl)
       for(int v = 0; v < NCV; v++)
       {
          int idx = cl * NCV + v;
-         if(!g_cvI[idx].ok) continue;
+         if(!g_cvI[idx].ok || g_cvI[idx].dup != 0) continue;
          HW("<tr><th class='rl'>" + ConfName(v) + "</th>");
          for(int k = 0; k < NSLF * NRRM; k++)
          {
@@ -6772,6 +6785,10 @@ string DgDecode(string s)
    StringReplace(s, "&ograve;", "o'");
    StringReplace(s, "&igrave;", "i'");
    StringReplace(s, "&rarr;", "->");
+   StringReplace(s, "&harr;", "<->");
+   StringReplace(s, "&Delta;", "Delta");
+   StringReplace(s, "&rho;", "rho");
+   StringReplace(s, "&radic;", "radice di ");
    StringReplace(s, "&middot;", "-");
    StringReplace(s, "&mdash;", "-");
    StringReplace(s, "&laquo;", "\"");
@@ -7027,7 +7044,7 @@ string SumRowTxt(const string area, const string res, const string reading)
 string SumStat(const SStat &s)
 {
    if(s.n == 0) return "N 0";
-   return "N " + IntegerToString(s.n) + ", E[R] " + F(StatMean(s), 3) + ", t " + F(StatT(s), 2) + ", win " + F(StatWR(s), 1) + "%";
+   return "N " + IntegerToString(s.n) + ", E[R] " + F(StatMean(s), 3) + ", t " + Pick(MathAbs(StatT(s)) >= 99.0, "n/d", F(StatT(s), 2)) + ", win " + F(StatWR(s), 1) + "%";
 }
 
 // migliore combinazione (range orario, time frame, k) della parte A con SL e RR scelti sull'IS: come A5
@@ -7105,7 +7122,7 @@ string SumPartA()
       double p;
       string vd = Verdict(xo, p, AlphaCls() / NSL);
       SumNote(xo, AlphaCls() / NSL, "Parte A: SL " + CbSLName(bestI) + " con RR 1:2 su tutti i time frame");
-      s += SumRowTxt("Parte A: lo SL migliore (A1, tutti i time frame, RR 1:2)", "SL scelto sull'IS: " + CbSLName(bestI) + " | IS: " + SumStat(xi) + " | OOS: " + SumStat(xo), vd);
+      s += SumRowTxt("Parte A: lo SL migliore (A1, tutti i time frame, RR 1:2)", "SL scelto sull'IS: " + CbSLName(bestI) + " | IS: " + SumStat(xi) + " | OOS: " + SumStat(xo), vd + " (i t di questa riga sono gonfiati: gli eventi di time frame e finestre diverse sono molto correlati; conta l'E[R])");
    }
    // sopravvivenza dello SL
    int reach = 0;
@@ -7225,12 +7242,18 @@ string SumDeep(const int cl)
    if(g_cvI[cl * NCV].ok)
    {
       int C = NCCFG;
-      string tf = "tocco " + F(StatMean(g_cvOOS[(cl * NCV) * C]), 3);
+      string tf = "tocco " + Pick(g_cvOOS[(cl * NCV) * C].n > 0, F(StatMean(g_cvOOS[(cl * NCV) * C]), 3), "-");
       string nn = "tocco " + IntegerToString(g_cvI[cl * NCV].n);
       for(int v = 1; v < NCV; v++)
          if(g_cvI[cl * NCV + v].ok)
          {
-            tf += "; " + g_cbName[v - 1] + " " + F(StatMean(g_cvOOS[(cl * NCV + v) * C]), 3);
+            if(g_cvI[cl * NCV + v].dup != 0)
+            {
+               tf += "; " + g_cbName[v - 1] + " = " + ((g_cvI[cl * NCV + v].dup == 1) ? "tocco" : g_cbName[g_cvI[cl * NCV + v].dup - 2]);
+               nn += "; " + g_cbName[v - 1] + " = " + ((g_cvI[cl * NCV + v].dup == 1) ? "tocco" : g_cbName[g_cvI[cl * NCV + v].dup - 2]);
+               continue;
+            }
+            tf += "; " + g_cbName[v - 1] + " " + Pick(g_cvOOS[(cl * NCV + v) * C].n > 0, F(StatMean(g_cvOOS[(cl * NCV + v) * C]), 3) + " (N " + IntegerToString(g_cvOOS[(cl * NCV + v) * C].n) + ")", "-");
             nn += "; " + g_cbName[v - 1] + " " + IntegerToString(g_cvI[cl * NCV + v].n);
          }
       int bv = g_cvBest[cl];
@@ -7239,18 +7262,26 @@ string SumDeep(const int cl)
       if(bv > 0)
       {
          int nValidTF = 0;
-         for(int v = 1; v < NCV; v++) if(g_cvI[cl * NCV + v].ok && g_cvIS[(cl * NCV + v) * C].n >= g_minIS) nValidTF++;
-         SStat a, o, po, ot;
+         for(int v = 1; v < NCV; v++) if(g_cvI[cl * NCV + v].ok && g_cvI[cl * NCV + v].dup == 0 && g_cvIS[(cl * NCV + v) * C].n >= g_minIS) nValidTF++;
+         SStat a, o, po, ot, ui, uo;
          a = g_cvIS[(cl * NCV + bv) * C];
          o = g_cvOOS[(cl * NCV + bv) * C];
          po = g_cvPD[(cl * NCV + bv) * 2 + 1];
          ot = g_cvOOS[(cl * NCV) * C];
+         ui = g_cvUC[(cl * NCV + bv) * 2];
+         uo = g_cvUC[(cl * NCV + bv) * 2 + 1];
          double p;
          vd = Verdict(o, p, AlphaCls() / MathMax(1, nValidTF));
          SumNote(o, AlphaCls() / MathMax(1, nValidTF), "Conferma a chiusura " + g_clsName[cl] + " (" + g_cbName[bv - 1] + ")");
-         best = "scelto sull'IS: chiusura " + g_cbName[bv - 1] + " (una scelta su " + IntegerToString(nValidTF) + ") | IS: " + SumStat(a) + " | OOS: " + SumStat(o) + " | al tocco OOS: " + SumStat(ot) + " | differenza sugli stessi giorni (OOS): " + F(StatMean(po), 3) + " R (t " + F(StatT(po), 2) + ", " + IntegerToString(po.n) + " giorni) | falsi breakout: tocco " + F(g_cvI[cl * NCV].fakePct, 1) + "% &rarr; chiusura " + F(g_cvI[cl * NCV + bv].fakePct, 1) + "%; costo d'ingresso mediano oltre il livello: " + F(g_cvI[cl * NCV + bv].slipMed, 1) + " punti";
+         // la conferma vale solo se batte il tocco sugli stessi giorni: lettura della differenza accoppiata (OOS)
+         string dl = "";
+         if(po.n >= 30 && StatT(po) <= -2.0) dl = "<span class='bad'>la conferma PEGGIORA il tocco sugli stessi giorni (" + F(StatMean(po), 3) + " R per trade, t " + F(StatT(po), 2) + "): il ritardo d'ingresso costa pi&ugrave; di quanto i falsi segnali filtrati fanno risparmiare</span>";
+         else if(po.n >= 30 && StatT(po) >= 2.0) dl = "<span class='ok'>la conferma MIGLIORA il tocco sugli stessi giorni (+" + F(StatMean(po), 3) + " R per trade, t " + F(StatT(po), 2) + ")</span>";
+         else dl = "differenza dal tocco sugli stessi giorni non distinguibile dal rumore";
+         vd += " | " + dl;
+         best = "scelto sull'IS: chiusura " + g_cbName[bv - 1] + " (una scelta su " + IntegerToString(nValidTF) + ") | IS: " + SumStat(a) + " | OOS: " + SumStat(o) + " | al tocco OOS: " + SumStat(ot) + " | differenza sugli stessi giorni (OOS): " + F(StatMean(po), 3) + " R (t " + F(StatT(po), 2) + ", " + IntegerToString(po.n) + " giorni) | tocchi NON confermati dalla chiusura: IS " + SumStat(ui) + ", OOS " + SumStat(uo) + " | falsi breakout: tocco " + F(g_cvI[cl * NCV].fakePct, 1) + "% &rarr; chiusura " + F(g_cvI[cl * NCV + bv].fakePct, 1) + "%; costo d'ingresso mediano oltre il livello: " + F(g_cvI[cl * NCV + bv].slipMed, 1) + " punti";
       }
-      s += SumRowTxt("Conferma a chiusura " + g_clsName[cl] + " (tutti i time frame)", "E[R] OOS per ingresso (uscita di riferimento): " + tf + " | ingressi: " + nn, "Confronto con l'ingresso al tocco, stesso range e stesse uscite (sezione " + Pick(cl == 0, "G", Pick(cl == 1, "S", "M")) + "4c).");
+      s += SumRowTxt("Conferma a chiusura " + g_clsName[cl] + " (tutti i time frame)", "E[R] OOS per ingresso (uscita di riferimento; N = trade OOS): " + tf + " | ingressi: " + nn, "Confronto con l'ingresso al tocco, stesso range e stesse uscite (sezione " + Pick(cl == 0, "G", Pick(cl == 1, "S", "M")) + "4c). Dove due time frame danno gli stessi ingressi (finestra di un'ora) sono scritti uguali.");
       s += SumRowTxt("Conferma a chiusura " + g_clsName[cl] + ": time frame migliore", best, vd);
    }
    return s;
