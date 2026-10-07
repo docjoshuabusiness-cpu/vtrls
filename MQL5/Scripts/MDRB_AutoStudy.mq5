@@ -386,6 +386,7 @@ int      g_srvOff = 2;             // offset del server rispetto a GMT in ore (s
 
 bool     g_curNeg = false;         // idem per la classe in analisi
 int      g_nCls = 1;               // numero di classi con un vincitore (correzione per test multipli del verdetto)
+int      g_nConfGroups = 0;        // gruppi di test della variante a conferma (uno per orizzonte analizzato a fondo): servono alla soglia di significativita'
 int      g_kClass = 1;             // combinazioni valide della classe in analisi
 int      g_minIS = 30;             // trade IS minimi per candidare una combinazione/cella (vedi MinTradesIS)
 int      g_refPtIdx = -1;         // cella SL ATR di riferimento nella griglia principale
@@ -1187,20 +1188,23 @@ bool BuildDay(const SDef &d, const int di, const datetime tMin, SEvent &e, SFunn
       int jt = -1, dir = 0, amb = 0;
       double fillDelta = 0.0, E0 = 0.0, Sf = 0.0;
       datetime tEntry = 0;
+      double lvB = 0.0, lvS = 0.0;       // livelli di conferma (stessa normalizzazione al tick del prezzo degli ordini stop, senza lo spostamento del chase)
       if(g_conf >= 0)
       {
          // variante a conferma: niente ordini stop. Si entra a mercato alla chiusura della PRIMA candela del time frame che chiude oltre il livello (+ offset),
          // tra la barra di piazzamento e la scadenza della coppia. Se subito dopo la chiusura non ci sono quotazioni (mercato chiuso) l'ingresso non e' eseguibile e il giorno finisce.
          int csec = g_cbSec[g_conf], coff = g_cbOff[g_conf], cn = g_cbN[g_conf];
          double offp = d.offsetPts * g_point;
+         lvB = NormPrice(hi + offp);
+         lvS = NormPrice(lo - offp);
          for(int q = CbLower(coff, cn, g_rs[jp].time - csec + 1); q < cn; q++)
          {
             datetime tc = g_cb[coff + q].t + csec;
             if(tc > pX[p]) break;
             double cc = g_cb[coff + q].c;
             int cdir = 0;
-            if(cc - (hi + offp) > g_tol) cdir = 1;
-            else if((lo - offp) - cc > g_tol) cdir = -1;
+            if(cc - lvB > g_tol) cdir = 1;
+            else if(lvS - cc > g_tol) cdir = -1;
             if(cdir == 0) continue;
             int jn = LowerBound(g_rs, tc);
             if(jn >= nS || (long)(g_rs[jn].time - tc) > 900) break;
@@ -1287,7 +1291,8 @@ bool BuildDay(const SDef &d, const int di, const datetime tMin, SEvent &e, SFunn
       e.delta = fillDelta;
       e.spread = Sf;
       e.hi = hi; e.lo = lo; e.width = hi - lo;
-      e.buyPx = buyPx; e.sellPx = sellPx;
+      e.buyPx = (g_conf >= 0) ? lvB : buyPx;
+      e.sellPx = (g_conf >= 0) ? lvS : sellPx;
       e.atr = atr;
       MqlDateTime dt;
       TimeToStruct(D, dt);
@@ -3681,6 +3686,8 @@ int MinTradesIS()
 // famiglie (5 per orizzonte) x orizzonti con un vincitore; righe di sintesi / uscita EA: solo gli orizzonti.
 double AlphaCls() { return 0.05 / MathMax(1, g_nCls); }
 double AlphaFam() { return 0.05 / (5.0 * MathMax(1, g_nCls)); }
+// variante a conferma: un gruppo di test per orizzonte analizzato a fondo, in piu' di quelli di g_nCls, e una scelta tra i time frame distinti
+double AlphaConf(const int nTF) { return 0.05 / (MathMax(1, g_nCls + g_nConfGroups) * MathMax(1, nTF)); }
 double AlphaForFam(const int f)
 {
    if(f < 5) return AlphaFam();
@@ -5071,6 +5078,7 @@ SStat   g_cvPD[];                    // differenza accoppiata conferma - tocco (
 SStat   g_cvCF[], g_cvUC[];          // trade al tocco CONFERMATI / NON CONFERMATI (nello stesso giorno e verso) dal time frame v: [((cl * NCV + v) * 2) + parte]
 int     g_cvBest[NCLS];              // variante a conferma migliore sull'IS (1..NTF), -1 = nessuna
 int     g_curCls = 0;                // classe in analisi (0 giornaliero, 1 settimanale, 2 mensile)
+SStat   g_cvND[];                    // differenza NETTA conferma - tocco per giorno, su tutti i giorni con un trade in almeno una variante (0 dove l'altra non entra): [((cl * NCV + v) * 2) + parte]
 
 void ConfInit()
 {
@@ -5080,6 +5088,8 @@ void ConfInit()
    ArrayResize(g_cvPD, NCLS * NCV * 2);
    ArrayResize(g_cvCF, NCLS * NCV * 2);
    ArrayResize(g_cvUC, NCLS * NCV * 2);
+   ArrayResize(g_cvND, NCLS * NCV * 2);
+   for(int i = 0; i < ArraySize(g_cvND); i++) ZeroMemory(g_cvND[i]);
    for(int i = 0; i < ArraySize(g_cvI); i++) ZeroMemory(g_cvI[i]);
    for(int i = 0; i < ArraySize(g_cvIS); i++) { ZeroMemory(g_cvIS[i]); ZeroMemory(g_cvOOS[i]); }
    for(int i = 0; i < ArraySize(g_cvPD); i++) { ZeroMemory(g_cvPD[i]); ZeroMemory(g_cvCF[i]); ZeroMemory(g_cvUC[i]); }
@@ -5144,7 +5154,7 @@ void ConfirmStudy(const int cl, const string suffix)
          for(int i = 0; i < NSLF; i++) hd += ",sl" + IntegerToString(i);
          for(int i = 0; i < NSLF; i++)
             for(int m = 0; m < NRRM; m++) hd += ",R_s" + IntegerToString(i) + "_m" + IntegerToString(m + 1);
-         FileWriteString(hc, hd + "\n");
+         FileWriteString(hc, hd + ",ref_sl_pts\n");
       }
    }
    datetime tDay[];
@@ -5177,7 +5187,8 @@ void ConfirmStudy(const int cl, const string suffix)
       Comment("MDRB Study: variante a conferma " + ((v == 0) ? "(al tocco)" : g_cbName[v - 1]) + "...");
       SimulateEvents(ev, cfg, R, F2, XJ, true);
       if(IsStopped()) { g_conf = -1; break; }
-      int split = SplitFor(ev);
+      int split = E;      // taglio per DATA, senza il minimo di un trade In-Sample di SplitFor: cosi' IS/OOS di queste tabelle coincidono con le partizioni per giorno
+      for(int e = 0; e < E; e++) if(ev[e].day >= g_cut) { split = e; break; }
       SStat tIS[], tOOS[], tAll[];
       ArrayResize(tIS, C); ArrayResize(tOOS, C); ArrayResize(tAll, C);
       int skip[], repl[];
@@ -5245,12 +5256,22 @@ void ConfirmStudy(const int cl, const string suffix)
          ArrayResize(vD, E);
          ArrayResize(vDr, E);
          for(int e = 0; e < E; e++) { vD[e] = ev[e].day; vDr[e] = ev[e].dir; }
+         datetime cD[];
+         ArrayResize(cD, 0);
+         int nC = 0;
          for(int e = 0; e < E; e++)
          {
             if(XR[e * C] == XR_SKIP) continue;
+            ArrayResize(cD, nC + 1, 512);
+            cD[nC] = ev[e].day;
+            nC++;
             int k = FindDay(tDay, nT, ev[e].day);
-            if(k >= 0) StatAdd(g_cvPD[idx * 2 + ((ev[e].day >= g_cut) ? 1 : 0)], (double)XR[e * C] - tR[k], 0);
+            int pt0 = (ev[e].day >= g_cut) ? 1 : 0;
+            if(k >= 0) StatAdd(g_cvPD[idx * 2 + pt0], (double)XR[e * C] - tR[k], 0);
+            StatAdd(g_cvND[idx * 2 + pt0], (double)XR[e * C] - ((k >= 0) ? tR[k] : 0.0), 0);      // netto: dove il tocco non entra conta 0
          }
+         for(int k = 0; k < nT; k++)
+            if(FindDay(cD, nC, tDay[k]) < 0) StatAdd(g_cvND[idx * 2 + ((tDay[k] >= g_cut) ? 1 : 0)], -tR[k], 0);      // tocco senza ingresso a chiusura: la conferma vale 0
          for(int k = 0; k < nT; k++)
          {
             int q = FindDay(vD, E, tDay[k]);
@@ -5272,7 +5293,7 @@ void ConfirmStudy(const int cl, const string suffix)
             ln += "," + F((double)R[e * C], 4) + "," + F((double)R[e * C + 1], 4);
             for(int i = 0; i < NSLF; i++) ln += "," + F(g_cbSLpts[i], 0);
             for(int k2 = 0; k2 < NSLF * NRRM; k2++) ln += "," + F((double)R[e * C + 2 + k2], 4);
-            FileWriteString(hc, ln + "\n");
+            FileWriteString(hc, ln + "," + F(RefSLPoints(), 0) + "\n");
          }
       }
    }
@@ -5333,7 +5354,7 @@ void HtmlConfirm(const int cl)
    if(nOk == 0) { HW("<div class='warn'>Nessun time frame disponibile per la conferma (la storia di simulazione &egrave; " + EnumToString(g_simTF) + Pick(g_custom, " oppure i time frame sono esclusi dal filtro scelto", "") + ").</div>"); return; }
    HW("<div class='note'>Stesso range, stessa finestra di ingresso (" + HHMM(g_cur.wsMin) + "-" + HHMM(g_cur.weMin) + "), stesso offset (" + IntegerToString(g_cur.offsetPts) + " pt), stesse uscite dell'ingresso al tocco; cambia solo l'ingresso: invece dell'ordine stop si aspetta la <b>chiusura della prima candela</b> del time frame che chiude oltre il livello (massimo + offset per i long, minimo &minus; offset per gli short), entro la scadenza della coppia, e si entra a mercato a quel prezzo (long all'ask, short al bid). " +
       "Lo SL e il TP si misurano dal prezzo di ingresso (non dal livello). Le colonne MFE, rientro e falsi breakout restano misurate dal livello rotto, cos&igrave; sono confrontabili col tocco; &laquo;ingresso oltre il livello&raquo; &egrave; il costo della conferma: di quanto l'ingresso &egrave; peggiore del livello. Time frame: M1 &rarr; H3 (quelli compatibili con la simulazione " + EnumToString(g_simTF) + "); " +
-      "con time frame lunghi la candela pu&ograve; chiudere dopo la scadenza della coppia: pochi ingressi. Uscita di riferimento: " + RefText() + ". Il time frame con E[R] In-Sample migliore &egrave; una scelta tra " + IntegerToString(nOk) + ": l'OOS ne &egrave; il test.</div>");
+      "con time frame lunghi la candela pu&ograve; chiudere dopo la scadenza della coppia: pochi ingressi. Uscita di riferimento: " + RefText() + ". Il time frame evidenziato &egrave; quello con il punteggio In-Sample migliore (stessa metrica della scelta del vincitore: " + Pick(InpRankBy == RANK_TSTAT, "t-stat", Pick(InpRankBy == RANK_EXPECTANCY, "expectancy", "profit factor")) + "), una scelta tra " + IntegerToString(nOk) + " time frame distinti: l'OOS ne &egrave; il test. I time frame con gli stessi ingressi e gli stessi esiti sono mostrati una volta sola.</div>");
    HW("<div class='sc'><table><tr><th class='rl'>Ingresso</th><th>Ingressi</th><th>% giorni</th><th>L/S</th><th>Ritardo mediano (min)</th><th>Ingresso oltre il livello (pt)</th><th>Falsi breakout %</th><th>MFE mediana (pt dal livello)</th><th>Rientro mediano (pt)</th>" +
       "<th>N IS</th><th>Win IS</th><th>E[R] IS</th><th>t IS</th><th>N OOS</th><th>Win OOS</th><th>E[R] OOS</th><th>t OOS</th><th>p OOS</th><th>E[R] IS uscite EA</th><th>E[R] OOS uscite EA</th></tr>");
    for(int v = 0; v < NCV; v++) HW(ConfRow(cl, v, v == g_cvBest[cl] && v > 0));
@@ -5349,28 +5370,34 @@ void HtmlConfirm(const int cl)
       so = g_cvOOS[(cl * NCV + bv) * C];
       ot = g_cvOOS[(cl * NCV) * C];
       double p;
-      string vd = Verdict(so, p, AlphaCls() / MathMax(1, nValidTF));
+      string vd = Verdict(so, p, AlphaConf(nValidTF));
       HW("<tr><th class='rl'>Variante a conferma</th><td class='rl'>" + ConfName(bv) + " (una scelta su " + IntegerToString(nValidTF) + ")</td><td>" + IntegerToString(so.n) + "</td><td>" + F(StatMean(so), 3) + "</td><td>" + F(StatT(so), 2) + "</td><td>" + F(StatMean(ot), 3) + "</td><td class='rl' style='text-align:left'>" + vd + "</td></tr>");
    }
    HW("</table>");
 
    // differenza accoppiata e effetto del filtro
-   HW("<h3>Quanto cambia rispetto al tocco: differenza sugli stessi giorni e trade al tocco che la chiusura avrebbe filtrato</h3><div class='sc'><table><tr><th class='rl'>Time frame</th><th>Giorni in comune IS</th><th>&Delta; E[R] IS (conferma &minus; tocco)</th><th>t IS</th><th>Giorni in comune OOS</th><th>&Delta; E[R] OOS</th><th>t OOS</th>" +
+   HW("<h3>Quanto cambia rispetto al tocco: differenza netta, costo del ritardo sui giorni confermati e trade al tocco che la chiusura avrebbe filtrato</h3><div class='sc'><table><tr><th class='rl'>Time frame</th>" +
+      "<th>NETTA: giorni IS</th><th>&Delta;R per giorno IS</th><th>t IS</th><th>giorni OOS</th><th>&Delta;R per giorno OOS</th><th>t OOS</th>" +
+      "<th>Solo giorni confermati: coppie IS</th><th>&Delta; E[R] IS</th><th>t IS</th><th>coppie OOS</th><th>&Delta; E[R] OOS</th><th>t OOS</th>" +
       "<th>Tocchi confermati: N IS</th><th>E[R] IS</th><th>N OOS</th><th>E[R] OOS</th><th>Tocchi NON confermati: N IS</th><th>E[R] IS</th><th>N OOS</th><th>E[R] OOS</th><th>t Welch OOS (confermati &minus; non)</th></tr>");
    for(int v = 1; v < NCV; v++)
    {
       int idx = cl * NCV + v;
       if(!g_cvI[idx].ok || g_cvI[idx].n == 0 || g_cvI[idx].dup != 0) continue;
-      SStat pi, po, ci, co, ui, uo;
+      SStat ni, no, pi, po, ci, co, ui, uo;
+      ni = g_cvND[idx * 2]; no = g_cvND[idx * 2 + 1];
       pi = g_cvPD[idx * 2]; po = g_cvPD[idx * 2 + 1];
       ci = g_cvCF[idx * 2]; co = g_cvCF[idx * 2 + 1];
       ui = g_cvUC[idx * 2]; uo = g_cvUC[idx * 2 + 1];
+      string cn2 = (no.n >= 20 && MathAbs(StatT(no)) >= ZThr()) ? ((StatT(no) > 0) ? " class='ok'" : " class='bad'") : "";
       string cp = (po.n >= 20 && MathAbs(StatT(po)) >= ZThr()) ? ((StatT(po) > 0) ? " class='ok'" : " class='bad'") : "";
-      HW("<tr><th class='rl'>" + g_cbName[v - 1] + "</th><td>" + IntegerToString(pi.n) + "</td><td>" + F(StatMean(pi), 3) + "</td><td>" + F(StatT(pi), 2) + "</td><td>" + IntegerToString(po.n) + "</td><td>" + F(StatMean(po), 3) + "</td><td" + cp + ">" + F(StatT(po), 2) + "</td>" +
+      HW("<tr><th class='rl'>" + g_cbName[v - 1] + "</th><td>" + IntegerToString(ni.n) + "</td><td>" + F(StatMean(ni), 3) + "</td><td>" + F(StatT(ni), 2) + "</td><td>" + IntegerToString(no.n) + "</td><td>" + F(StatMean(no), 3) + "</td><td" + cn2 + ">" + F(StatT(no), 2) + "</td>" +
+         "<td>" + IntegerToString(pi.n) + "</td><td>" + F(StatMean(pi), 3) + "</td><td>" + F(StatT(pi), 2) + "</td><td>" + IntegerToString(po.n) + "</td><td>" + F(StatMean(po), 3) + "</td><td" + cp + ">" + F(StatT(po), 2) + "</td>" +
          "<td>" + IntegerToString(ci.n) + "</td><td>" + Pick(ci.n > 0, F(StatMean(ci), 3), "-") + "</td><td>" + IntegerToString(co.n) + "</td><td>" + Pick(co.n > 0, F(StatMean(co), 3), "-") + "</td>" +
          "<td>" + IntegerToString(ui.n) + "</td><td>" + Pick(ui.n > 0, F(StatMean(ui), 3), "-") + "</td><td>" + IntegerToString(uo.n) + "</td><td>" + Pick(uo.n > 0, F(StatMean(uo), 3), "-") + "</td><td>" + Pick(co.n >= 5 && uo.n >= 5, F(WelchT(co, uo), 2), "-") + "</td></tr>\n");
    }
-   HW("</table></div><div class='note'>&Delta; positivo = la chiusura rende pi&ugrave; del tocco sullo stesso giorno (differenza accoppiata, uscita di riferimento, giorni in cui entrambe hanno eseguito un trade). &laquo;Tocchi confermati&raquo; = trade al tocco (con la regola del giorno occupato) a cui la chiusura del time frame ha dato lo stesso verso nello stesso giorno; &laquo;non confermati&raquo; = la candela non ha chiuso oltre il livello (solo uno stoppino): se i non confermati rendono nettamente meno, la conferma filtra i falsi segnali. Evidenziato |t| &ge; " + F(ZThr(), 0) + " con almeno 20 coppie OOS: sono molti confronti, conta la coerenza tra IS e OOS.</div>");
+   HW("</table></div><div class='note'><b>Differenza NETTA</b> = per ogni giorno con un trade in almeno una delle due varianti, R della chiusura &minus; R del tocco (0 dove una delle due non entra): &egrave; il confronto tra le due strategie, filtro compreso; &Delta;R per giorno &times; giorni = R totale guadagnato (o perso) dalla conferma. <b>Solo giorni confermati</b> = giorni in cui entrambe hanno eseguito un trade: misura il costo del ritardo d'ingresso, ma esclude i giorni in cui la chiusura ha evitato il tocco, quindi da sola &egrave; sfavorevole alla conferma. &laquo;Tocchi confermati&raquo; = trade al tocco (con la regola del giorno occupato) a cui la chiusura del time frame ha dato lo stesso verso nello stesso giorno; &laquo;non confermati&raquo; = la candela non ha chiuso oltre il livello (solo uno stoppino). Evidenziato |t| &ge; " + F(ZThr(), 0) + " con almeno 20 giorni OOS: sono molti confronti, conta la coerenza tra IS e OOS. " +
+      "Attenzione ai falsi breakout della tabella sopra: per la conferma sono misurati solo sugli ingressi confermati e a partire dalla chiusura, quindi il calo rispetto al tocco &egrave; in parte meccanico (i rientri dentro la stessa candela sono esclusi per costruzione): non &egrave; una misura di qualit&agrave; del segnale.</div>");
 
    // SL x RR per ogni variante
    for(int part = 0; part < 2; part++)
@@ -5599,7 +5626,7 @@ void CollectRangeDays()
    for(int i = 0; i < n; i++)
    {
       wv[i] = g_rd[i].width / pt;
-      dv[i] = (double)(g_rd[i].t1 - g_rd[i].t0) / 3600.0;
+      dv[i] = (double)g_rd[i].nb * g_perSim / 3600.0;      // ore di mercato (barre con quotazioni), non di calendario: i weekend non contano
       if(g_rd[i].widthAtr >= 0.0) { int s = ArraySize(av); ArrayResize(av, s + 1); av[s] = g_rd[i].widthAtr; }
       if(g_rd[i].hn[1] > 0)
       {
@@ -5789,26 +5816,29 @@ void HtmlAnatomy()
       }
       int s6 = ArraySize(dh);
       ArrayResize(dh, s6 + 1, 1024);
-      dh[s6] = (double)(g_rd[i].t1 - g_rd[i].t0) / 3600.0;
+      dh[s6] = (double)g_rd[i].nb * g_perSim / 3600.0;
    }
    string th = "<tr><th class='rl'></th><th>Giorni</th><th>Media</th><th>Dev. std</th><th>Min</th><th>P10</th><th>P25</th><th>Mediana</th><th>P75</th><th>P90</th><th>Max</th></tr>";
    HW("<h3>Larghezza del range in punti</h3><div class='sc'><table>" + th);
    HW(AnatDistRow("Tutti i giorni", wa, ArraySize(wa), 0));
    HW(AnatDistRow("In-Sample", wi, ArraySize(wi), 0));
    HW(AnatDistRow("Out-Of-Sample", wo, ArraySize(wo), 0));
-   for(int wd = 1; wd <= 5; wd++)
+   int wdl[7] = {1, 2, 3, 4, 5, 6, 0};
+   for(int q = 0; q < 7; q++)
    {
+      int wd = wdl[q];
       double wx[];
       ArrayResize(wx, 0);
       for(int i = 0; i < n; i++) if(g_rd[i].wday == wd) { int s = ArraySize(wx); ArrayResize(wx, s + 1, 256); wx[s] = g_rd[i].width / g_point; }
-      HW(AnatDistRow(WdayName(wd), wx, ArraySize(wx), 0));
+      if(ArraySize(wx) == 0) continue;
+      HW(AnatDistRow(Pick(wd == 6, "Sabato", Pick(wd == 0, "Domenica", WdayName(wd))), wx, ArraySize(wx), 0));
    }
    HW("</table></div>");
    HW("<h3>Larghezza del range in multipli dell'ATR e durata del periodo che lo forma</h3><div class='sc'><table>" + th);
    HW(AnatDistRow("Larghezza / ATR: tutti i giorni", aa, ArraySize(aa), 2));
    HW(AnatDistRow("Larghezza / ATR: In-Sample", ai, ArraySize(ai), 2));
    HW(AnatDistRow("Larghezza / ATR: Out-Of-Sample", ao, ArraySize(ao), 2));
-   HW(AnatDistRow("Durata del periodo del range (ore)", dh, ArraySize(dh), 1));
+   HW(AnatDistRow("Durata del periodo del range (ore di mercato)", dh, ArraySize(dh), 1));
    HW("</table></div><div class='note'>Un range di 1 ATR &egrave; largo quanto l'escursione media di una barra " + EnumToString(g_atrTF) + ": &laquo;stretto&raquo; e &laquo;largo&raquo; hanno senso solo in rapporto alla volatilit&agrave; (e allo spread: " + F(g_symSpread, 0) + " punti correnti). L'ATR mediano della storia &egrave; " + F(g_medATRpts, 0) + " punti.</div>");
 
    // cosa succede dopo
@@ -5850,7 +5880,7 @@ void HtmlAnatomy()
             if(ex >= 2.0) g2++;
          }
          string lbl = hl[h] + " &mdash; " + Pick(pp == 0, "tutti", Pick(pp == 1, "In-Sample", "Out-Of-Sample"));
-         if(nn == 0) { HW("<tr><th class='rl'>" + lbl + "</th><td>0</td><td colspan='15'>-</td></tr>\n"); continue; }
+         if(nn == 0) { HW("<tr><th class='rl'>" + lbl + "</th><td>0</td><td colspan='14'>-</td></tr>\n"); continue; }
          ArraySort(xp);
          ArraySort(xx);
          HW("<tr" + Pick(pp == 0, " class='bestrow'", "") + "><th class='rl'>" + lbl + "</th><td>" + IntegerToString(nn) + "</td><td>" + F(PctOf(none, nn), 1) + "</td><td>" + F(PctOf(onlyUp, nn), 1) + "</td><td>" + F(PctOf(onlyDn, nn), 1) + "</td><td>" + F(PctOf(both, nn), 1) + "</td><td>" +
@@ -5907,7 +5937,7 @@ void HtmlAnatomy()
    }
    // 5) eta' dell'ultimo estremo e quale
    {
-      HW("<tr><th class='rl' colspan='14' style='background:#f6f8fa'>Et&agrave; dell'ultimo estremo (frazione del periodo dal pi&ugrave; recente tra massimo e minimo alla fine del range)</th></tr>");
+      HW("<tr><th class='rl' colspan='14' style='background:#f6f8fa'>Et&agrave; dell'ultimo estremo (frazione del periodo, in tempo di calendario, dal pi&ugrave; recente tra massimo e minimo alla fine del range: nei range multi-giorno i weekend contano)</th></tr>");
       string lb[3] = {"estremo recente (&lt; 1/3)", "estremo di met&agrave; periodo", "estremo vecchio (&ge; 2/3): consolidamento"};
       for(int i = 0; i < n; i++) bk[i] = (g_rd[i].age < 0.0) ? -1 : ((g_rd[i].age < 1.0 / 3.0) ? 0 : ((g_rd[i].age < 2.0 / 3.0) ? 1 : 2));
       AnatFeatureTable(lb, 3, bk);
@@ -5926,15 +5956,25 @@ void HtmlAnatomy()
    // 7) giorno della settimana
    {
       HW("<tr><th class='rl' colspan='14' style='background:#f6f8fa'>Giorno della settimana</th></tr>");
-      string lb[5];
+      string lb[7];
       for(int w = 1; w <= 5; w++) lb[w - 1] = WdayName(w);
-      for(int i = 0; i < n; i++) bk[i] = (g_rd[i].wday >= 1 && g_rd[i].wday <= 5) ? g_rd[i].wday - 1 : -1;
-      AnatFeatureTable(lb, 5, bk);
+      lb[5] = "Sabato";
+      lb[6] = "Domenica";
+      for(int i = 0; i < n; i++) bk[i] = (g_rd[i].wday >= 1 && g_rd[i].wday <= 5) ? g_rd[i].wday - 1 : ((g_rd[i].wday == 6) ? 5 : 6);
+      AnatFeatureTable(lb, 7, bk);
    }
    HW("</table></div>");
 
    // correlazioni di rango
-   HW("<h3>Correlazioni di rango (Spearman) tra caratteristiche del range ed esito</h3><table><tr><th class='rl'>Coppia</th><th>Giorni</th><th>Spearman</th><th class='rl'>Lettura</th></tr>");
+   HW("<h3>Correlazioni di rango (Spearman) tra caratteristiche del range ed esito</h3><table><tr><th class='rl'>Coppia</th><th>Giorni</th><th>Spearman</th><th>Soglia</th><th class='rl'>Lettura</th></tr>");
+   double medDays = 1.0;
+   {
+      double dd2[];
+      ArrayResize(dd2, n);
+      for(int i = 0; i < n; i++) dd2[i] = (double)g_rd[i].nb * g_perSim / 86400.0;
+      ArraySort(dd2);
+      medDays = MathMax(1.0, MathRound(Quantile(dd2, n, 0.5)));
+   }
    for(int cp = 0; cp < 5; cp++)
    {
       double a[], b[];
@@ -5945,9 +5985,9 @@ void HtmlAnatomy()
       {
          double xa = 0.0, xb = 0.0;
          bool ok = false;
-         if(cp == 0 && g_rd[i].hn[2] > 0) { xa = g_rd[i].width / g_point; xb = AnatExtX(g_rd[i], 2); ok = true; nm = "larghezza (pt) &harr; estensione 24 h in multipli della larghezza"; }
-         else if(cp == 1 && g_rd[i].hn[2] > 0 && g_rd[i].widthAtr >= 0.0) { xa = g_rd[i].widthAtr; xb = MathMax(g_rd[i].hxu[2], g_rd[i].hxd[2]); ok = true; nm = "larghezza in ATR &harr; estensione 24 h in punti"; }
-         else if(cp == 2 && g_rd[i].hn[2] > 0 && g_rd[i].comp >= 0.0) { xa = g_rd[i].comp; xb = AnatExtX(g_rd[i], 2); ok = true; nm = "compressione (rispetto agli ultimi 20) &harr; estensione 24 h in multipli della larghezza"; }
+         if(cp == 0 && g_rd[i].hn[2] > 0) { xa = g_rd[i].width / g_point; xb = MathMax(g_rd[i].hxu[2], g_rd[i].hxd[2]); ok = true; nm = "larghezza del range (pt) &harr; estensione massima a 24 h (pt)"; }
+         else if(cp == 1 && g_rd[i].hn[2] > 0 && g_rd[i].atr > 0.0) { xa = g_rd[i].atr / g_point; xb = MathMax(g_rd[i].hxu[2], g_rd[i].hxd[2]); ok = true; nm = "ATR (pt) &harr; estensione massima a 24 h (pt): la volatilit&agrave; si ripete"; }
+         else if(cp == 2 && g_rd[i].hn[2] > 0 && g_rd[i].comp >= 0.0) { xa = g_rd[i].comp; xb = MathMax(g_rd[i].hxu[2], g_rd[i].hxd[2]); ok = true; nm = "compressione (rispetto agli ultimi 20 range) &harr; estensione massima a 24 h (pt)"; }
          else if(cp == 3 && g_rd[i].hn[1] > 0 && g_rd[i].pos >= 0.0 && (g_rd[i].hside[1] == 1 || g_rd[i].hside[1] == -1)) { xa = g_rd[i].pos; xb = (double)g_rd[i].hside[1]; ok = true; nm = "dove chiude il range &harr; direzione della prima uscita a 4 h (+1 sopra, -1 sotto)"; }
          else if(cp == 4 && g_rd[i].hn[1] > 0 && g_rd[i].age >= 0.0) { xa = g_rd[i].age; xb = (g_rd[i].hup[1] != 0 || g_rd[i].hdn[1] != 0) ? 1.0 : 0.0; ok = true; nm = "et&agrave; dell'ultimo estremo &harr; uscita entro 4 h (1 s&igrave;, 0 no)"; }
          if(!ok) continue;
@@ -5960,11 +6000,11 @@ void HtmlAnatomy()
       int m = ArraySize(a);
       if(m < 30) continue;
       double rho = Spearman(a, b, m);
-      double thr = 3.0 / MathSqrt((double)m);
-      string lec = (MathAbs(rho) >= thr) ? ((rho > 0) ? "<span class='ok'>positiva, oltre 3 errori standard</span>" : "<span class='bad'>negativa, oltre 3 errori standard</span>") : "nessuna relazione distinguibile dal rumore";
-      HW("<tr><th class='rl'>" + nm + "</th><td>" + IntegerToString(m) + "</td><td>" + F(rho, 3) + "</td><td class='rl' style='text-align:left'>" + lec + "</td></tr>\n");
+      double thr = 3.0 / MathSqrt(MathMax(1.0, (double)m / medDays));
+      string lec = (MathAbs(rho) >= thr) ? ((rho > 0) ? "<span class='ok'>positiva, oltre la soglia</span>" : "<span class='bad'>negativa, oltre la soglia</span>") : "nessuna relazione distinguibile dal rumore";
+      HW("<tr><th class='rl'>" + nm + "</th><td>" + IntegerToString(m) + "</td><td>" + F(rho, 3) + "</td><td>" + F(thr, 3) + "</td><td class='rl' style='text-align:left'>" + lec + "</td></tr>\n");
    }
-   HW("</table><div class='note'>Soglia di lettura: |&rho;| &ge; 3/&radic;N (circa tre errori standard sotto l'ipotesi di nessuna relazione). Cinque confronti: una correlazione appena sopra soglia con pochi giorni va ripresa fuori campione.</div>");
+   HW("</table><div class='note'>Soglia di lettura indicativa: |&rho;| &ge; 3/&radic;N<sub>eff</sub>, con N<sub>eff</sub> = giorni / durata mediana del range in giorni (" + F(medDays, 0) + "): giorni consecutivi condividono parte del range, quindi non sono indipendenti. Le coppie sono scelte tra grandezze senza fattori in comune (larghezza in punti contro estensione in punti, e non rapporti con la stessa larghezza a denominatore, che si correlerebbero per costruzione); volatilit&agrave; e larghezza si muovono insieme anche per motivi reali. Cinque confronti: una correlazione appena sopra soglia va ripresa fuori campione.</div>");
 }
 
 // volatilita' media per ora del giorno (range di un'ora in punti) e spread medio: il profilo del simbolo
@@ -6076,7 +6116,7 @@ void HtmlNotes()
    HW("<li>Un trade al giorno al massimo: con qualche anno di storia sono poche centinaia di trade per combinazione giornaliera, molti meno per le definizioni settimanali e mensili (range larghi, sfondamenti rari). La differenza tra due celle vicine &egrave; quasi sempre rumore: conta la struttura (zone intere della mappa che funzionano, anche fuori campione), non il singolo massimo.</li>");
    HW("<li>ATR: SMA del true range come iATR, sul TF " + EnumToString(g_atrTF) + ", valutato sull'ultima barra chiusa prima del piazzamento. L'EA non usa ATR: le distanze principali del report sono in PUNTI (derivate dall'ATR mediano della storia, uguali per tutte le definizioni); " + Pick(g_unit == UNIT_POINTS, "le griglie in ATR e in multipli del range sono nell'appendice, da guardare dopo.", "le griglie in ATR e in multipli del range sono nel corpo del report (metro scelto: " + Pick(g_unit == UNIT_ATR, "ATR", "punti e ATR") + ").") + "</li>");
    HW("<li><b>Variante a conferma (sezione 4c di ogni orizzonte).</b> Stesso range, stessa finestra e stesso offset del tocco; si entra a mercato alla chiusura della prima candela del time frame oltre il livello (+ offset), con le candele allineate alla mezzanotte del server e costruite dalle barre " + EnumToString(g_simTF) + ". Il prezzo di ingresso &egrave; la chiusura (long all'ask, short al bid), senza slippage: nella realt&agrave; la chiusura si conosce a candela finita e l'ordine parte dopo, quindi il costo vero &egrave; un po' pi&ugrave; alto. Se subito dopo la chiusura non ci sono quotazioni (mercato chiuso, buco nei dati) l'ingresso non &egrave; eseguibile e il giorno finisce. Il confronto col tocco &egrave; fatto sulla definizione scelta con il tocco: un'altra definizione potrebbe funzionare meglio con la conferma, ma provarle tutte moltiplicherebbe i test (non fatto). SL e TP si misurano dall'ingresso.</li>");
-   HW("<li><b>Anatomia del range (sezione 2b).</b> Un giorno = una riga, con il range calcolato come l'EA lo calcola al primo istante utile della finestra, senza il blocco &laquo;coppia del giorno prima ancora viva&raquo; e senza la regola del giorno occupato (quindi i giorni sono pi&ugrave; dei trade). Gli esiti sono sul prezzo, non sugli ordini; gli orizzonti sono in ore di mercato. Le fasce (terzili) sono calcolate sul solo In-Sample; con poche righe per fascia le percentuali oscillano di molti punti: servono per descrivere, non per decidere.</li>");
+   HW("<li><b>Anatomia del range (sezione 2b).</b> Un giorno = una riga, con il range calcolato come l'EA lo calcola al primo istante utile della finestra, senza il blocco &laquo;coppia del giorno prima ancora viva&raquo; e senza la regola del giorno occupato (quindi i giorni sono pi&ugrave; dei trade). Gli esiti sono sul prezzo, non sugli ordini; gli orizzonti sono in ore di mercato. Con finestre di ingresso PERSONALIZZATE a cavallo di mezzanotte il range del giorno e quello dell'evento possono differire (l'EA salta la porzione mattutina se la coppia di ieri &egrave; ancora viva): le colonne dei trade per fascia sono approssimate. Le fasce (terzili) sono calcolate sul solo In-Sample; con poche righe per fascia le percentuali oscillano di molti punti: servono per descrivere, non per decidere.</li>");
    HW("<li>R-multipli: confrontabili tra famiglie solo con sizing a rischio fisso per trade. L'EA usa lotti fissi (LotSize): con lotti fissi uno SL largo pesa di pi&ugrave; in denaro.</li>");
    HW("<li>La mappa contiene centinaia di combinazioni sullo stesso campione: la soglia di Bonferroni indica quanto deve essere forte l'IS per non essere data-mining. Le tre classi (giornaliero, settimanale, mensile) usano gli stessi giorni e lo stesso OOS: un OOS fortunato pu&ograve; confermarle tutte insieme, non sono test indipendenti.</li>");
    HW("</ul>");
@@ -7029,11 +7069,29 @@ bool OosConfirmed(const SStat &o, const double alpha)
    return (o.n >= 30 && StatMean(o) > 0.0 && NormUpper(StatT(o)) < alpha);
 }
 
-void SumNote(const SStat &o, const double alpha, const string what)
+// conta il risultato come "confermato" solo se supera l'OOS corretto E ha E[R] In-Sample positivo (se e' solo la meno negativa non e' un candidato edge); ritorna una nota per la colonna di lettura
+string SumNote(const SStat &o, const SStat &isS, const double alpha, const string what)
 {
-   if(!OosConfirmed(o, alpha)) return;
+   if(!OosConfirmed(o, alpha)) return "";
+   if(StatMean(isS) <= 0.0) return " (non conta come edge: E[R] In-Sample negativo, &egrave; solo la meno negativa)";
    g_sumNConfirmed++;
    g_sumConfirmed += Pick(StringLen(g_sumConfirmed) > 0, "; ", "") + what;
+   return "";
+}
+
+// verdetti "confermato OOS" delle famiglie di uscita (sezione 1 di ogni orizzonte) e della riga Uscita EA: stesse soglie del report; raccolti mentre l'analisi a fondo e' in memoria
+string g_famConfirmed = "";
+int    g_famN = 0;
+void SumFamilies(const int cl)
+{
+   for(int f = 0; f < 6; f++)
+   {
+      int c = g_best[f];
+      if(c < 0) continue;
+      if(!OosConfirmed(g_stOOS[c], AlphaForFam(f))) continue;
+      g_famN++;
+      g_famConfirmed += Pick(StringLen(g_famConfirmed) > 0, "; ", "") + "Parte B " + g_clsName[cl] + ", " + FamName(f) + ": " + CellDesc(c) + Pick(StatMean(g_stIS[c]) <= 0.0, " (E[R] In-Sample negativo)", "");
+   }
 }
 
 string SumRowTxt(const string area, const string res, const string reading)
@@ -7104,8 +7162,11 @@ string SumPartA()
    for(int w = 0; w < g_cbNW; w++)
       for(int t = 0; t < NTF; t++)
          for(int pp = 0; pp < 2; pp++) { rng += g_cbRng[((w * NTF) + t) * 2 + pp]; brk += g_cbBrk[((w * NTF) + t) * 2 + pp]; }
-   s += SumRowTxt("Parte A: quanto spesso rompe", "range orari osservati (finestra &times; time frame &times; giorno): " + IntegerToString(rng) + "; con almeno una chiusura fuori dal range entro sera: " + F(PctOf(brk, rng), 1) + "%; eventi di rottura con ingresso eseguibile (per finestra, time frame e giorno: lo stesso ingresso pu&ograve; ripetersi in finestre diverse): " + IntegerToString(g_cbEvents) + " (" + IntegerToString(g_cbNW) + " range orari &times; 7 time frame)",
-                "Le rotture a candela chiusa sono frequenti: il problema non &egrave; trovarle ma se valgono qualcosa dopo i costi (righe sotto).");
+   int nTFon = 0;
+   for(int t0 = 0; t0 < NTF; t0++) if(g_cbOn[t0]) nTFon++;
+   string fr0 = (PctOf(brk, rng) >= 50.0) ? "Le rotture a candela chiusa sono frequenti: il problema non &egrave; trovarle ma se valgono qualcosa dopo i costi (righe sotto)." : "Le rotture a candela chiusa sono relativamente rare con questi range: pochi eventi per combinazione, attenzione alla significativit&agrave;.";
+   s += SumRowTxt("Parte A: quanto spesso rompe", "range orari osservati (finestra &times; time frame &times; giorno): " + IntegerToString(rng) + "; con almeno una chiusura fuori dal range entro sera: " + F(PctOf(brk, rng), 1) + "%; eventi di rottura con ingresso eseguibile (per finestra, time frame e giorno: lo stesso ingresso pu&ograve; ripetersi in finestre diverse): " + IntegerToString(g_cbEvents) + " (" + IntegerToString(g_cbNW) + " range orari &times; " + IntegerToString(nTFon) + " time frame)",
+                fr0);
    // A1: SL migliore, tutti i TF
    int bestI = -1;
    double bs = -1e18;
@@ -7121,7 +7182,6 @@ string SumPartA()
       CbPool(0, g_cbNW - 1, 0, NTF - 1, 0, NKB - 1, bestI, 1, xi, xo);
       double p;
       string vd = Verdict(xo, p, AlphaCls() / NSL);
-      SumNote(xo, AlphaCls() / NSL, "Parte A: SL " + CbSLName(bestI) + " con RR 1:2 su tutti i time frame");
       s += SumRowTxt("Parte A: lo SL migliore (A1, tutti i time frame, RR 1:2)", "SL scelto sull'IS: " + CbSLName(bestI) + " | IS: " + SumStat(xi) + " | OOS: " + SumStat(xo), vd + " (i t di questa riga sono gonfiati: gli eventi di time frame e finestre diverse sono molto correlati; conta l'E[R])");
    }
    // sopravvivenza dello SL
@@ -7153,7 +7213,7 @@ string SumPartA()
       o = g_cbR[CbIdxR(cB, bi, bm, 1)];
       double p;
       string vd = Verdict(o, p, AlphaCls());
-      SumNote(o, AlphaCls(), "Parte A: " + StringFormat("%02d:00 + %d h", g_cbWS[w], g_cbWD[w]) + " " + g_cbName[t]);
+      vd += SumNote(o, a, AlphaCls(), "Parte A: " + StringFormat("%02d:00 + %d h", g_cbWS[w], g_cbWD[w]) + " " + g_cbName[t]);
       s += SumRowTxt("Parte A: migliore combinazione (A5)", "range " + StringFormat("%02d:00 + %d h", g_cbWS[w], g_cbWD[w]) + ", time frame " + g_cbName[t] + ", rottura " + CbKBName(b) + ", SL " + CbSLName(bi) + ", RR 1:" + IntegerToString(bm + 1) + " (scelti sull'IS tra " + IntegerToString(nV) + " combinazioni valide) | IS: " + SumStat(a) + " | OOS: " + SumStat(o), vd);
    }
    // A6/A7: larghezza
@@ -7171,7 +7231,8 @@ string SumPartA()
          for(int k = 0; k < NWB; k++)
             for(int pp = 0; pp < 2; pp++) { r0[k] += g_cbWRng[((t * NWB) + k) * 2 + pp]; b0[k] += g_cbWBrk[((t * NWB) + k) * 2 + pp]; }
       s += SumRowTxt("Parte A: larghezza dei range orari (A6, A7)", "larghezza mediana per finestra: da " + F(wm[0], 0) + " a " + F(wm[nw - 1], 0) + " punti (mediana tra le " + IntegerToString(nw) + " finestre: " + F(Quantile(wm, nw, 0.5), 0) + " punti; ATR mediano " + F(g_medATRpts, 0) + " punti) | range stretti / medi / larghi (terzili IS di ogni finestra): % con chiusura fuori entro sera " +
-                   F(PctOf(b0[0], r0[0]), 1) + "% / " + F(PctOf(b0[1], r0[1]), 1) + "% / " + F(PctOf(b0[2], r0[2]), 1) + "%", "Un range pi&ugrave; largo rompe meno spesso e richiede uno SL pi&ugrave; largo: il dettaglio per time frame con E[R] &egrave; in A7.");
+                   F(PctOf(b0[0], r0[0]), 1) + "% / " + F(PctOf(b0[1], r0[1]), 1) + "% / " + F(PctOf(b0[2], r0[2]), 1) + "%",
+                   Pick(PctOf(b0[0], r0[0]) > PctOf(b0[2], r0[2]) + 3.0, "I range stretti rompono pi&ugrave; spesso dei larghi.", Pick(PctOf(b0[2], r0[2]) > PctOf(b0[0], r0[0]) + 3.0, "I range larghi rompono pi&ugrave; spesso degli stretti.", "La larghezza cambia poco la frequenza di rottura.")) + " Il dettaglio per time frame, con E[R], &egrave; in A7.");
    }
    return s;
 }
@@ -7187,7 +7248,7 @@ string SumPartA2()
    o = g_c2R[C2IdxR(t, ni, ei, bi, bm, 1)];
    double p;
    string vd = Verdict(o, p, AlphaCls());
-   SumNote(o, AlphaCls(), "Parte A2: " + IntegerToString(g_c2N[ni]) + " candele " + g_cbName[t] + " fino alle " + StringFormat("%02d:00", ei + 1));
+   vd += SumNote(o, a, AlphaCls(), "Parte A2: " + IntegerToString(g_c2N[ni]) + " candele " + g_cbName[t] + " fino alle " + StringFormat("%02d:00", ei + 1));
    int obs = 0;
    for(int tt = 0; tt < NTF; tt++)
       for(int nn = 0; nn < g_c2NN; nn++) obs += g_c2Rng[(tt * NNC + nn) * 2] + g_c2Rng[(tt * NNC + nn) * 2 + 1];
@@ -7212,15 +7273,17 @@ string SumPartB()
       double p;
       string vd = Verdict(o, p, AlphaCls());
       if(g_winNeg[cl]) vd += " (nessuna combinazione con E[R] IS positivo: &egrave; solo la meno negativa)";
-      else SumNote(o, AlphaCls(), "Parte B " + g_clsName[cl] + ": " + g_rLbl[k / g_nW]);
+      else vd += SumNote(o, a, AlphaCls(), "Parte B " + g_clsName[cl] + ": " + g_rLbl[k / g_nW]);
       double fr = (g_daysAn > 0) ? 100.0 * g_mN[k] / g_daysAn : 0.0;
       s += SumRowTxt("Parte B " + g_clsName[cl] + ": definizione scelta", "range " + g_rLbl[k / g_nW] + " | finestra di ingresso " + HHMM(g_wS[k % g_nW]) + "-" + HHMM(g_wE[k % g_nW]) + " | sfondamenti " + IntegerToString(g_mN[k]) + " (" + F(fr, 0) + "% dei giorni) | IS: " + SumStat(a) + " | OOS: " + SumStat(o), vd);
    }
    SStat ea, eo;
    ea = g_eaIS[0];
    eo = g_eaOOS[0];
+   double pEa;
+   string vEa = Verdict(eo, pEa, 0.05);
    s += SumRowTxt("Parte B: EA con i parametri di default", "range " + RangeText(g_def) + ", finestra " + HHMM(g_def.wsMin) + "-" + HHMM(g_def.weMin) + " | IS: " + SumStat(ea) + " | OOS: " + SumStat(eo),
-                "Non scelta sui dati: vale come test unico solo se quei parametri non sono stati ottimizzati su questa storia.");
+                vEa + " (test unico a p &lt; 5%, fuori dal conteggio dei risultati scelti; vale solo se quei parametri non sono stati ottimizzati su questa storia)");
    return s;
 }
 
@@ -7234,7 +7297,7 @@ string SumDeep(const int cl)
    {
       SAnatSum a;
       a = g_an[cl];
-      s += SumRowTxt("Range " + g_clsName[cl] + ": quanto &egrave; grande", IntegerToString(a.n) + " giorni con range valido | larghezza mediana " + F(a.wMed, 0) + " punti (P10 " + F(a.wP10, 0) + ", P90 " + F(a.wP90, 0) + ")" + Pick(a.wAtrMed > 0.0, ", mediana " + F(a.wAtrMed, 2) + " ATR", "") + " | durata del periodo che lo forma: " + F(a.durH, 1) + " ore",
+      s += SumRowTxt("Range " + g_clsName[cl] + ": quanto &egrave; grande", IntegerToString(a.n) + " giorni con range valido | larghezza mediana " + F(a.wMed, 0) + " punti (P10 " + F(a.wP10, 0) + ", P90 " + F(a.wP90, 0) + ")" + Pick(a.wAtrMed > 0.0, ", mediana " + F(a.wAtrMed, 2) + " ATR", "") + " | durata del periodo che lo forma: " + F(a.durH, 1) + " ore di mercato",
                    "Dettaglio (per giorno della settimana, IS/OOS, in ATR) nella sezione " + Pick(cl == 0, "G", Pick(cl == 1, "S", "M")) + "2b.");
       s += SumRowTxt("Range " + g_clsName[cl] + ": cosa succede dopo", "esce dal range entro 4 h: " + F(a.pExit4, 1) + "% (prima sopra nel " + F(a.pUpFirst, 1) + "% dei casi); entro 24 h: " + F(a.pExit24, 1) + "% (da entrambi i lati: " + F(a.pBoth24, 1) + "%); a 24 h chiude dentro il range nel " + F(a.pInside24, 1) + "% dei giorni | estensione massima a 24 h: mediana " + F(a.extMedX, 2) + " &times; la larghezza, almeno 1&times; nel " + F(a.pExt1x, 1) + "%",
                    "Statistiche descrittive su tutta la storia, indipendenti dagli ordini. Le fasce per larghezza/forma/contesto sono in " + Pick(cl == 0, "G", Pick(cl == 1, "S", "M")) + "2b.");
@@ -7271,15 +7334,17 @@ string SumDeep(const int cl)
          ui = g_cvUC[(cl * NCV + bv) * 2];
          uo = g_cvUC[(cl * NCV + bv) * 2 + 1];
          double p;
-         vd = Verdict(o, p, AlphaCls() / MathMax(1, nValidTF));
-         SumNote(o, AlphaCls() / MathMax(1, nValidTF), "Conferma a chiusura " + g_clsName[cl] + " (" + g_cbName[bv - 1] + ")");
-         // la conferma vale solo se batte il tocco sugli stessi giorni: lettura della differenza accoppiata (OOS)
+         vd = Verdict(o, p, AlphaConf(nValidTF));
+         vd += SumNote(o, a, AlphaConf(nValidTF), "Conferma a chiusura " + g_clsName[cl] + " (" + g_cbName[bv - 1] + ")");
+         // la conferma vale solo se batte il tocco: lettura della differenza NETTA (tutti i giorni con un trade in almeno una variante, OOS)
+         SStat nd;
+         nd = g_cvND[(cl * NCV + bv) * 2 + 1];
          string dl = "";
-         if(po.n >= 30 && StatT(po) <= -2.0) dl = "<span class='bad'>la conferma PEGGIORA il tocco sugli stessi giorni (" + F(StatMean(po), 3) + " R per trade, t " + F(StatT(po), 2) + "): il ritardo d'ingresso costa pi&ugrave; di quanto i falsi segnali filtrati fanno risparmiare</span>";
-         else if(po.n >= 30 && StatT(po) >= 2.0) dl = "<span class='ok'>la conferma MIGLIORA il tocco sugli stessi giorni (+" + F(StatMean(po), 3) + " R per trade, t " + F(StatT(po), 2) + ")</span>";
-         else dl = "differenza dal tocco sugli stessi giorni non distinguibile dal rumore";
+         if(nd.n >= 20 && StatT(nd) <= -ZThr()) dl = "<span class='bad'>la conferma PEGGIORA il tocco, netto di tutti i giorni (" + F(StatMean(nd), 3) + " R per giorno, t " + F(StatT(nd), 2) + ")</span>";
+         else if(nd.n >= 20 && StatT(nd) >= ZThr()) dl = "<span class='ok'>la conferma MIGLIORA il tocco, netto di tutti i giorni (+" + F(StatMean(nd), 3) + " R per giorno, t " + F(StatT(nd), 2) + ")</span>";
+         else dl = "differenza netta dal tocco non distinguibile dal rumore (" + F(StatMean(nd), 3) + " R per giorno, t " + F(StatT(nd), 2) + ", " + IntegerToString(nd.n) + " giorni)";
          vd += " | " + dl;
-         best = "scelto sull'IS: chiusura " + g_cbName[bv - 1] + " (una scelta su " + IntegerToString(nValidTF) + ") | IS: " + SumStat(a) + " | OOS: " + SumStat(o) + " | al tocco OOS: " + SumStat(ot) + " | differenza sugli stessi giorni (OOS): " + F(StatMean(po), 3) + " R (t " + F(StatT(po), 2) + ", " + IntegerToString(po.n) + " giorni) | tocchi NON confermati dalla chiusura: IS " + SumStat(ui) + ", OOS " + SumStat(uo) + " | falsi breakout: tocco " + F(g_cvI[cl * NCV].fakePct, 1) + "% &rarr; chiusura " + F(g_cvI[cl * NCV + bv].fakePct, 1) + "%; costo d'ingresso mediano oltre il livello: " + F(g_cvI[cl * NCV + bv].slipMed, 1) + " punti";
+         best = "scelto sull'IS: chiusura " + g_cbName[bv - 1] + " (una scelta su " + IntegerToString(nValidTF) + ") | IS: " + SumStat(a) + " | OOS: " + SumStat(o) + " | al tocco OOS: " + SumStat(ot) + " | costo del ritardo sui soli giorni confermati (OOS): " + F(StatMean(po), 3) + " R (t " + F(StatT(po), 2) + ", " + IntegerToString(po.n) + " giorni) | differenza NETTA (OOS): " + F(StatMean(nd), 3) + " R per giorno su " + IntegerToString(nd.n) + " giorni | tocchi NON confermati dalla chiusura: IS " + SumStat(ui) + ", OOS " + SumStat(uo) + " | falsi breakout: tocco " + F(g_cvI[cl * NCV].fakePct, 1) + "% &rarr; chiusura " + F(g_cvI[cl * NCV + bv].fakePct, 1) + "% (calo in parte meccanico: i rientri nella stessa candela sono esclusi); costo d'ingresso mediano oltre il livello: " + F(g_cvI[cl * NCV + bv].slipMed, 1) + " punti";
       }
       s += SumRowTxt("Conferma a chiusura " + g_clsName[cl] + " (tutti i time frame)", "E[R] OOS per ingresso (uscita di riferimento; N = trade OOS): " + tf + " | ingressi: " + nn, "Confronto con l'ingresso al tocco, stesso range e stesse uscite (sezione " + Pick(cl == 0, "G", Pick(cl == 1, "S", "M")) + "4c). Dove due time frame danno gli stessi ingressi (finestra di un'ora) sono scritti uguali.");
       s += SumRowTxt("Conferma a chiusura " + g_clsName[cl] + ": time frame migliore", best, vd);
@@ -7301,9 +7366,10 @@ string BuildSummaryHtml()
    h += SumPartA2();
    h += SumPartB();
    for(int cl = 0; cl < NCLS; cl++) h += SumDeep(cl);
+   if(g_famN > 0) { g_sumNConfirmed += g_famN; g_sumConfirmed += Pick(StringLen(g_sumConfirmed) > 0, "; ", "") + g_famConfirmed; }
    string concl;
    if(g_sumNConfirmed == 0)
-      concl = "<span class='bad'>Nessun risultato scelto sull'In-Sample si conferma fuori campione con la correzione per test multipli.</span> Allo stato di questi dati non c'&egrave; un edge dimostrato: le statistiche descrittive (larghezza dei range, probabilit&agrave; di uscita, estensione) restano valide come descrizione del mercato, ma non come regola operativa.";
+      concl = "<span class='bad'>Nessun risultato scelto sull'In-Sample (parti A e A2, definizioni della parte B, famiglie di uscita, conferma a chiusura) si conferma fuori campione con la correzione per test multipli.</span> Allo stato di questi dati non c'&egrave; un edge dimostrato: le statistiche descrittive (larghezza dei range, probabilit&agrave; di uscita, estensione) restano valide come descrizione del mercato, ma non come regola operativa.";
    else
       concl = "<span class='ok'>" + IntegerToString(g_sumNConfirmed) + " risultat" + Pick(g_sumNConfirmed == 1, "o", "i") + " si conferma" + Pick(g_sumNConfirmed == 1, "", "no") + " fuori campione con la correzione per test multipli:</span> " + g_sumConfirmed + ". Prima di fidarsene: gli orizzonti e le parti usano gli stessi giorni (un OOS fortunato conferma tutto insieme), l'OOS &egrave; una sola finestra di tempo, e i costi reali (slippage, spread nei momenti critici) sono peggiori.";
    h += SumRowTxt("CONCLUSIONE AUTOMATICA", concl, "Leggi sempre il numero di trade OOS: con meno di 30 il verdetto non si dichiara confermato.");
@@ -7322,10 +7388,11 @@ void InsertSummary()
    FileClose(hf);
    string mk = "<!--SUMMARY-->";
    if(StringFind(html, mk) < 0) return;
+   if(StringFind(html, "</html>") < 0) { Print("Riepilogo generale: il report riletto sembra incompleto, non lo riscrivo"); return; }      // meglio un report senza riepilogo che uno troncato
    StringReplace(html, mk, BuildSummaryHtml());
    int h = FileOpen(fn, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_SHARE_READ);
    if(h == INVALID_HANDLE) { FileFail(fn); return; }
-   FileWriteString(h, html);
+   if(FileWriteString(h, html) == 0) Print("Riepilogo generale: scrittura del report non riuscita (errore ", GetLastError(), ")");
    FileClose(h);
 }
 
@@ -7377,6 +7444,7 @@ void OnStart()
       g_curCls = 0;
       Comment("MDRB Study: ricostruzione dei setup giornalieri...");
       if(!AnalyzeCur()) { Comment(""); return; }
+      g_nConfGroups = 1;
       ConfInit();
       ConfirmStudy(0, "");
       CollectRangeDays();
@@ -7400,6 +7468,10 @@ void OnStart()
       if(!anyWin) Warn("Nessuna combinazione ha abbastanza trade In-Sample (minimo " + IntegerToString(g_minIS) + ")." + Pick(g_custom, " Con PERSONALIZZATO controllare i filtri scelti: periodo, giorni, range, finestra di ingresso e larghezza possono escludere tutti i giorni.", " La storia disponibile e' troppo corta."));
       g_nCls = ((g_cbEvents >= 100) ? 1 : 0) + ((g_cbEvents2 >= 100) ? 1 : 0);      // la parte A e la parte A2 (se prodotte) contano come gruppi di test in piu'
       for(int cl = 0; cl < NCLS; cl++) if(g_win[cl] >= 0) g_nCls++;
+      g_nConfGroups = 0;
+      for(int cl = 0; cl < NCLS; cl++) if(g_win[cl] >= 0) g_nConfGroups++;
+      g_famN = 0;
+      g_famConfirmed = "";
       RunEaRow();
       ConfInit();
       if(InpWriteCSV) { WriteMapCSV(); WriteCbCSV(); }
@@ -7437,6 +7509,7 @@ void OnStart()
          }
          RunOffsetSweep();
          g_curCls = cl;
+         SumFamilies(cl);
          ConfirmStudy(cl, g_clsTag[cl]);
          CollectRangeDays();
          if(InpWriteCSV) WriteRangeDaysCSV(g_clsTag[cl]);

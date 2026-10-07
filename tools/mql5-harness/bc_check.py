@@ -173,7 +173,7 @@ days_all = sorted(set(t - t % 86400 for t in T))
 
 def first_confirm(place_t, hi, lo, pX):
     """prima candela con tc > place_t e tc <= pX che chiude fuori: (bk, dir, close) oppure None"""
-    up = hi + off * pt; dn = lo - off * pt
+    up = norm_tick(hi + off * pt); dn = norm_tick(lo - off * pt)
     q = bisect.bisect_left(ctimes, place_t - sec + 1)                   # bk > place_t - sec  <=>  tc > place_t
     while q < len(ctimes):
         bk = ctimes[q]
@@ -328,7 +328,7 @@ for ln, r in mine:
         n_candle_skip += 1; continue
     bk, dexp, E0 = ex; tc = bk + sec
     if dexp != d or tc != entry_t:
-        up = hi + off * pt; dn = lo - off * pt
+        up = norm_tick(hi + off * pt); dn = norm_tick(lo - off * pt)
         cb = cand.get(entry_t - sec)
         if cb is None: why = "nel dump non c'e' la candela che chiude a quell'ora"
         else:
