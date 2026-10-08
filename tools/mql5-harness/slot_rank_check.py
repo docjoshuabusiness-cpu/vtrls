@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Ricalcolo indipendente della classifica dell'analisi delle fasce: legge i trade virtuali (CSV) e la classifica scritta
-dall'EA e controlla, per ogni fascia, numero di trade, win %, E[R], profit factor, R totale, punti, drawdown (in R, in ordine di
+"""Ricalcolo indipendente della classifica dell'analisi virtuale: legge i trade virtuali (CSV) e la classifica scritta
+dall'EA e controlla, per ogni concorrente (sorgente del range x modalita' di entrata), numero di trade, win %, E[R], profit factor, R totale, punti, drawdown (in R, in ordine di
 chiusura), t-stat, trade prima/dopo la data di separazione, flag "in classifica" e ordine della classifica.
 
 uso: slot_rank_check.py <trade.csv> <classifica.csv> [--min-trades N] [--split EPOCH] [--rank-by tstat|er|pf|total]
@@ -22,9 +22,16 @@ def ts(x):
 
 rows = list(csv.DictReader(open(ns.trades)))
 rank = list(csv.DictReader(open(ns.rank)))
+MODES = {"stop": 0, "chiusura": 1, "retest": 2}
+
+
+def cid(r):   # indice del concorrente come nell'EA: sorgente * 3 + modalita'
+    return (int(r["source"]) - 1) * 3 + MODES[r["mode"]]
+
+
 by = {}
 for r in rows:
-    by.setdefault(int(r["slot"]), []).append(r)
+    by.setdefault(cid(r), []).append(r)
 diffs = []
 
 
@@ -37,13 +44,13 @@ exp_score = {}
 exp_elig = {}
 exp_n = {}
 for q in rank:
-    k = int(q["slot"])
+    k = cid(q)
     tr = by.get(k, [])
     Rs = [float(r["R"]) for r in tr]
     n = len(Rs)
     exp_n[k] = n
     if int(q["trades"]) != n:
-        diffs.append(f"fascia {k}: trade {q['trades']} atteso {n}")
+        diffs.append(f"concorrente {k}: trade {q['trades']} atteso {n}")
         continue
     s = sum(Rs)
     mean = s / n if n else 0.0
@@ -62,28 +69,28 @@ for q in rank:
         t = 0.0 if var <= 1e-12 else mean / math.sqrt(var / n)
     else:
         t = 0.0
-    near(float(q["win_pct"]), 100.0 * wins / n if n else 0.0, 0.006, f"fascia {k}: win % {q['win_pct']}")
-    near(float(q["expectancy_r"]), mean, 6e-5, f"fascia {k}: E[R] {q['expectancy_r']} atteso {mean:.4f}")
-    near(float(q["profit_factor"]), pf, 2e-3, f"fascia {k}: PF {q['profit_factor']} atteso {pf:.3f}")
-    near(float(q["total_r"]), s, 2e-3, f"fascia {k}: R totale {q['total_r']} atteso {s:.3f}")
-    near(float(q["total_pts"]), sum(float(r["pts"]) for r in tr), 0.06 + 0.05 * n, f"fascia {k}: punti {q['total_pts']}")
-    near(float(q["max_dd_r"]), dd, 3e-3 + 1e-4 * n, f"fascia {k}: maxDD {q['max_dd_r']} atteso {dd:.3f}")
-    near(float(q["t_stat"]), t, 3e-3 + 1e-4 * n, f"fascia {k}: t {q['t_stat']} atteso {t:.3f}")
+    near(float(q["win_pct"]), 100.0 * wins / n if n else 0.0, 0.006, f"concorrente {k}: win % {q['win_pct']}")
+    near(float(q["expectancy_r"]), mean, 6e-5, f"concorrente {k}: E[R] {q['expectancy_r']} atteso {mean:.4f}")
+    near(float(q["profit_factor"]), pf, 2e-3, f"concorrente {k}: PF {q['profit_factor']} atteso {pf:.3f}")
+    near(float(q["total_r"]), s, 2e-3, f"concorrente {k}: R totale {q['total_r']} atteso {s:.3f}")
+    near(float(q["total_pts"]), sum(float(r["pts"]) for r in tr), 0.06 + 0.05 * n, f"concorrente {k}: punti {q['total_pts']}")
+    near(float(q["max_dd_r"]), dd, 3e-3 + 1e-4 * n, f"concorrente {k}: maxDD {q['max_dd_r']} atteso {dd:.3f}")
+    near(float(q["t_stat"]), t, 3e-3 + 1e-4 * n, f"concorrente {k}: t {q['t_stat']} atteso {t:.3f}")
     el = 1 if n >= ns.min_trades else 0
     if int(q["eligible"]) != el:
-        diffs.append(f"fascia {k}: flag classifica {q['eligible']} atteso {el}")
+        diffs.append(f"concorrente {k}: flag classifica {q['eligible']} atteso {el}")
     if ns.split > 0:
         nb = sum(1 for r in tr if ts(r["topen"]) < ns.split)
         na = n - nb
         if int(q["trades_before"]) != nb or int(q["trades_after"]) != na:
-            diffs.append(f"fascia {k}: prima/dopo {q['trades_before']}/{q['trades_after']} atteso {nb}/{na}")
+            diffs.append(f"concorrente {k}: prima/dopo {q['trades_before']}/{q['trades_after']} atteso {nb}/{na}")
     else:
         if int(q["trades_after"]) != 0 or int(q["trades_before"]) != n:
-            diffs.append(f"fascia {k}: senza data di separazione prima/dopo {q['trades_before']}/{q['trades_after']} atteso {n}/0")
+            diffs.append(f"concorrente {k}: senza data di separazione prima/dopo {q['trades_before']}/{q['trades_after']} atteso {n}/0")
     exp_score[k] = {"tstat": t, "er": mean, "pf": min(pf, 10.0), "total": s}[ns.rank_by]
     exp_elig[k] = el
-# ordine: prima le fasce con abbastanza trade per punteggio decrescente, poi le altre per numero di trade; a pari merito la fascia con indice minore
-order = [int(q["slot"]) for q in rank]
+# ordine: prima i concorrenti con abbastanza trade per punteggio decrescente, poi gli altri per numero di trade; a pari merito quello con indice minore
+order = [cid(q) for q in rank]
 ks = list(order)
 
 
@@ -107,7 +114,7 @@ if order != expo:
         diffs.append(f"ordine della classifica {order} atteso {expo}")
 if [int(q["rank"]) for q in rank] != list(range(1, len(rank) + 1)):
     diffs.append("numerazione delle posizioni non progressiva")
-print(f"classifica: {len(rank)} fasce, {sum(exp_n.values())} trade ricalcolati, differenze {len(diffs)}")
+print(f"classifica: {len(rank)} concorrenti, {sum(exp_n.values())} trade ricalcolati, differenze {len(diffs)}")
 for d in diffs[:8]:
     print("   -", d)
 sys.exit(1 if diffs else 0)

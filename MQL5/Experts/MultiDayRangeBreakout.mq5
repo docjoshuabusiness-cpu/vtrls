@@ -2,10 +2,23 @@
 //|                                       MultiDayRangeBreakout.mq5 |
 //|  v3.00: riscrittura di v2.00 (stessa idea, meccanica corretta).  |
 //|                                                                  |
-//|  Idea: nella finestra di entrata si piazza una coppia di ordini  |
-//|  stop sul range scelto: BuyStop sopra il massimo, SellStop sotto |
-//|  il minimo. Quando uno scatta l'altro viene cancellato (OCO).    |
-//|  Gli ordini non eseguiti scadono a fine finestra.                |
+//|  Idea: nella finestra di entrata si entra in breakout di un      |
+//|  range. Modalita' di entrata (interruttori, anche piu' di una;   |
+//|  vince la prima che scatta e ne parte una sola per volta):       |
+//|   EntryStop         coppia di ordini stop: BuyStop sopra il      |
+//|                     massimo, SellStop sotto il minimo (+ offset).|
+//|                     Quando uno scatta l'altro viene cancellato   |
+//|                     (OCO); gli ordini non eseguiti scadono a     |
+//|                     fine finestra.                               |
+//|   EntryCandleClose  a mercato quando una candela CHIUSA di       |
+//|                     Timeframe chiude oltre massimo+offset (long) |
+//|                     o sotto minimo-offset (short).               |
+//|   EntryRetest       a mercato dopo una rottura (il prezzo supera |
+//|                     il livello+offset) quando il prezzo TORNA al |
+//|                     bordo del range (retest), nella direzione    |
+//|                     della rottura.                               |
+//|  Prima di aprire valgono sempre i filtri di spread e, se attivo, |
+//|  quello di larghezza del range (Min/MaxRangePoints).             |
 //|                                                                  |
 //|  Tutti gli orari sono ORA SERVER del broker (quella di           |
 //|  TimeCurrent), non GMT e non ora locale.                         |
@@ -28,10 +41,14 @@
 //|                                                                  |
 //|  Le distanze (SL, TP, BE, trailing, offset, range) sono in PUNTI |
 //|  del simbolo: su un cambio a 5 cifre 10 punti = 1 pip.           |
+//|                                                                  |
+//|  SlotScan = true: l'EA NON apre ordini ma analizza in modo       |
+//|  virtuale 12 fasce orarie (+ range a barre e D1 precedenti) per  |
+//|  ogni modalita' accesa e scrive la classifica (vedi sotto).      |
 //+------------------------------------------------------------------+
 #property copyright "MultiDayRangeBreakout"
 #property version   "3.00"
-#property description "BuyStop sopra e SellStop sotto un range, OCO, scadenza a fine finestra."
+#property description "Breakout di un range: ordini stop OCO, chiusura di candela o retest. Analisi virtuale delle fasce orarie."
 
 #include <Trade\Trade.mqh>
 
@@ -55,7 +72,7 @@ input double LotSize = 0.01;
 
 input group "=== RANGE ==="
 input ENUM_RANGE_MODE RangeMode = RANGE_BARS;
-input ENUM_TIMEFRAMES Timeframe = PERIOD_CURRENT;  // timeframe delle barre (RANGE_BARS e RANGE_TIME)
+input ENUM_TIMEFRAMES Timeframe = PERIOD_CURRENT;  // TIME FRAME OSSERVATO: barre del range (RANGE_BARS, RANGE_TIME) e candele di EntryCandleClose
 input int RangeDaysBack = 1;                       // giorno di riferimento (vedi intestazione)
 input int RangeBarsLookback = 25;                  // RANGE_BARS: numero di barre
 input int RangeHourStart = 16;                     // RANGE_TIME: inizio
@@ -67,8 +84,8 @@ input bool RequireRangeConfirmation = true;       // scarta i range fuori da Min
 input double MinRangePoints = 50;
 input double MaxRangePoints = 500;
 
-input group "=== ANALISI FASCE ORARIE: 12 range in parallelo, NESSUN ordine reale ==="
-input bool SlotScan = false;                       // true: analizza le fasce e scrivi la classifica (non apre ordini; il modo del range sopra e' ignorato)
+input group "=== ANALISI VIRTUALE: classifica di range x modalita' di entrata, NESSUN ordine reale ==="
+input bool SlotScan = false;                       // true: analizza e scrivi la classifica (non apre ordini; RangeMode e' ignorato: le sorgenti sono le fasce e i due interruttori sotto)
 input int SlotFirstHour = 0;                       // fascia 1: ora di inizio (ora server)
 input int SlotLenHours = 2;                        // durata di ogni fascia in ore (le fasce sono contigue: fascia 2 inizia dove finisce la 1)
 input bool Slot1 = true;                           // fascia 1 attiva (di default 00-02)
@@ -83,6 +100,8 @@ input bool Slot9 = true;                           // fascia 9 attiva (16-18)
 input bool Slot10 = true;                          // fascia 10 attiva (18-20)
 input bool Slot11 = true;                          // fascia 11 attiva (20-22)
 input bool Slot12 = true;                          // fascia 12 attiva (22-24)
+input bool ScanRangeBars = false;                  // analizza anche il range a barre (RangeBarsLookback barre di Timeframe)
+input bool ScanRangePrevD1 = false;                // analizza anche il range dei D1 precedenti (RangeDaySpan giorni; richiede RangeDaysBack >= 1)
 input int SlotMinTrades = 30;                      // trade minimi per entrare in classifica
 input ENUM_SLOT_RANK SlotRankBy = SLOT_RANK_TSTAT; // criterio della classifica
 input datetime SlotSplitDate = 0;                  // se > 0: i risultati sono separati prima/dopo questa data (per controllare fuori campione)
@@ -97,7 +116,13 @@ input int TradeMinuteEnd = 0;
 input int ExpireExtraMinutes = 0;                  // minuti di vita degli ordini oltre la fine finestra
 input int MaxTradesPerDay = 1;                     // posizioni aperte al massimo in un giorno
 input int PendingOrderOffsetPoints = 20;           // distanza degli ordini dal range
-input bool ChaseIfBroken = false;                  // true: se il prezzo e' gia' oltre il livello, ordine stop vicino al mercato (come v2)
+input bool ChaseIfBroken = false;                  // solo EntryStop. false: se il prezzo e' gia' oltre il livello aspetta che rientri nel range e poi piazza la coppia; true: piazza subito lo stop del lato rotto vicino al mercato (come v2)
+
+input group "=== MODALITA' DI ENTRATA (interruttori) ==="
+input bool EntryStop = true;                       // A) coppia di ordini stop sul massimo/minimo +/- offset (OCO)
+input bool EntryCandleClose = false;               // B) a mercato quando una candela chiusa di Timeframe chiude oltre massimo+offset / sotto minimo-offset
+input bool EntryRetest = false;                    // C) retest: dopo che il prezzo supera il livello+offset, entra a mercato quando TORNA al bordo del range
+input int RetestTolerancePoints = 0;               // C) il ritorno conta quando il prezzo e' entro questi punti dal bordo del range (0 = lo tocca)
 
 input group "=== STOP LOSS E TAKE PROFIT ==="
 input double StopLossPoints = 100;
@@ -138,6 +163,10 @@ int      g_nPos = -1;         // nostre posizioni (-1 = da leggere)
 int      g_nOrd = -1;         // nostri ordini pendenti
 datetime g_nextTry = 0;
 datetime g_nextMod = 0;
+datetime g_nextTryM = 0;       // pausa dopo un errore su un ingresso a mercato
+datetime g_barTime = 0;        // apertura della barra corrente di Timeframe (serve a riconoscere la chiusura di una candela)
+bool     g_armL = false;       // retest: il prezzo ha superato il livello superiore
+bool     g_armS = false;       // retest: il prezzo ha superato il livello inferiore
 int      g_failToday = 0;
 bool     g_logOutside = false;
 bool     g_logSpread = false;
@@ -435,57 +464,69 @@ int FinishRange(double hi, double lo, string &info)
    return 1;
   }
 
-int ComputeRange(datetime now, double &hi, double &lo, string &info)
+// range = massimo/minimo di RangeDaySpan barre D1 complete a partire dal giorno di riferimento. ritorna 1 = calcolato, -1 = dati non pronti
+int RangeByD1(double &hi, double &lo, string &info)
   {
    hi = -DBL_MAX;
    lo = DBL_MAX;
    info = "";
-   if(RangeMode == RANGE_PREV_D1)
+   for(int k = 0; k < RangeDaySpan; k++)
      {
-      for(int k = 0; k < RangeDaySpan; k++)
-        {
-         double h = iHigh(_Symbol, PERIOD_D1, RangeDaysBack + k);
-         double l = iLow(_Symbol, PERIOD_D1, RangeDaysBack + k);
-         if(h <= 0.0 || l <= 0.0)
-            return -1;
-         hi = MathMax(hi, h);
-         lo = MathMin(lo, l);
-        }
-      datetime t0 = iTime(_Symbol, PERIOD_D1, RangeDaysBack + RangeDaySpan - 1);
-      datetime t1 = iTime(_Symbol, PERIOD_D1, RangeDaysBack);
-      info = "D1 " + TimeToString(t0, TIME_DATE) + " .. " + TimeToString(t1, TIME_DATE);
+      double h = iHigh(_Symbol, PERIOD_D1, RangeDaysBack + k);
+      double l = iLow(_Symbol, PERIOD_D1, RangeDaysBack + k);
+      if(h <= 0.0 || l <= 0.0)
+         return -1;
+      hi = MathMax(hi, h);
+      lo = MathMin(lo, l);
      }
+   datetime t0 = iTime(_Symbol, PERIOD_D1, RangeDaysBack + RangeDaySpan - 1);
+   datetime t1 = iTime(_Symbol, PERIOD_D1, RangeDaysBack);
+   info = "D1 " + TimeToString(t0, TIME_DATE) + " .. " + TimeToString(t1, TIME_DATE);
+   return 1;
+  }
+
+// range = massimo/minimo delle ultime RangeBarsLookback barre di Timeframe. ritorna 1 = calcolato, -1 = dati non pronti
+int RangeByBars(double &hi, double &lo, string &info)
+  {
+   hi = -DBL_MAX;
+   lo = DBL_MAX;
+   info = "";
+   int s0 = 1;
+   if(RangeDaysBack > 0)
+     {
+      datetime nextDay = iTime(_Symbol, PERIOD_D1, RangeDaysBack - 1);
+      if(nextDay == 0)
+         return -1;
+      s0 = iBarShift(_Symbol, Timeframe, nextDay - 1, false);
+      if(s0 < 0)
+         return -1;
+     }
+   for(int i = s0; i < s0 + RangeBarsLookback; i++)
+     {
+      double h = iHigh(_Symbol, Timeframe, i);
+      double l = iLow(_Symbol, Timeframe, i);
+      if(h <= 0.0 || l <= 0.0)
+         return -1;
+      hi = MathMax(hi, h);
+      lo = MathMin(lo, l);
+     }
+   info = IntegerToString(RangeBarsLookback) + " barre " + TimeToString(iTime(_Symbol, Timeframe, s0 + RangeBarsLookback - 1), TIME_DATE | TIME_MINUTES) +
+          " .. " + TimeToString(iTime(_Symbol, Timeframe, s0), TIME_DATE | TIME_MINUTES);
+   return 1;
+  }
+
+int ComputeRange(datetime now, double &hi, double &lo, string &info)
+  {
+   int rt = 1;
+   if(RangeMode == RANGE_PREV_D1)
+      rt = RangeByD1(hi, lo, info);
    else
       if(RangeMode == RANGE_BARS)
-        {
-         int s0 = 1;
-         if(RangeDaysBack > 0)
-           {
-            datetime nextDay = iTime(_Symbol, PERIOD_D1, RangeDaysBack - 1);
-            if(nextDay == 0)
-               return -1;
-            s0 = iBarShift(_Symbol, Timeframe, nextDay - 1, false);
-            if(s0 < 0)
-               return -1;
-           }
-         for(int i = s0; i < s0 + RangeBarsLookback; i++)
-           {
-            double h = iHigh(_Symbol, Timeframe, i);
-            double l = iLow(_Symbol, Timeframe, i);
-            if(h <= 0.0 || l <= 0.0)
-               return -1;
-            hi = MathMax(hi, h);
-            lo = MathMin(lo, l);
-           }
-         info = IntegerToString(RangeBarsLookback) + " barre " + TimeToString(iTime(_Symbol, Timeframe, s0 + RangeBarsLookback - 1), TIME_DATE | TIME_MINUTES) +
-                " .. " + TimeToString(iTime(_Symbol, Timeframe, s0), TIME_DATE | TIME_MINUTES);
-        }
+         rt = RangeByBars(hi, lo, info);
       else
-        {
-         int rt = RangeTimeWindow(now, RangeHourStart, RangeMinuteStart, RangeHourEnd, RangeMinuteEnd, hi, lo, info);
-         if(rt <= 0)
-            return rt;
-        }
+         rt = RangeTimeWindow(now, RangeHourStart, RangeMinuteStart, RangeHourEnd, RangeMinuteEnd, hi, lo, info);
+   if(rt <= 0)
+      return rt;
    return FinishRange(hi, lo, info);
   }
 
@@ -516,6 +557,208 @@ void UpdateRangeLines()
      {
       ObjectDelete(0, LineName("hi"));
       ObjectDelete(0, LineName("lo"));
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Filtro di spread e modalita' di entrata a mercato                |
+//| (le stesse funzioni servono all'EA reale e all'analisi virtuale) |
+//+------------------------------------------------------------------+
+// spread massimo ammesso in punti (0 = nessun limite)
+double SpreadLimitPoints()
+  {
+   double lim = 0.0;
+   if(MaxSpreadPoints > 0.0)
+      lim = MaxSpreadPoints;
+   if(MaxSpreadPctOfSL > 0.0)
+     {
+      double l2 = StopLossPoints * MaxSpreadPctOfSL / 100.0;
+      if(lim <= 0.0 || l2 < lim)
+         lim = l2;
+     }
+   return lim;
+  }
+
+// SL e TP di un ingresso a mercato al prezzo entry (tp = 0 se UseTakeProfit e' spento)
+void MarketStops(const bool isBuy, const double entry, double &sl, double &tp)
+  {
+   double slD = StopLossPoints * _Point;
+   double tpD = TakeProfitPoints * _Point;
+   sl = NormPrice(isBuy ? entry - slD : entry + slD);
+   tp = (UseTakeProfit ? NormPrice(isBuy ? entry + tpD : entry - tpD) : 0.0);
+  }
+
+// B) la candela di Timeframe appena chiusa ha chiuso oltre il livello? +1 sopra massimo+offset, -1 sotto minimo-offset, 0 no.
+// Vale solo se ora siamo nella finestra di entrata (piu' ExpireExtraMinutes) e la candela si e' chiusa dopo l'inizio della finestra corrente.
+// Da chiamare solo al primo tick di una nuova barra.
+int CandleSignal(datetime now, double hi, double lo)
+  {
+   if(!OrdersMayLive(now))
+      return 0;
+   datetime t1 = iTime(_Symbol, Timeframe, 1);
+   if(t1 == 0)
+      return 0;
+   datetime tc = t1 + (datetime)PeriodSeconds(Timeframe);
+   datetime winStart = now - (datetime)(WinOffset(now) * 60 + (int)(now % 60));
+   if(tc <= winStart)
+      return 0;
+   double c = iClose(_Symbol, Timeframe, 1);
+   if(c <= 0.0)
+      return 0;
+   double tol = 0.001 * _Point;
+   double up = NormPrice(hi + PendingOrderOffsetPoints * _Point);
+   double dn = NormPrice(lo - PendingOrderOffsetPoints * _Point);
+   if(c - up > tol)
+      return 1;
+   if(dn - c > tol)
+      return -1;
+   return 0;
+  }
+
+// C) retest. Armamento: il prezzo supera il livello (ask >= massimo+offset, oppure bid <= minimo-offset). Ingresso: dopo l'armamento (mai nello stesso
+// tick) il prezzo torna al bordo del range: bid <= massimo + tolleranza per il long, ask >= minimo - tolleranza per lo short. Ritorna +1 / -1 / 0.
+int RetestSignal(bool &armL, bool &armS, double hi, double lo, double bid, double ask)
+  {
+   double tol = RetestTolerancePoints * _Point;
+   if(armL && bid <= hi + tol + 1e-9)
+      return 1;
+   if(armS && ask >= lo - tol - 1e-9)
+      return -1;
+   double up = NormPrice(hi + PendingOrderOffsetPoints * _Point);
+   double dn = NormPrice(lo - PendingOrderOffsetPoints * _Point);
+   if(ask >= up - 1e-9)
+      armL = true;
+   if(bid <= dn + 1e-9)
+      armS = true;
+   return 0;
+  }
+
+// calcola il range di oggi quando serve (una volta al giorno). true se e' valido e pronto
+bool EnsureRange(datetime now)
+  {
+   if(g_rangeDone)
+      return g_rangeOK;
+   if(now < g_nextTry)
+      return false;
+   double hi = 0.0, lo = 0.0;
+   string info = "";
+   int r = ComputeRange(now, hi, lo, info);
+   if(r < 0)
+     {
+      if(!g_logWait)
+        {
+         Print("Range non ancora calcolabile (dati o fine del range): riprovo. ", info);
+         g_logWait = true;
+        }
+      g_nextTry = now + 10;
+      return false;
+     }
+   g_rangeDone = true;
+   g_rangeInfo = info;
+   if(r == 1)
+     {
+      g_rangeOK = true;
+      g_upper = hi;
+      g_lower = lo;
+      g_rangeInfo = StringFormat("Range %s - %s (%.0f punti) %s", DoubleToString(lo, _Digits), DoubleToString(hi, _Digits), (hi - lo) / _Point, info);
+     }
+   Print(g_rangeOK ? "Range valido: " : "Range scartato: ", g_rangeInfo);
+   UpdateRangeLines();
+   return g_rangeOK;
+  }
+
+// ordine a mercato (modalita' B e C). ritorna true se accettato
+bool OpenMarket(const bool isBuy, const string tag)
+  {
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double entry = (isBuy ? ask : bid);
+   double sl = 0.0, tp = 0.0;
+   MarketStops(isBuy, entry, sl, tp);
+   double vol = NormVol(LotSize);
+   if(vol <= 0.0)
+     {
+      Print("Volume non valido: LotSize ", DoubleToString(LotSize, 3));
+      return false;
+     }
+   bool ok = (isBuy ? g_trade.Buy(vol, _Symbol, 0.0, sl, tp, OrderComment + " " + tag) : g_trade.Sell(vol, _Symbol, 0.0, sl, tp, OrderComment + " " + tag));
+   if(!(ok && TradeOK()))
+     {
+      Print("Errore ordine a mercato ", (isBuy ? "Buy" : "Sell"), " (", tag, "): ", g_trade.ResultRetcode(), " ", g_trade.ResultRetcodeDescription());
+      return false;
+     }
+   Print("Ingresso a mercato ", (isBuy ? "Buy" : "Sell"), " (", tag, ") a ", DoubleToString(entry, _Digits), " SL ", DoubleToString(sl, _Digits), " TP ", DoubleToString(tp, _Digits), " | ", g_rangeInfo);
+   return true;
+  }
+
+void TryMarketEntry(datetime now, bool newBar)
+  {
+   if(!EntryCandleClose && !EntryRetest)
+      return;
+   if(!OrdersMayLive(now))
+     {
+      g_armL = false;
+      g_armS = false;
+      return;
+     }
+   if(g_tradesToday >= MaxTradesPerDay)
+      return;
+   if(g_nPos > 0)
+     {
+      g_armL = false;
+      g_armS = false;
+      return;
+     }
+   if(now < g_nextTryM)
+      return;
+   if(!TradingAllowed())
+     {
+      g_status = "trading non consentito";
+      return;
+     }
+   if(!EnsureRange(now))
+      return;
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(ask <= 0.0 || bid <= 0.0 || ask < bid)
+      return;
+   int dir = 0;
+   string tag = "";
+   if(EntryRetest)
+     {
+      dir = RetestSignal(g_armL, g_armS, g_upper, g_lower, bid, ask);
+      tag = "retest";
+     }
+   if(dir == 0 && EntryCandleClose && newBar)
+     {
+      dir = CandleSignal(now, g_upper, g_lower);
+      tag = "chiusura";
+     }
+   if(dir == 0)
+      return;
+   double spr = (ask - bid) / _Point;
+   double lim = SpreadLimitPoints();
+   if(lim > 0.0 && spr > lim)
+     {
+      if(!g_logSpread)
+        {
+         Print("Spread ", DoubleToString(spr, 1), " punti sopra il limite ", DoubleToString(lim, 1), ": segnale ", tag, " saltato");
+         g_logSpread = true;
+        }
+      return;
+     }
+   if(OpenMarket(dir > 0, tag))
+     {
+      g_armL = false;
+      g_armS = false;
+      g_failToday = 0;
+      if(g_nOrd != 0)
+         DeleteOurPendings("OCO: ingresso a mercato");
+     }
+   else
+     {
+      g_failToday++;
+      g_nextTryM = now + (g_failToday >= 5 ? 600 : 15);
      }
   }
 
@@ -592,6 +835,8 @@ int PlaceSetup(datetime now)
 
 void TryPlaceSetup(datetime now)
   {
+   if(!EntryStop)
+      return;
    if(!InEntryWindow(now))
       return;
    if(g_tradesToday >= MaxTradesPerDay)
@@ -607,49 +852,14 @@ void TryPlaceSetup(datetime now)
       g_status = "trading non consentito";
       return;
      }
-   if(!g_rangeDone)
-     {
-      double hi = 0.0, lo = 0.0;
-      string info = "";
-      int r = ComputeRange(now, hi, lo, info);
-      if(r < 0)
-        {
-         if(!g_logWait)
-           {
-            Print("Range non ancora calcolabile (dati o fine del range): riprovo. ", info);
-            g_logWait = true;
-           }
-         g_nextTry = now + 10;
-         return;
-        }
-      g_rangeDone = true;
-      g_rangeInfo = info;
-      if(r == 1)
-        {
-         g_rangeOK = true;
-         g_upper = hi;
-         g_lower = lo;
-         g_rangeInfo = StringFormat("Range %s - %s (%.0f punti) %s", DoubleToString(lo, _Digits), DoubleToString(hi, _Digits), (hi - lo) / _Point, info);
-        }
-      Print(g_rangeOK ? "Range valido: " : "Range scartato: ", g_rangeInfo);
-      UpdateRangeLines();
-     }
-   if(!g_rangeOK)
+   if(!EnsureRange(now))
       return;
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(ask <= 0.0 || bid <= 0.0 || ask < bid)
       return;
    double spr = (ask - bid) / _Point;
-   double lim = 0.0;
-   if(MaxSpreadPoints > 0.0)
-      lim = MaxSpreadPoints;
-   if(MaxSpreadPctOfSL > 0.0)
-     {
-      double l2 = StopLossPoints * MaxSpreadPctOfSL / 100.0;
-      if(lim <= 0.0 || l2 < lim)
-         lim = l2;
-     }
+   double lim = SpreadLimitPoints();
    if(lim > 0.0 && spr > lim)
      {
       if(!g_logSpread)
@@ -790,30 +1000,45 @@ void ManagePositions(datetime now)
   }
 
 //+------------------------------------------------------------------+
-//| ANALISI DELLE FASCE ORARIE (SlotScan): NESSUN ordine reale        |
-//| Ogni fascia attiva e' un "EA virtuale" indipendente: il suo range  |
-//| e' il massimo/minimo della fascia nel giorno di riferimento        |
-//| (RangeDaysBack), e poi segue le stesse regole dell'EA reale:       |
-//| finestra di entrata, coppia di ordini stop con offset, filtro di   |
-//| larghezza e di spread, SL/TP, break even e trailing, un numero     |
-//| massimo di trade al giorno. Ordini e posizioni sono simulati qui   |
-//| dentro sui tick (ask/bid del tester): non si apre nulla nel conto. |
-//| Le fasce non si influenzano a vicenda. A fine test si scrive la    |
-//| classifica (log degli Esperti + file CSV).                         |
+//| ANALISI VIRTUALE (SlotScan): NESSUN ordine reale                  |
+//| Ogni "concorrente" e' un EA virtuale indipendente, formato da:    |
+//|   una SORGENTE di range                                           |
+//|     - le fasce orarie Slot1..Slot12 (massimo/minimo della fascia   |
+//|       nel giorno di riferimento RangeDaysBack)                    |
+//|     - il range a barre (ScanRangeBars: RangeBarsLookback barre di |
+//|       Timeframe)                                                  |
+//|     - il range dei D1 precedenti (ScanRangePrevD1: RangeDaySpan   |
+//|       giorni)                                                     |
+//|   una MODALITA' di entrata                                        |
+//|     - EntryStop         coppia di ordini stop (OCO)               |
+//|     - EntryCandleClose  chiusura di candela oltre il livello      |
+//|     - EntryRetest       rottura e ritorno al bordo del range      |
+//| Poi segue le stesse regole dell'EA reale: finestra di entrata,     |
+//| filtri di larghezza e di spread, SL/TP, break even e trailing, un  |
+//| numero massimo di trade al giorno. Ordini e posizioni sono         |
+//| simulati qui dentro sui tick (ask/bid del tester): non si apre     |
+//| nulla nel conto. I concorrenti non si influenzano a vicenda        |
+//| (nemmeno quelli della stessa fascia con modalita' diverse). A fine |
+//| test si scrive la classifica (log degli Esperti + file CSV).       |
 //+------------------------------------------------------------------+
 #define NSLOT 12
+#define NSRC 14
+#define NMODE 3
+#define NCON 42
 
 struct SSlot
   {
    bool     on;
+   int      src, mode;               // sorgente (0..11 fasce, 12 barre, 13 D1 precedenti) e modalita' (0 stop, 1 chiusura, 2 retest)
    int      hS, mS, hE, mE;          // fascia (ora server); hE = 0 significa mezzanotte
    // stato del giorno
    bool     rangeDone, rangeOK;
    double   hi, lo;
    int      pairs, trades;           // coppie piazzate / posizioni aperte oggi
    datetime nextTry;
+   bool     armL, armS;              // retest: il prezzo ha superato il livello, si attende il ritorno
    // ordini e posizione virtuali
-   int      state;                   // 0 niente, 1 coppia pendente, 2 posizione aperta
+   int      state;                   // 0 niente, 1 coppia pendente (solo stop), 2 posizione aperta
    double   buyPx, sellPx, slB, slS, tpB, tpS;
    datetime expiry;
    bool     isBuy;
@@ -829,12 +1054,12 @@ struct SSlot
 
 struct SVTrade
   {
-   int      slot, dir, part;
+   int      con, dir, part;
    datetime tOpen, tClose;
    double   entry, exitPx, R, pts, width;
   };
 
-SSlot    g_sl[NSLOT];
+SSlot    g_sl[NCON];
 SVTrade  g_vt[];
 int      g_nVt = 0;
 
@@ -870,211 +1095,206 @@ bool SlotOn(const int k)
    return false;
   }
 
-string SlotName(const int k)
+bool SrcOn(const int src)
   {
-   return StringFormat("%02d:%02d-%02d:%02d", g_sl[k].hS, g_sl[k].mS, (g_sl[k].hE == 0 ? 24 : g_sl[k].hE), g_sl[k].mE);
+   if(src < NSLOT)
+      return SlotOn(src);
+   if(src == NSLOT)
+      return ScanRangeBars;
+   return ScanRangePrevD1;
+  }
+
+bool ModeOn(const int m)
+  {
+   if(m == 0)
+      return EntryStop;
+   if(m == 1)
+      return EntryCandleClose;
+   return EntryRetest;
+  }
+
+string ModeName(const int m)
+  {
+   if(m == 0)
+      return "stop";
+   if(m == 1)
+      return "chiusura";
+   return "retest";
+  }
+
+string SrcLabel(const int c)
+  {
+   int src = g_sl[c].src;
+   if(src < NSLOT)
+      return StringFormat("%02d:%02d-%02d:%02d", g_sl[c].hS, g_sl[c].mS, (g_sl[c].hE == 0 ? 24 : g_sl[c].hE), g_sl[c].mE);
+   if(src == NSLOT)
+      return "barre" + IntegerToString(RangeBarsLookback);
+   return "D1x" + IntegerToString(RangeDaySpan);
+  }
+
+string ConName(const int c)
+  {
+   return SrcLabel(c) + " " + ModeName(g_sl[c].mode);
   }
 
 void ScanInit()
   {
    g_nVt = 0;
    ArrayResize(g_vt, 0);
-   for(int k = 0; k < NSLOT; k++)
+   for(int c = 0; c < NCON; c++)
      {
-      ZeroMemory(g_sl[k]);
-      g_sl[k].on = SlotOn(k);
-      int startMin = (SlotFirstHour * 60 + k * SlotLenHours * 60) % 1440;
-      int endMin = startMin + SlotLenHours * 60;
-      g_sl[k].hS = startMin / 60;
-      g_sl[k].mS = 0;
-      g_sl[k].hE = (endMin % 1440) / 60;
-      g_sl[k].mE = 0;
+      ZeroMemory(g_sl[c]);
+      int src = c / NMODE;
+      g_sl[c].src = src;
+      g_sl[c].mode = c % NMODE;
+      g_sl[c].on = (SrcOn(src) && ModeOn(c % NMODE));
+      if(src < NSLOT)
+        {
+         int startMin = (SlotFirstHour * 60 + src * SlotLenHours * 60) % 1440;
+         int endMin = startMin + SlotLenHours * 60;
+         g_sl[c].hS = startMin / 60;
+         g_sl[c].mS = 0;
+         g_sl[c].hE = (endMin % 1440) / 60;
+         g_sl[c].mE = 0;
+        }
      }
   }
 
 int ScanActive()
   {
    int n = 0;
-   for(int k = 0; k < NSLOT; k++)
-      if(g_sl[k].on)
+   for(int c = 0; c < NCON; c++)
+      if(g_sl[c].on)
          n++;
    return n;
   }
 
 void ScanNewDay()
   {
-   for(int k = 0; k < NSLOT; k++)
+   for(int c = 0; c < NCON; c++)
      {
-      g_sl[k].rangeDone = false;
-      g_sl[k].rangeOK = false;
-      g_sl[k].hi = 0.0;
-      g_sl[k].lo = 0.0;
-      g_sl[k].pairs = (g_sl[k].state == 1 ? 1 : 0);   // una coppia ancora viva (finestra a cavallo di mezzanotte) conta come piazzata
-      g_sl[k].trades = 0;
-      g_sl[k].nextTry = 0;
+      g_sl[c].rangeDone = false;
+      g_sl[c].rangeOK = false;
+      g_sl[c].hi = 0.0;
+      g_sl[c].lo = 0.0;
+      g_sl[c].pairs = (g_sl[c].state == 1 ? 1 : 0);   // una coppia ancora viva (finestra a cavallo di mezzanotte) conta come piazzata
+      g_sl[c].trades = 0;
+      g_sl[c].nextTry = 0;
+      g_sl[c].armL = false;
+      g_sl[c].armS = false;
      }
   }
 
-// chiude la posizione virtuale della fascia k al prezzo exitPx e aggiorna le statistiche
-void ScanClose(const int k, const double exitPx, const datetime now)
+// chiude la posizione virtuale del concorrente c al prezzo exitPx e aggiorna le statistiche
+void ScanClose(const int c, const double exitPx, const datetime now)
   {
-   double diff = (g_sl[k].isBuy ? (exitPx - g_sl[k].entry) : (g_sl[k].entry - exitPx));
-   double R = diff / g_sl[k].slNom;
+   double diff = (g_sl[c].isBuy ? (exitPx - g_sl[c].entry) : (g_sl[c].entry - exitPx));
+   double R = diff / g_sl[c].slNom;
    double pts = diff / _Point;
    if(SlotCommissionPoints > 0.0)
      {
-      R -= SlotCommissionPoints * _Point / g_sl[k].slNom;
+      R -= SlotCommissionPoints * _Point / g_sl[c].slNom;
       pts -= SlotCommissionPoints;
      }
-   int p = ((SlotSplitDate > 0 && g_sl[k].tOpen >= SlotSplitDate) ? 1 : 0);
-   g_sl[k].n[p]++;
+   int p = ((SlotSplitDate > 0 && g_sl[c].tOpen >= SlotSplitDate) ? 1 : 0);
+   g_sl[c].n[p]++;
    if(R > 0.0)
      {
-      g_sl[k].wins[p]++;
-      g_sl[k].gW[p] += R;
+      g_sl[c].wins[p]++;
+      g_sl[c].gW[p] += R;
      }
    else
-      g_sl[k].gL[p] += -R;
-   g_sl[k].sumR[p] += R;
-   g_sl[k].sumR2[p] += R * R;
-   g_sl[k].sumPts[p] += pts;
-   g_sl[k].eq += R;
-   if(g_sl[k].eq > g_sl[k].peak)
-      g_sl[k].peak = g_sl[k].eq;
-   if(g_sl[k].peak - g_sl[k].eq > g_sl[k].dd)
-      g_sl[k].dd = g_sl[k].peak - g_sl[k].eq;
+      g_sl[c].gL[p] += -R;
+   g_sl[c].sumR[p] += R;
+   g_sl[c].sumR2[p] += R * R;
+   g_sl[c].sumPts[p] += pts;
+   g_sl[c].eq += R;
+   if(g_sl[c].eq > g_sl[c].peak)
+      g_sl[c].peak = g_sl[c].eq;
+   if(g_sl[c].peak - g_sl[c].eq > g_sl[c].dd)
+      g_sl[c].dd = g_sl[c].peak - g_sl[c].eq;
    ArrayResize(g_vt, g_nVt + 1, 4096);
-   g_vt[g_nVt].slot = k;
-   g_vt[g_nVt].dir = (g_sl[k].isBuy ? 1 : -1);
+   g_vt[g_nVt].con = c;
+   g_vt[g_nVt].dir = (g_sl[c].isBuy ? 1 : -1);
    g_vt[g_nVt].part = p;
-   g_vt[g_nVt].tOpen = g_sl[k].tOpen;
+   g_vt[g_nVt].tOpen = g_sl[c].tOpen;
    g_vt[g_nVt].tClose = now;
-   g_vt[g_nVt].entry = g_sl[k].entry;
+   g_vt[g_nVt].entry = g_sl[c].entry;
    g_vt[g_nVt].exitPx = exitPx;
    g_vt[g_nVt].R = R;
    g_vt[g_nVt].pts = pts;
-   g_vt[g_nVt].width = g_sl[k].width;
+   g_vt[g_nVt].width = g_sl[c].width;
    g_nVt++;
-   g_sl[k].state = 0;
+   g_sl[c].state = 0;
   }
 
-// un tick per una fascia: prima il "broker" virtuale (scadenza, SL/TP, riempimenti), poi le azioni dell'EA (break even/trailing, piazzamento)
-void ScanSlot(const int k, const datetime now, const double bid, const double ask)
+// range del concorrente c al tick corrente: 1 valido, 0 scartato, -1 non pronto
+int ScanRange(const int c, const datetime now, double &hi, double &lo, string &info)
   {
-   if(g_sl[k].state == 1 && (now >= g_sl[k].expiry || !OrdersMayLive(now)))
-      g_sl[k].state = 0;
-   if(g_sl[k].state == 2)
-     {
-      bool hit = false;
-      double ex = 0.0;
-      if(g_sl[k].isBuy)
-        {
-         if(g_sl[k].sl > 0.0 && bid <= g_sl[k].sl + 1e-9)
-           {
-            hit = true;
-            ex = bid;
-           }
-         else
-            if(g_sl[k].tp > 0.0 && bid >= g_sl[k].tp - 1e-9)
-              {
-               hit = true;
-               ex = bid;
-              }
-        }
+   int src = g_sl[c].src;
+   int r = 1;
+   if(src < NSLOT)
+      r = RangeTimeWindow(now, g_sl[c].hS, g_sl[c].mS, g_sl[c].hE, g_sl[c].mE, hi, lo, info);
+   else
+      if(src == NSLOT)
+         r = RangeByBars(hi, lo, info);
       else
-        {
-         if(g_sl[k].sl > 0.0 && ask >= g_sl[k].sl - 1e-9)
-           {
-            hit = true;
-            ex = ask;
-           }
-         else
-            if(g_sl[k].tp > 0.0 && ask <= g_sl[k].tp + 1e-9)
-              {
-               hit = true;
-               ex = ask;
-              }
-        }
-      if(hit)
-         ScanClose(k, ex, now);
-     }
-   if(g_sl[k].state == 1)
-     {
-      bool fillB = (ask >= g_sl[k].buyPx - 1e-9);
-      bool fillS = (!fillB && bid <= g_sl[k].sellPx + 1e-9);
-      if(fillB || fillS)
-        {
-         g_sl[k].isBuy = fillB;
-         g_sl[k].entry = (fillB ? MathMax(g_sl[k].buyPx, ask) : MathMin(g_sl[k].sellPx, bid));   // un gap si riempie al prezzo del tick
-         g_sl[k].sl = (fillB ? g_sl[k].slB : g_sl[k].slS);
-         g_sl[k].tp = (fillB ? g_sl[k].tpB : g_sl[k].tpS);
-         g_sl[k].slNom = (fillB ? MathAbs(g_sl[k].buyPx - g_sl[k].slB) : MathAbs(g_sl[k].sellPx - g_sl[k].slS));
-         g_sl[k].tOpen = now;
-         g_sl[k].width = (g_sl[k].hi - g_sl[k].lo) / _Point;
-         g_sl[k].trades++;
-         g_sl[k].state = 2;
-        }
-     }
-   if(g_sl[k].state == 2 && (UsaBreakEven || UsaTrailingStop))
-     {
-      double tg = 0.0, pp = 0.0;
-      if(NextStop(g_sl[k].isBuy, g_sl[k].entry, g_sl[k].sl, g_sl[k].tp, bid, ask, tg, pp))
-         g_sl[k].sl = tg;
-     }
-   // piazzamento della coppia virtuale (stesse condizioni di TryPlaceSetup)
-   if(g_sl[k].state != 0)
-      return;
-   if(!InEntryWindow(now))
-      return;
-   if(g_sl[k].trades >= MaxTradesPerDay)
-      return;
-   if(g_sl[k].pairs > g_sl[k].trades)
-      return;
-   if(now < g_sl[k].nextTry)
-      return;
-   if(!g_sl[k].rangeDone)
+         r = RangeByD1(hi, lo, info);
+   if(r > 0)
+      r = FinishRange(hi, lo, info);
+   return r;
+  }
+
+// calcola (una volta al giorno) il range del concorrente; true se e' valido e pronto
+bool ScanEnsureRange(const int c, const datetime now)
+  {
+   if(!g_sl[c].rangeDone)
      {
       double hi = 0.0, lo = 0.0;
       string info = "";
-      int r = RangeTimeWindow(now, g_sl[k].hS, g_sl[k].mS, g_sl[k].hE, g_sl[k].mE, hi, lo, info);
-      if(r > 0)
-         r = FinishRange(hi, lo, info);
+      int r = ScanRange(c, now, hi, lo, info);
       if(r < 0)
         {
-         g_sl[k].nextTry = now + 10;
-         return;
+         g_sl[c].nextTry = now + 10;
+         return false;
         }
-      g_sl[k].rangeDone = true;
-      g_sl[k].daysSeen++;
+      g_sl[c].rangeDone = true;
+      g_sl[c].daysSeen++;
       if(r == 1)
         {
-         g_sl[k].rangeOK = true;
-         g_sl[k].hi = hi;
-         g_sl[k].lo = lo;
-         g_sl[k].daysValid++;
-         g_sl[k].sumWidth += (hi - lo) / _Point;
+         g_sl[c].rangeOK = true;
+         g_sl[c].hi = hi;
+         g_sl[c].lo = lo;
+         g_sl[c].daysValid++;
+         g_sl[c].sumWidth += (hi - lo) / _Point;
         }
      }
-   if(!g_sl[k].rangeOK)
+   return g_sl[c].rangeOK;
+  }
+
+// modalita' stop: piazzamento della coppia virtuale (stesse condizioni di TryPlaceSetup)
+void ScanPlacePair(const int c, const datetime now, const double bid, const double ask)
+  {
+   if(!InEntryWindow(now))
+      return;
+   if(g_sl[c].trades >= MaxTradesPerDay)
+      return;
+   if(g_sl[c].pairs > g_sl[c].trades)
+      return;
+   if(now < g_sl[c].nextTry)
+      return;
+   if(!ScanEnsureRange(c, now))
       return;
    if(ask <= 0.0 || bid <= 0.0 || ask < bid)
       return;
    double spr = (ask - bid) / _Point;
-   double lim = 0.0;
-   if(MaxSpreadPoints > 0.0)
-      lim = MaxSpreadPoints;
-   if(MaxSpreadPctOfSL > 0.0)
-     {
-      double l2 = StopLossPoints * MaxSpreadPctOfSL / 100.0;
-      if(lim <= 0.0 || l2 < lim)
-         lim = l2;
-     }
+   double lim = SpreadLimitPoints();
    if(lim > 0.0 && spr > lim)
       return;
    double ts = TickSize();
    double stopLvl = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-   double buyPx = NormPrice(g_sl[k].hi + PendingOrderOffsetPoints * _Point);
-   double sellPx = NormPrice(g_sl[k].lo - PendingOrderOffsetPoints * _Point);
+   double buyPx = NormPrice(g_sl[c].hi + PendingOrderOffsetPoints * _Point);
+   double sellPx = NormPrice(g_sl[c].lo - PendingOrderOffsetPoints * _Point);
    bool buyOK = ((buyPx - ask) > stopLvl + ts * 0.5);
    bool sellOK = ((bid - sellPx) > stopLvl + ts * 0.5);
    if(!buyOK || !sellOK)
@@ -1088,27 +1308,145 @@ void ScanSlot(const int k, const datetime now, const double bid, const double as
      }
    double slD = StopLossPoints * _Point;
    double tpD = TakeProfitPoints * _Point;
-   g_sl[k].buyPx = buyPx;
-   g_sl[k].sellPx = sellPx;
-   g_sl[k].slB = NormPrice(buyPx - slD);
-   g_sl[k].slS = NormPrice(sellPx + slD);
-   g_sl[k].tpB = (UseTakeProfit ? NormPrice(buyPx + tpD) : 0.0);
-   g_sl[k].tpS = (UseTakeProfit ? NormPrice(sellPx - tpD) : 0.0);
-   g_sl[k].expiry = OrdersExpiry(now);
-   g_sl[k].state = 1;
-   g_sl[k].pairs++;
-   g_sl[k].nPairs++;
+   g_sl[c].buyPx = buyPx;
+   g_sl[c].sellPx = sellPx;
+   g_sl[c].slB = NormPrice(buyPx - slD);
+   g_sl[c].slS = NormPrice(sellPx + slD);
+   g_sl[c].tpB = (UseTakeProfit ? NormPrice(buyPx + tpD) : 0.0);
+   g_sl[c].tpS = (UseTakeProfit ? NormPrice(sellPx - tpD) : 0.0);
+   g_sl[c].expiry = OrdersExpiry(now);
+   g_sl[c].state = 1;
+   g_sl[c].pairs++;
+   g_sl[c].nPairs++;
   }
 
-void ScanTick(const datetime now)
+// modalita' chiusura di candela (1) e retest (2): ingresso virtuale a mercato (stesse condizioni di TryMarketEntry)
+void ScanMarketEntry(const int c, const datetime now, const double bid, const double ask, const bool newBar)
+  {
+   if(!OrdersMayLive(now))
+     {
+      g_sl[c].armL = false;
+      g_sl[c].armS = false;
+      return;
+     }
+   if(g_sl[c].trades >= MaxTradesPerDay)
+      return;
+   if(now < g_sl[c].nextTry)
+      return;
+   if(!ScanEnsureRange(c, now))
+      return;
+   if(ask <= 0.0 || bid <= 0.0 || ask < bid)
+      return;
+   int dir = 0;
+   if(g_sl[c].mode == 2)
+      dir = RetestSignal(g_sl[c].armL, g_sl[c].armS, g_sl[c].hi, g_sl[c].lo, bid, ask);
+   else
+      if(newBar)
+         dir = CandleSignal(now, g_sl[c].hi, g_sl[c].lo);
+   if(dir == 0)
+      return;
+   double spr = (ask - bid) / _Point;
+   double lim = SpreadLimitPoints();
+   if(lim > 0.0 && spr > lim)
+      return;
+   bool isBuy = (dir > 0);
+   double entry = (isBuy ? ask : bid);
+   double sl = 0.0, tp = 0.0;
+   MarketStops(isBuy, entry, sl, tp);
+   g_sl[c].isBuy = isBuy;
+   g_sl[c].entry = entry;
+   g_sl[c].sl = sl;
+   g_sl[c].tp = tp;
+   g_sl[c].slNom = MathAbs(entry - sl);
+   g_sl[c].tOpen = now;
+   g_sl[c].width = (g_sl[c].hi - g_sl[c].lo) / _Point;
+   g_sl[c].trades++;
+   g_sl[c].nPairs++;
+   g_sl[c].state = 2;
+   g_sl[c].armL = false;
+   g_sl[c].armS = false;
+  }
+
+// un tick per un concorrente: prima il "broker" virtuale (scadenza, SL/TP, riempimenti), poi le azioni dell'EA (break even/trailing, ingresso)
+void ScanSlot(const int c, const datetime now, const double bid, const double ask, const bool newBar)
+  {
+   if(g_sl[c].state == 1 && (now >= g_sl[c].expiry || !OrdersMayLive(now)))
+      g_sl[c].state = 0;
+   if(g_sl[c].state == 2)
+     {
+      bool hit = false;
+      double ex = 0.0;
+      if(g_sl[c].isBuy)
+        {
+         if(g_sl[c].sl > 0.0 && bid <= g_sl[c].sl + 1e-9)
+           {
+            hit = true;
+            ex = bid;
+           }
+         else
+            if(g_sl[c].tp > 0.0 && bid >= g_sl[c].tp - 1e-9)
+              {
+               hit = true;
+               ex = bid;
+              }
+        }
+      else
+        {
+         if(g_sl[c].sl > 0.0 && ask >= g_sl[c].sl - 1e-9)
+           {
+            hit = true;
+            ex = ask;
+           }
+         else
+            if(g_sl[c].tp > 0.0 && ask <= g_sl[c].tp + 1e-9)
+              {
+               hit = true;
+               ex = ask;
+              }
+        }
+      if(hit)
+         ScanClose(c, ex, now);
+     }
+   if(g_sl[c].state == 1)
+     {
+      bool fillB = (ask >= g_sl[c].buyPx - 1e-9);
+      bool fillS = (!fillB && bid <= g_sl[c].sellPx + 1e-9);
+      if(fillB || fillS)
+        {
+         g_sl[c].isBuy = fillB;
+         g_sl[c].entry = (fillB ? MathMax(g_sl[c].buyPx, ask) : MathMin(g_sl[c].sellPx, bid));   // un gap si riempie al prezzo del tick
+         g_sl[c].sl = (fillB ? g_sl[c].slB : g_sl[c].slS);
+         g_sl[c].tp = (fillB ? g_sl[c].tpB : g_sl[c].tpS);
+         g_sl[c].slNom = (fillB ? MathAbs(g_sl[c].buyPx - g_sl[c].slB) : MathAbs(g_sl[c].sellPx - g_sl[c].slS));
+         g_sl[c].tOpen = now;
+         g_sl[c].width = (g_sl[c].hi - g_sl[c].lo) / _Point;
+         g_sl[c].trades++;
+         g_sl[c].state = 2;
+        }
+     }
+   if(g_sl[c].state == 2 && (UsaBreakEven || UsaTrailingStop))
+     {
+      double tg = 0.0, pp = 0.0;
+      if(NextStop(g_sl[c].isBuy, g_sl[c].entry, g_sl[c].sl, g_sl[c].tp, bid, ask, tg, pp))
+         g_sl[c].sl = tg;
+     }
+   if(g_sl[c].state != 0)
+      return;
+   if(g_sl[c].mode == 0)
+      ScanPlacePair(c, now, bid, ask);
+   else
+      ScanMarketEntry(c, now, bid, ask, newBar);
+  }
+
+void ScanTick(const datetime now, const bool newBar)
   {
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    if(bid <= 0.0 || ask <= 0.0)
       return;
-   for(int k = 0; k < NSLOT; k++)
-      if(g_sl[k].on)
-         ScanSlot(k, now, bid, ask);
+   for(int c = 0; c < NCON; c++)
+      if(g_sl[c].on)
+         ScanSlot(c, now, bid, ask, newBar);
   }
 
 //--- metriche e classifica
@@ -1179,7 +1517,7 @@ bool SlotBefore(const int a, const int b)
 int ScanOrder(int &order[])
   {
    int cnt = 0;
-   for(int k = 0; k < NSLOT; k++)
+   for(int k = 0; k < NCON; k++)
       if(g_sl[k].on)
         {
          order[cnt] = k;
@@ -1207,10 +1545,11 @@ string SlotRankName()
    return "t-stat dell'E[R]";
   }
 
-// valore per il tester (OnTester): punteggio della fascia migliore tra quelle con abbastanza trade, 0 se nessuna
+// valore per il tester (OnTester): punteggio del concorrente migliore tra quelli con abbastanza trade, 0 se nessuno
 double ScanBestScore()
   {
-   int order[NSLOT];
+   int order[];
+   ArrayResize(order, NCON);
    int cnt = ScanOrder(order);
    if(cnt < 1 || SlotTrades(order[0]) < SlotMinTrades)
       return 0.0;
@@ -1223,8 +1562,8 @@ string SlotLine(const int rank, const int k)
    double wr = (n > 0 ? 100.0 * (g_sl[k].wins[0] + g_sl[k].wins[1]) / n : 0.0);
    double aw = (g_sl[k].daysValid > 0 ? g_sl[k].sumWidth / g_sl[k].daysValid : 0.0);
    double pts = g_sl[k].sumPts[0] + g_sl[k].sumPts[1];
-   string s = StringFormat("%2d) fascia %s | giorni %d (range validi %d, largh. media %.0f pt) | coppie %d | trade %d | win %.1f%% | E[R] %.3f | PF %.2f | R tot %.1f | punti %.0f | maxDD %.1f R | t %.2f",
-                           rank, SlotName(k), g_sl[k].daysSeen, g_sl[k].daysValid, aw, g_sl[k].nPairs, n, wr, SlotMean(k), SlotPF(k), SlotSumR(k), pts, g_sl[k].dd, SlotT(k));
+   string s = StringFormat("%2d) %s | giorni %d (range validi %d, largh. media %.0f pt) | setup %d | trade %d | win %.1f%% | E[R] %.3f | PF %.2f | R tot %.1f | punti %.0f | maxDD %.1f R | t %.2f",
+                           rank, ConName(k), g_sl[k].daysSeen, g_sl[k].daysValid, aw, g_sl[k].nPairs, n, wr, SlotMean(k), SlotPF(k), SlotSumR(k), pts, g_sl[k].dd, SlotT(k));
    if(SlotSplitDate > 0)
      {
       s += StringFormat(" | prima: %d trade E[R] %.3f | dopo: %d trade E[R] %.3f",
@@ -1243,14 +1582,14 @@ void ScanWriteFiles(const int &order[], const int cnt)
       Print("SlotScan: impossibile scrivere ", base, ".csv (errore ", GetLastError(), ")");
    else
      {
-      FileWriteString(h, "rank,slot,start,end,days_seen,days_valid,avg_width_pts,pairs,trades,win_pct,expectancy_r,profit_factor,total_r,total_pts,max_dd_r,t_stat,eligible,trades_before,er_before,trades_after,er_after\n");
+      FileWriteString(h, "rank,source,mode,label,days_seen,days_valid,avg_width_pts,setups,trades,win_pct,expectancy_r,profit_factor,total_r,total_pts,max_dd_r,t_stat,eligible,trades_before,er_before,trades_after,er_after\n");
       for(int i = 0; i < cnt; i++)
         {
          int k = order[i];
          int n = SlotTrades(k);
          double wr = (n > 0 ? 100.0 * (g_sl[k].wins[0] + g_sl[k].wins[1]) / n : 0.0);
          double aw = (g_sl[k].daysValid > 0 ? g_sl[k].sumWidth / g_sl[k].daysValid : 0.0);
-         string ln = IntegerToString(i + 1) + "," + IntegerToString(k + 1) + "," + StringFormat("%02d:%02d", g_sl[k].hS, g_sl[k].mS) + "," + StringFormat("%02d:%02d", (g_sl[k].hE == 0 ? 24 : g_sl[k].hE), g_sl[k].mE) + "," +
+         string ln = IntegerToString(i + 1) + "," + IntegerToString(g_sl[k].src + 1) + "," + ModeName(g_sl[k].mode) + "," + SrcLabel(k) + "," +
                      IntegerToString(g_sl[k].daysSeen) + "," + IntegerToString(g_sl[k].daysValid) + "," + DoubleToString(aw, 1) + "," + IntegerToString(g_sl[k].nPairs) + "," + IntegerToString(n) + "," +
                      DoubleToString(wr, 2) + "," + DoubleToString(SlotMean(k), 4) + "," + DoubleToString(SlotPF(k), 3) + "," + DoubleToString(SlotSumR(k), 3) + "," + DoubleToString(g_sl[k].sumPts[0] + g_sl[k].sumPts[1], 1) + "," +
                      DoubleToString(g_sl[k].dd, 3) + "," + DoubleToString(SlotT(k), 3) + "," + (n >= SlotMinTrades ? "1" : "0") + "," + IntegerToString(g_sl[k].n[0]) + "," + DoubleToString(g_sl[k].n[0] > 0 ? g_sl[k].sumR[0] / g_sl[k].n[0] : 0.0, 4) + "," +
@@ -1264,11 +1603,11 @@ void ScanWriteFiles(const int &order[], const int cnt)
       Print("SlotScan: impossibile scrivere ", base, "_trades.csv (errore ", GetLastError(), ")");
    else
      {
-      FileWriteString(h, "slot,start,end,dir,part,topen,tclose,entry,exit,R,pts,range_pts\n");
+      FileWriteString(h, "source,mode,label,dir,part,topen,tclose,entry,exit,R,pts,range_pts\n");
       for(int i = 0; i < g_nVt; i++)
         {
-         int k = g_vt[i].slot;
-         string ln = IntegerToString(k + 1) + "," + StringFormat("%02d:%02d", g_sl[k].hS, g_sl[k].mS) + "," + StringFormat("%02d:%02d", (g_sl[k].hE == 0 ? 24 : g_sl[k].hE), g_sl[k].mE) + "," +
+         int k = g_vt[i].con;
+         string ln = IntegerToString(g_sl[k].src + 1) + "," + ModeName(g_sl[k].mode) + "," + SrcLabel(k) + "," +
                      IntegerToString(g_vt[i].dir) + "," + (g_vt[i].part == 1 ? "dopo" : "prima") + "," + TimeToString(g_vt[i].tOpen, TIME_DATE | TIME_MINUTES) + "," + TimeToString(g_vt[i].tClose, TIME_DATE | TIME_MINUTES) + "," +
                      DoubleToString(g_vt[i].entry, _Digits) + "," + DoubleToString(g_vt[i].exitPx, _Digits) + "," + DoubleToString(g_vt[i].R, 4) + "," + DoubleToString(g_vt[i].pts, 1) + "," + DoubleToString(g_vt[i].width, 1);
          FileWriteString(h, ln + "\n");
@@ -1279,22 +1618,23 @@ void ScanWriteFiles(const int &order[], const int cnt)
 
 void ScanReport()
   {
-   int order[NSLOT];
+   int order[];
+   ArrayResize(order, NCON);
    int cnt = ScanOrder(order);
    if(cnt < 1)
       return;
    int nOpen = 0;
-   for(int k = 0; k < NSLOT; k++)
+   for(int k = 0; k < NCON; k++)
       if(g_sl[k].on && g_sl[k].state == 2)
          nOpen++;
-   Print("=== CLASSIFICA DELLE FASCE ORARIE (analisi virtuale: nessun ordine e nessuna posizione reale) ===");
-   Print("Criterio: ", SlotRankName(), " | in classifica le fasce con almeno ", SlotMinTrades, " trade | range = massimo/minimo della fascia nel giorno di riferimento (RangeDaysBack ",
-         RangeDaysBack, ", barre ", EnumToString(Timeframe), ") | finestra di entrata ", StringFormat("%02d:%02d-%02d:%02d", TradeHourStart, TradeMinuteStart, TradeHourEnd, TradeMinuteEnd),
-         " | SL ", DoubleToString(StopLossPoints, 0), " TP ", (UseTakeProfit ? DoubleToString(TakeProfitPoints, 0) : "nessuno"), " punti");
+   Print("=== CLASSIFICA DEI CONCORRENTI: range x modalita' di entrata (analisi virtuale: nessun ordine e nessuna posizione reale) ===");
+   Print("Criterio: ", SlotRankName(), " | in classifica i concorrenti con almeno ", SlotMinTrades, " trade | giorno di riferimento del range RangeDaysBack ", RangeDaysBack,
+         " (barre ", EnumToString(Timeframe), ") | finestra di entrata ", StringFormat("%02d:%02d-%02d:%02d", TradeHourStart, TradeMinuteStart, TradeHourEnd, TradeMinuteEnd),
+         " | offset ", PendingOrderOffsetPoints, " | SL ", DoubleToString(StopLossPoints, 0), " TP ", (UseTakeProfit ? DoubleToString(TakeProfitPoints, 0) : "nessuno"), " punti");
    for(int i = 0; i < cnt; i++)
       Print(SlotLine(i + 1, order[i]));
    Print("R = profitto in multipli dello SL (costi di spread inclusi", (SlotCommissionPoints > 0.0 ? " e commissione" : ", commissione NON inclusa: usa SlotCommissionPoints"), "). Posizioni virtuali ancora aperte a fine test (non contate): ", nOpen,
-         ". Con ", cnt, " fasce provate la migliore e' in parte fortuna: confermala su un altro periodo (SlotSplitDate) prima di fidarti.");
+         ". Con ", cnt, " concorrenti provati il migliore e' in parte fortuna: confermalo su un altro periodo (SlotSplitDate) prima di fidarti.");
    if(SlotWriteFiles)
      {
       ScanWriteFiles(order, cnt);
@@ -1314,16 +1654,19 @@ void UpdatePanel(datetime now)
    g_lastPanel = now;
    if(SlotScan)
      {
-      string sp = "MultiDayRangeBreakout 3.00 - ANALISI FASCE ORARIE (nessun ordine reale)\nOra server " + TimeToString(now, TIME_DATE | TIME_MINUTES) + "  finestra di entrata " +
+      string sp = "MultiDayRangeBreakout 3.00 - ANALISI VIRTUALE (nessun ordine reale)\nOra server " + TimeToString(now, TIME_DATE | TIME_MINUTES) + "  finestra di entrata " +
                   StringFormat("%02d:%02d-%02d:%02d", TradeHourStart, TradeMinuteStart, TradeHourEnd, TradeMinuteEnd) + (InEntryWindow(now) ? " (aperta)" : " (chiusa)") + "\n";
-      int ord[NSLOT];
+      int ord[];
+      ArrayResize(ord, NCON);
       int cn = ScanOrder(ord);
-      for(int i = 0; i < cn; i++)
+      for(int i = 0; i < cn && i < 8; i++)
         {
          int k = ord[i];
-         sp += IntegerToString(i + 1) + ") " + SlotName(k) + "  trade " + IntegerToString(SlotTrades(k)) + "  E[R] " + DoubleToString(SlotMean(k), 3) + "  t " + DoubleToString(SlotT(k), 2) +
+         sp += IntegerToString(i + 1) + ") " + ConName(k) + "  trade " + IntegerToString(SlotTrades(k)) + "  E[R] " + DoubleToString(SlotMean(k), 3) + "  t " + DoubleToString(SlotT(k), 2) +
                (g_sl[k].state == 2 ? "  [posizione virtuale aperta]" : (g_sl[k].state == 1 ? "  [coppia virtuale in attesa]" : "")) + "\n";
         }
+      if(cn > 8)
+         sp += "... altri " + IntegerToString(cn - 8) + " concorrenti (classifica completa a fine test)\n";
       Comment(sp);
       return;
      }
@@ -1334,6 +1677,18 @@ void UpdatePanel(datetime now)
       s += (g_rangeOK ? "Range: " : "Range scartato: ") + g_rangeInfo + "\n";
    else
       s += "Range: non ancora calcolato\n";
+   string em = "";
+   if(EntryStop)
+      em += "stop ";
+   if(EntryCandleClose)
+      em += "chiusura ";
+   if(EntryRetest)
+      em += "retest";
+   if(EntryRetest && g_armL)
+      em += " [armato long]";
+   if(EntryRetest && g_armS)
+      em += " [armato short]";
+   s += "Entrata: " + em + "\n";
    s += "Ordini " + IntegerToString(g_nOrd) + "  posizioni " + IntegerToString(g_nPos) + "  coppie oggi " + IntegerToString(g_pairsToday) +
         "  trade oggi " + IntegerToString(g_tradesToday) + "/" + IntegerToString(MaxTradesPerDay) + "\n";
    s += "Spread " + DoubleToString((SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point, 1) + " punti\n";
@@ -1357,6 +1712,9 @@ void NewDay(datetime day)
    g_tradesToday = 0;
    g_failToday = 0;
    g_nextTry = 0;
+   g_nextTryM = 0;
+   g_armL = false;
+   g_armS = false;
    g_logOutside = false;
    g_logSpread = false;
    g_logWait = false;
@@ -1385,6 +1743,10 @@ string CheckInputs()
       return "ExpireExtraMinutes non valido";
    if(MaxTradesPerDay < 1)
       return "MaxTradesPerDay deve essere >= 1";
+   if(!EntryStop && !EntryCandleClose && !EntryRetest)
+      return "accendi almeno una modalita' di entrata (EntryStop, EntryCandleClose, EntryRetest)";
+   if(RetestTolerancePoints < 0)
+      return "RetestTolerancePoints non puo' essere negativo";
    if(SlotScan)
      {
       if(RangeDaysBack < 0)
@@ -1393,8 +1755,12 @@ string CheckInputs()
          return "SlotFirstHour deve essere tra 0 e 23";
       if(SlotLenHours < 1 || SlotLenHours > 12)
          return "SlotLenHours deve essere tra 1 e 12";
-      if(!(Slot1 || Slot2 || Slot3 || Slot4 || Slot5 || Slot6 || Slot7 || Slot8 || Slot9 || Slot10 || Slot11 || Slot12))
-         return "analisi fasce: accendi almeno una fascia";
+      if(!(Slot1 || Slot2 || Slot3 || Slot4 || Slot5 || Slot6 || Slot7 || Slot8 || Slot9 || Slot10 || Slot11 || Slot12 || ScanRangeBars || ScanRangePrevD1))
+         return "analisi: accendi almeno una fascia o un range (ScanRangeBars, ScanRangePrevD1)";
+      if(ScanRangeBars && RangeBarsLookback < 1)
+         return "RangeBarsLookback deve essere >= 1";
+      if(ScanRangePrevD1 && (RangeDaySpan < 1 || RangeDaysBack < 1))
+         return "ScanRangePrevD1 richiede RangeDaySpan >= 1 e RangeDaysBack >= 1";
       if(SlotMinTrades < 1)
          return "SlotMinTrades deve essere >= 1";
      }
@@ -1438,11 +1804,12 @@ int OnInit()
    if(SlotScan)
      {
       ScanInit();
-      Print("MultiDayRangeBreakout 3.00 su ", _Symbol, ": ANALISI DELLE FASCE ORARIE, ", ScanActive(), " fasce da ", SlotLenHours, " ore dalle ", StringFormat("%02d:00", SlotFirstHour),
-            " (ora server), range = massimo/minimo della fascia nel giorno di riferimento RangeDaysBack ", RangeDaysBack, ". NESSUN ordine reale verra' aperto: la classifica si scrive a fine test.");
+      Print("MultiDayRangeBreakout 3.00 su ", _Symbol, ": ANALISI VIRTUALE, ", ScanActive(), " concorrenti (range x modalita' di entrata: ", (EntryStop ? "stop " : ""), (EntryCandleClose ? "chiusura " : ""), (EntryRetest ? "retest" : ""),
+            "); fasce da ", SlotLenHours, " ore dalle ", StringFormat("%02d:00", SlotFirstHour), " (ora server), giorno di riferimento del range RangeDaysBack ", RangeDaysBack,
+            ". NESSUN ordine reale verra' aperto: la classifica si scrive a fine test.");
       return INIT_SUCCEEDED;
      }
-   Print("MultiDayRangeBreakout 3.00 su ", _Symbol, ": range ", EnumToString(RangeMode), ", finestra ", StringFormat("%02d:%02d-%02d:%02d", TradeHourStart, TradeMinuteStart, TradeHourEnd, TradeMinuteEnd),
+   Print("MultiDayRangeBreakout 3.00 su ", _Symbol, ": entrata ", (EntryStop ? "stop " : ""), (EntryCandleClose ? "chiusura " : ""), (EntryRetest ? "retest " : ""), "| range ", EnumToString(RangeMode), ", finestra ", StringFormat("%02d:%02d-%02d:%02d", TradeHourStart, TradeMinuteStart, TradeHourEnd, TradeMinuteEnd),
          " ora server, SL ", DoubleToString(StopLossPoints, 0), " TP ", (UseTakeProfit ? DoubleToString(TakeProfitPoints, 0) : "nessuno"), " punti");
    return INIT_SUCCEEDED;
   }
@@ -1470,9 +1837,19 @@ void OnTick()
    datetime day = DayStart(now);
    if(day != g_day)
       NewDay(day);
+   bool newBar = false;
+   if(SlotScan || EntryCandleClose)
+     {
+      datetime bt = iTime(_Symbol, Timeframe, 0);
+      if(bt != 0 && bt != g_barTime)
+        {
+         newBar = true;
+         g_barTime = bt;
+        }
+     }
    if(SlotScan)
      {
-      ScanTick(now);
+      ScanTick(now, newBar);
       UpdatePanel(now);
       return;
      }
@@ -1480,6 +1857,7 @@ void OnTick()
    ManageOrders(now);
    ManagePositions(now);
    TryPlaceSetup(now);
+   TryMarketEntry(now, newBar);
    UpdatePanel(now);
   }
 //+------------------------------------------------------------------+

@@ -86,6 +86,16 @@ public:
    }
    bool BuyStop(double vol, double price, const string& sym, double sl, double tp, int ttype, datetime exp, const string& cmt) { return place(ORDER_TYPE_BUY_STOP, vol, price, sym, sl, tp, ttype, exp, cmt); }
    bool SellStop(double vol, double price, const string& sym, double sl, double tp, int ttype, datetime exp, const string& cmt) { return place(ORDER_TYPE_SELL_STOP, vol, price, sym, sl, tp, ttype, exp, cmt); }
+   // ordine a mercato: si riempie subito al prezzo corrente (ask per il Buy, bid per il Sell)
+   bool market(int ptype, double vol, const string& sym, double sl, double tp) {
+      double fp = (ptype == POSITION_TYPE_BUY) ? g_curAsk : g_curBid;
+      g_pos.push_back({g_nextTicket++, ptype, fp, sl, tp, magic, sym, g_now, std::fabs(fp - sl), g_curBid});
+      g_deals.push_back({g_nextTicket++, g_now, sym, magic, DEAL_ENTRY_IN});
+      g_horders.push_back({g_nextTicket++, g_now, sym, magic, ptype == POSITION_TYPE_BUY ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, fp});
+      retcode = TRADE_RETCODE_DONE; return true;
+   }
+   bool Buy(double vol, const string& sym, double price, double sl, double tp, const string& cmt) { return market(POSITION_TYPE_BUY, vol, sym, sl, tp); }
+   bool Sell(double vol, const string& sym, double price, double sl, double tp, const string& cmt) { return market(POSITION_TYPE_SELL, vol, sym, sl, tp); }
    bool OrderDelete(ulong t) {
       for(size_t i = 0; i < g_orders.size(); i++) if(g_orders[i].ticket == t) { g_orders.erase(g_orders.begin() + i); retcode = TRADE_RETCODE_DONE; return true; }
       retcode = 10013; return false;
@@ -108,6 +118,7 @@ static std::vector<MqlRates>& tfBars(ENUM_TIMEFRAMES tf) { if(tf == PERIOD_CURRE
 inline datetime iTime(const string&, ENUM_TIMEFRAMES tf, int s) { auto& v = tfBars(tf); int i = lastAtOrBeforeTF(v, g_now) - s; return (i >= 0 && i < (int)v.size()) ? v[i].time : 0; }
 inline double iHigh(const string&, ENUM_TIMEFRAMES tf, int s) { auto& v = tfBars(tf); int i = lastAtOrBeforeTF(v, g_now) - s; return (i >= 0 && i < (int)v.size()) ? v[i].high : 0; }
 inline double iLow(const string&, ENUM_TIMEFRAMES tf, int s) { auto& v = tfBars(tf); int i = lastAtOrBeforeTF(v, g_now) - s; return (i >= 0 && i < (int)v.size()) ? v[i].low : 0; }
+inline double iClose(const string&, ENUM_TIMEFRAMES tf, int s) { auto& v = tfBars(tf); int i = lastAtOrBeforeTF(v, g_now) - s; return (i >= 0 && i < (int)v.size()) ? v[i].close : 0; }
 inline int iBarShift(const string&, ENUM_TIMEFRAMES tf, datetime t, bool exact = false) {
    auto& v = tfBars(tf);
    int idxNow = lastAtOrBeforeTF(v, g_now);
@@ -128,8 +139,13 @@ static void closePos(size_t i, double exitPx, datetime t) {
    g_pos.erase(g_pos.begin() + i);
 }
 
+// EXEC_AT_TICK=1: stop e SL/TP si eseguono sempre al prezzo del tick che li attraversa (non al prezzo dell'ordine): e' il modello
+// dell'analisi virtuale dell'EA, e toglie dal confronto l'ambiguita' di mezzo tick che il trailing amplifica a un intero scalino
+static bool execAtTick() { static int v = -1; if(v < 0) v = (getenv("EXEC_AT_TICK") && atoi(getenv("EXEC_AT_TICK")) != 0) ? 1 : 0; return v == 1; }
+
 // elabora un tick: scadenze, riempimenti degli ordini, SL/TP. isOpen = primo tick della barra (i gap si riempiono al prezzo del tick)
 static void brokerTick(datetime t, double bid, bool isOpen) {
+   const bool atTick = isOpen || execAtTick();
    g_now = t; g_curBid = bid; g_curAsk = bid + g_spreadPrice;
    for(size_t i = 0; i < g_orders.size();) { if(g_orders[i].exp > 0 && t >= g_orders[i].exp) g_orders.erase(g_orders.begin() + i); else i++; }
    // SL/TP delle posizioni
@@ -137,11 +153,11 @@ static void brokerTick(datetime t, double bid, bool isOpen) {
       MPos& p = g_pos[i];
       bool closed = false;
       if(p.type == POSITION_TYPE_BUY) {
-         if(p.sl > 0 && g_curBid <= p.sl + 1e-9) { closePos(i, isOpen ? g_curBid : p.sl, t); closed = true; }
-         else if(p.tp > 0 && g_curBid >= p.tp - 1e-9) { closePos(i, isOpen ? g_curBid : p.tp, t); closed = true; }
+         if(p.sl > 0 && g_curBid <= p.sl + 1e-9) { closePos(i, atTick ? g_curBid : p.sl, t); closed = true; }
+         else if(p.tp > 0 && g_curBid >= p.tp - 1e-9) { closePos(i, atTick ? g_curBid : p.tp, t); closed = true; }
       } else {
-         if(p.sl > 0 && g_curAsk >= p.sl - 1e-9) { closePos(i, isOpen ? g_curAsk : p.sl, t); closed = true; }
-         else if(p.tp > 0 && g_curAsk <= p.tp + 1e-9) { closePos(i, isOpen ? g_curAsk : p.tp, t); closed = true; }
+         if(p.sl > 0 && g_curAsk >= p.sl - 1e-9) { closePos(i, atTick ? g_curAsk : p.sl, t); closed = true; }
+         else if(p.tp > 0 && g_curAsk <= p.tp + 1e-9) { closePos(i, atTick ? g_curAsk : p.tp, t); closed = true; }
       }
       if(!closed) i++;
    }
@@ -149,8 +165,8 @@ static void brokerTick(datetime t, double bid, bool isOpen) {
    for(size_t i = 0; i < g_orders.size();) {
       MOrder o = g_orders[i];
       bool fill = false; double fp = 0.0; int ptype = 0;
-      if(o.type == ORDER_TYPE_BUY_STOP && g_curAsk >= o.price - 1e-9) { fill = true; fp = isOpen ? g_curAsk : o.price; ptype = POSITION_TYPE_BUY; }
-      if(o.type == ORDER_TYPE_SELL_STOP && g_curBid <= o.price + 1e-9) { fill = true; fp = isOpen ? g_curBid : o.price; ptype = POSITION_TYPE_SELL; }
+      if(o.type == ORDER_TYPE_BUY_STOP && g_curAsk >= o.price - 1e-9) { fill = true; fp = atTick ? g_curAsk : o.price; ptype = POSITION_TYPE_BUY; }
+      if(o.type == ORDER_TYPE_SELL_STOP && g_curBid <= o.price + 1e-9) { fill = true; fp = atTick ? g_curBid : o.price; ptype = POSITION_TYPE_SELL; }
       if(fill) {
          double slNom = std::fabs(o.price - o.sl);
          g_pos.push_back({g_nextTicket++, ptype, fp, o.sl, o.tp, o.magic, o.symbol, t, slNom, bid});

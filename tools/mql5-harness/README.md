@@ -53,6 +53,17 @@ Serve a compilare e far girare il codice su dati sintetici **senza MetaEditor** 
    - il riepilogo generale in testa al report e al file di testo (`RIEPILOGO GENERALE`, `CONCLUSIONE AUTOMATICA`) e le sezioni `2b` e `4c` sono controllate
      nel riepilogo di testo da `custom_check.py`.
 
+7. (MDRB, EA) `./run_slot_tests.sh`: l'**analisi virtuale** dell'EA (`SlotScan=true`: 12 fasce orarie + range a barre + D1 precedenti, ciascuno con
+   le tre modalita' di entrata: ordini stop, chiusura di candela, retest) viene confrontata concorrente per concorrente con l'**EA reale** sul broker
+   simulato (stesso range via `RANGE_TIME`/`RANGE_BARS`/`RANGE_PREV_D1`, UNA sola modalita' accesa), sugli stessi tick (`PATHMODE=fixed`, percorso denso
+   indipendente dallo stato dell'EA; `EXEC_AT_TICK=1`: stop e SL/TP si eseguono al prezzo del tick, che e' il modello dell'analisi virtuale: con il
+   riempimento "al prezzo dell'ordine" del broker semplice la differenza di mezzo tick viene amplificata dal trailing a un intero scalino).
+   13 scenari (finestre, filtri, chase, trailing, piu' trade al giorno, scadenza estesa, M5/H1, offset 0, tolleranza del retest, finestra a
+   cavallo di mezzanotte...): stesso numero di trade, stessa direzione, stesso minuto di apertura, R entro 0.02 e chiusura entro 2 minuti
+   (`slot_check.py`); la classifica e le metriche (E[R], PF, R totale, drawdown, t-stat, prima/dopo la data di separazione, ordine) sono
+   ricalcolate in modo indipendente dal CSV dei trade (`slot_rank_check.py`); scansione e EA reale sotto AddressSanitizer + UBSan;
+   input non validi rifiutati. `ONLY=n NOTAIL=1 ./run_slot_tests.sh` lancia solo lo scenario n.
+
 Uso: `./run_all.sh` (richiede `g++` e `python3`; crea la cartella `build/`; include `run_mdrb.sh`).
 
 Nota: sui prezzi tondi l'EA reale puo' fallire confronti a soglia esatta per rumore float

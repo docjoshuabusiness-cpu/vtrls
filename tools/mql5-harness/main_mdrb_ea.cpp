@@ -22,6 +22,7 @@ static void applyOverrides() {
       OV(ExpireExtraMinutes) OV(PendingOrderOffsetPoints) OV(ChaseIfBroken) OV(StopLossPoints) OV(TakeProfitPoints) OV(UseTakeProfit)
       OV(UsaBreakEven) OV(BreakEvenAttivazione) OV(BreakEvenOffset) OV(UsaTrailingStop) OV(TrailingStartProfit) OV(TrailingStep) OV(TrailingOffset)
       OV(MaxTradesPerDay) OV(MaxSpreadPoints) OV(MaxSpreadPctOfSL) OV(SlotScan) OV(SlotFirstHour) OV(SlotLenHours) OV(SlotMinTrades) OV(SlotRankBy) OV(SlotSplitDate) OV(SlotCommissionPoints) OV(SlotWriteFiles)
+      OV(EntryStop) OV(EntryCandleClose) OV(EntryRetest) OV(RetestTolerancePoints) OV(ScanRangeBars) OV(ScanRangePrevD1)
       OV(Slot1) OV(Slot2) OV(Slot3) OV(Slot4) OV(Slot5) OV(Slot6) OV(Slot7) OV(Slot8) OV(Slot9) OV(Slot10) OV(Slot11) OV(Slot12)
       else if(k == "Timeframe") Timeframe = (ENUM_TIMEFRAMES)(int)v;
       else if(k == "StopsLevel") g_stopsLevel = (long)v;
@@ -41,10 +42,17 @@ int main(int argc, char** argv) {
    applyOverrides();
    gen(days, kappa, sigma_default(), 88172645463325252ULL + 7919ULL * (unsigned long long)scenario);
    auto& m1 = g_store[(int)PERIOD_M1];
+   if(getenv("DUMP_M1")) {   // barre M1 generate (epoch,open,high,low,close,spread in punti) per i controlli indipendenti
+      FILE* df = fopen("m1_dump.csv", "w");
+      fprintf(df, "time,open,high,low,close,spread\n");
+      for(const auto& b : m1) fprintf(df, "%lld,%.10f,%.10f,%.10f,%.10f,%d\n", (long long)b.time, b.open, b.high, b.low, b.close, b.spread);
+      fclose(df);
+   }
    if(OnInit() != INIT_SUCCEEDED) { fprintf(stderr, "OnInit failed\n"); return 1; }
    enum Pat { FLAT, LONG, SHORT };
    for(const auto& b : m1) {
       g_spreadPrice = b.spread * g_pointval;
+      if(getenv("SPREAD_WIDE") && ((b.time % 86400) / 60) % 90 < 20) g_spreadPrice = 30 * g_pointval;   // spread largo 20 minuti ogni 90: prova dei filtri di spread
       datetime t0 = b.time;
       int k = 0;
       auto doTick = [&](double px, bool isOpen) {
