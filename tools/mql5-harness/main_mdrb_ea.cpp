@@ -21,6 +21,8 @@ static void applyOverrides() {
       OV(RequireRangeConfirmation) OV(MinRangePoints) OV(MaxRangePoints) OV(TradeHourStart) OV(TradeMinuteStart) OV(TradeHourEnd) OV(TradeMinuteEnd)
       OV(ExpireExtraMinutes) OV(PendingOrderOffsetPoints) OV(ChaseIfBroken) OV(StopLossPoints) OV(TakeProfitPoints) OV(UseTakeProfit)
       OV(UsaBreakEven) OV(BreakEvenAttivazione) OV(BreakEvenOffset) OV(UsaTrailingStop) OV(TrailingStartProfit) OV(TrailingStep) OV(TrailingOffset)
+      OV(MaxTradesPerDay) OV(MaxSpreadPoints) OV(MaxSpreadPctOfSL) OV(SlotScan) OV(SlotFirstHour) OV(SlotLenHours) OV(SlotMinTrades) OV(SlotRankBy) OV(SlotSplitDate) OV(SlotCommissionPoints) OV(SlotWriteFiles)
+      OV(Slot1) OV(Slot2) OV(Slot3) OV(Slot4) OV(Slot5) OV(Slot6) OV(Slot7) OV(Slot8) OV(Slot9) OV(Slot10) OV(Slot11) OV(Slot12)
       else if(k == "Timeframe") Timeframe = (ENUM_TIMEFRAMES)(int)v;
       else if(k == "StopsLevel") g_stopsLevel = (long)v;
       else if(k == "TickSize") { g_ticksize = v; }
@@ -35,8 +37,8 @@ int main(int argc, char** argv) {
    double kappa = argc > 2 ? atof(argv[2]) : 0.002;
    int scenario = argc > 3 ? atoi(argv[3]) : 0;
    system("mkdir -p out/MQL5/Files");
-   applyOverrides();
    MaxSpreadPoints = 0; MaxSpreadPctOfSL = 0; MaxTradesPerDay = 1;
+   applyOverrides();
    gen(days, kappa, sigma_default(), 88172645463325252ULL + 7919ULL * (unsigned long long)scenario);
    auto& m1 = g_store[(int)PERIOD_M1];
    if(OnInit() != INIT_SUCCEEDED) { fprintf(stderr, "OnInit failed\n"); return 1; }
@@ -82,6 +84,8 @@ int main(int argc, char** argv) {
             }
          }
       }
+      bool fixedPath = (envs("PATHMODE", "") == "fixed");
+      if(fixedPath) { keys = ((b.high - b.open) <= (b.open - b.low)) ? std::vector<double>{b.high, b.low, b.close} : std::vector<double>{b.low, b.high, b.close}; dense = true; }
       size_t ki = 0;
       while(ki < keys.size()) {
          double target = keys[ki];
@@ -92,6 +96,7 @@ int main(int argc, char** argv) {
          size_t before = g_pos.size();
          doTick(px, false);
          cur = px;
+         if(fixedPath) continue;
          if(g_pos.size() < before) { keys = {b.close}; ki = 0; dense = false; }      // chiusa: resta solo la chiusura
          else if(g_pos.size() > before && !g_pos.empty()) {
             // appena aperta in questa barra: il minimo (long) / massimo (short) cade PRIMA del riempimento (modello dello studio);
@@ -101,6 +106,7 @@ int main(int argc, char** argv) {
          }
       }
    }
+   { double ot = OnTester(); OnDeinit(0); if(envs("MDRB_TRACE_TESTER", "") == "1") fprintf(stderr, "OnTester %.6f\n", ot); }
    FILE* f = fopen("mdrb_ea_trades.csv", "w");
    fprintf(f, "ticket,dir,topen,tclose,entry,exit,R\n");
    for(auto& c : g_closed) fprintf(f, "%llu,%d,%s,%s,%.8f,%.8f,%.6f\n", (unsigned long long)c.ticket, c.dir, TimeToString(c.topen, TIME_DATE | TIME_MINUTES).c_str(), TimeToString(c.tclose, TIME_DATE | TIME_MINUTES).c_str(), c.entry, c.exit, c.R);
