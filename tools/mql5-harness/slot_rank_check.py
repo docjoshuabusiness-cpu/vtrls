@@ -101,13 +101,15 @@ def key(k):
 
 
 expo = sorted(ks, key=key)
-# tolleranza sui punteggi quasi uguali (arrotondamento del CSV): confronta solo se la differenza supera 1e-6
+# punteggi quasi uguali: i trade nel CSV hanno R arrotondato a 4 decimali, quindi il punteggio ricalcolato differisce da quello dell'EA di
+# circa la tolleranza delle metriche; due concorrenti entro questa distanza possono legittimamente scambiarsi di posto
+TIE_TOL = {"tstat": 5e-3, "er": 1e-4, "pf": 2e-3, "total": 2e-3}[ns.rank_by]
 if order != expo:
     bad = False
     for i in range(len(order)):
         if order[i] != expo[i]:
             a, b = order[i], expo[i]
-            if exp_elig[a] == exp_elig[b] and abs(exp_score.get(a, 0) - exp_score.get(b, 0)) < 1e-6 and exp_elig[a]:
+            if exp_elig[a] == exp_elig[b] and abs(exp_score.get(a, 0) - exp_score.get(b, 0)) < TIE_TOL and exp_elig[a]:
                 continue
             bad = True
     if bad:

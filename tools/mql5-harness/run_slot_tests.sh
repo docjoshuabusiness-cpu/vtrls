@@ -11,8 +11,8 @@ H=..
 python3 $H/prep_mdrb.py >/dev/null
 CXX="g++ -std=c++17 -w -I. -I$H"
 $CXX -O2 -o mdrb_ea $H/main_mdrb_ea.cpp
-$CXX -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -o mdrb_ea_san $H/main_mdrb_ea.cpp
-cp $H/slot_check.py $H/slot_rank_check.py .
+[ -n "$NOTAIL" ] || $CXX -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -o mdrb_ea_san $H/main_mdrb_ea.cpp
+cp $H/slot_check.py $H/slot_rank_check.py $H/entry_check.py .
 export GEN_ROUND=1e7 TICKSTEP_PTS=0.5 PATHMODE=fixed EXEC_AT_TICK=1
 export VPTF=M15
 BUILD=$PWD
@@ -34,7 +34,7 @@ job() {   # indice override giorni kappa
 sc() {   # nome giorni override [kappa] [time frame del grafico]
   local name="$1" days="$2" ov="$3" kappa="${4:-0.002}" tf="${5:-M15}"
   scn=$((scn + 1))
-  if [ -n "$ONLY" ] && [ "$scn" != "$ONLY" ]; then return; fi    # ONLY=n: solo lo scenario n (per il debug)
+  if [ -n "$ONLY" ] && [[ " $ONLY " != *" $scn "* ]]; then return; fi    # ONLY="n m": solo gli scenari indicati (per il debug)
   export VPTF="$tf"
   local first=0 len=2 d1=1
   [[ "$ov" =~ SlotFirstHour=([0-9]+) ]] && first=${BASH_REMATCH[1]}
@@ -43,7 +43,7 @@ sc() {   # nome giorni override [kappa] [time frame del grafico]
   local nsrc=14; [ $d1 -eq 0 ] && nsrc=13
   local scanov="$ov,SlotScan=1,EntryStop=1,EntryCandleClose=1,EntryRetest=1,ScanRangeBars=1,ScanRangePrevD1=$d1"
   rm -f out/MQL5/Files/MDRB_SlotScan_*
-  VPINP="$scanov" MDRB_QUIET=1 ./mdrb_ea $days $kappa 0 >/dev/null 2>err_slot.txt || { echo "ERRORE scansione ($name)"; head -5 err_slot.txt; fail=1; return; }
+  VPINP="$scanov" DUMP_M1=1 MDRB_QUIET=1 ./mdrb_ea $days $kappa 0 >/dev/null 2>err_slot.txt || { echo "ERRORE scansione ($name)"; head -5 err_slot.txt; fail=1; return; }
   [ -f out/MQL5/Files/MDRB_SlotScan_EURUSD_trades.csv ] || { echo "ERRORE: nessun file di trade virtuali ($name)"; fail=1; return; }
   cp out/MQL5/Files/MDRB_SlotScan_EURUSD_trades.csv scan_trades.csv
   cp out/MQL5/Files/MDRB_SlotScan_EURUSD.csv scan_rank.csv
@@ -74,7 +74,27 @@ sc() {   # nome giorni override [kappa] [time frame del grafico]
     done
   done
   python3 slot_rank_check.py scan_trades.csv scan_rank.csv --min-trades $(echo "$ov" | sed -n 's/.*SlotMinTrades=\([0-9]*\).*/\1/p' | grep . || echo 30) --split $(echo "$ov" | sed -n 's/.*SlotSplitDate=\([0-9]*\).*/\1/p' | grep . || echo 0) || bad=$((bad + 1))
-  if [ $bad -eq 0 ]; then n_ok=$((n_ok + 1)); echo "OK   $name | $ncmp concorrenti, $tot trade confrontati con l'EA reale, 0 differenze"; else fail=1; echo "DIFF $name | concorrenti con differenze: $bad"; fi
+  # controllo indipendente degli ingressi "chiusura" e "retest" (primo ingresso del giorno ricostruito dai M1 grezzi): vale con un solo trade al giorno,
+  # senza filtri di larghezza o di spread (che il controllo non modella)
+  local ec="saltato"
+  if [[ "$ov" == *RequireRangeConfirmation=0* && "$ov" != *MaxTradesPerDay=* && "$ov" != *MaxSpreadPoints* ]]; then
+    local off=20 tol=0 hs=10 he=11 ex=0 db=1 nb=25 sp=1 nob=""
+    [[ "$ov" =~ PendingOrderOffsetPoints=([0-9]+) ]] && off=${BASH_REMATCH[1]}
+    [[ "$ov" =~ RetestTolerancePoints=([0-9]+) ]] && tol=${BASH_REMATCH[1]}
+    [[ "$ov" =~ TradeHourStart=([0-9]+) ]] && hs=${BASH_REMATCH[1]}
+    [[ "$ov" =~ TradeHourEnd=([0-9]+) ]] && he=${BASH_REMATCH[1]}
+    [[ "$ov" =~ ExpireExtraMinutes=([0-9]+) ]] && ex=${BASH_REMATCH[1]}
+    [[ "$ov" =~ RangeDaysBack=([0-9]+) ]] && db=${BASH_REMATCH[1]}
+    [[ "$ov" =~ RangeBarsLookback=([0-9]+) ]] && nb=${BASH_REMATCH[1]}
+    [[ "$ov" =~ RangeDaySpan=([0-9]+) ]] && sp=${BASH_REMATCH[1]}
+    [ $db -eq 0 ] && nob="--no-bars-d1"
+    local nsl=$((24 / len)); [ $nsl -gt 12 ] && nsl=12
+    mkdir -p chkdir; cp scan_trades.csv chkdir/trades.csv; cp m1_dump.csv chkdir/m1_dump.csv
+    o=$(python3 -I entry_check.py chkdir --tf $tf --offset $off --tol $tol --win $(printf '%02d:00-%02d:00' $hs $he) --extra $ex --first-hour $first --slot-len $len --slots $nsl --days-back $db --bars $nb --span $sp $nob 2>&1) \
+      && ec=$(echo "$o" | sed -n 's/^TOTALE: atteso \([0-9]*\), .*differenze 0.*/\1 ingressi ricostruiti dai M1/p') \
+      || { echo "$o" | tail -12; bad=$((bad + 1)); ec="DIFFERENZE"; }
+  fi
+  if [ $bad -eq 0 ]; then n_ok=$((n_ok + 1)); echo "OK   $name | $ncmp concorrenti, $tot trade confrontati con l'EA reale, 0 differenze | controllo indipendente degli ingressi: $ec"; else fail=1; echo "DIFF $name | concorrenti con differenze: $bad"; fi
 }
 R="RequireRangeConfirmation=0"
 sc "default (range di ieri, finestra 10-11)" 300 "$R"

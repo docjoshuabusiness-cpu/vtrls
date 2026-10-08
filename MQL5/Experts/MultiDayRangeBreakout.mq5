@@ -1169,10 +1169,13 @@ int ScanActive()
    return n;
   }
 
-void ScanNewDay()
+void ScanNewDay(const datetime now)
   {
    for(int c = 0; c < NCON; c++)
      {
+      // una coppia scaduta (per esempio nel fine settimana) non c'e' piu' quando comincia il nuovo giorno: il broker l'ha gia' tolta
+      if(g_sl[c].state == 1 && (now >= g_sl[c].expiry || !OrdersMayLive(now)))
+         g_sl[c].state = 0;
       g_sl[c].rangeDone = false;
       g_sl[c].rangeOK = false;
       g_sl[c].hi = 0.0;
@@ -1722,7 +1725,7 @@ void NewDay(datetime day)
    g_nPos = -1;   // forza la rilettura dei contatori dalla storia
    g_nOrd = -1;
    if(SlotScan)
-      ScanNewDay();
+      ScanNewDay(TimeCurrent());
    UpdateRangeLines();
   }
 
