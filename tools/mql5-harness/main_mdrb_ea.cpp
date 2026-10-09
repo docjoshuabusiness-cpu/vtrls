@@ -17,13 +17,14 @@ static void applyOverrides() {
       string k = kv.substr(0, eq); double v = atof(kv.substr(eq + 1).c_str());
 #define OV(n) else if(k == #n) n = (decltype(n))v;
       if(false) {}
-      OV(RangeMode) OV(RangeDaysBack) OV(RangeBarsLookback) OV(RangeHourStart) OV(RangeMinuteStart) OV(RangeHourEnd) OV(RangeMinuteEnd) OV(RangeDaySpan)
+      OV(UseRangeTime) OV(UseRangeBars) OV(UseRangePrevD1) OV(RangeDaysBack) OV(RangeBarsLookback) OV(RangeHourStart) OV(RangeMinuteStart) OV(RangeHourEnd) OV(RangeMinuteEnd) OV(RangeDaySpan)
       OV(RequireRangeConfirmation) OV(MinRangePoints) OV(MaxRangePoints) OV(TradeHourStart) OV(TradeMinuteStart) OV(TradeHourEnd) OV(TradeMinuteEnd)
       OV(ExpireExtraMinutes) OV(PendingOrderOffsetPoints) OV(ChaseIfBroken) OV(StopLossPoints) OV(TakeProfitPoints) OV(UseTakeProfit)
       OV(UsaBreakEven) OV(BreakEvenAttivazione) OV(BreakEvenOffset) OV(UsaTrailingStop) OV(TrailingStartProfit) OV(TrailingStep) OV(TrailingOffset)
       OV(MaxTradesPerDay) OV(MaxSpreadPoints) OV(MaxSpreadPctOfSL) OV(SlotScan) OV(SlotFirstHour) OV(SlotLenHours) OV(SlotMinTrades) OV(SlotRankBy) OV(SlotSplitDate) OV(SlotCommissionPoints) OV(SlotWriteFiles)
-      OV(EntryStop) OV(EntryCandleClose) OV(EntryRetest) OV(RetestTolerancePoints) OV(RetestMaxDepthPoints) OV(ScanRangeBars) OV(ScanRangePrevD1)
+      OV(EntryStop) OV(EntryCandleClose) OV(EntryRetest) OV(RetestTolerancePoints) OV(RetestMaxDepthPoints)
       OV(Slot1) OV(Slot2) OV(Slot3) OV(Slot4) OV(Slot5) OV(Slot6) OV(Slot7) OV(Slot8) OV(Slot9) OV(Slot10) OV(Slot11) OV(Slot12)
+      else if(k == "RangeMode") { UseRangeBars = (v == 0); UseRangeTime = (v == 1); UseRangePrevD1 = (v == 2); }   // vecchio selettore (0 barre, 1 orario, 2 D1): lo usano gli script della batteria, condivisi con lo studio
       else if(k == "Timeframe") Timeframe = (ENUM_TIMEFRAMES)(int)v;
       else if(k == "StopsLevel") g_stopsLevel = (long)v;
       else if(k == "TickSize") { g_ticksize = v; }

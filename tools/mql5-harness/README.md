@@ -53,9 +53,9 @@ Serve a compilare e far girare il codice su dati sintetici **senza MetaEditor** 
    - il riepilogo generale in testa al report e al file di testo (`RIEPILOGO GENERALE`, `CONCLUSIONE AUTOMATICA`) e le sezioni `2b` e `4c` sono controllate
      nel riepilogo di testo da `custom_check.py`.
 
-7. (MDRB, EA) `./run_slot_tests.sh`: l'**analisi virtuale** dell'EA (`SlotScan=true`: 12 fasce orarie + range a barre + D1 precedenti, ciascuno con
+7. (MDRB, EA) `./run_slot_tests.sh`: l'**analisi virtuale** dell'EA (`SlotScan=true` con `UseRangeTime`/`UseRangeBars`/`UseRangePrevD1` accesi: 12 fasce orarie + range a barre + D1 precedenti, ciascuno con
    le tre modalita' di entrata: ordini stop, chiusura di candela, retest = 42 concorrenti) viene confrontata concorrente per concorrente con l'**EA reale**
-   sul broker simulato (stesso range via `RANGE_TIME`/`RANGE_BARS`/`RANGE_PREV_D1`, UNA sola modalita' accesa), sugli stessi tick (`PATHMODE=fixed`, percorso denso
+   sul broker simulato (stesso range: un solo interruttore `UseRange*` acceso; negli script resta il vecchio override `RangeMode=0|1|2` = barre|orario|D1, che l'harness traduce negli interruttori e che e' condiviso con lo studio; UNA sola modalita' di entrata accesa), sugli stessi tick (`PATHMODE=fixed`, percorso denso
    indipendente dallo stato dell'EA; `EXEC_AT_TICK=1`: stop e SL/TP si eseguono al prezzo del tick, che e' il modello dell'analisi virtuale: con il
    riempimento "al prezzo dell'ordine" del broker semplice la differenza di mezzo tick viene amplificata dal trailing a un intero scalino).
    18 scenari: finestre, filtri di larghezza e di spread (`SPREAD_WIDE=1`: spread largo 20 minuti ogni 90), chase, trailing, piu' trade al giorno, scadenza estesa,

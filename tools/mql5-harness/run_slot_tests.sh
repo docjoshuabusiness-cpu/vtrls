@@ -41,7 +41,7 @@ sc() {   # nome giorni override [kappa] [time frame del grafico]
   [[ "$ov" =~ SlotLenHours=([0-9]+) ]] && len=${BASH_REMATCH[1]}
   [[ "$ov" =~ RangeDaysBack=0 ]] && d1=0       # il range dei D1 precedenti richiede RangeDaysBack >= 1
   local nsrc=14; [ $d1 -eq 0 ] && nsrc=13
-  local scanov="$ov,SlotScan=1,EntryStop=1,EntryCandleClose=1,EntryRetest=1,ScanRangeBars=1,ScanRangePrevD1=$d1"
+  local scanov="$ov,SlotScan=1,EntryStop=1,EntryCandleClose=1,EntryRetest=1,UseRangeTime=1,UseRangeBars=1,UseRangePrevD1=$d1"
   rm -f out/MQL5/Files/MDRB_SlotScan_*
   VPINP="$scanov" DUMP_M1=1 MDRB_QUIET=1 ./mdrb_ea $days $kappa 0 >/dev/null 2>err_slot.txt || { echo "ERRORE scansione ($name)"; head -5 err_slot.txt; fail=1; return; }
   [ -f out/MQL5/Files/MDRB_SlotScan_EURUSD_trades.csv ] || { echo "ERRORE: nessun file di trade virtuali ($name)"; fail=1; return; }
@@ -131,14 +131,16 @@ if [ -n "$NOTAIL" ]; then [ $fail -eq 0 ] && echo "SCENARI OK ($n_ok)" || echo "
 echo "== scansione sotto AddressSanitizer + UBSan (dati sintetici, tutti i concorrenti) =="
 for ov in "$R" "$R,ChaseIfBroken=1,StopsLevel=25,MaxTradesPerDay=3,RetestTolerancePoints=10"; do
   rm -f out/MQL5/Files/MDRB_SlotScan_*
-  VPINP="$ov,SlotScan=1,EntryStop=1,EntryCandleClose=1,EntryRetest=1,ScanRangeBars=1,ScanRangePrevD1=1,SlotSplitDate=1676000000" MDRB_QUIET=1 ./mdrb_ea_san 120 0.002 0 >/dev/null 2>err_slot.txt || { echo "ERRORE ASan scansione ($ov)"; head -8 err_slot.txt; fail=1; }
+  VPINP="$ov,SlotScan=1,EntryStop=1,EntryCandleClose=1,EntryRetest=1,UseRangeTime=1,UseRangeBars=1,UseRangePrevD1=1,SlotSplitDate=1676000000" MDRB_QUIET=1 ./mdrb_ea_san 120 0.002 0 >/dev/null 2>err_slot.txt || { echo "ERRORE ASan scansione ($ov)"; head -8 err_slot.txt; fail=1; }
   for m in 0 1 2; do
     VPINP="$ov,${MODEOV[$m]}" MDRB_QUIET=1 ./mdrb_ea_san 120 0.002 0 >/dev/null 2>err_slot.txt || { echo "ERRORE ASan EA reale ($ov, ${MODES[$m]})"; head -8 err_slot.txt; fail=1; }
   done
 done
 echo "== input non validi: devono fermarsi con un messaggio, senza ordini =="
-for bad in "SlotScan=1,SlotLenHours=0" "SlotScan=1,SlotLenHours=13" "SlotScan=1,SlotFirstHour=24" "SlotScan=1,Slot1=0,Slot2=0,Slot3=0,Slot4=0,Slot5=0,Slot6=0,Slot7=0,Slot8=0,Slot9=0,Slot10=0,Slot11=0,Slot12=0" "SlotScan=1,SlotMinTrades=0" \
-           "EntryStop=0,EntryCandleClose=0,EntryRetest=0" "SlotScan=1,EntryStop=0,EntryCandleClose=0,EntryRetest=0" "EntryRetest=1,RetestTolerancePoints=-1" "EntryRetest=1,RetestTolerancePoints=30" "EntryRetest=1,RetestMaxDepthPoints=-5" "SlotScan=1,ScanRangePrevD1=1,RangeDaysBack=0" "SlotScan=1,ScanRangeBars=1,RangeBarsLookback=0"; do
+for bad in "SlotScan=1,UseRangeTime=1,UseRangeBars=0,SlotLenHours=0" "SlotScan=1,UseRangeTime=1,UseRangeBars=0,SlotLenHours=13" "SlotScan=1,UseRangeTime=1,UseRangeBars=0,SlotFirstHour=24" "SlotScan=1,UseRangeTime=1,UseRangeBars=0,Slot1=0,Slot2=0,Slot3=0,Slot4=0,Slot5=0,Slot6=0,Slot7=0,Slot8=0,Slot9=0,Slot10=0,Slot11=0,Slot12=0" "SlotScan=1,SlotMinTrades=0" \
+           "EntryStop=0,EntryCandleClose=0,EntryRetest=0" "SlotScan=1,EntryStop=0,EntryCandleClose=0,EntryRetest=0" "EntryRetest=1,RetestTolerancePoints=-1" "EntryRetest=1,RetestTolerancePoints=30" "EntryRetest=1,RetestMaxDepthPoints=-5" \
+           "SlotScan=1,UseRangePrevD1=1,RangeDaysBack=0" "SlotScan=1,UseRangeBars=1,RangeBarsLookback=0" "SlotScan=1,UseRangeBars=0" \
+           "UseRangeTime=1" "UseRangeBars=0" "UseRangeBars=0,UseRangeTime=1,RangeHourStart=24" "UseRangeBars=0,UseRangePrevD1=1,RangeDaysBack=0" "UseRangeBars=0,UseRangePrevD1=1,RangeDaySpan=0"; do
   if VPINP="$R,$bad" MDRB_QUIET=1 ./mdrb_ea 30 0.002 0 >/dev/null 2>err_slot.txt; then echo "ERRORE: l'input non valido ($bad) e' stato accettato"; fail=1; else echo "rifiutato: $bad"; fi
 done
 [ $fail -eq 0 ] && echo "FASCE: TUTTO OK ($n_ok scenari)" || { echo "FASCE: verifiche fallite"; exit 1; }

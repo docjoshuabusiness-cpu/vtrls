@@ -1,63 +1,100 @@
 //+------------------------------------------------------------------+
 //|                                       MultiDayRangeBreakout.mq5 |
-//|  v3.00: riscrittura di v2.00 (stessa idea, meccanica corretta).  |
+//|  v3.00                                                           |
 //|                                                                  |
-//|  Idea: nella finestra di entrata si entra in breakout di un      |
-//|  range. Modalita' di entrata (interruttori, anche piu' di una;   |
-//|  vince la prima che scatta e ne parte una sola per volta):       |
-//|   EntryStop         coppia di ordini stop: BuyStop sopra il      |
-//|                     massimo, SellStop sotto il minimo (+ offset).|
-//|                     Quando uno scatta l'altro viene cancellato   |
-//|                     (OCO); gli ordini non eseguiti scadono a     |
-//|                     fine finestra.                               |
+//|  COSA FA                                                         |
+//|  Calcola un RANGE (massimo e minimo di un periodo) e, dentro la |
+//|  FINESTRA DI ENTRATA, entra in breakout: long se il prezzo esce  |
+//|  sopra il massimo, short se esce sotto il minimo. Livelli di     |
+//|  breakout: massimo + offset (alto) e minimo - offset (basso).    |
+//|                                                                  |
+//|  Convenzioni: tutti gli orari sono ORA SERVER del broker (quella |
+//|  di TimeCurrent), non GMT e non ora locale. Tutte le distanze    |
+//|  (range, offset, SL, TP, break even, trailing, spread) sono in   |
+//|  PUNTI del simbolo: su un cambio a 5 cifre 10 punti = 1 pip.     |
+//|                                                                  |
+//|  ORDINE DEGLI INPUT (gli stessi gruppi della finestra Parametri) |
+//|   0  modo (reale / analisi virtuale) e volume                    |
+//|   1A quale range usare (interruttori true/false)                 |
+//|   1B time frame osservato e giorno di riferimento                |
+//|   1C range per ORARIO    1D range a BARRE    1E range D1         |
+//|   1F filtro di larghezza del range                               |
+//|   2  finestra di entrata e massimo di trade al giorno            |
+//|   3  modalita' di entrata (interruttori true/false)              |
+//|   4  uscite: stop loss, take profit, break even, trailing        |
+//|   5  filtro di spread                                            |
+//|   6  parametri dell'analisi virtuale                             |
+//|   7  sistema                                                     |
+//|                                                                  |
+//|  1. RANGE (gruppi 1A-1F)                                         |
+//|   Per orario  massimo/minimo di una fascia oraria (es. 00-08)    |
+//|               del giorno di riferimento, calcolato sulle barre   |
+//|               di Timeframe.                                      |
+//|   A barre     massimo/minimo delle ultime N barre di Timeframe.  |
+//|   D1 prec.    massimo/minimo degli ultimi N giorni D1 completi.  |
+//|   Giorno di riferimento (RangeDaysBack) = N-esimo giorno di      |
+//|   mercato prima di oggi, contato con le barre D1: il lunedi'     |
+//|   1 = venerdi'. 0 = oggi. Il range e' calcolato una volta per    |
+//|   giorno di calendario server, al primo tick utile della         |
+//|   finestra di entrata (mai fuori finestra). A mezzanotte tutto   |
+//|   si azzera: se la finestra passa la mezzanotte il range viene   |
+//|   ricalcolato col nuovo giorno di riferimento.                   |
+//|   Il filtro di larghezza (1F) scarta il range fuori da Min/Max.  |
+//|                                                                  |
+//|  2. FINESTRA DI ENTRATA (gruppo 2)                               |
+//|   Gli ordini stop si piazzano solo dentro la finestra (fine      |
+//|   esclusa) e vivono fino a fine finestra + ExpireExtraMinutes.   |
+//|   Retest e chiusura di candela valgono fino a fine finestra +    |
+//|   ExpireExtraMinutes (la candela che chiude esattamente a fine   |
+//|   finestra vale e l'ingresso scatta al primo tick dopo; una      |
+//|   candela che chiude a mezzanotte no). MaxTradesPerDay limita le |
+//|   posizioni aperte in un giorno server (riparte a mezzanotte):   |
+//|   EA reale = un solo conteggio per tutte le modalita' (vince la  |
+//|   prima che scatta, una posizione per volta); analisi virtuale = |
+//|   un conteggio per concorrente.                                  |
+//|                                                                  |
+//|  3. MODALITA' DI ENTRATA (gruppo 3), anche piu' di una insieme:  |
+//|   vince la prima che scatta e ne parte una sola per volta.       |
+//|   EntryStop         coppia di ordini stop: BuyStop sul livello   |
+//|                     alto, SellStop sul basso. Quando uno scatta  |
+//|                     l'altro e' cancellato (OCO); gli ordini non  |
+//|                     eseguiti scadono a fine finestra +           |
+//|                     ExpireExtraMinutes.                          |
 //|   EntryCandleClose  a mercato quando una candela CHIUSA di       |
-//|                     Timeframe chiude oltre massimo+offset (long) |
-//|                     o sotto minimo-offset (short).               |
-//|   EntryRetest       a mercato dopo una rottura (il prezzo supera |
-//|                     il livello+offset) quando il prezzo TORNA al |
-//|                     bordo del range (retest), nella direzione    |
-//|                     della rottura.                               |
-//|  Prima di aprire valgono sempre i filtri di spread e, se attivo, |
-//|  quello di larghezza del range (Min/MaxRangePoints).             |
+//|                     Timeframe chiude oltre il livello alto       |
+//|                     (long) o sotto il basso (short).             |
+//|   EntryRetest       a mercato quando, dopo una rottura, il       |
+//|                     prezzo TORNA al bordo del range (retest),    |
+//|                     nella direzione della rottura.               |
+//|  Se accesi, prima di piazzare gli ordini stop o di entrare a     |
+//|  mercato valgono il filtro di spread (gruppo 5: non controlla    |
+//|  gli stop gia' piazzati) e quello di larghezza del range (1F).   |
 //|                                                                  |
-//|  Tutti gli orari sono ORA SERVER del broker (quella di           |
-//|  TimeCurrent), non GMT e non ora locale.                         |
+//|  4. USCITE (gruppo 4): stop loss e take profit in punti dal      |
+//|   prezzo dell'ordine (stop) o dalla quotazione all'invio         |
+//|   (ingressi a mercato); break even e trailing stop opzionali.    |
 //|                                                                  |
-//|  Range (RangeMode):                                              |
-//|   RANGE_BARS    ultime RangeBarsLookback barre completate di     |
-//|                 Timeframe che finiscono alla fine del giorno di  |
-//|                 riferimento. RangeDaysBack=1: fino alla          |
-//|                 mezzanotte di oggi (cioe' ieri); 0: le ultime    |
-//|                 barre chiuse al momento del piazzamento.         |
-//|   RANGE_TIME    finestra oraria RangeHourStart:Min - RangeHourEnd|
-//|                 :Min (se la fine e' prima dell'inizio passa la   |
-//|                 mezzanotte) nel giorno di riferimento. 0 = oggi  |
-//|                 (range asiatico), 1 = ultimo giorno di mercato.  |
-//|   RANGE_PREV_D1 massimo e minimo di RangeDaySpan barre D1        |
-//|                 complete, a partire dal giorno di riferimento    |
-//|                 (RangeDaysBack >= 1) e andando indietro.         |
-//|  "Giorno di riferimento" = N-esimo giorno di mercato prima di    |
-//|  oggi (contato con le barre D1): il lunedi' 1 = venerdi'.        |
-//|                                                                  |
-//|  Le distanze (SL, TP, BE, trailing, offset, range) sono in PUNTI |
-//|  del simbolo: su un cambio a 5 cifre 10 punti = 1 pip.           |
-//|                                                                  |
-//|  SlotScan = true: l'EA NON apre ordini ma analizza in modo       |
-//|  virtuale 12 fasce orarie (+ range a barre e D1 precedenti) per  |
-//|  ogni modalita' accesa e scrive la classifica (vedi sotto).      |
+//|  ANALISI VIRTUALE (SlotScan = true, gruppi 0 e 6)                |
+//|   L'EA NON apre ordini. Simula in parallelo e in modo            |
+//|   indipendente tanti "concorrenti" = un range x una modalita' di |
+//|   entrata, con le stesse regole dell'EA reale (finestra, filtri, |
+//|   SL/TP, break even, trailing). Range in gara: le fasce orarie   |
+//|   Slot1..Slot12 (se UseRangeTime), il range a barre (se          |
+//|   UseRangeBars), il range D1 (se UseRangePrevD1). A fine test    |
+//|   scrive la classifica nel log degli Esperti e due file CSV in   |
+//|   Terminal\Common\Files (sovrascritti a ogni esecuzione; nelle   |
+//|   ottimizzazioni non scrive nulla: conta solo il valore dato a   |
+//|   OnTester). Il risultato di ogni trade e' in R (multipli dello  |
+//|   stop loss). La classifica usa TUTTI i trade del periodo;       |
+//|   SlotSplitDate mostra solo prima/dopo. Con tanti concorrenti il |
+//|   migliore e' in parte fortuna: confermalo rifacendo il test su  |
+//|   un altro periodo.                                              |
 //+------------------------------------------------------------------+
 #property copyright "MultiDayRangeBreakout"
 #property version   "3.00"
 #property description "Breakout di un range: ordini stop OCO, chiusura di candela o retest. Analisi virtuale delle fasce orarie."
 
 #include <Trade\Trade.mqh>
-
-enum ENUM_RANGE_MODE
-  {
-   RANGE_BARS    = 0,   // ultime N barre del timeframe
-   RANGE_TIME    = 1,   // finestra oraria (ora server)
-   RANGE_PREV_D1 = 2    // massimo/minimo di giorni D1 completi
-  };
 
 enum ENUM_SLOT_RANK
   {
@@ -67,88 +104,126 @@ enum ENUM_SLOT_RANK
    SLOT_RANK_TOTAL       = 3    // R totale
   };
 
-input group "=== POSIZIONE ==="
-input double LotSize = 0.01;
+//==================================================================
+// 0. MODO DI FUNZIONAMENTO E VOLUME
+//==================================================================
+input group "=== 0. MODO E VOLUME ==="
+input bool SlotScan = false;                       // MODO. false = EA REALE: apre ordini veri sul conto. true = ANALISI VIRTUALE: NESSUN ordine, simula in parallelo tutti i range e le modalita' di entrata accesi e scrive la classifica (parametri nel gruppo 6)
+input double LotSize = 0.01;                       // VOLUME di ogni operazione reale, in lotti (> 0; arrotondato per DIFETTO al passo del simbolo e limitato al massimo; se e' sotto il minimo del simbolo l'EA non parte). Nell'analisi virtuale non viene usato (il risultato e' in multipli dello stop loss) ma deve comunque essere valido
 
-input group "=== RANGE ==="
-input ENUM_RANGE_MODE RangeMode = RANGE_BARS;
-input ENUM_TIMEFRAMES Timeframe = PERIOD_CURRENT;  // TIME FRAME OSSERVATO: barre del range (RANGE_BARS, RANGE_TIME) e candele di EntryCandleClose
-input int RangeDaysBack = 1;                       // giorno di riferimento (vedi intestazione)
-input int RangeBarsLookback = 25;                  // RANGE_BARS: numero di barre
-input int RangeHourStart = 16;                     // RANGE_TIME: inizio
-input int RangeMinuteStart = 0;
-input int RangeHourEnd = 0;                        // RANGE_TIME: fine (0:00 = mezzanotte)
-input int RangeMinuteEnd = 0;
-input int RangeDaySpan = 1;                        // RANGE_PREV_D1: quanti giorni D1
-input bool RequireRangeConfirmation = true;       // scarta i range fuori da Min/Max
-input double MinRangePoints = 50;
-input double MaxRangePoints = 500;
+//==================================================================
+// 1. RANGE
+//==================================================================
+input group "=== 1A. QUALE RANGE USARE (interruttori true/false) ==="
+// EA REALE (SlotScan = false): accendine ESATTAMENTE UNO, l'EA rifiuta 0 o piu' di uno.
+// ANALISI VIRTUALE (SlotScan = true): puoi accenderne piu' di uno, entrano tutti in classifica.
+input bool UseRangeTime = false;                   // RANGE PER ORARIO. true = usa il massimo/minimo di una fascia oraria. EA reale: la fascia RangeHourStart-RangeHourEnd (gruppo 1C). Analisi virtuale: le fasce Slot1..Slot12 (gruppo 1C). Usa anche i parametri 1B
+input bool UseRangeBars = true;                    // RANGE A BARRE. true = usa il massimo/minimo delle ultime RangeBarsLookback barre di Timeframe (gruppo 1D). Usa anche i parametri 1B
+input bool UseRangePrevD1 = false;                 // RANGE D1 PRECEDENTI. true = usa il massimo/minimo degli ultimi RangeDaySpan giorni D1 completi (gruppo 1E). Richiede RangeDaysBack >= 1 (gruppo 1B)
 
-input group "=== ANALISI VIRTUALE: classifica di range x modalita' di entrata, NESSUN ordine reale ==="
-input bool SlotScan = false;                       // true: analizza e scrivi la classifica (non apre ordini; RangeMode e' ignorato: le sorgenti sono le fasce e i due interruttori sotto)
-input int SlotFirstHour = 0;                       // fascia 1: ora di inizio (ora server)
-input int SlotLenHours = 2;                        // durata di ogni fascia in ore (le fasce sono contigue: fascia 2 inizia dove finisce la 1)
-input bool Slot1 = true;                           // fascia 1 attiva (di default 00-02)
-input bool Slot2 = true;                           // fascia 2 attiva (02-04)
-input bool Slot3 = true;                           // fascia 3 attiva (04-06)
-input bool Slot4 = true;                           // fascia 4 attiva (06-08)
-input bool Slot5 = true;                           // fascia 5 attiva (08-10)
-input bool Slot6 = true;                           // fascia 6 attiva (10-12)
-input bool Slot7 = true;                           // fascia 7 attiva (12-14)
-input bool Slot8 = true;                           // fascia 8 attiva (14-16)
-input bool Slot9 = true;                           // fascia 9 attiva (16-18)
-input bool Slot10 = true;                          // fascia 10 attiva (18-20)
-input bool Slot11 = true;                          // fascia 11 attiva (20-22)
-input bool Slot12 = true;                          // fascia 12 attiva (22-24)
-input bool ScanRangeBars = false;                  // analizza anche il range a barre (RangeBarsLookback barre di Timeframe)
-input bool ScanRangePrevD1 = false;                // analizza anche il range dei D1 precedenti (RangeDaySpan giorni; richiede RangeDaysBack >= 1)
-input int SlotMinTrades = 30;                      // trade minimi per entrare in classifica
-input ENUM_SLOT_RANK SlotRankBy = SLOT_RANK_TSTAT; // criterio della classifica
-input datetime SlotSplitDate = 0;                  // se > 0: i risultati sono separati prima/dopo questa data (per controllare fuori campione)
-input double SlotCommissionPoints = 0.0;           // commissione round-turn in punti, sottratta a ogni trade virtuale
-input bool SlotWriteFiles = true;                  // scrivi la classifica e i trade virtuali in Terminal\Common\Files (solo nei test singoli)
+input group "=== 1B. TIME FRAME E GIORNO DI RIFERIMENTO (comuni ai range) ==="
+input ENUM_TIMEFRAMES Timeframe = PERIOD_CURRENT;  // TIME FRAME OSSERVATO. Le sue barre formano il range per orario e il range a barre; le sue candele chiuse servono a EntryCandleClose. Nel range per orario conta ogni barra che APRE dentro la fascia (inizio incluso, fine esclusa) ed e' presa intera con il suo massimo/minimo: la fascia e' esatta solo se inizio e fine coincidono con aperture di barra (M1 sempre; con H1 solo a minuto 00), altrimenti il range perde prezzi dentro la fascia o include prezzi fuori. Il range D1 non lo usa. PERIOD_CURRENT = il time frame del grafico
+input int RangeDaysBack = 1;                       // GIORNO DI RIFERIMENTO del range, in giorni di mercato (barre D1) prima di oggi: 1 = ultimo giorno di mercato (il lunedi' guarda il venerdi'), 2 = il giorno di mercato prima ancora. Per orario e' il giorno in cui INIZIA la fascia; a barre il range finisce con l'ultima barra di quel giorno; D1 e' il giorno piu' recente incluso. 0 = oggi: NON ammesso con il range D1; a barre sono le ultime barre chiuse al primo tick della finestra di entrata (possono includere ieri); per orario la fascia deve finire prima della fine della finestra di entrata (se finisce durante, l'EA aspetta), altrimenti quel giorno non si entra
 
-input group "=== FINESTRA DI ENTRATA (ora server) ==="
-input int TradeHourStart = 10;
-input int TradeMinuteStart = 0;
-input int TradeHourEnd = 11;
-input int TradeMinuteEnd = 0;
-input int ExpireExtraMinutes = 0;                  // minuti oltre la fine finestra in cui gli ordini stop restano vivi e gli ingressi a mercato (chiusura/retest) sono ancora validi
-input int MaxTradesPerDay = 1;                     // posizioni aperte al massimo in un giorno
-input int PendingOrderOffsetPoints = 20;           // distanza dei livelli di breakout dal range: ordini stop, soglia di chiusura della candela, soglia di rottura del retest
-input bool ChaseIfBroken = false;                  // solo EntryStop. false: se il prezzo e' gia' oltre il livello aspetta che rientri nel range e poi piazza la coppia; true: piazza subito lo stop del lato rotto vicino al mercato (come v2)
+input group "=== 1C. RANGE PER ORARIO (usato se UseRangeTime = true) ==="
+input int RangeHourStart = 16;                     // EA REALE - ORA di inizio della fascia, 0-23 (ora server)
+input int RangeMinuteStart = 0;                    // EA REALE - MINUTO di inizio della fascia, 0-59
+input int RangeHourEnd = 0;                        // EA REALE - ORA di fine della fascia, 0-24. Se la fine e' uguale o precedente all'inizio la fascia passa la mezzanotte (0 con minuto 0 = mezzanotte)
+input int RangeMinuteEnd = 0;                      // EA REALE - MINUTO di fine della fascia, 0-59
+input int SlotFirstHour = 0;                       // ANALISI VIRTUALE - ORA di inizio della fascia 1, 0-23 (ora server). Ogni fascia successiva parte dove finisce la precedente
+input int SlotLenHours = 2;                        // ANALISI VIRTUALE - DURATA di ogni fascia in ore, 1-12. Con 2 e inizio 0: 00-02, 02-04 ... 22-24. Se una fascia coincide con una precedente (succede con durata 3, 4, 6, 8, 9 o 12) viene spenta anche se quella precedente e' disattivata: quell'orario resta analizzato solo dalla prima
+input bool Slot1 = true;                           // ANALISI VIRTUALE - fascia 1 attiva (con i valori di default 00-02; in generale parte a SlotFirstHour e dura SlotLenHours ore)
+input bool Slot2 = true;                           // ANALISI VIRTUALE - fascia 2 attiva (con i valori di default 02-04; in generale parte dove finisce la fascia 1 e dura SlotLenHours ore)
+input bool Slot3 = true;                           // ANALISI VIRTUALE - fascia 3 attiva (con i valori di default 04-06; in generale parte dove finisce la fascia 2 e dura SlotLenHours ore)
+input bool Slot4 = true;                           // ANALISI VIRTUALE - fascia 4 attiva (con i valori di default 06-08; in generale parte dove finisce la fascia 3 e dura SlotLenHours ore)
+input bool Slot5 = true;                           // ANALISI VIRTUALE - fascia 5 attiva (con i valori di default 08-10; in generale parte dove finisce la fascia 4 e dura SlotLenHours ore)
+input bool Slot6 = true;                           // ANALISI VIRTUALE - fascia 6 attiva (con i valori di default 10-12; in generale parte dove finisce la fascia 5 e dura SlotLenHours ore)
+input bool Slot7 = true;                           // ANALISI VIRTUALE - fascia 7 attiva (con i valori di default 12-14; in generale parte dove finisce la fascia 6 e dura SlotLenHours ore)
+input bool Slot8 = true;                           // ANALISI VIRTUALE - fascia 8 attiva (con i valori di default 14-16; in generale parte dove finisce la fascia 7 e dura SlotLenHours ore)
+input bool Slot9 = true;                           // ANALISI VIRTUALE - fascia 9 attiva (con i valori di default 16-18; in generale parte dove finisce la fascia 8 e dura SlotLenHours ore)
+input bool Slot10 = true;                          // ANALISI VIRTUALE - fascia 10 attiva (con i valori di default 18-20; in generale parte dove finisce la fascia 9 e dura SlotLenHours ore)
+input bool Slot11 = true;                          // ANALISI VIRTUALE - fascia 11 attiva (con i valori di default 20-22; in generale parte dove finisce la fascia 10 e dura SlotLenHours ore)
+input bool Slot12 = true;                          // ANALISI VIRTUALE - fascia 12 attiva (con i valori di default 22-24; in generale parte dove finisce la fascia 11 e dura SlotLenHours ore)
 
-input group "=== MODALITA' DI ENTRATA (interruttori) ==="
-input bool EntryStop = true;                       // A) coppia di ordini stop sul massimo/minimo +/- offset (OCO)
-input bool EntryCandleClose = false;               // B) a mercato quando una candela chiusa di Timeframe chiude oltre massimo+offset / sotto minimo-offset
-input bool EntryRetest = false;                    // C) retest: dopo che il prezzo supera il livello+offset, entra a mercato quando TORNA al bordo del range
-input int RetestTolerancePoints = 0;               // C) il ritorno conta quando il prezzo (bid) scende fino a questi punti SOPRA il bordo del range (0 = lo tocca); deve essere minore dell'offset
-input int RetestMaxDepthPoints = 50;               // C) se il prezzo scende piu' di questi punti SOTTO il bordo (la rottura e' fallita) il retest si annulla e non si entra
+input group "=== 1D. RANGE A BARRE (usato se UseRangeBars = true) ==="
+input int RangeBarsLookback = 25;                  // NUMERO DI BARRE di Timeframe che formano il range (>= 1). Con RangeDaysBack >= 1 sono le ultime barre fino alla fine del giorno di riferimento (RangeDaysBack = 1: fino alla mezzanotte di oggi); con RangeDaysBack = 0 sono le ultime barre chiuse al primo tick della finestra di entrata
 
-input group "=== STOP LOSS E TAKE PROFIT ==="
-input double StopLossPoints = 100;
-input double TakeProfitPoints = 200;
-input bool UseTakeProfit = true;
+input group "=== 1E. RANGE D1 PRECEDENTI (usato se UseRangePrevD1 = true) ==="
+input int RangeDaySpan = 1;                        // QUANTI GIORNI D1 completi (>= 1) formano il range, dal giorno di riferimento andando indietro. Con RangeDaysBack = 1: 1 = solo ieri, 3 = gli ultimi 3 giorni di mercato
 
-input group "=== FILTRI DI COSTO ==="
-input double MaxSpreadPoints = 0;                  // 0 = spento
-input double MaxSpreadPctOfSL = 15;                // spread massimo in % dello stop loss; 0 = spento
+input group "=== 1F. FILTRO DI LARGHEZZA DEL RANGE (vale per tutti i range) ==="
+input bool RequireRangeConfirmation = true;        // true = scarta il range (niente trade quel giorno) se la sua larghezza e' fuori da Min/Max. false = nessun filtro di larghezza
+input double MinRangePoints = 50;                  // LARGHEZZA MINIMA del range in punti (solo con il filtro acceso)
+input double MaxRangePoints = 500;                 // LARGHEZZA MASSIMA del range in punti, misurata tra massimo e minimo del range (offset escluso); un range piu' largo viene scartato (solo con il filtro acceso; deve essere >= alla minima; 0 NON vuol dire nessun limite: scarta tutti i range)
 
-input group "=== BREAK EVEN E TRAILING ==="
-input bool UsaBreakEven = true;
-input int BreakEvenAttivazione = 100;
-input int BreakEvenOffset = 10;
-input bool UsaTrailingStop = true;
-input int TrailingStartProfit = 150;
-input int TrailingStep = 20;
-input int TrailingOffset = 30;
+//==================================================================
+// 2. FINESTRA DI ENTRATA
+//==================================================================
+input group "=== 2. FINESTRA DI ENTRATA (ora server) E LIMITI GIORNALIERI ==="
+input int TradeHourStart = 10;                     // ORA di inizio della finestra di entrata, 0-23
+input int TradeMinuteStart = 0;                    // MINUTO di inizio della finestra di entrata, 0-59
+input int TradeHourEnd = 11;                       // ORA di fine della finestra, 0-24 (la fine e' esclusa). Fine uguale all'inizio, o 00:00-24:00, NON e' ammesso (la finestra deve durare meno di 24 ore). Se la fine e' prima dell'inizio la finestra passa la mezzanotte; a mezzanotte il giorno riparte: il range si ricalcola, MaxTradesPerDay riparte da zero e con EntryCandleClose la candela che chiude alle 00:00 non vale
+input int TradeMinuteEnd = 0;                      // MINUTO di fine della finestra, 0-59
+input int ExpireExtraMinutes = 0;                  // MINUTI EXTRA dopo la fine della finestra (>= 0; finestra + extra sotto le 24 ore). Gli ordini stop gia' piazzati restano vivi fino a fine finestra + extra; retest e chiusura di candela restano validi (conta la candela che chiude entro quel limite, estremo compreso). NON si piazzano nuovi ordini stop dopo la fine della finestra. Vale anche nell'analisi virtuale
+input int MaxTradesPerDay = 1;                     // MASSIMO DI APERTURE di posizioni in un giorno server (>= 1): conta anche le posizioni gia' chiuse e riparte da 0 a mezzanotte. EA reale: un solo conteggio per tutte le modalita' di entrata insieme e una sola posizione alla volta; analisi virtuale: il limite vale separatamente per ogni concorrente
 
-input group "=== SISTEMA ==="
-input int Slippage = 10;
-input int MagicNumber = 123456;
-input string OrderComment = "MDRB3";
-input bool ShowPanel = true;
-input bool ShowRangeLines = true;
+//==================================================================
+// 3. MODALITA' DI ENTRATA
+//==================================================================
+input group "=== 3. MODALITA' DI ENTRATA (interruttori true/false) ==="
+input int PendingOrderOffsetPoints = 20;           // OFFSET in punti dal range, comune alle tre modalita': livello alto = massimo + offset, livello basso = minimo - offset. Stop: prezzo degli ordini. Chiusura di candela: la candela deve chiudere oltre il livello. Retest: la rottura scatta quando il prezzo supera il livello
+input bool EntryStop = true;                       // A) ORDINI STOP. true = piazza BuyStop sul livello alto e SellStop sul basso, una sola volta e solo dentro la finestra (OCO: quando uno scatta l'altro e' cancellato); gli ordini non eseguiti scadono a fine finestra + ExpireExtraMinutes (con 0 extra: a fine finestra)
+input bool ChaseIfBroken = false;                  // A) solo con EntryStop: PREZZO GIA' OLTRE UN LIVELLO (o piu' vicino della distanza minima degli stop del broker) nel momento in cui si piazza la coppia, di norma all'apertura della finestra. false = aspetta che il prezzo rientri; se non rientra prima della fine della finestra non piazza nulla. true = piazza subito lo stop del lato rotto vicino al mercato (BuyStop a ask + distanza minima + 10 punti, SellStop a bid - distanza minima - 10 punti, SL/TP dal nuovo prezzo); l'altro lato resta al suo livello se e' piazzabile. Rincorre il movimento gia' partito: NON e' un retest
+input bool EntryCandleClose = false;               // B) CHIUSURA DI CANDELA. true = entra a mercato, al primo tick dopo la chiusura, quando una candela chiusa di Timeframe chiude oltre il livello alto (long) o sotto il basso (short). Conta solo la candela che chiude dopo l'inizio e al piu' alla fine della finestra (+ ExpireExtraMinutes); una candela che chiude a mezzanotte (00:00) non conta mai, quindi con fine finestra 24:00 l'ultima candela e' esclusa
+input bool EntryRetest = false;                    // C) RETEST. true = dopo che il prezzo (bid) supera il livello, entra a mercato quando TORNA al bordo del range, nella direzione della rottura
+input int RetestTolerancePoints = 0;               // C) TOLLERANZA del ritorno in punti: il retest scatta quando il bid scende fino a questa distanza SOPRA il bordo (long; simmetrico per lo short). 0 = deve toccarlo. Deve essere minore dell'offset
+input int RetestMaxDepthPoints = 50;               // C) PROFONDITA' MASSIMA in punti, misurata dal BORDO del range verso l'interno (dal massimo per il long, dal minimo per lo short): se il bid scende sotto massimo - profondita' (simmetrico per lo short) la rottura e' fallita e il retest armato si annulla. Se poi il prezzo supera di nuovo il livello (offset) il retest si riarma e puo' ancora entrare nella stessa finestra. 0 NON vuol dire nessun limite: il prezzo non deve mai oltrepassare il bordo
+
+//==================================================================
+// 4. USCITE
+//==================================================================
+input group "=== 4A. STOP LOSS E TAKE PROFIT (in punti) ==="
+input double StopLossPoints = 100;                 // STOP LOSS iniziale in punti (> 0). Con gli ordini stop e' misurato dal prezzo dell'ordine; con gli ingressi a mercato (candela, retest) dall'ask/bid al momento dell'invio. Il livello e' fisso: con gap o slippage la perdita reale puo' superare questa distanza. Misura anche l'unita' R dell'analisi virtuale
+input bool UseTakeProfit = true;                   // true = imposta il take profit; false = nessun TP (restano lo stop loss, il break even e il trailing)
+input double TakeProfitPoints = 200;               // TAKE PROFIT in punti, misurato dalla stessa base dello stop loss (non dal prezzo realmente eseguito); ignorato se UseTakeProfit = false, altrimenti deve essere > 0
+
+input group "=== 4B. BREAK EVEN ==="
+input bool UsaBreakEven = true;                    // true = quando il profitto raggiunge BreakEvenAttivazione sposta lo stop loss sull'entrata piu' BreakEvenOffset
+input int BreakEvenAttivazione = 100;              // PROFITTO in punti che attiva il break even
+input int BreakEvenOffset = 10;                    // PUNTI oltre il prezzo di entrata a cui viene portato lo stop loss (copre spread e costi)
+
+input group "=== 4C. TRAILING STOP ==="
+input bool UsaTrailingStop = true;                 // true = quando il profitto raggiunge TrailingStartProfit lo stop loss segue il prezzo
+input int TrailingStartProfit = 150;               // PROFITTO in punti da cui parte il trailing
+input int TrailingStep = 20;                       // PASSO MINIMO in punti: lo stop loss si sposta solo se migliora di almeno questo valore
+input int TrailingOffset = 30;                     // DISTANZA in punti a cui viene portato lo stop loss rispetto al prezzo corrente (bid per i long, ask per gli short) quando si sposta. Lo SL si muove solo ogni TrailingStep punti, quindi tra due spostamenti la distanza reale sale fino a circa offset + passo. Se e' minore della distanza minima del broker vale quella. Con il break even acceso vale lo stop piu' favorevole dei due
+
+//==================================================================
+// 5. FILTRO DI SPREAD
+//==================================================================
+input group "=== 5. FILTRO DI SPREAD (controllo prima di aprire) ==="
+input double MaxSpreadPoints = 0;                  // SPREAD MASSIMO in punti, controllato solo nel momento in cui l'EA piazza la coppia di ordini stop o invia un ingresso a mercato (chiusura di candela, retest): se e' piu' alto aspetta e riprova a ogni tick finche' puo'. Gli stop gia' piazzati NON sono piu' controllati e scattano anche con spread alto. 0 = filtro spento
+input double MaxSpreadPctOfSL = 15;                // SPREAD MASSIMO in % dello stop loss (stesso controllo di MaxSpreadPoints): limite = StopLossPoints x % / 100, es. 15 con SL 100 = 15 punti. 0 = filtro spento. Se sono accesi entrambi vale il limite piu' stretto
+
+//==================================================================
+// 6. ANALISI VIRTUALE (usati solo con SlotScan = true)
+//==================================================================
+input group "=== 6. ANALISI VIRTUALE: classifica e file (solo con SlotScan = true) ==="
+input int SlotMinTrades = 30;                      // TRADE MINIMI (>= 1) perche' un concorrente entri in classifica; gli altri sono elencati in coda come "fuori classifica"
+input ENUM_SLOT_RANK SlotRankBy = SLOT_RANK_TSTAT; // CRITERIO della classifica, sui trade virtuali (R = multipli dello stop loss): t-stat = E[R] medio diviso la sua incertezza statistica, premia risultato buono E molti trade (consigliato; vale 0 con meno di 2 trade o se tutti i trade hanno lo stesso R); E[R] medio per trade; profit factor (nel punteggio al massimo 10: sopra si pareggia); R totale. Il punteggio del primo in classifica e' anche il valore dato al tester per l'ottimizzazione "Custom max" (-1e9 se nessuno raggiunge SlotMinTrades)
+input datetime SlotSplitDate = 0;                  // DATA DI SEPARAZIONE (ora server). Se > 0 il log e i CSV mostrano per ogni concorrente anche numero di trade ed E[R] di quelli aperti prima e da questa data in poi, per confrontare i due periodi. Classifica, SlotMinTrades e punteggio del tester usano SEMPRE tutti i trade: non e' un vero fuori campione, per quello rifai il test su un altro periodo. 0 = nessuna separazione
+input double SlotCommissionPoints = 0.0;           // COMMISSIONE round-turn in punti sottratta a ogni trade virtuale. 0 = commissioni escluse (lo spread e' sempre incluso)
+input bool SlotWriteFiles = true;                  // true = a fine test scrive in Terminal\Common\Files, sovrascrivendoli a ogni esecuzione, la classifica di tutti i concorrenti (MDRB_SlotScan_<simbolo>.csv, colonna eligible: 0 = fuori classifica) e tutti i trade virtuali (MDRB_SlotScan_<simbolo>_trades.csv). false = nessun file, resta la classifica nel log degli Esperti. In ottimizzazione non viene scritto nulla (ne' file ne' log): conta solo il valore dato al tester
+
+//==================================================================
+// 7. SISTEMA
+//==================================================================
+input group "=== 7. SISTEMA ==="
+input int Slippage = 10;                           // SLIPPAGE massimo in punti accettato negli ordini a mercato (chiusura di candela, retest)
+input int MagicNumber = 123456;                    // NUMERO MAGICO: identifica gli ordini e le posizioni di questo EA (cambialo se ne usi piu' di uno sullo stesso simbolo)
+input string OrderComment = "MDRB3";               // COMMENTO (prefisso) scritto su ordini e posizioni reali: l'EA vi aggiunge " B"/" S" (ordini stop) o " chiusura"/" retest" (ingressi a mercato); il broker puo' troncarlo. E' solo un'etichetta: le operazioni sono riconosciute dal MagicNumber, non dal commento. Ignorato nell'analisi virtuale
+input bool ShowPanel = true;                       // true = mostra il pannello di stato sul grafico (non nel tester senza modo visuale)
+input bool ShowRangeLines = true;                  // true = disegna due linee orizzontali tratteggiate: massimo (blu) e minimo (rosso) del range di oggi, SENZA offset (non sono i livelli di entrata, che distano PendingOrderOffsetPoints). Compaiono quando il range viene calcolato, spariscono a mezzanotte o se il range e' scartato. Solo EA reale: nell'analisi virtuale non disegna nulla
 
 //--- stato
 CTrade   g_trade;
@@ -520,10 +595,10 @@ int RangeByBars(double &hi, double &lo, string &info)
 int ComputeRange(datetime now, double &hi, double &lo, string &info)
   {
    int rt = 1;
-   if(RangeMode == RANGE_PREV_D1)
+   if(UseRangePrevD1)
       rt = RangeByD1(hi, lo, info);
    else
-      if(RangeMode == RANGE_BARS)
+      if(UseRangeBars)
          rt = RangeByBars(hi, lo, info);
       else
          rt = RangeTimeWindow(now, RangeHourStart, RangeMinuteStart, RangeHourEnd, RangeMinuteEnd, hi, lo, info);
@@ -1040,11 +1115,11 @@ void ManagePositions(datetime now)
 //| ANALISI VIRTUALE (SlotScan): NESSUN ordine reale                  |
 //| Ogni "concorrente" e' un EA virtuale indipendente, formato da:    |
 //|   una SORGENTE di range                                           |
-//|     - le fasce orarie Slot1..Slot12 (massimo/minimo della fascia   |
-//|       nel giorno di riferimento RangeDaysBack)                    |
-//|     - il range a barre (ScanRangeBars: RangeBarsLookback barre di |
-//|       Timeframe)                                                  |
-//|     - il range dei D1 precedenti (ScanRangePrevD1: RangeDaySpan   |
+//|     - le fasce orarie Slot1..Slot12 (se UseRangeTime: massimo/    |
+//|       minimo della fascia nel giorno di riferimento RangeDaysBack)|
+//|     - il range a barre (se UseRangeBars: RangeBarsLookback barre  |
+//|       di Timeframe)                                               |
+//|     - il range dei D1 precedenti (se UseRangePrevD1: RangeDaySpan |
 //|       giorni)                                                     |
 //|   una MODALITA' di entrata                                        |
 //|     - EntryStop         coppia di ordini stop (OCO)               |
@@ -1136,10 +1211,10 @@ bool SlotOn(const int k)
 bool SrcOn(const int src)
   {
    if(src < NSLOT)
-      return SlotOn(src);
+      return (UseRangeTime && SlotOn(src));
    if(src == NSLOT)
-      return ScanRangeBars;
-   return ScanRangePrevD1;
+      return UseRangeBars;
+   return UseRangePrevD1;
   }
 
 bool ModeOn(const int m)
@@ -1702,7 +1777,7 @@ void ScanReport()
    for(int i = 0; i < cnt; i++)
       Print(SlotLine(i + 1, order[i]));
    Print("R = profitto in multipli dello SL (costi di spread inclusi", (SlotCommissionPoints > 0.0 ? " e commissione" : ", commissione NON inclusa: usa SlotCommissionPoints"), "). Posizioni virtuali ancora aperte a fine test (non contate): ", nOpen,
-         ". Con ", cnt, " concorrenti provati il migliore e' in parte fortuna: confermalo su un altro periodo (SlotSplitDate) prima di fidarti.");
+         ". Con ", cnt, " concorrenti provati il migliore e' in parte fortuna: confermalo rifacendo il test su un altro periodo (SlotSplitDate mostra solo prima/dopo, ma la classifica usa tutti i trade) prima di fidarti.");
    if(SlotWriteFiles)
      {
       ScanWriteFiles(order, cnt);
@@ -1818,31 +1893,30 @@ string CheckInputs()
       return "RetestTolerancePoints e RetestMaxDepthPoints non possono essere negativi";
    if(EntryRetest && PendingOrderOffsetPoints <= RetestTolerancePoints)
       return "con EntryRetest l'offset (PendingOrderOffsetPoints) deve essere maggiore di RetestTolerancePoints: altrimenti il ritorno e' gia' vero alla rottura";
-   if(SlotScan)
+   // --- range: quali sorgenti sono accese
+   int nSrc = (UseRangeTime ? 1 : 0) + (UseRangeBars ? 1 : 0) + (UseRangePrevD1 ? 1 : 0);
+   bool anySlot = (Slot1 || Slot2 || Slot3 || Slot4 || Slot5 || Slot6 || Slot7 || Slot8 || Slot9 || Slot10 || Slot11 || Slot12);
+   if(!SlotScan && nSrc != 1)
+      return "EA reale: accendi ESATTAMENTE un range tra UseRangeTime, UseRangeBars e UseRangePrevD1 (ora ne sono accesi " + IntegerToString(nSrc) + "); per confrontarne piu' di uno usa SlotScan";
+   if(SlotScan && !((UseRangeTime && anySlot) || UseRangeBars || UseRangePrevD1))
+      return "analisi virtuale: accendi almeno un range (UseRangeTime con almeno una fascia Slot1..Slot12, UseRangeBars oppure UseRangePrevD1)";
+   if(RangeDaysBack < 0)
+      return "RangeDaysBack non puo' essere negativo";
+   if(UseRangeBars && RangeBarsLookback < 1)
+      return "RangeBarsLookback deve essere >= 1";
+   if(UseRangePrevD1 && (RangeDaySpan < 1 || RangeDaysBack < 1))
+      return "UseRangePrevD1 richiede RangeDaySpan >= 1 e RangeDaysBack >= 1";
+   if(UseRangeTime && !SlotScan && (RangeHourStart < 0 || RangeHourStart > 23 || RangeHourEnd < 0 || RangeHourEnd > 24 || RangeMinuteStart < 0 || RangeMinuteStart > 59 || RangeMinuteEnd < 0 || RangeMinuteEnd > 59))
+      return "orario del range per orario (RangeHourStart/Minute..., RangeHourEnd/Minute...) non valido";
+   if(UseRangeTime && SlotScan)
      {
-      if(RangeDaysBack < 0)
-         return "RangeDaysBack non valido";
       if(SlotFirstHour < 0 || SlotFirstHour > 23)
          return "SlotFirstHour deve essere tra 0 e 23";
       if(SlotLenHours < 1 || SlotLenHours > 12)
          return "SlotLenHours deve essere tra 1 e 12";
-      if(!(Slot1 || Slot2 || Slot3 || Slot4 || Slot5 || Slot6 || Slot7 || Slot8 || Slot9 || Slot10 || Slot11 || Slot12 || ScanRangeBars || ScanRangePrevD1))
-         return "analisi: accendi almeno una fascia o un range (ScanRangeBars, ScanRangePrevD1)";
-      if(ScanRangeBars && RangeBarsLookback < 1)
-         return "RangeBarsLookback deve essere >= 1";
-      if(ScanRangePrevD1 && (RangeDaySpan < 1 || RangeDaysBack < 1))
-         return "ScanRangePrevD1 richiede RangeDaySpan >= 1 e RangeDaysBack >= 1";
-      if(SlotMinTrades < 1)
-         return "SlotMinTrades deve essere >= 1";
      }
-   if(RangeDaysBack < 0 || (!SlotScan && RangeMode == RANGE_PREV_D1 && RangeDaysBack < 1))
-      return "RangeDaysBack non valido per il modo scelto";
-   if(!SlotScan && RangeMode == RANGE_BARS && RangeBarsLookback < 1)
-      return "RangeBarsLookback deve essere >= 1";
-   if(!SlotScan && RangeMode == RANGE_PREV_D1 && RangeDaySpan < 1)
-      return "RangeDaySpan deve essere >= 1";
-   if(!SlotScan && RangeMode == RANGE_TIME && (RangeHourStart < 0 || RangeHourStart > 23 || RangeHourEnd < 0 || RangeHourEnd > 24 || RangeMinuteStart < 0 || RangeMinuteStart > 59 || RangeMinuteEnd < 0 || RangeMinuteEnd > 59))
-      return "orario del range non valido";
+   if(SlotScan && SlotMinTrades < 1)
+      return "SlotMinTrades deve essere >= 1";
    if(RequireRangeConfirmation && MinRangePoints > MaxRangePoints)
       return "MinRangePoints > MaxRangePoints";
    if(NormVol(LotSize) <= 0.0)
@@ -1876,15 +1950,26 @@ int OnInit()
       Print("Attenzione: StopLossPoints e' sotto il livello minimo dei stop del broker (", DoubleToString(stopLvl / _Point, 0), " punti)");
    if(EntryCandleClose && PeriodSeconds(Timeframe) > (WinLen() + ExpireExtraMinutes) * 60)
       Print("Attenzione: la finestra di entrata (", WinLen() + ExpireExtraMinutes, " minuti) e' piu' corta di una candela di ", EnumToString(Timeframe), ": potrebbe non contenere nessuna chiusura di candela e EntryCandleClose non scattare mai");
+   string rs = "";   // range accesi
+   if(UseRangeTime)
+     {
+      if(SlotScan)
+         rs += "orario (fasce da " + IntegerToString(SlotLenHours) + " ore dalle " + StringFormat("%02d:00", SlotFirstHour) + ") ";
+      else
+         rs += "orario " + StringFormat("%02d:%02d-%02d:%02d", RangeHourStart, RangeMinuteStart, RangeHourEnd, RangeMinuteEnd) + " ";
+     }
+   if(UseRangeBars)
+      rs += "barre (" + IntegerToString(RangeBarsLookback) + " x " + EnumToString(Timeframe) + ") ";
+   if(UseRangePrevD1)
+      rs += "D1 precedenti (" + IntegerToString(RangeDaySpan) + " giorni) ";
    if(SlotScan)
      {
       ScanInit();
-      Print("MultiDayRangeBreakout 3.00 su ", _Symbol, ": ANALISI VIRTUALE, ", ScanActive(), " concorrenti (range x modalita' di entrata: ", (EntryStop ? "stop " : ""), (EntryCandleClose ? "chiusura " : ""), (EntryRetest ? "retest" : ""),
-            "); fasce da ", SlotLenHours, " ore dalle ", StringFormat("%02d:00", SlotFirstHour), " (ora server), giorno di riferimento del range RangeDaysBack ", RangeDaysBack,
-            ". NESSUN ordine reale verra' aperto: la classifica si scrive a fine test.");
+      Print("MultiDayRangeBreakout 3.00 su ", _Symbol, ": ANALISI VIRTUALE, ", ScanActive(), " concorrenti (range x modalita' di entrata). Range: ", rs, "| entrata: ", (EntryStop ? "stop " : ""), (EntryCandleClose ? "chiusura " : ""), (EntryRetest ? "retest" : ""),
+            " | giorno di riferimento del range RangeDaysBack ", RangeDaysBack, ". NESSUN ordine reale verra' aperto: la classifica si scrive a fine test.");
       return INIT_SUCCEEDED;
      }
-   Print("MultiDayRangeBreakout 3.00 su ", _Symbol, ": entrata ", (EntryStop ? "stop " : ""), (EntryCandleClose ? "chiusura " : ""), (EntryRetest ? "retest " : ""), "| range ", EnumToString(RangeMode), ", finestra ", StringFormat("%02d:%02d-%02d:%02d", TradeHourStart, TradeMinuteStart, TradeHourEnd, TradeMinuteEnd),
+   Print("MultiDayRangeBreakout 3.00 su ", _Symbol, ": entrata ", (EntryStop ? "stop " : ""), (EntryCandleClose ? "chiusura " : ""), (EntryRetest ? "retest " : ""), "| range ", rs, "| finestra ", StringFormat("%02d:%02d-%02d:%02d", TradeHourStart, TradeMinuteStart, TradeHourEnd, TradeMinuteEnd),
          " ora server, SL ", DoubleToString(StopLossPoints, 0), " TP ", (UseTakeProfit ? DoubleToString(TakeProfitPoints, 0) : "nessuno"), " punti");
    return INIT_SUCCEEDED;
   }
