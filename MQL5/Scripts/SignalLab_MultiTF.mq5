@@ -51,6 +51,13 @@ enum ENUM_SD_MODE
    SDM_OR    = 3   // Basta uno dei due (OR)
   };
 
+enum ENUM_NOISE_SORT
+  {
+   NS_TOTAL = 0,  // Profitto totale in punti sull'intero storico
+   NS_MEAN  = 1,  // Netto medio per posizione
+   NS_T     = 2   // t-statistic
+  };
+
 input group "=== SEGNALE (stessi parametri dell'EA) ==="
 input ENUM_SD_MODE InpMode          = SDM_DELTA;
 input int      InpEmaPeriod         = 13;     // EmaPeriod
@@ -88,6 +95,7 @@ input group "=== CLASSIFICA (ipotetica posizione, in-sample / out-of-sample) ===
 input int      InpSplitPct          = 70;     // % iniziale del periodo usata per CLASSIFICARE; il resto serve solo a verificare
 input int      InpRankMinN          = 100;    // posizioni minime in-sample perche' una combinazione entri in classifica
 input int      InpRankTop           = 30;     // quante righe mostrare nella classifica
+input ENUM_NOISE_SORT InpNoiseSort  = NS_TOTAL; // ordinamento della tabella B (con rumore, senza protezione: intero storico)
 input ENUM_TIMEFRAMES InpEventTF    = PERIOD_M5; // TF dell'elenco segnali con le spunte
 input int      InpEventRows         = 120;    // quanti segnali elencare (campione uniforme su tutto il periodo)
 
@@ -124,6 +132,9 @@ long     g_parentSec = 3600;
 long     g_off = 0;
 double   g_pt = 0.0;
 double   g_zB = 3.0;
+double   g_minN = 100.0;                // minimo posizioni (>= 1)
+datetime g_tStart = 0;                  // primo istante M1 effettivamente disponibile nel periodo
+bool     g_histWarn = false;            // lo storico M1 inizia molto dopo InpFrom
 int      g_rbMin = 15, g_nRB = 96;   // fasce della classifica
 int      g_splitDay = 0;             // primo giorno out-of-sample
 int      g_evT = -1;                 // indice TF dell'elenco segnali
@@ -228,6 +239,12 @@ string ColT(const double t)
    return "#7b8794";
   }
 
+//--- t naive (campioni sovrapposti, nessuna correzione per test multipli): al massimo giallo
+string ColTNaive(const double t)
+  {
+   return (MathAbs(t) >= 2.0) ? "#ebcb8b" : "#7b8794";
+  }
+
 double NormSf(const double z)
   {
    double t = 1.0 / (1.0 + 0.2316419 * MathAbs(z));
@@ -259,6 +276,18 @@ int SnapBucket(const int req)
       if(d < bd) { bd = d; best = valid[i]; }
      }
    return best;
+  }
+
+string SafeTag(const string src)
+  {
+   string out = src;
+   for(int i = 0; i < StringLen(out); i++)
+     {
+      ushort c = StringGetCharacter(out, i);
+      bool ok = ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '.' || c == '-' || c == '_');
+      if(!ok) StringSetCharacter(out, i, '_');
+     }
+   return out;
   }
 
 string ModeName()
@@ -315,8 +344,10 @@ bool ParseTFs()
         {
          string pp = parts[q];
          StringTrimLeft(pp); StringTrimRight(pp);
+         bool known = false;
          for(int i = 0; i < 21; i++)
-            if(g_allName[i] == pp) { AddTF(i); break; }
+            if(g_allName[i] == pp) { AddTF(i); known = true; break; }
+         if(!known && pp != "") Print("Timeframe sconosciuto in InpTFs: '", pp, "' (ignorato).");
         }
      }
    g_nT = ArraySize(g_tf);
@@ -366,6 +397,8 @@ int ParseDoubleList(const string src, double &out[])
 
 bool SetupInputs()
   {
+   if(InpFrom >= InpTo) { Print("InpFrom deve precedere InpTo."); return false; }
+   g_minN = MathMax(1.0, (double)InpRankMinN);
    if(!ParseTFs()) { Print("Nessun timeframe valido in InpTFs"); return false; }
    g_nH = ParseIntList(InpHorizons, g_hor);
    if(g_nH < 1) { Print("Nessun orizzonte valido in InpHorizons"); return false; }
@@ -376,9 +409,12 @@ bool SetupInputs()
       int d = MathAbs(g_hor[i] - InpRefHorizon);
       if(d < bd) { bd = d; g_refH = i; }
      }
+   if(g_hor[g_refH] != InpRefHorizon)
+      Print("InpRefHorizon ", InpRefHorizon, " non e' fra gli orizzonti: uso ", g_hor[g_refH], " min.");
    g_nL = ParseDoubleList(InpLevels, g_lev);
    if(g_nL < 1)
      {
+      Print("InpLevels non valido: uso 100, 500, 1000.");
       ArrayResize(g_lev, 3);
       g_lev[0] = 100; g_lev[1] = 500; g_lev[2] = 1000;
       g_nL = 3;
@@ -389,6 +425,7 @@ bool SetupInputs()
    g_nRB   = 1440 / g_rbMin;
    g_evT = -1;
    for(int t = 0; t < g_nT; t++) if(g_tf[t] == InpEventTF) g_evT = t;
+   if(g_evT < 0) Print("InpEventTF non e' fra i TF analizzati: elenco spunte disattivato.");
    g_parentSec = (long)PeriodSeconds(InpParentTF);
    ArrayResize(g_tfSec, g_nT);
    ArrayResize(g_slotOK, g_nT);
@@ -397,7 +434,7 @@ bool SetupInputs()
    for(int t = 0; t < g_nT; t++)
      {
       g_tfSec[t] = (long)PeriodSeconds(g_tf[t]);
-      bool ok = (g_tfSec[t] > 0 && g_tfSec[t] < g_parentSec &&
+      bool ok = (g_tfSec[t] > 0 && g_tfSec[t] < g_parentSec && g_parentSec <= 86400L &&
                  (g_parentSec % g_tfSec[t]) == 0 && (g_parentSec / g_tfSec[t]) <= 1440);
       g_slotOK[t]  = ok;
       g_slotCnt[t] = ok ? (int)(g_parentSec / g_tfSec[t]) : 0;
@@ -423,12 +460,15 @@ int LoadRates(const ENUM_TIMEFRAMES tf, const datetime from, const datetime to, 
   {
    ArraySetAsSeries(out, false);
    int got = -1;
+   bool synced = false;
    for(int a = 0; a < 20; a++)
      {
       got = CopyRates(_Symbol, tf, from, to, out);
-      if(got > 0 && (bool)SeriesInfoInteger(_Symbol, tf, SERIES_SYNCHRONIZED)) break;
+      if(got > 0 && (bool)SeriesInfoInteger(_Symbol, tf, SERIES_SYNCHRONIZED)) { synced = true; break; }
+      if(IsStopped()) break;
       Sleep(250);
      }
+   if(!synced) Print("Attenzione: serie ", EnumToString(tf), " non sincronizzata dopo i tentativi (barre ", got, "): lo storico potrebbe essere parziale.");
    return got;
   }
 
@@ -481,6 +521,18 @@ bool LoadM1()
      }
    g_nDays = g_m1Day[g_n1 - 1] + 1;
    if(g_nDays < 1) g_nDays = 1;
+
+   //--- primo istante realmente disponibile nel periodo richiesto
+   g_tStart = g_m1Time[g_n1 - 1];
+   for(int i = 0; i < g_n1; i++)
+      if(g_m1Time[i] >= InpFrom) { g_tStart = g_m1Time[i]; break; }
+   g_histWarn = ((long)g_tStart > (long)InpFrom + 7L * 86400L);
+   Print("Storico M1 dal ", TimeToString(g_m1Time[0], TIME_DATE | TIME_MINUTES), " al ",
+         TimeToString(g_m1Time[g_n1 - 1], TIME_DATE | TIME_MINUTES), " | inizio effettivo del periodo ",
+         TimeToString(g_tStart, TIME_DATE));
+   if(g_histWarn)
+      Print("!!! Lo storico M1 disponibile inizia dopo InpFrom: il periodo analizzato e' piu' corto di quello richiesto.",
+            " Scarica piu' storico (F2 History Center) o accorcia InpFrom.");
 
    //--- buchi di dati: nextBrk[j] = primo k >= j con buco dopo k (altrimenti ultimo indice)
    const long gmax = (long)InpMaxGapMin * 60L;
@@ -556,7 +608,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
       g_ent[u]  = p;
       g_dir[u]  = dir[i];
       g_bur[u]  = bur[i];
-      g_slot[u] = (ushort)(slotOK ? (int)((((long)r[i].time + g_off) % g_parentSec) / xs) : 0);
+      g_slot[u] = (ushort)(slotOK ? (int)(((long)r[i].time % g_parentSec) / xs) : 0);
       if(dir[i] != 0) ev++;
       u++;
      }
@@ -577,7 +629,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
 //+------------------------------------------------------------------+
 //| Accumulatori                                                      |
 //+------------------------------------------------------------------+
-void AllocAcc()
+bool AllocAcc()
   {
    int cTH = g_nT * g_nH;
    ArrayResize(g_accTH, cTH * ACCN);               ArrayInitialize(g_accTH, 0.0);
@@ -595,7 +647,7 @@ void AllocAcc()
    ArrayResize(g_accDir,  g_nT * 2 * ACCN);           ArrayInitialize(g_accDir, 0.0);
    ArrayResize(g_accDow,  g_nT * 7 * ACCN);           ArrayInitialize(g_accDow, 0.0);
 
-   g_topCap = MathMax(0, InpTopRuns);
+   g_topCap = MathMin(1000, MathMax(0, InpTopRuns));
    g_topN = 0; g_topMinIdx = 0;
    int c = MathMax(1, g_topCap);
    ArrayResize(g_tpTime, c); ArrayResize(g_tpTF, c); ArrayResize(g_tpDir, c);
@@ -606,7 +658,12 @@ void AllocAcc()
    int blk = (g_nL + 1) * 4 * RKN;
    long szK = (long)g_nT * g_nRB * g_nH * blk;
    Print("Classifica: ", szK, " celle (", DoubleToString(szK * 8.0 / 1048576.0, 0), " MB)");
-   ArrayResize(g_rk, (int)szK);                 ArrayInitialize(g_rk, 0.0);
+   if(szK > 400000000L || ArrayResize(g_rk, (int)szK) != (int)szK)
+     {
+      Print("Memoria insufficiente per la classifica (", szK, " celle): riduci orizzonti, livelli o TF, oppure allarga le fasce.");
+      return false;
+     }
+   ArrayInitialize(g_rk, 0.0);
    ArrayResize(g_rg, g_nT * g_nH * blk);        ArrayInitialize(g_rg, 0.0);
    ArrayResize(g_lockB, g_nT * g_nH * g_nRB);   ArrayInitialize(g_lockB, 0);
    ArrayResize(g_lockG, g_nT * g_nH);           ArrayInitialize(g_lockG, 0);
@@ -614,12 +671,13 @@ void AllocAcc()
    //--- elenco segnali con spunte
    g_evCap = (g_evT >= 0) ? MathMax(0, InpEventRows) : 0;
    g_evCount = 0; g_evSeen = 0;
-   g_evStride = (g_evCap > 0) ? MathMax(1, g_tfEv[g_evT] / g_evCap) : 1;
+   g_evStride = (g_evCap > 0) ? MathMax(1, (g_tfEv[g_evT] + g_evCap - 1) / g_evCap) : 1;
    int ce = MathMax(1, g_evCap);
    ArrayResize(g_evTime, ce); ArrayResize(g_evDir, ce); ArrayResize(g_evSlot, ce);
    ArrayResize(g_evBur, ce);  ArrayResize(g_evJ, ce);
    ArrayResize(g_evMfe, ce);  ArrayResize(g_evMae, ce); ArrayResize(g_evRet, ce);
    ArrayResize(g_evMin, ce * g_nL);
+   return true;
   }
 
 void AddAcc(double &a[], const int cell, const double fav, const double adv,
@@ -680,7 +738,10 @@ void ComputeForward(const int hMin)
         }
       while(ht > hd && g_dqH[hd] < j) hd++;
       while(lt > ld && g_dqL[ld] < j) ld++;
-      bool ok = (e < g_n1 && e > j && ht > hd && lt > ld && g_nextBrk[j] >= e - 1);
+      //--- finestra completa: nessun buco dati fra le barre j..e-1 e, se un buco segue la barra e-1,
+      //    quella barra deve comunque coprire tEnd (altrimenti l'orizzonte risulterebbe troncato)
+      bool ok = (e < g_n1 && e > j && ht > hd && lt > ld &&
+                 (g_nextBrk[j] >= e || (g_nextBrk[j] == e - 1 && (long)g_m1Time[e - 1] + 60L >= tEnd)));
       g_ok[j] = ok ? 1 : 0;
       if(ok)
         {
@@ -723,21 +784,41 @@ void AddRank(double &a[], const int base, const int smp,
 
 struct RkStat
   {
-   double n, mean, t, hit, mae;
+   double n, mean, t, hit, mae, sum;
   };
 
 void RkRead(const double &a[], const int base, const int kk, const int dd, const int smp, RkStat &s)
   {
    const int p = base + (((kk * 2 + dd) * 2 + smp) * RKN);
    double n = a[p];
-   s.n = n; s.mean = 0.0; s.t = 0.0; s.hit = 0.0; s.mae = 0.0;
+   s.n = n; s.mean = 0.0; s.t = 0.0; s.hit = 0.0; s.mae = 0.0; s.sum = 0.0;
    if(n < 1.0) return;
+   s.sum  = a[p + 1];
    s.mean = a[p + 1] / n;
    double var = (n > 1.0) ? (a[p + 2] - n * s.mean * s.mean) / (n - 1.0) : 0.0;
    double sd  = (var > 0.0) ? MathSqrt(var) : 0.0;
    s.t   = (sd > 0.0) ? s.mean / (sd / MathSqrt(n)) : 0.0;
    s.hit = 100.0 * a[p + 3] / n;
    s.mae = a[p + 4] / n;
+  }
+
+//--- statistiche sull'INTERO storico (in-sample + out-of-sample sommati)
+void RkReadAll(const double &a[], const int base, const int kk, const int dd, RkStat &s)
+  {
+   const int p0 = base + (((kk * 2 + dd) * 2 + 0) * RKN);
+   const int p1 = base + (((kk * 2 + dd) * 2 + 1) * RKN);
+   double n = a[p0] + a[p1];
+   s.n = n; s.mean = 0.0; s.t = 0.0; s.hit = 0.0; s.mae = 0.0; s.sum = 0.0;
+   if(n < 1.0) return;
+   double sm = a[p0 + 1] + a[p1 + 1];
+   double s2 = a[p0 + 2] + a[p1 + 2];
+   s.sum  = sm;
+   s.mean = sm / n;
+   double var = (n > 1.0) ? (s2 - n * s.mean * s.mean) / (n - 1.0) : 0.0;
+   double sd  = (var > 0.0) ? MathSqrt(var) : 0.0;
+   s.t   = (sd > 0.0) ? s.mean / (sd / MathSqrt(n)) : 0.0;
+   s.hit = 100.0 * (a[p0 + 3] + a[p1 + 3]) / n;
+   s.mae = (a[p0 + 4] + a[p1 + 4]) / n;
   }
 
 //+------------------------------------------------------------------+
@@ -805,7 +886,7 @@ void AccumulateHorizon(const int hi)
              g_lockG[cell] = tj;
              AddRank(g_rg, cell * rkBlk, smp, mfeF, maeF, retN, mfeI, maeI, retI);
             }
-          const int rb = (b * g_bMin) / g_rbMin;
+          const int rb = (int)((((long)g_m1Time[j] + g_off) % 86400L) / ((long)g_rbMin * 60L));
           const int lb = cell * g_nRB + rb;
           if(g_lockB[lb] == 0 || (tj - g_lockB[lb]) >= Hs)
             {
@@ -919,7 +1000,7 @@ string AccCell(const double &a[], const int p)
    double ret = a[p + 3] / n;
    double var = (n > 1.0) ? (a[p + 4] - n * ret * ret) / (n - 1.0) : 0.0;
    double tn  = (var > 0.0) ? ret / (MathSqrt(var) / MathSqrt(n)) : 0.0;
-   string col = (n < InpMinPerBucket) ? "#4c566a" : ColT(tn);
+   string col = (n < InpMinPerBucket) ? "#4c566a" : ColTNaive(tn);
    return Td(F1(ret) + " <span style='color:#4c566a'>(" + F0(n) + ")</span>", col);
   }
 
@@ -934,7 +1015,7 @@ void RepHead()
    W("h3{font-size:13px;margin:16px 0 4px;color:#8fbcbb}");
    W("table{border-collapse:collapse;margin:8px 0;font-size:12px}td,th{border:1px solid #2e3440;padding:3px 9px;text-align:right}");
    W("th{background:#1e222a;color:#8fbcbb}td:first-child,th:first-child{text-align:left}");
-   W(".thin td{color:#4c566a;font-style:italic}");
+   W(".thin td,td.thin{color:#4c566a;font-style:italic}");
    W(".kpi{display:inline-block;background:#1e222a;border:1px solid #2e3440;border-radius:6px;padding:10px 16px;margin:4px 8px 4px 0;min-width:120px;font-size:11px;color:#7b8794}");
    W(".kpi b{display:block;font-size:18px;color:#eceff4}");
    W(".note{background:#1e222a;border-left:3px solid #ebcb8b;padding:10px 14px;margin:12px 0;color:#c8ccd4}");
@@ -949,9 +1030,12 @@ void RepIntro()
    W("<h1>SignalLab MultiTF &mdash; " + ModeName() + " &mdash; " + _Symbol + "</h1>");
    datetime tEnd = (datetime)MathMin((long)InpTo, (long)g_m1Time[g_n1 - 1]);
    W("<div style='color:#7b8794'>Tutto in punti (point = " + DoubleToString(g_pt, _Digits) + "). Periodo " +
-     TimeToString(InpFrom, TIME_DATE) + " &rarr; " + TimeToString(tEnd, TIME_DATE) +
+     TimeToString(g_tStart, TIME_DATE) + " &rarr; " + TimeToString(tEnd, TIME_DATE) +
      " | orologio comune M1 | orizzonte di riferimento " + IS(g_hor[g_refH]) + " min</div>");
 
+   if(g_histWarn)
+      W("<div class='note ko'><b>Storico M1 incompleto.</b> Richiesto da " + TimeToString(InpFrom, TIME_DATE) + ", disponibile da " +
+        TimeToString(g_tStart, TIME_DATE) + ". Il periodo analizzato &egrave; pi&ugrave; corto: scarica altro storico (F2, Centro cronologia) o accorcia InpFrom.</div>");
    W("<h2>Configurazione e contesto dati</h2>");
    W("<table>");
    W("<tr><th>Segnale</th><td>" + ModeName() + " | EMA " + IS(InpEmaPeriod) + " | volume " + IS(InpVolAvgPeriod) +
@@ -965,8 +1049,8 @@ void RepIntro()
    for(int i = 0; i < g_nH; i++) hs += (i > 0 ? ", " : "") + IS(g_hor[i]);
    W("<tr><th>Tenute / orizzonti (min)</th><td>" + hs + "</td></tr>");
    datetime tSplit = (datetime)((g_day0 + (long)g_splitDay) * 86400L - g_off);
-   W("<tr><th>Classifica</th><td>in-sample fino al " + TimeToString(tSplit, TIME_DATE) + ", out-of-sample dopo | fasce da " +
-     IS(g_rbMin) + " min | minimo " + IS(InpRankMinN) + " posizioni in-sample | una posizione per volta, senza stop</td></tr>");
+   W("<tr><th>Classifica</th><td>in-sample prima del " + TimeToString(tSplit, TIME_DATE) + ", out-of-sample dal " + TimeToString(tSplit, TIME_DATE) + " | fasce da " +
+     IS(g_rbMin) + " min | minimo " + IS((long)g_minN) + " posizioni in-sample | una posizione per volta, senza stop</td></tr>");
    string ls = "";
    for(int i = 0; i < g_nL; i++) ls += (i > 0 ? ", " : "") + F0(g_lev[i]);
    W("<tr><th>Livelli (pt)</th><td>" + ls + "</td></tr>");
@@ -987,7 +1071,11 @@ void RepIntro()
      "Contano <b>MFE/MAE</b> (asimmetria dentro lo stesso evento) e il confronto con la <b>base</b> = entrate in direzione casuale, stesso TF, stessa fascia oraria.</div>");
    W("<div class='note'><b>t cluster</b> usa l'errore standard raggruppato per giorno: i segnali di barre vicine si sovrappongono, "
      "il t naive &egrave; gonfiato. Giallo = |t| &ge; 2 (debole, atteso per caso su 1 cella su 20). Verde/rosso = oltre la soglia di Bonferroni "
-     "sul numero di celle TF x orizzonte di questo report: |t| &ge; <b>" + F2(g_zB) + "</b>. Non cercare la cella migliore: cerca coerenza fra TF vicini e orizzonti vicini.</div>");
+     "sul numero di celle TF x orizzonte di questo report: |t| &ge; <b>" + F2(g_zB) + "</b>. Non cercare la cella migliore: cerca coerenza fra TF vicini e orizzonti vicini. "
+     "Il t cluster &egrave; ottimista per orizzonti di un giorno o pi&ugrave;, perch&eacute; giorni adiacenti condividono parte del percorso del prezzo.</div>");
+   W("<div class='note'>Tutte le tabelle con <b>t naive</b> o z del segno (fasce orarie, candela nel TF superiore, raffica, direzione, giorno, classifiche) "
+     "non sono corrette n&eacute; per la sovrapposizione n&eacute; per i test multipli: il giallo significa solo |t| &ge; 2, non esiste mai verde o rosso. "
+     "Nelle classifiche la posizione occupa il suo slot per tutta la tenuta anche se il target esce prima (scelta prudente).</div>");
    W("<div class='note'>Le misure sono <b>in punti</b>: i simboli non sono confrontabili fra loro e le ore con volatilit&agrave; alta dominano i totali. "
      "Per questo le tabelle orarie sono affiancate dalla base della stessa fascia.</div>");
   }
@@ -1028,7 +1116,7 @@ void RepVerdict()
         Td(F2(ratio), ratio > 1.0 ? "#a3be8c" : "#bf616a") + Td(F0(s.baseMfe)) + Td(F2(rb)) +
         Td("<b>" + F1(s.ret) + "</b>", ColSign(s.ret)) + Td(F2(s.tNaive)) +
         Td("<b>" + F2(s.tCl) + "</b>", ColT(s.tCl)) + Td(F1(s.cost)) + Td(F1(wp)) +
-        Td(F2(s.zSign), ColT(s.zSign)) + "</tr>");
+        Td(F2(s.zSign), ColTNaive(s.zSign)) + "</tr>");
      }
    W("</table>");
   }
@@ -1137,7 +1225,7 @@ void RepEvents()
      " (uno ogni " + IS(g_evStride) + ") su tutto il periodo. <b>&#10003; N m</b> = livello raggiunto entro N minuti dall'ingresso, "
      "nella direzione del segnale, come movimento lordo dal prezzo d'ingresso (open M1, spread escluso). "
      "&laquo;-&raquo; = non raggiunto entro l'orizzonte. L'elenco &egrave; illustrativo: le percentuali da usare sono nelle tabelle aggregate.</div>");
-   W("<table><tr><th>#</th><th>Entrata (server)</th><th>Giorno</th><th>Verso</th><th>Candela TF sup.</th><th>Raffica</th><th>MFE</th><th>MAE</th><th>Netto</th>");
+   W("<table><tr><th>#</th><th>Entrata (server + offset)</th><th>Giorno</th><th>Verso</th><th>Candela TF sup.</th><th>Raffica</th><th>MFE</th><th>MAE</th><th>Netto</th>");
    for(int l = 0; l < g_nL; l++) W("<th>" + F0(g_lev[l]) + "</th>");
    W("</tr>");
    for(int q = 0; q < g_evCount; q++)
@@ -1210,7 +1298,7 @@ void RepHeat(const int t)
             RkRead(g_rg, base, kk, dd, 0, a);
             RkRead(g_rg, base, kk, dd, 1, b);
             string tip = " title='posizioni IS " + F0(a.n) + " / OOS " + F0(b.n) + "'";
-            if(a.n < InpRankMinN)
+            if(a.n < g_minN)
               { W("<td class='thin'" + tip + ">" + F1(a.mean) + " / " + F1(b.mean) + "</td>"); continue; }
             string col = "#ebcb8b";
             if(a.mean > 0.0 && b.mean > 0.0) col = "#a3be8c";
@@ -1236,7 +1324,7 @@ string KLabel(const int kk) { return (kk == 0) ? string("nessuno") : F0(g_lev[kk
 
 string EsitoCell(const RkStat &a, const RkStat &b)
   {
-   if(b.n < MathMax(10.0, InpRankMinN / 3.0)) return Td("OOS scarso", "#4c566a");
+   if(b.n < MathMax(10.0, g_minN / 3.0)) return Td("OOS scarso", "#4c566a");
    if(b.mean > 0.0 && b.t >= 2.0)             return Td("<b>TIENE</b>", "#a3be8c");
    if(b.mean > 0.0)                           return Td("debole", "#ebcb8b");
    return Td("NO", "#bf616a");
@@ -1245,7 +1333,7 @@ string EsitoCell(const RkStat &a, const RkStat &b)
 string RankHead()
   {
    return "<table><tr><th>#</th><th>TF</th><th>Fascia (entrata)</th><th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th>"
-          "<th>IS pos.</th><th>IS netto</th><th>IS t</th><th>Target raggiunto %</th>"
+          "<th>IS pos.</th><th>IS netto</th><th>IS t</th><th>Target raggiunto % (netto)</th>"
           "<th>OOS pos.</th><th>OOS netto</th><th>OOS t</th><th>Esito</th></tr>";
   }
 
@@ -1259,7 +1347,7 @@ string RankRow(const int rank, const int t, const int rb, const int h, const int
    return "<tr>" + Td(IS(rank)) + "<td>" + g_tfName[t] + "</td><td>" + RBktLabel(rb) + "</td>" +
           Td(dd == 0 ? "SEGUI" : "INVERTI") + Td(IS(g_hor[h])) + Td(KLabel(kk)) +
           Td(F0(a.n)) + Td("<b>" + F1(a.mean) + "</b>", ColSign(a.mean)) + Td(F2(a.t)) + Td(hs) +
-          Td(F0(b.n)) + Td("<b>" + F1(b.mean) + "</b>", ColSign(b.mean)) + Td(F2(b.t), ColT(b.t)) +
+          Td(F0(b.n)) + Td("<b>" + F1(b.mean) + "</b>", ColSign(b.mean)) + Td(F2(b.t), ColTNaive(b.t)) +
           EsitoCell(a, b) + "</tr>";
   }
 
@@ -1278,14 +1366,14 @@ void RankDigest(const string tag, const int rank, const int t, const int rb, con
 void RepBestTF()
   {
    const int blk = (g_nL + 1) * 4 * RKN;
-   W("<h2>Quanto tenere e per quanti punti: miglior combinazione per timeframe</h2>");
+   W("<h2>A1 &mdash; Quanto tenere e per quanti punti: miglior combinazione per timeframe (scelta in-sample)</h2>");
    W("<div class='note'><b>Come &egrave; costruita.</b> Per ogni TF si simula una posizione per volta (tutto il giorno): si entra sul segnale, "
      "si esce al target (se indicato) oppure dopo <b>Tieni</b> minuti, senza stop. Il risultato &egrave; netto del costo. "
      "La combinazione migliore &egrave; scelta sul <b>primo " + IS(MathMin(95, MathMax(5, InpSplitPct))) + "%</b> del periodo (in-sample, IS) per t-statistic; "
      "le colonne OOS sono il restante periodo, mai usato per scegliere. <b>Solo l'OOS conta.</b> "
      "&laquo;INVERTI&raquo; = fare l'opposto del segnale: &egrave; incluso perch&eacute; un trigger pu&ograve; contenere informazione dal lato sbagliato.</div>");
    W("<table><tr><th>TF</th><th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th><th>IS pos.</th><th>IS netto</th><th>IS t</th>"
-     "<th>Target raggiunto %</th><th>OOS pos.</th><th>OOS netto</th><th>OOS t</th><th>Esito</th></tr>");
+     "<th>Target raggiunto % (netto)</th><th>OOS pos.</th><th>OOS netto</th><th>OOS t</th><th>Esito</th></tr>");
    for(int t = 0; t < g_nT; t++)
      {
       double bt = -1.0e9; int bh = -1, bk = -1, bd = -1;
@@ -1295,7 +1383,7 @@ void RepBestTF()
               {
                RkStat a;
                RkRead(g_rg, (t * g_nH + h) * blk, kk, dd, 0, a);
-               if(a.n < InpRankMinN) continue;
+               if(a.n < g_minN) continue;
                if(a.t > bt) { bt = a.t; bh = h; bk = kk; bd = dd; }
               }
       if(bh < 0)
@@ -1305,7 +1393,7 @@ void RepBestTF()
       RkRead(g_rg, (t * g_nH + bh) * blk, bk, bd, 1, b);
       W("<tr><td>" + g_tfName[t] + "</td>" + Td(bd == 0 ? "SEGUI" : "INVERTI") + Td(IS(g_hor[bh])) + Td(KLabel(bk)) +
         Td(F0(a.n)) + Td("<b>" + F1(a.mean) + "</b>", ColSign(a.mean)) + Td(F2(a.t)) + Td(bk == 0 ? "-" : F1(a.hit)) +
-        Td(F0(b.n)) + Td("<b>" + F1(b.mean) + "</b>", ColSign(b.mean)) + Td(F2(b.t), ColT(b.t)) + EsitoCell(a, b) + "</tr>");
+        Td(F0(b.n)) + Td("<b>" + F1(b.mean) + "</b>", ColSign(b.mean)) + Td(F2(b.t), ColTNaive(b.t)) + EsitoCell(a, b) + "</tr>");
       g_dg += "BESTTF|" + g_tfName[t] + "|" + (bd == 0 ? "SEGUI" : "INVERTI") + "|hold|" + IS(g_hor[bh]) + "|tp|" + KLabel(bk) +
               "|isn|" + F0(a.n) + "|ismean|" + F1(a.mean) + "|ist|" + F2(a.t) + "|hit|" + F1(a.hit) +
               "|oosn|" + F0(b.n) + "|oosmean|" + F1(b.mean) + "|oost|" + F2(b.t) + "\n";
@@ -1317,7 +1405,8 @@ void RepBestTF()
 void RepRank()
   {
    const int blk = (g_nL + 1) * 4 * RKN;
-   const int P = MathMax(300, InpRankTop * 5);
+   const int rankTop = MathMin(200, MathMax(1, InpRankTop));
+   const int P = MathMax(300, rankTop * 5);
    double pT[]; int pTf[], pB[], pH[], pK[], pD[];
    ArrayResize(pT, P); ArrayResize(pTf, P); ArrayResize(pB, P);
    ArrayResize(pH, P); ArrayResize(pK, P);  ArrayResize(pD, P);
@@ -1328,7 +1417,7 @@ void RepRank()
          for(int h = 0; h < g_nH; h++)
            {
             const int base = ((t * g_nRB + rb) * g_nH + h) * blk;
-            if(g_rk[base] < InpRankMinN) continue;
+            if(g_rk[base] < g_minN) continue;
             for(int kk = 0; kk <= g_nL; kk++)
                for(int dd = 0; dd < 2; dd++)
                  {
@@ -1352,7 +1441,7 @@ void RepRank()
                  }
            }
 
-   W("<h2>Classifica: quando osservare il segnale e come gestire la posizione</h2>");
+   W("<h2>A2 &mdash; Classifica: quando osservare il segnale e come gestire la posizione (scelta in-sample)</h2>");
    if(pn < 1 || m < 1)
      { W("<div class='note ko'>Nessuna combinazione con almeno " + IS(InpRankMinN) + " posizioni in-sample. Riduci <b>InpRankMinN</b> o allarga il periodo.</div>"); return; }
 
@@ -1362,7 +1451,7 @@ void RepRank()
      {
       RkStat b;
       RkRead(g_rk, ((pTf[i] * g_nRB + pB[i]) * g_nH + pH[i]) * blk, pK[i], pD[i], 1, b);
-      if(b.n < MathMax(10.0, InpRankMinN / 3.0)) continue;
+      if(b.n < MathMax(10.0, g_minN / 3.0)) continue;
       usable++;
       if(b.mean > 0.0) posOOS++;
       if(b.mean > 0.0 && b.t >= 2.0) strong++;
@@ -1378,7 +1467,7 @@ void RepRank()
      string(noisy ? "Se questi numeri sono vicini a zero la classifica &egrave; rumore di selezione: non operare nessuna di queste righe."
                   : "Il risultato regge la prima verifica, ma resta da confermare su dati mai visti (forward o altro simbolo).") + "</div>");
 
-   const int K = MathMin(InpRankTop, pn);
+   const int K = MathMin(rankTop, pn);
    W("<h3>Prime " + IS(K) + " in-sample (ordinate per t in-sample)</h3>");
    W(RankHead());
    for(int i = 0; i < K; i++)
@@ -1399,13 +1488,13 @@ void RepRank()
       if(pT[i] < 2.0) continue;
       RkStat b;
       RkRead(g_rk, ((pTf[i] * g_nRB + pB[i]) * g_nH + pH[i]) * blk, pK[i], pD[i], 1, b);
-      if(b.n < MathMax(10.0, InpRankMinN / 3.0)) continue;
+      if(b.n < MathMax(10.0, g_minN / 3.0)) continue;
       if(b.mean > 0.0 && b.t >= 2.0) { sv[ns] = i; svT[ns] = b.t; ns++; }
      }
    for(int i = 0; i < ns - 1; i++)
       for(int j2 = i + 1; j2 < ns; j2++)
          if(svT[j2] > svT[i]) { double tt = svT[i]; svT[i] = svT[j2]; svT[j2] = tt; int ti = sv[i]; sv[i] = sv[j2]; sv[j2] = ti; }
-   W("<h3>Quelle che reggono anche fuori campione (IS t &ge; 2, OOS netto &gt; 0 e OOS t &ge; 2)</h3>");
+   W("<h3>Fra le prime " + IS(pn) + " in-sample: quelle con IS t &ge; 2 che reggono anche fuori campione (OOS netto &gt; 0 e OOS t &ge; 2)</h3>");
    if(ns == 0)
       W("<div class='note ko'>Nessuna combinazione fra le migliori in-sample ha OOS positivo e significativo. &Egrave; il risultato atteso se il segnale non ha edge netto dei costi.</div>");
    else
@@ -1421,6 +1510,215 @@ void RepRank()
         }
       W("</table>");
      }
+  }
+
+//+------------------------------------------------------------------+
+//| TABELLA B - CON RUMORE                                            |
+//| Ordinata sull'INTERO storico, senza separare in-sample e          |
+//| out-of-sample: e' quello che vedrebbe chi ottimizza senza         |
+//| protezione. Le due parti del periodo sono affiancate solo per     |
+//| mostrare se il risultato e' stabile; la riga pero' e' stata       |
+//| scelta guardando entrambe, quindi non sono indipendenti.          |
+//+------------------------------------------------------------------+
+string NoiseSortName()
+  {
+   switch(InpNoiseSort)
+     {
+      case NS_TOTAL: return "profitto totale in punti";
+      case NS_MEAN:  return "netto medio per posizione";
+      case NS_T:     return "t-statistic";
+     }
+   return "profitto totale in punti";
+  }
+
+double NoiseKey(const RkStat &s)
+  {
+   switch(InpNoiseSort)
+     {
+      case NS_TOTAL: return s.sum;
+      case NS_MEAN:  return s.mean;
+      case NS_T:     return s.t;
+     }
+   return s.sum;
+  }
+
+string CoerenzaCell(const RkStat &a, const RkStat &b)
+  {
+   if(a.n < 1.0 || b.n < MathMax(10.0, g_minN / 3.0)) return Td("2a parte scarsa", "#4c566a");
+   if(a.mean > 0.0 && b.mean > 0.0) return Td("coerente +", "#a3be8c");
+   if(a.mean < 0.0 && b.mean < 0.0) return Td("coerente -", "#7b8794");
+   return Td("INCOERENTE", "#bf616a");
+  }
+
+string NoiseHead(const bool withBucket)
+  {
+   return "<table><tr><th>#</th><th>TF</th>" + string(withBucket ? "<th>Fascia (entrata)</th>" : "") +
+          "<th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th><th>Posizioni</th><th>Profitto totale (pt)</th>"
+          "<th>Netto medio</th><th>t</th><th>Target raggiunto % (netto)</th>"
+          "<th>Netto 1a parte</th><th>Netto 2a parte</th><th>Fra le due parti</th></tr>";
+  }
+
+string NoiseCells(const RkStat &all, const RkStat &a, const RkStat &b, const int kk)
+  {
+   return Td(F0(all.n)) + Td("<b>" + F0(all.sum) + "</b>", ColSign(all.sum)) + Td(F1(all.mean), ColSign(all.mean)) +
+          Td(F2(all.t), ColTNaive(all.t)) + Td(kk == 0 ? "-" : F1(all.hit)) +
+          Td(F1(a.mean), ColSign(a.mean)) + Td(F1(b.mean), ColSign(b.mean)) + CoerenzaCell(a, b);
+  }
+
+void RepNoiseIntro()
+  {
+   int pct = MathMin(95, MathMax(5, InpSplitPct));
+   W("<h2>Due letture della stessa classifica</h2>");
+   W("<div class='note'><b>Tabelle A</b> (sopra): le combinazioni sono scelte guardando solo il primo " + IS(pct) +
+     "% del periodo e poi verificate sul resto, che non ha mai partecipato alla scelta. "
+     "<b>Tabelle B</b> (sotto): le combinazioni sono scelte guardando <b>tutto</b> lo storico, ordinate per <b>" + NoiseSortName() +
+     "</b>, senza alcuna protezione: &egrave; quello che vedrebbe chi ottimizza sull'intero storico. "
+     "Con migliaia di combinazioni la prima riga di B &egrave; positiva per costruzione, anche se il segnale non ha informazione. "
+     "Serve per confrontare quanto B promette rispetto a quanto A conferma, non per scegliere cosa operare.</div>");
+  }
+
+//--- B1: miglior combinazione per TF sull'intero storico
+void RepBestTFNoise()
+  {
+   const int blk = (g_nL + 1) * 4 * RKN;
+   W("<h2>B1 &mdash; Quanto tenere e per quanti punti: miglior combinazione per timeframe (CON RUMORE, intero storico)</h2>");
+   W("<div class='note ko'>Per ogni TF si prende la combinazione con il valore pi&ugrave; alto di <b>" + NoiseSortName() +
+     "</b> su tutto il periodo. Le colonne <b>1a parte</b> (primo " + IS(MathMin(95, MathMax(5, InpSplitPct))) +
+     "%) e <b>2a parte</b> (resto) mostrano se il risultato &egrave; stabile nel tempo, ma non sono indipendenti: la riga &egrave; stata scelta guardandole entrambe. "
+     "&laquo;INCOERENTE&raquo; = le due parti hanno segno opposto: tipico del rumore.</div>");
+   W(NoiseHead(false));
+   for(int t = 0; t < g_nT; t++)
+     {
+      double bk0 = -1.0e18; int bh = -1, bk = -1, bd = -1;
+      for(int h = 0; h < g_nH; h++)
+         for(int kk = 0; kk <= g_nL; kk++)
+            for(int dd = 0; dd < 2; dd++)
+              {
+               RkStat all;
+               RkReadAll(g_rg, (t * g_nH + h) * blk, kk, dd, all);
+               if(all.n < g_minN) continue;
+               double key = NoiseKey(all);
+               if(key > bk0) { bk0 = key; bh = h; bk = kk; bd = dd; }
+              }
+      if(bh < 0)
+        { W("<tr class='thin'><td>-</td><td>" + g_tfName[t] + "</td><td colspan='11'>campione insufficiente</td></tr>"); continue; }
+      RkStat all, a, b;
+      RkReadAll(g_rg, (t * g_nH + bh) * blk, bk, bd, all);
+      RkRead(g_rg, (t * g_nH + bh) * blk, bk, bd, 0, a);
+      RkRead(g_rg, (t * g_nH + bh) * blk, bk, bd, 1, b);
+      W("<tr>" + Td("-") + "<td>" + g_tfName[t] + "</td>" + Td(bd == 0 ? "SEGUI" : "INVERTI") + Td(IS(g_hor[bh])) + Td(KLabel(bk)) +
+        NoiseCells(all, a, b, bk) + "</tr>");
+      g_dg += "BESTNOISE|" + g_tfName[t] + "|" + (bd == 0 ? "SEGUI" : "INVERTI") + "|hold|" + IS(g_hor[bh]) + "|tp|" + KLabel(bk) +
+              "|n|" + F0(all.n) + "|total|" + F0(all.sum) + "|mean|" + F1(all.mean) + "|t|" + F2(all.t) + "|hit|" + F1(all.hit) +
+              "|part1|" + F1(a.mean) + "|part2|" + F1(b.mean) + "\n";
+     }
+   W("</table>");
+  }
+
+//--- B2: classifica congiunta TF x fascia x tenuta x target x verso sull'intero storico
+void RepRankNoise()
+  {
+   const int blk = (g_nL + 1) * 4 * RKN;
+   const int rankTop = MathMin(200, MathMax(1, InpRankTop));
+   const int P = MathMax(300, rankTop * 5);
+   double pK2[]; int pTf[], pB[], pH[], pK[], pD[];
+   ArrayResize(pK2, P); ArrayResize(pTf, P); ArrayResize(pB, P);
+   ArrayResize(pH, P);  ArrayResize(pK, P);  ArrayResize(pD, P);
+   int pn = 0;
+   long m = 0;
+   for(int t = 0; t < g_nT; t++)
+      for(int rb = 0; rb < g_nRB; rb++)
+         for(int h = 0; h < g_nH; h++)
+           {
+            const int base = ((t * g_nRB + rb) * g_nH + h) * blk;
+            if(g_rk[base] + g_rk[base + RKN] < g_minN) continue;
+            for(int kk = 0; kk <= g_nL; kk++)
+               for(int dd = 0; dd < 2; dd++)
+                 {
+                  RkStat all;
+                  RkReadAll(g_rk, base, kk, dd, all);
+                  m++;
+                  double key = NoiseKey(all);
+                  int pos;
+                  if(pn < P) { pos = pn; pn++; }
+                  else
+                    {
+                     if(key <= pK2[P - 1]) continue;
+                     pos = P - 1;
+                    }
+                  while(pos > 0 && pK2[pos - 1] < key)
+                    {
+                     pK2[pos] = pK2[pos - 1]; pTf[pos] = pTf[pos - 1]; pB[pos] = pB[pos - 1];
+                     pH[pos] = pH[pos - 1];   pK[pos]  = pK[pos - 1];  pD[pos] = pD[pos - 1];
+                     pos--;
+                    }
+                  pK2[pos] = key; pTf[pos] = t; pB[pos] = rb; pH[pos] = h; pK[pos] = kk; pD[pos] = dd;
+                 }
+           }
+
+   W("<h2>B2 &mdash; Classifica (CON RUMORE): ordinata per " + NoiseSortName() + " sull'intero storico</h2>");
+   if(pn < 1 || m < 1)
+     { W("<div class='note ko'>Nessuna combinazione con almeno " + IS((long)g_minN) + " posizioni.</div>"); return; }
+
+   //--- diagnostica: quanto del profitto "trovato" sopravvive nella parte piu' recente
+   double sumAll = 0.0, sumLate = 0.0, nAll = 0.0, nLate = 0.0;
+   int incoh = 0, bothPos = 0, usable = 0;
+   const int K = MathMin(rankTop, pn);
+   for(int i = 0; i < K; i++)
+     {
+      const int base = ((pTf[i] * g_nRB + pB[i]) * g_nH + pH[i]) * blk;
+      RkStat all, a, b;
+      RkReadAll(g_rk, base, pK[i], pD[i], all);
+      RkRead(g_rk, base, pK[i], pD[i], 0, a);
+      RkRead(g_rk, base, pK[i], pD[i], 1, b);
+      sumAll += all.sum; sumLate += b.sum; nAll += all.n; nLate += b.n;
+     }
+   for(int i = 0; i < pn; i++)
+     {
+      const int base = ((pTf[i] * g_nRB + pB[i]) * g_nH + pH[i]) * blk;
+      RkStat a, b;
+      RkRead(g_rk, base, pK[i], pD[i], 0, a);
+      RkRead(g_rk, base, pK[i], pD[i], 1, b);
+      if(b.n < MathMax(10.0, g_minN / 3.0)) continue;
+      usable++;
+      if(a.mean > 0.0 && b.mean > 0.0) bothPos++;
+      else if((a.mean > 0.0) != (b.mean > 0.0)) incoh++;
+     }
+   double chanceT = (m > 1) ? MathSqrt(2.0 * MathLog((double)m)) : 0.0;
+   double shareLate = (sumAll != 0.0) ? 100.0 * sumLate / sumAll : 0.0;
+   double shareN    = (nAll > 0.0) ? 100.0 * nLate / nAll : 0.0;
+   RkStat top;
+   RkReadAll(g_rk, ((pTf[0] * g_nRB + pB[0]) * g_nH + pH[0]) * blk, pK[0], pD[0], top);
+   bool good = (usable > 0 && bothPos * 2 >= usable && shareLate >= 0.5 * shareN);
+   W("<div class='note " + string(good ? "ok" : "ko") + "'><b>Cosa promette questa tabella.</b> Combinazioni valutate: <b>" + IS(m) +
+     "</b>. La prima ha profitto totale <b>" + F0(top.sum) + " pt</b> su " + F0(top.n) + " posizioni (netto medio " + F1(top.mean) +
+     ", t " + F2(top.t) + "); il t massimo atteso per puro caso su " + IS(m) + " tentativi &egrave; intorno a <b>" + F2(chanceT) + "</b>. "
+     "Nelle prime " + IS(K) + " righe, la parte pi&ugrave; recente del periodo contiene il <b>" + F1(shareN) + "%</b> delle posizioni ma il <b>" +
+     F1(shareLate) + "%</b> del profitto: se l'edge fosse stabile le due quote sarebbero simili. "
+     "Fra le prime " + IS(pn) + " con campione sufficiente, <b>" + IS(bothPos) + "</b> su " + IS(usable) + " sono positive in entrambe le parti e <b>" +
+     IS(incoh) + "</b> cambiano segno. " +
+     string(good ? "Il profitto sembra stabile nel tempo: confrontalo con la tabella A prima di fidarti."
+                 : "La distanza fra il profitto promesso e quello della parte recente &egrave; la misura del rumore di selezione.") + "</div>");
+
+   W("<h3>Prime " + IS(K) + " per " + NoiseSortName() + " (intero storico)</h3>");
+   W(NoiseHead(true));
+   for(int i = 0; i < K; i++)
+     {
+      const int base = ((pTf[i] * g_nRB + pB[i]) * g_nH + pH[i]) * blk;
+      RkStat all, a, b;
+      RkReadAll(g_rk, base, pK[i], pD[i], all);
+      RkRead(g_rk, base, pK[i], pD[i], 0, a);
+      RkRead(g_rk, base, pK[i], pD[i], 1, b);
+      W("<tr>" + Td(IS(i + 1)) + "<td>" + g_tfName[pTf[i]] + "</td><td>" + RBktLabel(pB[i]) + "</td>" +
+        Td(pD[i] == 0 ? "SEGUI" : "INVERTI") + Td(IS(g_hor[pH[i]])) + Td(KLabel(pK[i])) + NoiseCells(all, a, b, pK[i]) + "</tr>");
+      g_dg += "NOISE|" + IS(i + 1) + "|" + g_tfName[pTf[i]] + "|" + RBktLabel(pB[i]) + "|" + (pD[i] == 0 ? "SEGUI" : "INVERTI") +
+              "|hold|" + IS(g_hor[pH[i]]) + "|tp|" + KLabel(pK[i]) + "|n|" + F0(all.n) + "|total|" + F0(all.sum) +
+              "|mean|" + F1(all.mean) + "|t|" + F2(all.t) + "|hit|" + F1(all.hit) + "|part1|" + F1(a.mean) + "|part2|" + F1(b.mean) + "\n";
+     }
+   W("</table>");
+   g_dg += "DIAGNOISE|combos|" + IS(m) + "|sort|" + NoiseSortName() + "|top_total|" + F0(top.sum) + "|top_t|" + F2(top.t) +
+           "|chance_t|" + F2(chanceT) + "|late_share_n|" + F1(shareN) + "|late_share_profit|" + F1(shareLate) +
+           "|pool|" + IS(pn) + "|usable|" + IS(usable) + "|both_pos|" + IS(bothPos) + "|incoherent|" + IS(incoh) + "\n";
   }
 
 void RepStruct()
@@ -1457,7 +1755,7 @@ void RepStruct()
      }
    W("</table>");
 
-   W("<h2>Giorno della settimana (server time) &mdash; netto medio (n)</h2>");
+   W("<h2>Giorno della settimana (server + offset) &mdash; netto medio (n)</h2>");
    W("<table><tr><th>TF</th>");
    for(int d = 0; d < 7; d++) W("<th>" + DowName(d) + "</th>");
    W("</tr>");
@@ -1488,7 +1786,7 @@ void RepTOD(const int t)
       string cls = (n < InpMinPerBucket) ? " class='thin'" : "";
       W("<tr" + cls + "><td>" + BktLabel(b) + "</td>" + Td(F0(n)) + Td(F0(mfe)) + Td(F0(mae)) + Td(F0(bm)) +
         Td(bm > 0.0 ? F2(mfe / bm) : "-") + Td("<b>" + F1(ret) + "</b>", ColSign(ret)) +
-        Td(F2(tn), ColT(tn)) + Td(F1(cost)) + "</tr>");
+        Td(F2(tn), ColTNaive(tn)) + Td(F1(cost)) + "</tr>");
       if(InpDigestTOD)
          g_dg += "TOD|" + g_tfName[t] + "|" + BktLabel(b) + "|n|" + F0(n) + "|mfe|" + F0(mfe) + "|mae|" + F0(mae) +
                  "|base|" + F0(bm) + "|ret|" + F1(ret) + "|t|" + F2(tn) + "|cost|" + F1(cost) + "\n";
@@ -1511,7 +1809,7 @@ void RepSlot(const int t)
       double tn  = (var > 0.0) ? ret / (MathSqrt(var) / MathSqrt(n)) : 0.0;
       string cls = (n < InpMinPerBucket) ? " class='thin'" : "";
       W("<tr" + cls + "><td>" + IS(s + 1) + " di " + IS(g_slotCnt[t]) + "</td>" + Td(F0(n)) + Td(F0(mfe)) + Td(F0(mae)) +
-        Td("<b>" + F1(ret) + "</b>", ColSign(ret)) + Td(F2(tn), ColT(tn)) + Td(F1(cost)) + "</tr>");
+        Td("<b>" + F1(ret) + "</b>", ColSign(ret)) + Td(F2(tn), ColTNaive(tn)) + Td(F1(cost)) + "</tr>");
      }
    W("</table>");
   }
@@ -1534,7 +1832,7 @@ void RepDetails()
          W("<h3>Candela nel " + EnumToString(InpParentTF) + "</h3>");
          RepSlot(t);
         }
-      W("<h3>Probabilit&agrave; di raggiungere il target entro la tenuta: segnale % (base %)</h3>");
+      W("<h3>Probabilit&agrave; di raggiungere il target entro la tenuta: segnale % (base %) &mdash; movimento lordo dal prezzo d'ingresso, spread escluso</h3>");
       RepReach(t);
       W("<h3>Quanto tenere e per quanti punti (una posizione per volta, tutto il giorno)</h3>");
       RepHeat(t);
@@ -1557,7 +1855,7 @@ void RepTop()
    W("<div class='note'>Classifica globale di tutti i TF per MFE lordo (punti dall'open d'ingresso nella direzione del segnale). "
      "Orologio comune M1, quindi confrontabili. Sono gli estremi della distribuzione: indicano <b>quando</b> si sono verificati, non dove c'&egrave; edge. "
      "Se si concentrano in poche giornate sono eventi di mercato, non una propriet&agrave; del segnale.</div>");
-   W("<table><tr><th>#</th><th>Entrata (server)</th><th>Giorno</th><th>TF</th><th>Dir</th><th>Candela TF sup.</th><th>Raffica</th>"
+   W("<table><tr><th>#</th><th>Entrata (server + offset)</th><th>Giorno</th><th>TF</th><th>Dir</th><th>Candela TF sup.</th><th>Raffica</th>"
      "<th>MFE</th><th>MAE</th><th>Netto</th><th>Costo</th></tr>");
    for(int r = 0; r < g_topN; r++)
      {
@@ -1653,10 +1951,10 @@ void WriteReport()
          if(g_accTH[(t * g_nH + h) * ACCN] >= 1.0) m++;
    g_zB = ZCrit(MathMax(1, m));
 
-   string tag = _Symbol + "_" + ModeName();
+   string tag = SafeTag(_Symbol) + "_" + ModeName();
    string fn  = "SignalLab_MultiTF_" + tag + ".html";
    g_fh = FileOpen(fn, FILE_WRITE | FILE_TXT | FILE_ANSI);
-   if(g_fh == INVALID_HANDLE) { Print("HTML non scrivibile: ", GetLastError()); return; }
+   if(g_fh == INVALID_HANDLE) Print("HTML non scrivibile (errore ", GetLastError(), "): salvo solo il digest.");
 
    g_dg = "";
    RepHead();
@@ -1666,8 +1964,11 @@ void WriteReport()
    RepMatrices();
    RepExceed();
    RepEvents();
+   RepNoiseIntro();
    RepBestTF();
    RepRank();
+   RepBestTFNoise();
+   RepRankNoise();
    RepStruct();
    RepDetails();
    RepTop();
@@ -1680,9 +1981,12 @@ void WriteReport()
    W("<div class='note'>Seleziona e incolla in chat. Stesso testo in <b>MQL5/Files/SignalLab_MultiTF_digest_" + tag + ".txt</b>.</div>");
    W("<pre>" + esc + "### END\n</pre>");
    W("</body></html>");
-   FileClose(g_fh);
-   g_fh = INVALID_HANDLE;
-   Print("Report: MQL5/Files/", fn);
+   if(g_fh != INVALID_HANDLE)
+     {
+      FileClose(g_fh);
+      g_fh = INVALID_HANDLE;
+      Print("Report: MQL5/Files/", fn);
+     }
 
    int df = FileOpen("SignalLab_MultiTF_digest_" + tag + ".txt", FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(df != INVALID_HANDLE)
@@ -1704,7 +2008,7 @@ void OnStart()
 
    //--- primo giorno out-of-sample: la classifica si costruisce solo sul periodo precedente
    {
-    int dFrom = (int)((((long)InpFrom + g_off) / 86400L) - g_day0);
+    int dFrom = (int)((((long)g_tStart + g_off) / 86400L) - g_day0);
     if(dFrom < 0) dFrom = 0;
     int pct = MathMin(95, MathMax(5, InpSplitPct));
     g_splitDay = dFrom + (int)((double)(g_nDays - dFrom) * pct / 100.0);
@@ -1728,6 +2032,7 @@ void OnStart()
    ArrayFree(g_r1);
    for(int t = 0; t < g_nT; t++)
      {
+      if(IsStopped()) { Print("Interrotto dall'utente."); Comment(""); return; }
       if(t == idxM1) continue;
       MqlRates r[];
       int n = LoadTF(t, r);
@@ -1739,11 +2044,12 @@ void OnStart()
    if(g_used == 0) { Print("Nessuna barra valida: controlla periodo e storico."); Comment(""); return; }
 
    //--- finestre forward e accumulo, un orizzonte alla volta
-   AllocAcc();
+   if(!AllocAcc()) { Comment(""); return; }
    ArrayResize(g_fHi, g_n1); ArrayResize(g_fLo, g_n1); ArrayResize(g_fCl, g_n1);
    ArrayResize(g_ok, g_n1);  ArrayResize(g_dqH, g_n1); ArrayResize(g_dqL, g_n1);
    for(int hi = 0; hi < g_nH; hi++)
      {
+      if(IsStopped()) { Print("Interrotto dall'utente."); Comment(""); return; }
       ComputeForward(g_hor[hi]);
       AccumulateHorizon(hi);
       Print("Orizzonte ", g_hor[hi], " min completato (", (GetTickCount() - t0) / 1000.0, " s)");
