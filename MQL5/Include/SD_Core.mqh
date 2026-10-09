@@ -23,6 +23,7 @@
 #define SD_MODE_EXP   1
 #define SD_MODE_AND   2
 #define SD_MODE_OR    3
+#define SD_MODE_ADDED 4   // solo i segnali che l'Expansion AGGIUNGE a Delta (Expansion accesa, Delta spento)
 
 struct SDParams
   {
@@ -70,6 +71,80 @@ void SD_Atr(const MqlRates &r[], const int n, const int period, double &atr[])
    atr[period] = s / period;
    for(int i = period + 1; i < n; i++)
       atr[i] = atr[i-1] + (trv[i] - trv[i-period]) / period;
+  }
+
+//+------------------------------------------------------------------+
+//| STATO DI VOLATILITA' - stessa logica dell'indicatore              |
+//| VolatilityStateIndicator_Ferro (verificata barra per barra):      |
+//|   TR/ATR della barra (ATR = SMA del TR, include la barra)         |
+//|   volatilita' composita = (ATR% + Parkinson)/2, EMA di smoothing  |
+//|   percentile della composita sulle ultime 'lookback' barre        |
+//| code = (cls << 3) | (regime << 1) | rising                        |
+//|   cls   : 0 compressione (TR/ATR < compTh), 1 normale,            |
+//|           2 espansione (TR/ATR > expTh)                           |
+//|   regime: 0 LOW, 1 NORMAL, 2 HIGH, 3 EXTREME                      |
+//|   rising: 1 se il percentile e' salito rispetto alla barra prima  |
+//+------------------------------------------------------------------+
+struct SDVolParams
+  {
+   int    atrLen;
+   int    lookback;
+   int    emaSmooth;
+   double expTh;
+   double compTh;
+   int    lowTh;
+   int    highTh;
+   int    extremeTh;
+  };
+
+void SD_VolState(const MqlRates &r[], const int n, const SDVolParams &p, const double pt, uchar &code[])
+  {
+   ArrayResize(code, n);
+   ArrayInitialize(code, 0);
+   if(n < p.atrLen + p.lookback + p.emaSmooth + 5) return;
+
+   double atr[];
+   SD_Atr(r, n, p.atrLen, atr);
+
+   double pv[], sm[], pct[];
+   ArrayResize(pv, n);
+   ArrayResize(sm, n);  ArrayInitialize(sm, 0.0);
+   ArrayResize(pct, n); ArrayInitialize(pct, 50.0);
+   const double parkF = 1.0 / (4.0 * MathLog(2.0));
+   const double a     = 2.0 / (p.emaSmooth + 1.0);
+   double win = 0.0;      // somma mobile della varianza di Parkinson su atrLen barre
+   for(int i = 0; i < n; i++)
+     {
+      pv[i] = (r[i].low > 0.0 && r[i].high > 0.0) ? parkF * MathPow(MathLog(r[i].high / r[i].low), 2) : 0.0;
+      win += pv[i];
+      if(i >= p.atrLen) win -= pv[i - p.atrLen];
+      if(win < 0.0) win = 0.0;     // l'arrotondamento della somma mobile non deve dare radici negative
+      if(i < p.atrLen) continue;
+      int    cnt     = MathMin(i + 1, p.atrLen);
+      double parkVol = MathSqrt(win / cnt) * 100.0;
+      double av      = (atr[i] > 0.0) ? atr[i] : pt;
+      double comp    = ((av / r[i].close) * 100.0 + parkVol) / 2.0;
+      sm[i] = (i == p.atrLen) ? comp : sm[i-1] + a * (comp - sm[i-1]);
+     }
+   for(int i = p.lookback; i < n; i++)
+     {
+      if(i < p.atrLen) continue;
+      double cur = sm[i];
+      int lower = 0;
+      for(int k = i - p.lookback; k < i; k++) if(sm[k] <= cur) lower++;
+      pct[i] = 100.0 * lower / p.lookback;
+     }
+   for(int i = 0; i < n; i++)
+     {
+      if(i < p.lookback || i < p.atrLen || i < 1) { code[i] = (uchar)((1 << 3) | (1 << 1)); continue; }
+      double tr    = MathMax(r[i].high, r[i-1].close) - MathMin(r[i].low, r[i-1].close);
+      double av    = (atr[i] > 0.0) ? atr[i] : pt;
+      double ratio = tr / av;
+      int cls  = (ratio > p.expTh) ? 2 : ((ratio < p.compTh) ? 0 : 1);
+      int reg  = (pct[i] >= p.extremeTh) ? 3 : ((pct[i] >= p.highTh) ? 2 : ((pct[i] >= p.lowTh) ? 1 : 0));
+      int rise = (i > p.lookback && pct[i] > pct[i-1]) ? 1 : 0;
+      code[i] = (uchar)((cls << 3) | (reg << 1) | rise);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -179,6 +254,7 @@ int SD_BuildSignals(const MqlRates &r[], const int n, const SDParams &p,
          case SD_MODE_DELTA: d = dD; break;
          case SD_MODE_EXP:   d = dE; break;
          case SD_MODE_AND:   d = (dD != 0 && dD == dE) ? dD : 0; break;
+         case SD_MODE_ADDED: d = (dD == 0) ? dE : 0; break;
          case SD_MODE_OR:
             if(dD != 0 && dE != 0 && dD != dE) d = 0;
             else d = (dD != 0) ? dD : dE;

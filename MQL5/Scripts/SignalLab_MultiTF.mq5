@@ -48,7 +48,8 @@ enum ENUM_SD_MODE
    SDM_DELTA = 0,  // Solo Synthetic Delta
    SDM_EXP   = 1,  // Solo Expansion Candle
    SDM_AND   = 2,  // Entrambi concordi sulla stessa barra (AND)
-   SDM_OR    = 3   // Basta uno dei due (OR)
+   SDM_OR    = 3,  // Delta + Expansion: basta uno dei due (OR)
+   SDM_ADDED = 4   // Solo i segnali che l'Expansion AGGIUNGE a Delta (Expansion accesa, Delta spento)
   };
 
 enum ENUM_NOISE_SORT
@@ -68,6 +69,17 @@ input int      InpExpAtrPeriod      = 14;     // Inp_ExpATRPeriod
 input double   InpExpThreshold      = 1.8;    // Inp_ExpThreshold (TR/ATR)
 input int      InpExpConfirmOffset  = 0;      // Inp_ExpConfirmOffset
 input int      InpRunGapBars        = 0;      // Inp_RunGapBars (0 = raffica chiusa solo da segnale opposto)
+
+input group "=== STATO DI VOLATILITA' (indicatore Ferro: TR/ATR e percentile) ==="
+input bool     InpUseVolState       = true;   // classifica ogni segnale per intensita' e regime di volatilita' (non filtra)
+input int      InpVsAtrLen          = 14;     // ATR Length
+input int      InpVsLookback        = 100;    // Percentile Lookback (barre)
+input int      InpVsEmaSmooth       = 3;      // Smoothing EMA
+input double   InpVsExpTh           = 1.8;    // Soglia Espansione (TR/ATR)
+input double   InpVsCompTh          = 0.5;    // Soglia Compressione (TR/ATR)
+input int      InpVsLowTh           = 30;     // Soglia LOW percentile
+input int      InpVsHighTh          = 70;     // Soglia HIGH percentile
+input int      InpVsExtremeTh       = 90;     // Soglia EXTREME percentile
 
 input group "=== DATI ==="
 input datetime InpFrom              = D'2015.01.01 00:00';
@@ -103,6 +115,7 @@ input int      InpEventRows         = 120;    // quanti segnali elencare (campio
 #define ACCN 8       // campi per accumulatore: n, mfe, mae, retNet, retNet^2, costo, win, lose
 #define BCAP 8       // posizione raffica: 1..7, 8+
 #define RKN  5       // campi classifica: n, somma pnl, somma pnl^2, hit, somma MAE
+#define NCAT 9       // categorie di stato di volatilita': 3 intensita' + 4 regimi + 2 direzioni del percentile
 
 const ENUM_TIMEFRAMES g_allTF[21] =
   {PERIOD_M1, PERIOD_M2, PERIOD_M3, PERIOD_M4, PERIOD_M5, PERIOD_M6, PERIOD_M10, PERIOD_M12,
@@ -114,6 +127,8 @@ const string g_allName[21] =
 
 //--- parametri derivati
 SDParams g_par;
+SDVolParams g_vpar;
+int      g_volWarm = 0;
 int      g_nT = 0;
 ENUM_TIMEFRAMES g_tf[];
 string   g_tfName[];
@@ -161,6 +176,7 @@ int      g_dqH[], g_dqL[];
 //--- barre di ogni TF con ingresso valido (appese in sequenza)
 int      g_tfOff[], g_tfCnt[], g_tfBars[], g_tfEv[], g_tfRejGap[], g_tfRejM1[];
 int      g_ent[];
+uchar    g_vs[];            // codice stato di volatilita' per barra (vedi SD_VolState)
 char     g_dir[];
 uchar    g_bur[];
 ushort   g_slot[];
@@ -179,6 +195,9 @@ double   g_accSlot[];     // [t][slot][ACCN]
 double   g_accBur[];      // [t][BCAP][ACCN]
 double   g_accDir[];      // [t][2][ACCN]
 double   g_accDow[];      // [t][7][ACCN]
+double   g_accCnd[];      // [t][NCAT][ACCN]   stato di volatilita' dei segnali (orizzonte di riferimento)
+int      g_cbN[], g_ceN[];       // [t][NCAT][b] barre base / segnali per fascia
+double   g_cbSum[];              // [t][NCAT][b] somma MFE medio (buy+sell)/2
 
 //--- classifica ipotetica posizione: [t][fascia][h][kk][dd][smp][RKN]
 //    kk: 0 = uscita a solo tempo, 1..nL = target; dd: 0 = segui, 1 = inverti; smp: 0 = IS, 1 = OOS
@@ -304,6 +323,7 @@ string ModeName()
       case SDM_EXP:   return "EXPANSION";
       case SDM_AND:   return "AND";
       case SDM_OR:    return "OR";
+      case SDM_ADDED: return "EXP_ADDED";
      }
    return "?";
   }
@@ -453,6 +473,16 @@ bool SetupInputs()
        Print("InpParentTF ", EnumToString(InpParentTF), " non utilizzabile come contenitore (al massimo D1 e deve contenere almeno un TF analizzato): tabelle 'candela nel TF superiore' disattivate.");
    }
 
+   g_vpar.atrLen    = MathMax(2, InpVsAtrLen);
+   g_vpar.lookback  = MathMax(10, InpVsLookback);
+   g_vpar.emaSmooth = MathMax(1, InpVsEmaSmooth);
+   g_vpar.expTh     = InpVsExpTh;
+   g_vpar.compTh    = InpVsCompTh;
+   g_vpar.lowTh     = InpVsLowTh;
+   g_vpar.highTh    = InpVsHighTh;
+   g_vpar.extremeTh = InpVsExtremeTh;
+   g_volWarm        = g_vpar.atrLen + g_vpar.lookback + g_vpar.emaSmooth + 10;
+
    g_par.mode             = (int)InpMode;
    g_par.emaPeriod        = MathMax(1, InpEmaPeriod);
    g_par.volAvgPeriod     = MathMax(1, InpVolAvgPeriod);
@@ -593,6 +623,12 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    char  dir[];
    uchar bur[];
    int   warm = SD_BuildSignals(r, n, g_par, dir, bur);
+   uchar vsc[];
+   if(InpUseVolState)
+     {
+      SD_VolState(r, n, g_vpar, g_pt, vsc);
+      if(warm < g_volWarm) warm = g_volWarm;      // il percentile ha bisogno della finestra piena
+     }
 
    const long   xs      = g_tfSec[t];
    const long   maxGap  = (long)InpMaxEntryGapMin * 60L;
@@ -604,6 +640,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    ArrayResize(g_dir,  need, 2000000);
    ArrayResize(g_bur,  need, 2000000);
    ArrayResize(g_slot, need, 2000000);
+   ArrayResize(g_vs,   need, 2000000);
 
    int u = g_used, p = 0;
    int bars = 0, rejGap = 0, rejM1 = 0, ev = 0;
@@ -620,6 +657,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
       g_ent[u]  = p;
       g_dir[u]  = dir[i];
       g_bur[u]  = bur[i];
+      g_vs[u]   = InpUseVolState ? vsc[i] : (uchar)10;
       g_slot[u] = (ushort)(slotOK ? (int)(((long)r[i].time % g_parentSec) / xs) : 0);
       if(dir[i] != 0) ev++;
       u++;
@@ -634,6 +672,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    ArrayResize(g_dir,  g_used);
    ArrayResize(g_bur,  g_used);
    ArrayResize(g_slot, g_used);
+   ArrayResize(g_vs,   g_used);
    Print("TF ", g_tfName[t], ": barre ", n, " | in periodo ", bars, " | segnali ", ev,
          " | scartate gap sessione ", rejGap, " | senza M1 ", rejM1);
   }
@@ -665,6 +704,12 @@ bool AllocAcc()
    ArrayResize(g_tpTime, c); ArrayResize(g_tpTF, c); ArrayResize(g_tpDir, c);
    ArrayResize(g_tpBur, c);  ArrayResize(g_tpSlot, c);
    ArrayResize(g_tpMfe, c);  ArrayResize(g_tpMae, c); ArrayResize(g_tpRet, c); ArrayResize(g_tpCost, c);
+
+   //--- stato di volatilita'
+   ArrayResize(g_accCnd, g_nT * NCAT * ACCN);      ArrayInitialize(g_accCnd, 0.0);
+   ArrayResize(g_cbN,  g_nT * NCAT * g_nB);        ArrayInitialize(g_cbN, 0);
+   ArrayResize(g_ceN,  g_nT * NCAT * g_nB);        ArrayInitialize(g_ceN, 0);
+   ArrayResize(g_cbSum, g_nT * NCAT * g_nB);       ArrayInitialize(g_cbSum, 0.0);
 
    //--- classifica ipotetica posizione
    int blk = (g_nL + 1) * 4 * RKN;
@@ -867,6 +912,14 @@ void AccumulateHorizon(const int hi)
          int cs = 0; while(cs < g_nL && mS >= g_lev[cs]) cs++;
          g_bsHist[bi * nL1 + cb]++;
          g_bsHist[bi * nL1 + cs]++;
+         if(isRef && InpUseVolState)
+           {
+            const int    vc = (int)g_vs[k];
+            const double bm = 0.5 * (mB + mS);
+            int ib = (t * NCAT + ((vc >> 3) & 3)) * g_nB + b;       g_cbN[ib]++; g_cbSum[ib] += bm;
+            ib     = (t * NCAT + 3 + ((vc >> 1) & 3)) * g_nB + b;   g_cbN[ib]++; g_cbSum[ib] += bm;
+            ib     = (t * NCAT + 7 + (vc & 1)) * g_nB + b;          g_cbN[ib]++; g_cbSum[ib] += bm;
+           }
 
          //--- segnali
          const int d = (int)g_dir[k];
@@ -919,6 +972,17 @@ void AccumulateHorizon(const int hi)
                   g_evBur[q]  = (int)g_bur[k]; g_evJ[q] = j;
                   g_evMfe[q]  = fav; g_evMae[q] = adv; g_evRet[q] = retN;
                  }
+              }
+            if(InpUseVolState)
+              {
+               const int vc2 = (int)g_vs[k];
+               const int cA = (vc2 >> 3) & 3, cB = 3 + ((vc2 >> 1) & 3), cC = 7 + (vc2 & 1);
+               AddAcc(g_accCnd, t * NCAT + cA, fav, adv, retN, cost);
+               AddAcc(g_accCnd, t * NCAT + cB, fav, adv, retN, cost);
+               AddAcc(g_accCnd, t * NCAT + cC, fav, adv, retN, cost);
+               g_ceN[(t * NCAT + cA) * g_nB + b]++;
+               g_ceN[(t * NCAT + cB) * g_nB + b]++;
+               g_ceN[(t * NCAT + cC) * g_nB + b]++;
               }
             AddAcc(g_accBkt, t * g_nB + b, fav, adv, retN, cost);
             if(g_slotOK[t]) AddAcc(g_accSlot, t * g_maxSlots + (int)g_slot[k], fav, adv, retN, cost);
@@ -1053,6 +1117,10 @@ void RepIntro()
    W("<tr><th>Segnale</th><td>" + ModeName() + " | EMA " + IS(InpEmaPeriod) + " | volume " + IS(InpVolAvgPeriod) +
      " | soglia " + F2(InpThreshold) + " | Exp TR/ATR &gt; " + F2(InpExpThreshold) + " (ATR " + IS(InpExpAtrPeriod) +
      ", conferma +" + IS(InpExpConfirmOffset) + ") | RunGapBars " + IS(InpRunGapBars) + "</td></tr>");
+   if(InpUseVolState)
+      W("<tr><th>Stato di volatilit&agrave;</th><td>ATR " + IS(InpVsAtrLen) + " | percentile su " + IS(InpVsLookback) + " barre | EMA " + IS(InpVsEmaSmooth) +
+        " | espansione TR/ATR &gt; " + F2(InpVsExpTh) + " | compressione &lt; " + F2(InpVsCompTh) + " | LOW &lt; " + IS(InpVsLowTh) +
+        ", HIGH &ge; " + IS(InpVsHighTh) + ", EXTREME &ge; " + IS(InpVsExtremeTh) + "</td></tr>");
    W("<tr><th>Costo</th><td>" + (InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : "spread reale M1") +
      " + extra " + F1(InpExtraCostPts) + " pt</td></tr>");
    W("<tr><th>Finestre</th><td>buco dati massimo " + IS(InpMaxGapMin) + " min | gap massimo all'ingresso " +
@@ -1745,6 +1813,110 @@ void RepRankNoise()
            "|pool|" + IS(pn) + "|usable|" + IS(usable) + "|both_pos|" + IS(bothPos) + "|incoherent|" + IS(incoh) + "\n";
   }
 
+//+------------------------------------------------------------------+
+//| STATO DI VOLATILITA' DEI SEGNALI (logica dell'indicatore Ferro)   |
+//| Non filtra: divide gli stessi segnali per intensita' della        |
+//| candela (TR/ATR), regime (percentile) e direzione del percentile. |
+//+------------------------------------------------------------------+
+string CndLabel(const int cat)
+  {
+   switch(cat)
+     {
+      case 0: return "Compressione (TR/ATR &lt; " + F2(InpVsCompTh) + ")";
+      case 1: return "Normale";
+      case 2: return "Espansione (TR/ATR &gt; " + F2(InpVsExpTh) + ")";
+      case 3: return "LOW (percentile &lt; " + IS(InpVsLowTh) + ")";
+      case 4: return "NORMAL";
+      case 5: return "HIGH (&ge; " + IS(InpVsHighTh) + ")";
+      case 6: return "EXTREME (&ge; " + IS(InpVsExtremeTh) + ")";
+      case 7: return "Volatilit&agrave; in calo o ferma";
+      case 8: return "Volatilit&agrave; in aumento";
+     }
+   return "?";
+  }
+
+string CndTag(const int cat)
+  {
+   string tg[9] = {"COMPRESSIONE", "NORMALE", "ESPANSIONE", "LOW", "NORMAL", "HIGH", "EXTREME", "VOL_CALO", "VOL_AUMENTO"};
+   return (cat >= 0 && cat < 9) ? tg[cat] : "?";
+  }
+
+//--- MFE medio della base (direzione casuale) nella stessa categoria e con la stessa distribuzione oraria dei segnali
+double CndBase(const int t, const int cat)
+  {
+   double num = 0.0, den = 0.0;
+   for(int b = 0; b < g_nB; b++)
+     {
+      const int ib = (t * NCAT + cat) * g_nB + b;
+      const int en = g_ceN[ib];
+      if(en <= 0 || g_cbN[ib] <= 0) continue;
+      num += (double)en * (g_cbSum[ib] / (double)g_cbN[ib]);
+      den += (double)en;
+     }
+   return (den > 0.0) ? num / den : 0.0;
+  }
+
+void RepVolState()
+  {
+   if(!InpUseVolState) return;
+   W("<h2>Stato di volatilit&agrave; dei segnali (indicatore Ferro) &mdash; orizzonte " + IS(g_hor[g_refH]) + " min</h2>");
+   W("<div class='note'>Ogni segnale &egrave; classificato con la stessa logica dell'indicatore <b>Volatility State [Ferro]</b>, calcolata sulla <b>barra del segnale</b> "
+     "(la candela che ha appena chiuso): <b>intensit&agrave;</b> = TR/ATR (compressione sotto " + F2(InpVsCompTh) + ", espansione sopra " + F2(InpVsExpTh) +
+     "), <b>regime</b> = percentile della volatilit&agrave; composita (ATR% + Parkinson, EMA " + IS(InpVsEmaSmooth) + ") sulle ultime " + IS(InpVsLookback) +
+     " barre, <b>direzione</b> = il percentile &egrave; salito o no rispetto alla barra prima. &Egrave; una misura, non un filtro: i segnali restano gli stessi, "
+     "divisi in gruppi. Verifica se i segnali emessi con volatilit&agrave; in aumento o in espansione hanno un netto diverso. "
+     "La tabella <b>MFE / base</b> confronta il movimento dopo il segnale con quello di entrate in direzione casuale nello stesso stato di volatilit&agrave; e nelle stesse fasce orarie: "
+     "in espansione tutti si muovono di pi&ugrave;, quindi conta il rapporto con la base e il netto, non l'MFE assoluto. "
+     "t naive: nessuna correzione per sovrapposizione e test multipli.</div>");
+   int first[3] = {0, 3, 7};
+   int cnt[3]   = {3, 4, 2};
+   string title[3] = {"1. Intensit&agrave; della candela del segnale (TR/ATR)", "2. Regime di volatilit&agrave; (percentile)", "3. La volatilit&agrave; sta salendo?"};
+   for(int g = 0; g < 3; g++)
+     {
+      W("<h3>" + title[g] + " &mdash; netto medio per posizione, punti (segnali)</h3>");
+      W("<table><tr><th>TF</th>");
+      for(int c = 0; c < cnt[g]; c++) W("<th>" + CndLabel(first[g] + c) + "</th>");
+      W("</tr>");
+      for(int t = 0; t < g_nT; t++)
+        {
+         if(g_accTH[(t * g_nH + g_refH) * ACCN] < 1.0) continue;
+         W("<tr><td>" + g_tfName[t] + "</td>");
+         for(int c = 0; c < cnt[g]; c++) W(AccCell(g_accCnd, (t * NCAT + first[g] + c) * ACCN));
+         W("</tr>");
+        }
+      W("</table>");
+      W("<h3>" + title[g] + " &mdash; MFE medio / base della stessa categoria [MFE/MAE]</h3>");
+      W("<table><tr><th>TF</th>");
+      for(int c = 0; c < cnt[g]; c++) W("<th>" + CndLabel(first[g] + c) + "</th>");
+      W("</tr>");
+      for(int t = 0; t < g_nT; t++)
+        {
+         if(g_accTH[(t * g_nH + g_refH) * ACCN] < 1.0) continue;
+         W("<tr><td>" + g_tfName[t] + "</td>");
+         for(int c = 0; c < cnt[g]; c++)
+           {
+            const int cat = first[g] + c;
+            const int p = (t * NCAT + cat) * ACCN;
+            double n = g_accCnd[p];
+            if(n < 1.0) { W("<td>-</td>"); continue; }
+            double mfe = g_accCnd[p + 1] / n, mae = g_accCnd[p + 2] / n;
+            double bs  = CndBase(t, cat);
+            double rb  = (bs > 0.0) ? mfe / bs : 0.0;
+            double ra  = (mae > 0.0) ? mfe / mae : 0.0;
+            string col = (n < InpMinPerBucket) ? "#4c566a" : (ra > 1.0 ? "#a3be8c" : "#bf616a");
+            W(Td(F2(rb) + " [" + F2(ra) + "]", col));
+            double ret = g_accCnd[p + 3] / n;
+            double var = (n > 1.0) ? (g_accCnd[p + 4] - n * ret * ret) / (n - 1.0) : 0.0;
+            double tn  = (var > 0.0) ? ret / (MathSqrt(var) / MathSqrt(n)) : 0.0;
+            g_dg += "VST|" + g_tfName[t] + "|" + CndTag(cat) + "|n|" + F0(n) + "|mfe|" + F0(mfe) + "|mae|" + F0(mae) +
+                    "|base|" + F0(bs) + "|ret|" + F1(ret) + "|t|" + F2(tn) + "|cost|" + F1(g_accCnd[p + 5] / n) + "\n";
+           }
+         W("</tr>");
+        }
+      W("</table>");
+     }
+  }
+
 void RepStruct()
   {
    W("<h2>Posizione nella raffica (come il Sequence Filter dell'EA) &mdash; netto medio (n)</h2>");
@@ -1916,6 +2088,8 @@ void BuildDigest()
    d += "CTX|offset|" + IS(InpTimeOffsetH) + "|from|" + TimeToString(g_tStart, TIME_DATE) + "|histwarn|" + IS(g_histWarn ? 1 : 0) +
         "|split|" + IS(MathMin(95, MathMax(5, InpSplitPct))) + "|splitdate|" + TimeToString(tSp, TIME_DATE) + "|minn|" + IS((long)g_minN) +
         "|noisesort|" + NoiseSortName() + "\n";
+   d += "VOLCFG|on|" + IS(InpUseVolState ? 1 : 0) + "|atr|" + IS(InpVsAtrLen) + "|lookback|" + IS(InpVsLookback) + "|ema|" + IS(InpVsEmaSmooth) +
+        "|exp|" + F2(InpVsExpTh) + "|comp|" + F2(InpVsCompTh) + "|low|" + IS(InpVsLowTh) + "|high|" + IS(InpVsHighTh) + "|extreme|" + IS(InpVsExtremeTh) + "\n";
    d += "RUN|costfix|" + F1(InpCostPoints) + "|extra|" + F1(InpExtraCostPts) + "|maxgap|" + IS(InpMaxGapMin) +
         "|entrygap|" + IS(InpMaxEntryGapMin) + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +
         "|ref|" + IS(g_hor[g_refH]) + "|zbonf|" + F2(g_zB) + "\n";
@@ -1998,6 +2172,7 @@ void WriteReport()
    RepRank();
    RepBestTFNoise();
    RepRankNoise();
+   RepVolState();
    RepStruct();
    RepDetails();
    RepTop();
