@@ -290,6 +290,12 @@ string SafeTag(const string src)
    return out;
   }
 
+string ParentName()
+  {
+   for(int i = 0; i < 21; i++) if(g_allTF[i] == InpParentTF) return g_allName[i];
+   return EnumToString(InpParentTF);
+  }
+
 string ModeName()
   {
    switch(InpMode)
@@ -440,6 +446,12 @@ bool SetupInputs()
       g_slotCnt[t] = ok ? (int)(g_parentSec / g_tfSec[t]) : 0;
       if(g_slotCnt[t] > g_maxSlots) g_maxSlots = g_slotCnt[t];
      }
+   {
+    bool anySlot = false;
+    for(int t = 0; t < g_nT; t++) if(g_slotOK[t]) anySlot = true;
+    if(!anySlot)
+       Print("InpParentTF ", EnumToString(InpParentTF), " non utilizzabile come contenitore (al massimo D1 e deve contenere almeno un TF analizzato): tabelle 'candela nel TF superiore' disattivate.");
+   }
 
    g_par.mode             = (int)InpMode;
    g_par.emaPeriod        = MathMax(1, InpEmaPeriod);
@@ -1048,9 +1060,10 @@ void RepIntro()
    string hs = "";
    for(int i = 0; i < g_nH; i++) hs += (i > 0 ? ", " : "") + IS(g_hor[i]);
    W("<tr><th>Tenute / orizzonti (min)</th><td>" + hs + "</td></tr>");
-   datetime tSplit = (datetime)((g_day0 + (long)g_splitDay) * 86400L - g_off);
-   W("<tr><th>Classifica</th><td>in-sample prima del " + TimeToString(tSplit, TIME_DATE) + ", out-of-sample dal " + TimeToString(tSplit, TIME_DATE) + " | fasce da " +
-     IS(g_rbMin) + " min | minimo " + IS((long)g_minN) + " posizioni in-sample | una posizione per volta, senza stop</td></tr>");
+   datetime tSplit = (datetime)((g_day0 + (long)g_splitDay) * 86400L);   // giorno sull'orologio server + offset, lo stesso di g_m1Day
+   W("<tr><th>Classifica</th><td>in-sample prima del " + TimeToString(tSplit, TIME_DATE) + " (server + offset), out-of-sample dal " +
+     TimeToString(tSplit, TIME_DATE) + " | fasce da " + IS(g_rbMin) + " min | minimo " + IS((long)g_minN) +
+     " posizioni (in-sample per le tabelle A, intero storico per le B) | una posizione per volta, senza stop</td></tr>");
    string ls = "";
    for(int i = 0; i < g_nL; i++) ls += (i > 0 ? ", " : "") + F0(g_lev[i]);
    W("<tr><th>Livelli (pt)</th><td>" + ls + "</td></tr>");
@@ -1074,7 +1087,8 @@ void RepIntro()
      "sul numero di celle TF x orizzonte di questo report: |t| &ge; <b>" + F2(g_zB) + "</b>. Non cercare la cella migliore: cerca coerenza fra TF vicini e orizzonti vicini. "
      "Il t cluster &egrave; ottimista per orizzonti di un giorno o pi&ugrave;, perch&eacute; giorni adiacenti condividono parte del percorso del prezzo.</div>");
    W("<div class='note'>Tutte le tabelle con <b>t naive</b> o z del segno (fasce orarie, candela nel TF superiore, raffica, direzione, giorno, classifiche) "
-     "non sono corrette n&eacute; per la sovrapposizione n&eacute; per i test multipli: il giallo significa solo |t| &ge; 2, non esiste mai verde o rosso. "
+     "non sono corrette per i test multipli (e quelle non a posizione singola nemmeno per la sovrapposizione): nelle colonne t e z il giallo significa solo |t| &ge; 2, mai verde o rosso; "
+     "il verde/rosso dei netti indica solo il segno, e la colonna Esito (verdetto sull'out-of-sample) &egrave; l'unica eccezione. "
      "Nelle classifiche la posizione occupa il suo slot per tutta la tenuta anche se il target esce prima (scelta prudente).</div>");
    W("<div class='note'>Le misure sono <b>in punti</b>: i simboli non sono confrontabili fra loro e le ore con volatilit&agrave; alta dominano i totali. "
      "Per questo le tabelle orarie sono affiancate dalla base della stessa fascia.</div>");
@@ -1085,7 +1099,7 @@ void RepCoverage()
    W("<h2>Copertura per timeframe</h2>");
    W("<div class='note'>Un segnale viene scartato se tra la chiusura della barra e la barra successiva c'&egrave; una pausa di sessione "
      "oltre <b>" + IS(InpMaxEntryGapMin) + "</b> min (weekend, chiusura giornaliera): l'ingresso non sarebbe quello del segnale. "
-     "Per D1, W1 e MN1 questo scarta di fatto quasi tutto: aumenta <b>InpMaxEntryGapMin</b> se vuoi entrare comunque all'apertura successiva.</div>");
+     "Per D1, W1 e MN1 la pausa di sessione o il weekend pu&ograve; scartare una quota alta dei segnali (vedi le colonne sopra): aumenta <b>InpMaxEntryGapMin</b> se vuoi entrare comunque all'apertura successiva.</div>");
    W("<table><tr><th>TF</th><th>Barre in periodo</th><th>Scartate gap sessione</th><th>Senza M1</th><th>Barre base</th>"
      "<th>Segnali</th><th>Misurati @" + IS(g_hor[g_refH]) + "m</th><th>% misurati</th></tr>");
    for(int t = 0; t < g_nT; t++)
@@ -1332,7 +1346,7 @@ string EsitoCell(const RkStat &a, const RkStat &b)
 
 string RankHead()
   {
-   return "<table><tr><th>#</th><th>TF</th><th>Fascia (entrata)</th><th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th>"
+   return "<table><tr><th>#</th><th>TF</th><th>Fascia (entrata, server + offset)</th><th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th>"
           "<th>IS pos.</th><th>IS netto</th><th>IS t</th><th>Target raggiunto % (netto)</th>"
           "<th>OOS pos.</th><th>OOS netto</th><th>OOS t</th><th>Esito</th></tr>";
   }
@@ -1359,7 +1373,7 @@ void RankDigest(const string tag, const int rank, const int t, const int rb, con
    RkRead(g_rk, base, kk, dd, 1, b);
    g_dg += tag + "|" + IS(rank) + "|" + g_tfName[t] + "|" + RBktLabel(rb) + "|" + (dd == 0 ? "SEGUI" : "INVERTI") +
            "|hold|" + IS(g_hor[h]) + "|tp|" + KLabel(kk) + "|isn|" + F0(a.n) + "|ismean|" + F1(a.mean) + "|ist|" + F2(a.t) +
-           "|hit|" + F1(a.hit) + "|oosn|" + F0(b.n) + "|oosmean|" + F1(b.mean) + "|oost|" + F2(b.t) + "\n";
+           "|hit|" + (kk == 0 ? "-" : F1(a.hit)) + "|oosn|" + F0(b.n) + "|oosmean|" + F1(b.mean) + "|oost|" + F2(b.t) + "\n";
   }
 
 //--- migliore combinazione (tenuta, target, verso) per ogni TF, su tutto il giorno
@@ -1395,7 +1409,7 @@ void RepBestTF()
         Td(F0(a.n)) + Td("<b>" + F1(a.mean) + "</b>", ColSign(a.mean)) + Td(F2(a.t)) + Td(bk == 0 ? "-" : F1(a.hit)) +
         Td(F0(b.n)) + Td("<b>" + F1(b.mean) + "</b>", ColSign(b.mean)) + Td(F2(b.t), ColTNaive(b.t)) + EsitoCell(a, b) + "</tr>");
       g_dg += "BESTTF|" + g_tfName[t] + "|" + (bd == 0 ? "SEGUI" : "INVERTI") + "|hold|" + IS(g_hor[bh]) + "|tp|" + KLabel(bk) +
-              "|isn|" + F0(a.n) + "|ismean|" + F1(a.mean) + "|ist|" + F2(a.t) + "|hit|" + F1(a.hit) +
+              "|isn|" + F0(a.n) + "|ismean|" + F1(a.mean) + "|ist|" + F2(a.t) + "|hit|" + (bk == 0 ? "-" : F1(a.hit)) +
               "|oosn|" + F0(b.n) + "|oosmean|" + F1(b.mean) + "|oost|" + F2(b.t) + "\n";
      }
    W("</table>");
@@ -1443,7 +1457,7 @@ void RepRank()
 
    W("<h2>A2 &mdash; Classifica: quando osservare il segnale e come gestire la posizione (scelta in-sample)</h2>");
    if(pn < 1 || m < 1)
-     { W("<div class='note ko'>Nessuna combinazione con almeno " + IS(InpRankMinN) + " posizioni in-sample. Riduci <b>InpRankMinN</b> o allarga il periodo.</div>"); return; }
+     { W("<div class='note ko'>Nessuna combinazione con almeno " + IS((long)g_minN) + " posizioni in-sample. Riduci <b>InpRankMinN</b> o allarga il periodo.</div>"); return; }
 
    //--- diagnostica sull'insieme dei migliori in-sample
    int posOOS = 0, strong = 0, usable = 0;
@@ -1542,9 +1556,16 @@ double NoiseKey(const RkStat &s)
    return s.sum;
   }
 
+//--- campione minimo della parte recente per la tabella B: proporzionale alla quota di periodo fuori campione
+double MinLate()
+  {
+   int pct = MathMin(95, MathMax(5, InpSplitPct));
+   return MathMax(10.0, 0.5 * g_minN * (100.0 - pct) / 100.0);
+  }
+
 string CoerenzaCell(const RkStat &a, const RkStat &b)
   {
-   if(a.n < 1.0 || b.n < MathMax(10.0, g_minN / 3.0)) return Td("2a parte scarsa", "#4c566a");
+   if(a.n < 1.0 || b.n < MinLate()) return Td("2a parte scarsa", "#4c566a");
    if(a.mean > 0.0 && b.mean > 0.0) return Td("coerente +", "#a3be8c");
    if(a.mean < 0.0 && b.mean < 0.0) return Td("coerente -", "#7b8794");
    return Td("INCOERENTE", "#bf616a");
@@ -1552,7 +1573,7 @@ string CoerenzaCell(const RkStat &a, const RkStat &b)
 
 string NoiseHead(const bool withBucket)
   {
-   return "<table><tr><th>#</th><th>TF</th>" + string(withBucket ? "<th>Fascia (entrata)</th>" : "") +
+   return "<table><tr><th>#</th><th>TF</th>" + string(withBucket ? "<th>Fascia (entrata, server + offset)</th>" : "") +
           "<th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th><th>Posizioni</th><th>Profitto totale (pt)</th>"
           "<th>Netto medio</th><th>t</th><th>Target raggiunto % (netto)</th>"
           "<th>Netto 1a parte</th><th>Netto 2a parte</th><th>Fra le due parti</th></tr>";
@@ -1569,11 +1590,11 @@ void RepNoiseIntro()
   {
    int pct = MathMin(95, MathMax(5, InpSplitPct));
    W("<h2>Due letture della stessa classifica</h2>");
-   W("<div class='note'><b>Tabelle A</b> (sopra): le combinazioni sono scelte guardando solo il primo " + IS(pct) +
+   W("<div class='note'><b>Tabelle A</b> (A1 e A2, qui di seguito): le combinazioni sono scelte guardando solo il primo " + IS(pct) +
      "% del periodo e poi verificate sul resto, che non ha mai partecipato alla scelta. "
-     "<b>Tabelle B</b> (sotto): le combinazioni sono scelte guardando <b>tutto</b> lo storico, ordinate per <b>" + NoiseSortName() +
+     "<b>Tabelle B</b> (B1 e B2, dopo le A): le combinazioni sono scelte guardando <b>tutto</b> lo storico, ordinate per <b>" + NoiseSortName() +
      "</b>, senza alcuna protezione: &egrave; quello che vedrebbe chi ottimizza sull'intero storico. "
-     "Con migliaia di combinazioni la prima riga di B &egrave; positiva per costruzione, anche se il segnale non ha informazione. "
+     "Con migliaia di combinazioni la prima riga di B tende a essere positiva anche se il segnale non ha informazione (a meno che il costo domini ovunque). "
      "Serve per confrontare quanto B promette rispetto a quanto A conferma, non per scegliere cosa operare.</div>");
   }
 
@@ -1609,7 +1630,7 @@ void RepBestTFNoise()
       W("<tr>" + Td("-") + "<td>" + g_tfName[t] + "</td>" + Td(bd == 0 ? "SEGUI" : "INVERTI") + Td(IS(g_hor[bh])) + Td(KLabel(bk)) +
         NoiseCells(all, a, b, bk) + "</tr>");
       g_dg += "BESTNOISE|" + g_tfName[t] + "|" + (bd == 0 ? "SEGUI" : "INVERTI") + "|hold|" + IS(g_hor[bh]) + "|tp|" + KLabel(bk) +
-              "|n|" + F0(all.n) + "|total|" + F0(all.sum) + "|mean|" + F1(all.mean) + "|t|" + F2(all.t) + "|hit|" + F1(all.hit) +
+              "|n|" + F0(all.n) + "|total|" + F0(all.sum) + "|mean|" + F1(all.mean) + "|t|" + F2(all.t) + "|hit|" + (bk == 0 ? "-" : F1(all.hit)) +
               "|part1|" + F1(a.mean) + "|part2|" + F1(b.mean) + "\n";
      }
    W("</table>");
@@ -1679,22 +1700,25 @@ void RepRankNoise()
       RkStat a, b;
       RkRead(g_rk, base, pK[i], pD[i], 0, a);
       RkRead(g_rk, base, pK[i], pD[i], 1, b);
-      if(b.n < MathMax(10.0, g_minN / 3.0)) continue;
+      if(b.n < MinLate()) continue;
       usable++;
       if(a.mean > 0.0 && b.mean > 0.0) bothPos++;
       else if((a.mean > 0.0) != (b.mean > 0.0)) incoh++;
      }
    double chanceT = (m > 1) ? MathSqrt(2.0 * MathLog((double)m)) : 0.0;
-   double shareLate = (sumAll != 0.0) ? 100.0 * sumLate / sumAll : 0.0;
+   double shareLate = (sumAll > 0.0) ? 100.0 * sumLate / sumAll : 0.0;
    double shareN    = (nAll > 0.0) ? 100.0 * nLate / nAll : 0.0;
    RkStat top;
    RkReadAll(g_rk, ((pTf[0] * g_nRB + pB[0]) * g_nH + pH[0]) * blk, pK[0], pD[0], top);
-   bool good = (usable > 0 && bothPos * 2 >= usable && shareLate >= 0.5 * shareN);
+   bool good = (sumAll > 0.0 && usable > 0 && bothPos * 2 >= usable && shareLate >= 0.5 * shareN);
+   string shareTxt = (sumAll > 0.0)
+      ? ("la parte pi&ugrave; recente del periodo contiene il <b>" + F1(shareN) + "%</b> delle posizioni ma il <b>" + F1(shareLate) +
+         "%</b> del profitto: se l'edge fosse stabile le due quote sarebbero simili. ")
+      : "le prime righe non hanno profitto totale positivo: non c'&egrave; profitto da ripartire fra le due parti. ";
    W("<div class='note " + string(good ? "ok" : "ko") + "'><b>Cosa promette questa tabella.</b> Combinazioni valutate: <b>" + IS(m) +
      "</b>. La prima ha profitto totale <b>" + F0(top.sum) + " pt</b> su " + F0(top.n) + " posizioni (netto medio " + F1(top.mean) +
      ", t " + F2(top.t) + "); il t massimo atteso per puro caso su " + IS(m) + " tentativi &egrave; intorno a <b>" + F2(chanceT) + "</b>. "
-     "Nelle prime " + IS(K) + " righe, la parte pi&ugrave; recente del periodo contiene il <b>" + F1(shareN) + "%</b> delle posizioni ma il <b>" +
-     F1(shareLate) + "%</b> del profitto: se l'edge fosse stabile le due quote sarebbero simili. "
+     "Nelle prime " + IS(K) + " righe " + shareTxt +
      "Fra le prime " + IS(pn) + " con campione sufficiente, <b>" + IS(bothPos) + "</b> su " + IS(usable) + " sono positive in entrambe le parti e <b>" +
      IS(incoh) + "</b> cambiano segno. " +
      string(good ? "Il profitto sembra stabile nel tempo: confrontalo con la tabella A prima di fidarti."
@@ -1713,7 +1737,7 @@ void RepRankNoise()
         Td(pD[i] == 0 ? "SEGUI" : "INVERTI") + Td(IS(g_hor[pH[i]])) + Td(KLabel(pK[i])) + NoiseCells(all, a, b, pK[i]) + "</tr>");
       g_dg += "NOISE|" + IS(i + 1) + "|" + g_tfName[pTf[i]] + "|" + RBktLabel(pB[i]) + "|" + (pD[i] == 0 ? "SEGUI" : "INVERTI") +
               "|hold|" + IS(g_hor[pH[i]]) + "|tp|" + KLabel(pK[i]) + "|n|" + F0(all.n) + "|total|" + F0(all.sum) +
-              "|mean|" + F1(all.mean) + "|t|" + F2(all.t) + "|hit|" + F1(all.hit) + "|part1|" + F1(a.mean) + "|part2|" + F1(b.mean) + "\n";
+              "|mean|" + F1(all.mean) + "|t|" + F2(all.t) + "|hit|" + (pK[i] == 0 ? "-" : F1(all.hit)) + "|part1|" + F1(a.mean) + "|part2|" + F1(b.mean) + "\n";
      }
    W("</table>");
    g_dg += "DIAGNOISE|combos|" + IS(m) + "|sort|" + NoiseSortName() + "|top_total|" + F0(top.sum) + "|top_t|" + F2(top.t) +
@@ -1796,7 +1820,7 @@ void RepTOD(const int t)
 
 void RepSlot(const int t)
   {
-   W("<table><tr><th>Candela nel " + EnumToString(InpParentTF) + "</th><th>Segnali</th><th>MFE medio</th><th>MAE medio</th>"
+   W("<table><tr><th>Candela nel " + ParentName() + "</th><th>Segnali</th><th>MFE medio</th><th>MAE medio</th>"
      "<th>Netto medio</th><th>t naive</th><th>Costo medio</th></tr>");
    for(int s = 0; s < g_slotCnt[t]; s++)
      {
@@ -1818,7 +1842,7 @@ void RepDetails()
   {
    W("<h2>Dettaglio per timeframe &mdash; orizzonte " + IS(g_hor[g_refH]) + " min</h2>");
    W("<div class='note'><b>Fascia oraria</b>: ora del server (+ offset) della barra M1 d'ingresso, cio&egrave; della chiusura del segnale. "
-     "<b>Candela nel TF superiore</b>: posizione della barra del segnale dentro il " + EnumToString(InpParentTF) +
+     "<b>Candela nel TF superiore</b>: posizione della barra del segnale dentro il " + ParentName() +
      " (es. 8 di 15 = ottava candela di un contenitore da 15). Con fasce strette il campione per riga &egrave; piccolo: "
      "le righe grigie sono rumore, non fasce operative.</div>");
    for(int t = 0; t < g_nT; t++)
@@ -1829,7 +1853,7 @@ void RepDetails()
       RepTOD(t);
       if(g_slotOK[t])
         {
-         W("<h3>Candela nel " + EnumToString(InpParentTF) + "</h3>");
+         W("<h3>Candela nel " + ParentName() + "</h3>");
          RepSlot(t);
         }
       W("<h3>Probabilit&agrave; di raggiungere il target entro la tenuta: segnale % (base %) &mdash; movimento lordo dal prezzo d'ingresso, spread escluso</h3>");
@@ -1887,8 +1911,13 @@ void BuildDigest()
         "|ema|" + IS(InpEmaPeriod) + "|vol|" + IS(InpVolAvgPeriod) + "|thr|" + F2(InpThreshold) +
         "|expthr|" + F2(InpExpThreshold) + "|expatr|" + IS(InpExpAtrPeriod) + "|expoff|" + IS(InpExpConfirmOffset) +
         "|rungap|" + IS(InpRunGapBars) + "\n";
+   datetime tSp = (datetime)((g_day0 + (long)g_splitDay) * 86400L);
+   d += "# tabelle RANK/SURV/BESTTF: scelte sul primo periodo, verificate sul resto. NOISE/BESTNOISE: scelte sull'intero storico, part1/part2 NON indipendenti.\n";
+   d += "CTX|offset|" + IS(InpTimeOffsetH) + "|from|" + TimeToString(g_tStart, TIME_DATE) + "|histwarn|" + IS(g_histWarn ? 1 : 0) +
+        "|split|" + IS(MathMin(95, MathMax(5, InpSplitPct))) + "|splitdate|" + TimeToString(tSp, TIME_DATE) + "|minn|" + IS((long)g_minN) +
+        "|noisesort|" + NoiseSortName() + "\n";
    d += "RUN|costfix|" + F1(InpCostPoints) + "|extra|" + F1(InpExtraCostPts) + "|maxgap|" + IS(InpMaxGapMin) +
-        "|entrygap|" + IS(InpMaxEntryGapMin) + "|bucket|" + IS(g_bMin) + "|parent|" + EnumToString(InpParentTF) +
+        "|entrygap|" + IS(InpMaxEntryGapMin) + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +
         "|ref|" + IS(g_hor[g_refH]) + "|zbonf|" + F2(g_zB) + "\n";
    d += "DATA|m1bars|" + IS(g_n1) + "|days|" + IS(g_nDays) + "|medrange|" + F0(g_medRange) + "|medspr|" + F0(g_medSpr) +
         "|zerospr|" + F1(g_zeroSprPct) + "\n";
