@@ -626,8 +626,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    uchar vsc[];
    if(InpUseVolState)
      {
-      SD_VolState(r, n, g_vpar, g_pt, vsc);
-      if(warm < g_volWarm) warm = g_volWarm;      // il percentile ha bisogno della finestra piena
+      SD_VolState(r, n, g_vpar, g_pt, vsc);       // il warm-up dei segnali resta quello del segnale: lo stato ha il suo (g_volWarm)
      }
 
    const long   xs      = g_tfSec[t];
@@ -657,7 +656,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
       g_ent[u]  = p;
       g_dir[u]  = dir[i];
       g_bur[u]  = bur[i];
-      g_vs[u]   = InpUseVolState ? vsc[i] : (uchar)10;
+      g_vs[u]   = InpUseVolState ? ((i >= g_volWarm) ? vsc[i] : (uchar)255) : (uchar)10;   // 255 = finestra del percentile incompleta
       g_slot[u] = (ushort)(slotOK ? (int)(((long)r[i].time % g_parentSec) / xs) : 0);
       if(dir[i] != 0) ev++;
       u++;
@@ -912,7 +911,7 @@ void AccumulateHorizon(const int hi)
          int cs = 0; while(cs < g_nL && mS >= g_lev[cs]) cs++;
          g_bsHist[bi * nL1 + cb]++;
          g_bsHist[bi * nL1 + cs]++;
-         if(isRef && InpUseVolState)
+         if(isRef && InpUseVolState && g_vs[k] != 255)
            {
             const int    vc = (int)g_vs[k];
             const double bm = 0.5 * (mB + mS);
@@ -973,7 +972,7 @@ void AccumulateHorizon(const int hi)
                   g_evMfe[q]  = fav; g_evMae[q] = adv; g_evRet[q] = retN;
                  }
               }
-            if(InpUseVolState)
+            if(InpUseVolState && g_vs[k] != 255)
               {
                const int vc2 = (int)g_vs[k];
                const int cA = (vc2 >> 3) & 3, cB = 3 + ((vc2 >> 1) & 3), cC = 7 + (vc2 & 1);
@@ -1118,7 +1117,7 @@ void RepIntro()
      " | soglia " + F2(InpThreshold) + " | Exp TR/ATR &gt; " + F2(InpExpThreshold) + " (ATR " + IS(InpExpAtrPeriod) +
      ", conferma +" + IS(InpExpConfirmOffset) + ") | RunGapBars " + IS(InpRunGapBars) + "</td></tr>");
    if(InpUseVolState)
-      W("<tr><th>Stato di volatilit&agrave;</th><td>ATR " + IS(InpVsAtrLen) + " | percentile su " + IS(InpVsLookback) + " barre | EMA " + IS(InpVsEmaSmooth) +
+      W("<tr><th>Stato di volatilit&agrave;</th><td>ATR " + IS(g_vpar.atrLen) + " | percentile su " + IS(g_vpar.lookback) + " barre | EMA " + IS(g_vpar.emaSmooth) +
         " | espansione TR/ATR &gt; " + F2(InpVsExpTh) + " | compressione &lt; " + F2(InpVsCompTh) + " | LOW &lt; " + IS(InpVsLowTh) +
         ", HIGH &ge; " + IS(InpVsHighTh) + ", EXTREME &ge; " + IS(InpVsExtremeTh) + "</td></tr>");
    W("<tr><th>Costo</th><td>" + (InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : "spread reale M1") +
@@ -1862,7 +1861,7 @@ void RepVolState()
    W("<h2>Stato di volatilit&agrave; dei segnali (indicatore Ferro) &mdash; orizzonte " + IS(g_hor[g_refH]) + " min</h2>");
    W("<div class='note'>Ogni segnale &egrave; classificato con la stessa logica dell'indicatore <b>Volatility State [Ferro]</b>, calcolata sulla <b>barra del segnale</b> "
      "(la candela che ha appena chiuso): <b>intensit&agrave;</b> = TR/ATR (compressione sotto " + F2(InpVsCompTh) + ", espansione sopra " + F2(InpVsExpTh) +
-     "), <b>regime</b> = percentile della volatilit&agrave; composita (ATR% + Parkinson, EMA " + IS(InpVsEmaSmooth) + ") sulle ultime " + IS(InpVsLookback) +
+     "), <b>regime</b> = percentile della volatilit&agrave; composita (ATR% + Parkinson, EMA " + IS(g_vpar.emaSmooth) + ") sulle ultime " + IS(g_vpar.lookback) +
      " barre, <b>direzione</b> = il percentile &egrave; salito o no rispetto alla barra prima. &Egrave; una misura, non un filtro: i segnali restano gli stessi, "
      "divisi in gruppi. Verifica se i segnali emessi con volatilit&agrave; in aumento o in espansione hanno un netto diverso. "
      "La tabella <b>MFE / base</b> confronta il movimento dopo il segnale con quello di entrate in direzione casuale nello stesso stato di volatilit&agrave; e nelle stesse fasce orarie: "
@@ -2088,7 +2087,8 @@ void BuildDigest()
    d += "CTX|offset|" + IS(InpTimeOffsetH) + "|from|" + TimeToString(g_tStart, TIME_DATE) + "|histwarn|" + IS(g_histWarn ? 1 : 0) +
         "|split|" + IS(MathMin(95, MathMax(5, InpSplitPct))) + "|splitdate|" + TimeToString(tSp, TIME_DATE) + "|minn|" + IS((long)g_minN) +
         "|noisesort|" + NoiseSortName() + "\n";
-   d += "VOLCFG|on|" + IS(InpUseVolState ? 1 : 0) + "|atr|" + IS(InpVsAtrLen) + "|lookback|" + IS(InpVsLookback) + "|ema|" + IS(InpVsEmaSmooth) +
+   if(!InpUseVolState) d += "VOLCFG|on|0\n";
+   else d += "VOLCFG|on|1|atr|" + IS(g_vpar.atrLen) + "|lookback|" + IS(g_vpar.lookback) + "|ema|" + IS(g_vpar.emaSmooth) +
         "|exp|" + F2(InpVsExpTh) + "|comp|" + F2(InpVsCompTh) + "|low|" + IS(InpVsLowTh) + "|high|" + IS(InpVsHighTh) + "|extreme|" + IS(InpVsExtremeTh) + "\n";
    d += "RUN|costfix|" + F1(InpCostPoints) + "|extra|" + F1(InpExtraCostPts) + "|maxgap|" + IS(InpMaxGapMin) +
         "|entrygap|" + IS(InpMaxEntryGapMin) + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +

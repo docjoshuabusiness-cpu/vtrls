@@ -249,12 +249,16 @@ int SD_BuildSignals(const MqlRates &r[], const int n, const SDParams &p,
 
       //--- combinazione
       int d = 0;
+      int dRun = -99;      // direzione che alimenta la raffica (coincide con d tranne che nel modo ADDED)
       switch(p.mode)
         {
          case SD_MODE_DELTA: d = dD; break;
          case SD_MODE_EXP:   d = dE; break;
          case SD_MODE_AND:   d = (dD != 0 && dD == dE) ? dD : 0; break;
-         case SD_MODE_ADDED: d = (dD == 0) ? dE : 0; break;
+         case SD_MODE_ADDED:
+            d    = (dD == 0) ? dE : 0;     // segnale emesso: solo quelli che l'Expansion aggiunge
+            dRun = (dD != 0 && dE != 0 && dD != dE) ? 0 : ((dD != 0) ? dD : dE);   // la raffica segue il flusso OR dell'EA
+            break;
          case SD_MODE_OR:
             if(dD != 0 && dE != 0 && dD != dE) d = 0;
             else d = (dD != 0) ? dD : dE;
@@ -262,7 +266,8 @@ int SD_BuildSignals(const MqlRates &r[], const int n, const SDParams &p,
         }
 
       //--- raffica (identico a ApplySequenceFilter, senza filtri a monte)
-      if(d == 0)
+      if(dRun == -99) dRun = d;
+      if(dRun == 0)
         {
          gapBars++;
          if(p.runGapBars > 0 && gapBars >= p.runGapBars) { runDir = 0; runCount = 0; }
@@ -270,8 +275,11 @@ int SD_BuildSignals(const MqlRates &r[], const int n, const SDParams &p,
       else
         {
          gapBars = 0;
-         if(d == runDir) runCount++;
-         else { runDir = d; runCount = 1; }
+         if(dRun == runDir) runCount++;
+         else { runDir = dRun; runCount = 1; }
+        }
+      if(d != 0)
+        {
          dir[i]   = (char)d;
          burst[i] = (uchar)MathMin(runCount, 255);
         }
