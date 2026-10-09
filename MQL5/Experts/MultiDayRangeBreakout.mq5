@@ -113,16 +113,17 @@ input int TradeHourStart = 10;
 input int TradeMinuteStart = 0;
 input int TradeHourEnd = 11;
 input int TradeMinuteEnd = 0;
-input int ExpireExtraMinutes = 0;                  // minuti di vita degli ordini oltre la fine finestra
+input int ExpireExtraMinutes = 0;                  // minuti oltre la fine finestra in cui gli ordini stop restano vivi e gli ingressi a mercato (chiusura/retest) sono ancora validi
 input int MaxTradesPerDay = 1;                     // posizioni aperte al massimo in un giorno
-input int PendingOrderOffsetPoints = 20;           // distanza degli ordini dal range
+input int PendingOrderOffsetPoints = 20;           // distanza dei livelli di breakout dal range: ordini stop, soglia di chiusura della candela, soglia di rottura del retest
 input bool ChaseIfBroken = false;                  // solo EntryStop. false: se il prezzo e' gia' oltre il livello aspetta che rientri nel range e poi piazza la coppia; true: piazza subito lo stop del lato rotto vicino al mercato (come v2)
 
 input group "=== MODALITA' DI ENTRATA (interruttori) ==="
 input bool EntryStop = true;                       // A) coppia di ordini stop sul massimo/minimo +/- offset (OCO)
 input bool EntryCandleClose = false;               // B) a mercato quando una candela chiusa di Timeframe chiude oltre massimo+offset / sotto minimo-offset
 input bool EntryRetest = false;                    // C) retest: dopo che il prezzo supera il livello+offset, entra a mercato quando TORNA al bordo del range
-input int RetestTolerancePoints = 0;               // C) il ritorno conta quando il prezzo e' entro questi punti dal bordo del range (0 = lo tocca)
+input int RetestTolerancePoints = 0;               // C) il ritorno conta quando il prezzo (bid) scende fino a questi punti SOPRA il bordo del range (0 = lo tocca); deve essere minore dell'offset
+input int RetestMaxDepthPoints = 50;               // C) se il prezzo scende piu' di questi punti SOTTO il bordo (la rottura e' fallita) il retest si annulla e non si entra
 
 input group "=== STOP LOSS E TAKE PROFIT ==="
 input double StopLossPoints = 100;
@@ -167,6 +168,7 @@ datetime g_nextTryM = 0;       // pausa dopo un errore su un ingresso a mercato
 datetime g_barTime = 0;        // apertura della barra corrente di Timeframe (serve a riconoscere la chiusura di una candela)
 bool     g_armL = false;       // retest: il prezzo ha superato il livello superiore
 bool     g_armS = false;       // retest: il prezzo ha superato il livello inferiore
+bool     g_candlePend = false; // chiusura di candela: la candela appena chiusa va ancora valutata/ritentata (fino a fine barra)
 int      g_failToday = 0;
 bool     g_logOutside = false;
 bool     g_logSpread = false;
@@ -589,18 +591,20 @@ void MarketStops(const bool isBuy, const double entry, double &sl, double &tp)
   }
 
 // B) la candela di Timeframe appena chiusa ha chiuso oltre il livello? +1 sopra massimo+offset, -1 sotto minimo-offset, 0 no.
-// Vale solo se ora siamo nella finestra di entrata (piu' ExpireExtraMinutes) e la candela si e' chiusa dopo l'inizio della finestra corrente.
-// Da chiamare solo al primo tick di una nuova barra.
-int CandleSignal(datetime now, double hi, double lo)
+// La candela vale se FINISCE dentro la finestra di entrata (piu' ExpireExtraMinutes): cioe' anche quella che chiude esattamente a fine finestra, come nello
+// Studio; l'ingresso avviene al primo tick utile dopo la chiusura. Vale solo la candela appena chiusa (contigua alla barra corrente); una candela che
+// chiude a mezzanotte e' esclusa (per l'EA e' gia' un altro giorno).
+int CandleSignal(double hi, double lo)
   {
-   if(!OrdersMayLive(now))
-      return 0;
    datetime t1 = iTime(_Symbol, Timeframe, 1);
    if(t1 == 0)
       return 0;
    datetime tc = t1 + (datetime)PeriodSeconds(Timeframe);
-   datetime winStart = now - (datetime)(WinOffset(now) * 60 + (int)(now % 60));
-   if(tc <= winStart)
+   if(tc != iTime(_Symbol, Timeframe, 0))
+      return 0;   // c'e' un buco di barre (weekend, pausa, avvio): quella non e' la candela appena chiusa
+   if(tc % 86400 == 0)
+      return 0;
+   if(WinOffset(tc - 1) >= WinLen() + ExpireExtraMinutes)
       return 0;
    double c = iClose(_Symbol, Timeframe, 1);
    if(c <= 0.0)
@@ -615,18 +619,32 @@ int CandleSignal(datetime now, double hi, double lo)
    return 0;
   }
 
-// C) retest. Armamento: il prezzo supera il livello (ask >= massimo+offset, oppure bid <= minimo-offset). Ingresso: dopo l'armamento (mai nello stesso
-// tick) il prezzo torna al bordo del range: bid <= massimo + tolleranza per il long, ask >= minimo - tolleranza per lo short. Ritorna +1 / -1 / 0.
+// C) retest, tutto sul prezzo bid del grafico. Armamento: il prezzo supera il livello (bid >= massimo+offset per il long, bid <= minimo-offset per lo short).
+// Ingresso: dopo l'armamento (mai nello stesso tick) il prezzo torna al bordo del range: bid <= massimo + tolleranza (long), bid >= minimo - tolleranza (short).
+// Se pero' il prezzo si spinge oltre RetestMaxDepthPoints dentro il range la rottura e' fallita: l'armamento si annulla. Ritorna +1 / -1 / 0.
 int RetestSignal(bool &armL, bool &armS, double hi, double lo, double bid, double ask)
   {
    double tol = RetestTolerancePoints * _Point;
-   if(armL && bid <= hi + tol + 1e-9)
-      return 1;
-   if(armS && ask >= lo - tol - 1e-9)
-      return -1;
+   double depth = RetestMaxDepthPoints * _Point;
+   if(armL)
+     {
+      if(bid < hi - depth - 1e-9)
+         armL = false;
+      else
+         if(bid <= hi + tol + 1e-9)
+            return 1;
+     }
+   if(armS)
+     {
+      if(bid > lo + depth + 1e-9)
+         armS = false;
+      else
+         if(bid >= lo - tol - 1e-9)
+            return -1;
+     }
    double up = NormPrice(hi + PendingOrderOffsetPoints * _Point);
    double dn = NormPrice(lo - PendingOrderOffsetPoints * _Point);
-   if(ask >= up - 1e-9)
+   if(bid >= up - 1e-9)
       armL = true;
    if(bid <= dn + 1e-9)
       armS = true;
@@ -695,18 +713,26 @@ void TryMarketEntry(datetime now, bool newBar)
   {
    if(!EntryCandleClose && !EntryRetest)
       return;
-   if(!OrdersMayLive(now))
+   if(newBar && EntryCandleClose)
+      g_candlePend = true;   // una nuova candela e' appena chiusa: va valutata (e ritentata nella stessa barra se un filtro o un errore la blocca)
+   bool inWin = OrdersMayLive(now);
+   if(EntryRetest && !inWin)
      {
       g_armL = false;
       g_armS = false;
+     }
+   if(!inWin && !g_candlePend)
+      return;   // fuori dalla finestra puo' ancora agire solo la candela appena chiusa
+   if(g_tradesToday >= MaxTradesPerDay)
+     {
+      g_candlePend = false;
       return;
      }
-   if(g_tradesToday >= MaxTradesPerDay)
-      return;
    if(g_nPos > 0)
      {
       g_armL = false;
       g_armS = false;
+      g_candlePend = false;
       return;
      }
    if(now < g_nextTryM)
@@ -714,6 +740,11 @@ void TryMarketEntry(datetime now, bool newBar)
    if(!TradingAllowed())
      {
       g_status = "trading non consentito";
+      return;
+     }
+   if(!g_rangeDone && !inWin)
+     {
+      g_candlePend = false;   // il range si calcola solo dentro la finestra (come per gli ordini stop): fuori non si calcola e la candela non si puo' valutare
       return;
      }
    if(!EnsureRange(now))
@@ -724,15 +755,18 @@ void TryMarketEntry(datetime now, bool newBar)
       return;
    int dir = 0;
    string tag = "";
-   if(EntryRetest)
+   bool retestWin = (EntryRetest && inWin);
+   if(retestWin)
      {
       dir = RetestSignal(g_armL, g_armS, g_upper, g_lower, bid, ask);
       tag = "retest";
      }
-   if(dir == 0 && EntryCandleClose && newBar)
+   if(dir == 0 && g_candlePend)
      {
-      dir = CandleSignal(now, g_upper, g_lower);
+      dir = CandleSignal(g_upper, g_lower);
       tag = "chiusura";
+      if(dir == 0)
+         g_candlePend = false;   // candela valutata, nessun segnale: non si riprova
      }
    if(dir == 0)
       return;
@@ -742,7 +776,7 @@ void TryMarketEntry(datetime now, bool newBar)
      {
       if(!g_logSpread)
         {
-         Print("Spread ", DoubleToString(spr, 1), " punti sopra il limite ", DoubleToString(lim, 1), ": segnale ", tag, " saltato");
+         Print("Spread ", DoubleToString(spr, 1), " punti sopra il limite ", DoubleToString(lim, 1), ": segnale ", tag, " in attesa");
          g_logSpread = true;
         }
       return;
@@ -751,7 +785,10 @@ void TryMarketEntry(datetime now, bool newBar)
      {
       g_armL = false;
       g_armS = false;
+      g_candlePend = false;
       g_failToday = 0;
+      g_tradesToday++;   // contato subito: se la posizione si chiude prima del prossimo tick SyncCounters non la vedrebbe mai
+      g_nPos++;
       if(g_nOrd != 0)
          DeleteOurPendings("OCO: ingresso a mercato");
      }
@@ -1037,6 +1074,7 @@ struct SSlot
    int      pairs, trades;           // coppie piazzate / posizioni aperte oggi
    datetime nextTry;
    bool     armL, armS;              // retest: il prezzo ha superato il livello, si attende il ritorno
+   bool     candlePend;              // chiusura di candela: la candela appena chiusa va ancora valutata/ritentata (fino a fine barra)
    // ordini e posizione virtuali
    int      state;                   // 0 niente, 1 coppia pendente (solo stop), 2 posizione aperta
    double   buyPx, sellPx, slB, slS, tpB, tpS;
@@ -1156,6 +1194,10 @@ void ScanInit()
          g_sl[c].mS = 0;
          g_sl[c].hE = (endMin % 1440) / 60;
          g_sl[c].mE = 0;
+         // una fascia identica a una precedente (succede se SlotLenHours non e' 1, 2 o un divisore di 24 che dia meno di 12 fasce distinte) e' un doppione: si spegne
+         for(int q = 0; q < src; q++)
+            if(g_sl[q * NMODE].hS == g_sl[c].hS && g_sl[q * NMODE].hE == g_sl[c].hE)
+               g_sl[c].on = false;
         }
      }
   }
@@ -1185,6 +1227,7 @@ void ScanNewDay(const datetime now)
       g_sl[c].nextTry = 0;
       g_sl[c].armL = false;
       g_sl[c].armS = false;
+      g_sl[c].candlePend = false;
      }
   }
 
@@ -1326,14 +1369,26 @@ void ScanPlacePair(const int c, const datetime now, const double bid, const doub
 // modalita' chiusura di candela (1) e retest (2): ingresso virtuale a mercato (stesse condizioni di TryMarketEntry)
 void ScanMarketEntry(const int c, const datetime now, const double bid, const double ask, const bool newBar)
   {
-   if(!OrdersMayLive(now))
+   if(newBar && g_sl[c].mode == 1)
+      g_sl[c].candlePend = true;
+   bool inWin = OrdersMayLive(now);
+   if(g_sl[c].mode == 2 && !inWin)
      {
       g_sl[c].armL = false;
       g_sl[c].armS = false;
+     }
+   if(!inWin && !g_sl[c].candlePend)
+      return;
+   if(g_sl[c].trades >= MaxTradesPerDay)
+     {
+      g_sl[c].candlePend = false;
       return;
      }
-   if(g_sl[c].trades >= MaxTradesPerDay)
+   if(!g_sl[c].rangeDone && !inWin)
+     {
+      g_sl[c].candlePend = false;
       return;
+     }
    if(now < g_sl[c].nextTry)
       return;
    if(!ScanEnsureRange(c, now))
@@ -1341,11 +1396,15 @@ void ScanMarketEntry(const int c, const datetime now, const double bid, const do
    if(ask <= 0.0 || bid <= 0.0 || ask < bid)
       return;
    int dir = 0;
-   if(g_sl[c].mode == 2)
+   bool retestWin = (g_sl[c].mode == 2 && inWin);
+   if(retestWin)
       dir = RetestSignal(g_sl[c].armL, g_sl[c].armS, g_sl[c].hi, g_sl[c].lo, bid, ask);
-   else
-      if(newBar)
-         dir = CandleSignal(now, g_sl[c].hi, g_sl[c].lo);
+   if(dir == 0 && g_sl[c].candlePend)
+     {
+      dir = CandleSignal(g_sl[c].hi, g_sl[c].lo);
+      if(dir == 0)
+         g_sl[c].candlePend = false;
+     }
    if(dir == 0)
       return;
    double spr = (ask - bid) / _Point;
@@ -1368,6 +1427,7 @@ void ScanMarketEntry(const int c, const datetime now, const double bid, const do
    g_sl[c].state = 2;
    g_sl[c].armL = false;
    g_sl[c].armS = false;
+   g_sl[c].candlePend = false;
   }
 
 // un tick per un concorrente: prima il "broker" virtuale (scadenza, SL/TP, riempimenti), poi le azioni dell'EA (break even/trailing, ingresso)
@@ -1434,7 +1494,12 @@ void ScanSlot(const int c, const datetime now, const double bid, const double as
          g_sl[c].sl = tg;
      }
    if(g_sl[c].state != 0)
+     {
+      g_sl[c].armL = false;      // come TryMarketEntry con una posizione aperta
+      g_sl[c].armS = false;
+      g_sl[c].candlePend = false;
       return;
+     }
    if(g_sl[c].mode == 0)
       ScanPlacePair(c, now, bid, ask);
    else
@@ -1548,14 +1613,14 @@ string SlotRankName()
    return "t-stat dell'E[R]";
   }
 
-// valore per il tester (OnTester): punteggio del concorrente migliore tra quelli con abbastanza trade, 0 se nessuno
+// valore per il tester (OnTester): punteggio del concorrente migliore tra quelli con abbastanza trade, -1e9 se nessuno
 double ScanBestScore()
   {
    int order[];
    ArrayResize(order, NCON);
    int cnt = ScanOrder(order);
    if(cnt < 1 || SlotTrades(order[0]) < SlotMinTrades)
-      return 0.0;
+      return -1.0e9;   // nessun concorrente ha abbastanza trade: peggio di qualunque punteggio reale (anche negativo)
    return SlotScore(order[0]);
   }
 
@@ -1718,6 +1783,7 @@ void NewDay(datetime day)
    g_nextTryM = 0;
    g_armL = false;
    g_armS = false;
+   g_candlePend = false;
    g_logOutside = false;
    g_logSpread = false;
    g_logWait = false;
@@ -1748,8 +1814,10 @@ string CheckInputs()
       return "MaxTradesPerDay deve essere >= 1";
    if(!EntryStop && !EntryCandleClose && !EntryRetest)
       return "accendi almeno una modalita' di entrata (EntryStop, EntryCandleClose, EntryRetest)";
-   if(RetestTolerancePoints < 0)
-      return "RetestTolerancePoints non puo' essere negativo";
+   if(RetestTolerancePoints < 0 || RetestMaxDepthPoints < 0)
+      return "RetestTolerancePoints e RetestMaxDepthPoints non possono essere negativi";
+   if(EntryRetest && PendingOrderOffsetPoints <= RetestTolerancePoints)
+      return "con EntryRetest l'offset (PendingOrderOffsetPoints) deve essere maggiore di RetestTolerancePoints: altrimenti il ritorno e' gia' vero alla rottura";
    if(SlotScan)
      {
       if(RangeDaysBack < 0)
@@ -1801,9 +1869,13 @@ int OnInit()
    g_nextTry = 0;
    g_nextMod = 0;
    g_lastPanel = 0;
+   g_barTime = iTime(_Symbol, Timeframe, 0);   // la barra in corso all'avvio non e' una "nuova barra": la prima candela da valutare e' la prossima a chiudere
+   g_candlePend = false;
    double stopLvl = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    if(StopLossPoints * _Point < stopLvl)
       Print("Attenzione: StopLossPoints e' sotto il livello minimo dei stop del broker (", DoubleToString(stopLvl / _Point, 0), " punti)");
+   if(EntryCandleClose && PeriodSeconds(Timeframe) > (WinLen() + ExpireExtraMinutes) * 60)
+      Print("Attenzione: la finestra di entrata (", WinLen() + ExpireExtraMinutes, " minuti) e' piu' corta di una candela di ", EnumToString(Timeframe), ": potrebbe non contenere nessuna chiusura di candela e EntryCandleClose non scattare mai");
    if(SlotScan)
      {
       ScanInit();
@@ -1817,7 +1889,7 @@ int OnInit()
    return INIT_SUCCEEDED;
   }
 
-// valore del tester: nell'analisi delle fasce e' il punteggio della fascia migliore (per ottimizzare gli altri parametri su di essa); altrimenti 0
+// valore del tester: nell'analisi virtuale e' il punteggio del concorrente migliore (per ottimizzare gli altri parametri su di esso); altrimenti 0
 double OnTester()
   {
    if(SlotScan)

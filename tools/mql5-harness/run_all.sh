@@ -41,4 +41,6 @@ echo "== 6. MDRB: EA MultiDayRangeBreakout reale contro MDRB_Study (batteria dif
 (cd .. && ./run_mdrb.sh | tail -1) || fail=1
 echo "== 7. MDRB modalita' AUTO: orizzonte adattivo, coerenza mappa/analisi singola, ASan, test nullo e di potenza =="
 (cd .. && ./run_auto_tests.sh) || fail=1
+echo "== 8. MDRB EA: analisi virtuale (fasce x modalita' di entrata) contro l'EA reale, controllo indipendente degli ingressi, ASan =="
+(cd .. && ./run_slot_tests.sh | tail -1) || fail=1
 [ $fail -eq 0 ] && echo "TUTTO OK" || { echo "ATTENZIONE: verifiche fallite"; exit 1; }

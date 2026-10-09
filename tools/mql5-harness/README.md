@@ -54,15 +54,21 @@ Serve a compilare e far girare il codice su dati sintetici **senza MetaEditor** 
      nel riepilogo di testo da `custom_check.py`.
 
 7. (MDRB, EA) `./run_slot_tests.sh`: l'**analisi virtuale** dell'EA (`SlotScan=true`: 12 fasce orarie + range a barre + D1 precedenti, ciascuno con
-   le tre modalita' di entrata: ordini stop, chiusura di candela, retest) viene confrontata concorrente per concorrente con l'**EA reale** sul broker
-   simulato (stesso range via `RANGE_TIME`/`RANGE_BARS`/`RANGE_PREV_D1`, UNA sola modalita' accesa), sugli stessi tick (`PATHMODE=fixed`, percorso denso
+   le tre modalita' di entrata: ordini stop, chiusura di candela, retest = 42 concorrenti) viene confrontata concorrente per concorrente con l'**EA reale**
+   sul broker simulato (stesso range via `RANGE_TIME`/`RANGE_BARS`/`RANGE_PREV_D1`, UNA sola modalita' accesa), sugli stessi tick (`PATHMODE=fixed`, percorso denso
    indipendente dallo stato dell'EA; `EXEC_AT_TICK=1`: stop e SL/TP si eseguono al prezzo del tick, che e' il modello dell'analisi virtuale: con il
    riempimento "al prezzo dell'ordine" del broker semplice la differenza di mezzo tick viene amplificata dal trailing a un intero scalino).
-   13 scenari (finestre, filtri, chase, trailing, piu' trade al giorno, scadenza estesa, M5/H1, offset 0, tolleranza del retest, finestra a
-   cavallo di mezzanotte...): stesso numero di trade, stessa direzione, stesso minuto di apertura, R entro 0.02 e chiusura entro 2 minuti
-   (`slot_check.py`); la classifica e le metriche (E[R], PF, R totale, drawdown, t-stat, prima/dopo la data di separazione, ordine) sono
-   ricalcolate in modo indipendente dal CSV dei trade (`slot_rank_check.py`); scansione e EA reale sotto AddressSanitizer + UBSan;
-   input non validi rifiutati. `ONLY=n NOTAIL=1 ./run_slot_tests.sh` lancia solo lo scenario n.
+   18 scenari: finestre, filtri di larghezza e di spread (`SPREAD_WIDE=1`: spread largo 20 minuti ogni 90), chase, trailing, piu' trade al giorno, scadenza estesa,
+   M5/H1, offset e tolleranza del retest, finestra a cavallo di mezzanotte, gap di prezzo (`GEN_JUMP=p`: salti all'apertura delle barre M1, per la
+   profondita' del retest), pausa di mercato (`GEN_BREAK=1`: la candela di fine finestra non e' contigua), range a barre di oggi.
+   Per ogni scenario: stesso numero di trade, stessa direzione, stesso minuto di apertura, R entro 0.02 e chiusura entro 2 minuti (`slot_check.py`); la
+   classifica e le metriche (E[R], PF, R totale, drawdown, t-stat, prima/dopo la data di separazione, ordine) ricalcolate dal CSV dei trade (`slot_rank_check.py`);
+   e, dove ha senso (un trade al giorno, nessun filtro di larghezza/spread), un **controllo indipendente degli ingressi** `entry_check.py`: dai soli M1 grezzi
+   ricostruisce il primo ingresso di ogni giorno delle modalita' chiusura e retest per tutte le sorgenti di range (barre, tick denso, cancelli, armamento del retest,
+   candela contigua e che finisce in finestra, range calcolato in finestra) e lo confronta con i trade virtuali. Poi scansione e EA reale sotto
+   AddressSanitizer + UBSan e input non validi rifiutati. `ONLY="n m" NOTAIL=1 NOCHK=1 ./run_slot_tests.sh` lancia solo gli scenari indicati, senza la coda
+   (ASan, input non validi) e/o senza il controllo indipendente. Limiti dichiarati: dati sintetici; il Python non ricostruisce le uscite (SL/TP/BE/trailing) delle
+   modalita' a mercato, che condividono `NextStop` con l'EA gia' provato dalla batteria; gli ingressi ancora aperti a fine dati non sono nel CSV.
 
 Uso: `./run_all.sh` (richiede `g++` e `python3`; crea la cartella `build/`; include `run_mdrb.sh`).
 

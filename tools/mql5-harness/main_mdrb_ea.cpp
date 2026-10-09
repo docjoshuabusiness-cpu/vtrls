@@ -22,7 +22,7 @@ static void applyOverrides() {
       OV(ExpireExtraMinutes) OV(PendingOrderOffsetPoints) OV(ChaseIfBroken) OV(StopLossPoints) OV(TakeProfitPoints) OV(UseTakeProfit)
       OV(UsaBreakEven) OV(BreakEvenAttivazione) OV(BreakEvenOffset) OV(UsaTrailingStop) OV(TrailingStartProfit) OV(TrailingStep) OV(TrailingOffset)
       OV(MaxTradesPerDay) OV(MaxSpreadPoints) OV(MaxSpreadPctOfSL) OV(SlotScan) OV(SlotFirstHour) OV(SlotLenHours) OV(SlotMinTrades) OV(SlotRankBy) OV(SlotSplitDate) OV(SlotCommissionPoints) OV(SlotWriteFiles)
-      OV(EntryStop) OV(EntryCandleClose) OV(EntryRetest) OV(RetestTolerancePoints) OV(ScanRangeBars) OV(ScanRangePrevD1)
+      OV(EntryStop) OV(EntryCandleClose) OV(EntryRetest) OV(RetestTolerancePoints) OV(RetestMaxDepthPoints) OV(ScanRangeBars) OV(ScanRangePrevD1)
       OV(Slot1) OV(Slot2) OV(Slot3) OV(Slot4) OV(Slot5) OV(Slot6) OV(Slot7) OV(Slot8) OV(Slot9) OV(Slot10) OV(Slot11) OV(Slot12)
       else if(k == "Timeframe") Timeframe = (ENUM_TIMEFRAMES)(int)v;
       else if(k == "StopsLevel") g_stopsLevel = (long)v;

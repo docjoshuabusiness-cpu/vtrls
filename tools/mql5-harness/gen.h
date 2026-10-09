@@ -35,6 +35,8 @@ static void gen(int days, double kappa, double sigma, unsigned long long seed) {
    // GEN_GAPS=p: ogni barra M1 manca con probabilita' p (come i buchi dello storico reale); GEN_BREAK=1: nessuna barra tra le 22:00 e le 23:00 (pausa giornaliera)
    double gapP = getenv("GEN_GAPS") ? atof(getenv("GEN_GAPS")) : 0.0;
    bool dayBreak = getenv("GEN_BREAK") && atoi(getenv("GEN_BREAK")) != 0;
+   // GEN_JUMP=p: a ogni barra M1, con probabilita' p, il prezzo salta di 20-150 punti (a caso su o giu') PRIMA dell'apertura: gap tra la chiusura precedente e l'apertura
+   double jumpP = getenv("GEN_JUMP") ? atof(getenv("GEN_JUMP")) : 0.0;
    std::vector<MqlRates> m1;
    struct tm g; memset(&g, 0, sizeof g);
    g.tm_year = 2023 - 1900; g.tm_mon = 0; g.tm_mday = 2;     // Monday 2023-01-02
@@ -50,6 +52,7 @@ static void gen(int days, double kappa, double sigma, unsigned long long seed) {
       for(int mnt = 0; mnt < 1440; mnt++) {
          double hr = mnt / 60.0;
          double act = 0.5 + 1.2 * std::exp(-0.5 * std::pow((hr - 9.0) / 2.5, 2)) + 1.6 * std::exp(-0.5 * std::pow((hr - 16.0) / 2.5, 2));
+         if(jumpP > 0.0 && urand() < jumpP) p += (urand() < 0.5 ? -1.0 : 1.0) * (20.0 + 130.0 * urand()) * 0.00001;
          double o = p;
          double mv = kappa * (mu - p) + sigma * act * nrand();
          double c = o + mv;
