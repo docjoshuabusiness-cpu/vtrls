@@ -3779,7 +3779,7 @@ void BuildConclusions(const int sIdx)
                      ", p90 " + F0(NxPct(sIdx, rt, 0, q, 0, a.n, 0.9)) + "), avverso " + F0(a.adv) + ", range " + F0(a.rng) +
                      ((hb && b.rng > 0.0) ? (" (x" + F2(a.rng / b.rng) + " la base)") : "") + "; ";
               }
-            NxStat ar, br;
+            NxStat ar;
             if(sn != "" && NxGet(sIdx, rt, 0, g_nxRef, ar))
               {
                //--- range contro base: si prende la distanza (fra quelle misurate, con campione sufficiente) dove lo scarto dalla base e' maggiore
