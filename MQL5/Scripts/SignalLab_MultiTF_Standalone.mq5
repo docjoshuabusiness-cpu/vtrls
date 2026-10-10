@@ -3800,7 +3800,7 @@ void BuildConclusions(const int sIdx)
                else if(rr <= 0.9) v4 = "Dopo " + IS(rrM) + " cand. il range e' inferiore di " + F0(100.0 * (1.0 - rr)) + "% a quello di una barra qualunque nelle stesse ore. ";
                else               v4 = "Il range dopo il segnale e' in linea con quello di una barra qualunque nelle stesse ore a tutte le distanze misurate (scarto massimo " + F0(100.0 * MathAbs(rr - 1.0)) + "% dopo " + IS(rrM) + " cand.): il segnale non anticipa ne' una volatilita' maggiore ne' minore. ";
                string v5;
-               if(MathAbs(ar.tMv) < 2.0)
+               if(MathAbs(ar.tMv) < 3.0)        // t naive: la sovrapposizione dei segnali lo gonfia, soglia piu' alta di 2
                   v5 = (ampKnown && (rr >= 1.1 || rr <= 0.9))
                        ? "La direzione di chiusura non e' distinguibile dal caso: l'informazione e' sull'ampiezza, non sul verso."
                        : "La direzione di chiusura non e' distinguibile dal caso e l'ampiezza e' quella di una barra qualunque: il segnale non porta informazione ne' sul verso ne' sull'ampiezza.";
@@ -3821,7 +3821,7 @@ void BuildConclusions(const int sIdx)
                         ", favorevole " + F0(ai.fav) + ", avverso " + F0(ai.adv) + " su " + F0(ai.n) + " segnali; ";
                  }
                if(si != "")
-                  AddConc(sIdx, "Candele successive per intensita'", "TF " + g_tfName[rt] + ", dopo " + IS(g_nxM[g_nxRef]) + " candela/e, per intensita' della candela del segnale (TR/ATR): " + si +
+                  AddConc(sIdx, "Candele successive per intensita'", "TF " + g_tfName[rt] + ", dopo " + IS(g_nxM[g_nxRef]) + " cand., per intensita' della candela del segnale (TR/ATR): " + si +
                           "L'intensita' conta perche' la volatilita' si raggruppa anche senza segnale: la base di ogni categoria ne tiene conto, il confronto utile e' il rapporto con la base.");
 
                //--- per orario
@@ -3855,7 +3855,7 @@ void BuildConclusions(const int sIdx)
                   loTxt += (loTxt == "" ? "" : "; ") + BktLabel(bsel) + " " + F0(bv) + " pt (" + F0(hn2[bsel]) + " segnali)";
                  }
                if(hiTxt != "")
-                  AddConc(sIdx, "Candele successive per orario", "TF " + g_tfName[rt] + ", range medio dopo " + IS(g_nxM[g_nxRef]) + " candela/e, per orario d'ingresso (server + offset). "
+                  AddConc(sIdx, "Candele successive per orario", "TF " + g_tfName[rt] + ", range medio dopo " + IS(g_nxM[g_nxRef]) + " cand., per orario d'ingresso (server + offset). "
                           "Fasce con il range piu' alto: " + hiTxt + ". Fasce piu' quiete: " + (loTxt != "" ? loTxt : "-") + ". "
                           "Il range segue la volatilita' oraria del mercato, con o senza segnale: la tabella per orario e TF mostra anche il confronto con la base di ogni fascia.");
               }
@@ -3879,7 +3879,7 @@ void BuildConclusions(const int sIdx)
               ": la probabilita' di un t >= 2 positivo e' circa il 2.3%). " +
               (aEdge ? ("Ne passano molte piu' di quelle attese dal caso: " + IS(g_cAns) + " combinazioni con OOS positivo e t >= 2, la prima: " + g_cAsurv +
                         ". Sono candidate da confermare su dati mai visti, non risultati: l'OOS e' stato usato per sceglierle.")
-                     : (g_cAns > 0 ? ("Le " + IS(g_cAns) + " che passano il filtro (OOS positivo e t >= 2) sono compatibili con il caso, non sono evidenza di vantaggio; la prima: " + g_cAsurv + ".")
+                     : (g_cAns > 0 ? ("Quelle che passano il filtro (OOS positivo e t >= 2) sono " + IS(g_cAns) + ", compatibili con il caso: non sono evidenza di vantaggio; la prima: " + g_cAsurv + ".")
                                    : "Nessuna combinazione regge fuori campione: la classifica in-sample e' rumore di selezione, nessuna riga va operata.")));
 
    //--- tabella B (con rumore)
