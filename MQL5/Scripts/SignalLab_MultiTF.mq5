@@ -1502,7 +1502,7 @@ void RepIntro()
    W("<tr><th>Costo</th><td>" + (InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : "spread reale M1") +
      " + extra " + F1(InpExtraCostPts) + " pt</td></tr>");
    W("<tr><th>Finestre</th><td>buco dati massimo " + IS(InpMaxGapMin) + " min | gap massimo all'ingresso " +
-     IS(InpMaxEntryGapMin) + " min | fasce da " + IS(g_bMin) + " min | offset orario " + IS(InpTimeOffsetH) + " h</td></tr>");
+     IS(InpMaxEntryGapMin) + " min | fasce da " + IS(g_bMin) + " min | offset orario " + IS(InpTimeOffsetH) + " h | ritardo d'ingresso " + IS(InpEntryLagMin) + " min</td></tr>");
    string hs = "";
    for(int i = 0; i < g_nH; i++) hs += (i > 0 ? ", " : "") + IS(g_hor[i]);
    W("<tr><th>Tenute / orizzonti (min)</th><td>" + hs + "</td></tr>");
@@ -3398,7 +3398,8 @@ void BuildConclusions(const int sIdx)
             (InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : ("spread M1 mediano " + F0(g_medSpr) + " pt")) +
             (InpExtraCostPts > 0.0 ? (" + extra " + F1(InpExtraCostPts) + " pt") : "") +
             ". Tutti i valori sono in punti (1 punto = " + DoubleToString(g_pt, _Digits) + ")." +
-            (g_histWarn ? " ATTENZIONE: lo storico M1 e' piu' corto del periodo richiesto." : ""));
+            (g_histWarn ? " ATTENZIONE: lo storico M1 e' piu' corto del periodo richiesto." : "") +
+            (InpEntryLagMin > 0 ? (" ATTENZIONE: corsa con ingresso ritardato di " + IS(InpEntryLagMin) + " min dopo la chiusura del segnale (prova di stress): i risultati non sono quelli dell'EA.") : ""));
    }
 
    //--- direzione prima dei costi e netto dopo i costi, per TF all'orizzonte di riferimento
@@ -3802,7 +3803,7 @@ void BuildConclusions(const int sIdx)
                "(deriva del prezzo o dislocazione del prezzo d'ingresso), non dalla direzione del segnale. Prova di stress: ripeti con InpEntryLagMin = 5. ";
       else
          ta += "Il conteggio neutro del segnale reale non si distingue da quello atteso dal caso" + string(g_cPok ? " e dal placebo" : "") + ": la tabella A non prova che la direzione del segnale porti informazione" +
-               string(g_cAns > 0 && g_cAsurv != "" ? ("; la prima delle " + IS(g_cAns) + " che passano il filtro: " + g_cAsurv) : "") + ". ";
+               string(g_cAns > 0 && g_cAsurv != "" ? ("; fra quelle che passano il filtro (" + IS(g_cAns) + ") la prima e': " + g_cAsurv) : "") + ". ";
       ta += "Le combinazioni vicine (TF contigui, fasce e target adiacenti) sono quasi duplicati: il numero di sopravvissute non conta conferme indipendenti.";
       AddConc(sIdx, "Tabella A (scelta in-sample)", ta);
      }
@@ -3968,7 +3969,7 @@ string BuildDigestHeader()
    else d += "VOLCFG|on|1|atr|" + IS(g_vpar.atrLen) + "|lookback|" + IS(g_vpar.lookback) + "|ema|" + IS(g_vpar.emaSmooth) +
         "|exp|" + F2(InpVsExpTh) + "|comp|" + F2(InpVsCompTh) + "|low|" + IS(InpVsLowTh) + "|high|" + IS(InpVsHighTh) + "|extreme|" + IS(InpVsExtremeTh) + "\n";
    d += "RUN|costfix|" + F1(InpCostPoints) + "|extra|" + F1(InpExtraCostPts) + "|maxgap|" + IS(InpMaxGapMin) +
-        "|entrygap|" + IS(InpMaxEntryGapMin) + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +
+        "|entrygap|" + IS(InpMaxEntryGapMin) + "|entrylag|" + IS(InpEntryLagMin) + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +
         "|ref|" + IS(g_hor[g_refH]) + "|sets|" + IS(g_nSets) + "\n";
    d += "DATA|m1bars|" + IS(g_n1) + "|days|" + IS(g_nDays) + "|medrange|" + F0(g_medRange) + "|medspr|" + F0(g_medSpr) +
         "|zerospr|" + F1(g_zeroSprPct) + "\n";
