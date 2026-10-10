@@ -2217,12 +2217,14 @@ string BuildDigestSet()
 //+------------------------------------------------------------------+
 string g_reportTag = "";
 string g_reportFile = "";
+string g_reportTmp = "";
 
 void ReportBegin()
   {
    g_reportTag  = SafeTag(_Symbol) + "_" + ModeName();
    g_reportFile = "SignalLab_MultiTF_" + g_reportTag + ".html";
-   g_fh = FileOpen(g_reportFile, FILE_WRITE | FILE_TXT | FILE_ANSI);
+   g_reportTmp  = g_reportFile + ".tmp";      // il report precedente resta intatto finche' la corsa non e' completa
+   g_fh = FileOpen(g_reportTmp, FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(g_fh == INVALID_HANDLE) Print("HTML non scrivibile (errore ", GetLastError(), "): salvo solo il digest.");
    g_dgSets = "";
    RepHead();
@@ -2330,7 +2332,8 @@ void RepCompare()
      }
    W("</table>");
    W("</div>");
-   //--- righe per il digest
+   //--- righe per il digest (sezione separata: non appartengono all'ultima serie)
+   g_dgSets += "### CMP\n";
    for(int s2 = 0; s2 < 2; s2++)
       for(int t = 0; t < g_nT; t++)
         {
@@ -2340,6 +2343,17 @@ void RepCompare()
                      "|ret|" + F1(g_cmpRet[ci]) + "|tcl|" + F2(g_cmpTcl[ci]) + "|mfe|" + F0(g_cmpMfe[ci]) + "|mae|" + F0(g_cmpMae[ci]) +
                      "|best|" + g_cmpDesc[ci] + "|oosn|" + F0(g_cmpBoN[ci]) + "|oosmean|" + F1(g_cmpBoM[ci]) + "|oost|" + F2(g_cmpBoT[ci]) + "\n";
         }
+  }
+
+//--- corsa interrotta: chiude e scarta il file temporaneo, il report precedente non viene toccato
+void ReportAbort()
+  {
+   if(g_fh != INVALID_HANDLE)
+     {
+      FileClose(g_fh);
+      g_fh = INVALID_HANDLE;
+      FileDelete(g_reportTmp);
+     }
   }
 
 void ReportEnd()
@@ -2358,7 +2372,11 @@ void ReportEnd()
      {
       FileClose(g_fh);
       g_fh = INVALID_HANDLE;
-      Print("Report: MQL5/Files/", g_reportFile);
+      if(FileIsExist(g_reportFile)) FileDelete(g_reportFile);
+      if(FileMove(g_reportTmp, 0, g_reportFile, FILE_REWRITE))
+         Print("Report: MQL5/Files/", g_reportFile);
+      else
+         Print("Report completo ma non rinominabile (errore ", GetLastError(), "): si trova in MQL5/Files/", g_reportTmp);
      }
    int df = FileOpen("SignalLab_MultiTF_digest_" + g_reportTag + ".txt", FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(df != INVALID_HANDLE)
@@ -2444,10 +2462,10 @@ void OnStart()
         }
       g_curSet = sIdx;
       Print("--- Serie ", sIdx + 1, "/", g_nSets, ": ", g_setTag[sIdx]);
-      if(!AllocAcc()) { Comment(""); if(g_fh != INVALID_HANDLE) { FileClose(g_fh); g_fh = INVALID_HANDLE; } return; }
+      if(!AllocAcc()) { Comment(""); ReportAbort(); return; }
       for(int hi = 0; hi < g_nH; hi++)
         {
-         if(IsStopped()) { Print("Interrotto dall'utente."); Comment(""); if(g_fh != INVALID_HANDLE) { FileClose(g_fh); g_fh = INVALID_HANDLE; } return; }
+         if(IsStopped()) { Print("Interrotto dall'utente."); Comment(""); ReportAbort(); return; }
          ComputeForward(g_hor[hi]);
          AccumulateHorizon(hi);
          Print(g_setTag[sIdx], ": orizzonte ", g_hor[hi], " min completato (", (GetTickCount() - t0) / 1000.0, " s)");
