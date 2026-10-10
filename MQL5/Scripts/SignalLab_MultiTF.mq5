@@ -104,6 +104,7 @@ input double   InpExtraCostPts      = 0;      // commissione/slippage extra in p
 input group "=== TABELLE ==="
 input int      InpBucketMin         = 15;     // fasce orarie: 1,2,3,4,5,6,10,12,15,20,30,60
 input ENUM_TIMEFRAMES InpParentTF   = PERIOD_H1; // TF "contenitore" per la posizione della candela (es. 5a M1 dentro l'H1)
+input double   InpMatrixLevel       = 200;    // livello (pt) della matrice giorno x ora: probabilita' di raggiungerlo
 input int      InpTopRuns           = 100;    // quante run piu' lunghe elencare
 input int      InpMinPerBucket      = 30;     // sotto questa soglia la riga e' grigia (rumore)
 input bool     InpDigestTOD         = false;  // include le fasce orarie nel digest (lungo)
@@ -116,11 +117,19 @@ input ENUM_NOISE_SORT InpNoiseSort  = NS_TOTAL; // ordinamento della tabella B (
 input ENUM_TIMEFRAMES InpEventTF    = PERIOD_M5; // TF dell'elenco segnali con le spunte
 input int      InpEventRows         = 120;    // quanti segnali elencare (campione uniforme su tutto il periodo)
 
+input group "=== CANDELE SUCCESSIVE AL SEGNALE (quanto si muove il prezzo dopo) ==="
+input string   InpNextCandles       = "1,2,3,5,10"; // quante candele DOPO il segnale misurare (dello stesso TF del segnale): massimo 8 valori, ciascuno da 1 a 100
+input int      InpNextRef           = 1;      // numero di candele di riferimento per le tabelle per orario, intensita' e giorno
+
 //--- ================================================================
 #define ACCN 8       // campi per accumulatore: n, mfe, mae, retNet, retNet^2, costo, win, lose
 #define BCAP 8       // posizione raffica: 1..7, 8+
 #define RKN  5       // campi classifica: n, somma pnl, somma pnl^2, hit, somma MAE
 #define NCAT 9       // categorie di stato di volatilita': 3 intensita' + 4 regimi + 2 direzioni del percentile
+#define NXF    7     // candele successive, campi: n, favorevole, avverso, range, |chiusura|, chiusura con segno, chiusura con segno^2
+#define NXB    64    // classi dell'istogramma logaritmico (favorevole e range) per mediana e 90 percentile
+#define NXSTEP 0.2   // ampiezza di una classe dell'istogramma: log(1 + punti)
+#define NMEM1  20    // categorie fisse: 0 tutti | 1..7 giorno | 8..13 intensita' | 14..17 regime | 18..19 volatilita' in calo/in salita; poi le fasce orarie
 
 const ENUM_TIMEFRAMES g_allTF[21] =
   {PERIOD_M1, PERIOD_M2, PERIOD_M3, PERIOD_M4, PERIOD_M5, PERIOD_M6, PERIOD_M10, PERIOD_M12,
@@ -170,6 +179,33 @@ int      g_cmpEv[];
 double   g_cmpN[], g_cmpMfe[], g_cmpMae[], g_cmpRet[], g_cmpTcl[];
 string   g_cmpDesc[];
 double   g_cmpBoN[], g_cmpBoM[], g_cmpBoT[];
+
+//--- candele successive al segnale
+int      g_nM = 0, g_nxRef = 0, g_nMem = 0;
+int      g_nxM[];                  // numero di candele misurate (crescente)
+double   g_ibEdge[5];              // soglie TR/ATR delle 6 classi di intensita'
+double   g_nx[];                   // [serie][t][categoria][m][NXF]
+int      g_nxh[];                  // [serie][t][categoria][m][2][NXB]: 0 = favorevole, 1 = range
+double   g_nxb[];                  // base: [t][categoria][m][NXF] = tutte le barre con ingresso valido, direzione casuale
+
+//--- giorno della settimana x fascia x livello (orizzonte di riferimento)
+int      g_dbLev[];        // [t][dow][b][nL+1] segnali: istogramma del n. di livelli <= MFE
+int      g_dbBN[];         // [t][dow][b]       barre base
+int      g_dbBHist[];      // [t][dow][b][nL+1] base (direzione casuale)
+
+//--- riepilogo scritto: righe (serie, tema, testo) e valori raccolti dalle tabelle di classifica
+int      g_cSet[];
+string   g_cTopic[], g_cText[];
+bool     g_cAok = false, g_cBok = false;
+long     g_cAm = 0, g_cBm = 0;
+double   g_cAbestT = 0.0, g_cAchance = 0.0;
+int      g_cApn = 0, g_cAusable = 0, g_cApos = 0, g_cAstrong = 0, g_cAns = 0;
+string   g_cAsurv = "", g_cBdesc = "";
+double   g_cBtotal = 0.0, g_cBmean = 0.0, g_cBt = 0.0, g_cBn = 0.0, g_cBshareN = 0.0, g_cBshareLate = 0.0;
+int      g_cBboth = 0, g_cBincoh = 0, g_cBusable = 0, g_cBpn = 0;
+//--- aggregati per serie, usati dal confronto
+double   g_agN[2], g_agNet[2], g_agGross[2];
+int      g_agGpos[2], g_agGneg[2], g_agNsig[2], g_agA1ok[2], g_agAns[2], g_agNtf[2];
 datetime g_tStart = 0;                  // primo istante M1 effettivamente disponibile nel periodo
 bool     g_histWarn = false;            // lo storico M1 inizia molto dopo InpFrom
 int      g_rbMin = 15, g_nRB = 96;   // fasce della classifica
@@ -246,7 +282,7 @@ string   g_dg = "";
 
 struct CellStat
   {
-   double n, mfe, mae, ret, sd, tNaive, tCl, cost, win, lose, zSign, baseMfe;
+   double n, mfe, mae, ret, sd, tNaive, tCl, cost, win, lose, zSign, baseMfe, se, gross, tGross;
   };
 
 //+------------------------------------------------------------------+
@@ -256,6 +292,24 @@ string F0(const double v) { return DoubleToString(v, 0); }
 string F1(const double v) { return DoubleToString(v, 1); }
 string F2(const double v) { return DoubleToString(v, 2); }
 string IS(const long v)   { return IntegerToString(v); }
+string Sg(const double v, const int dg = 1) { return string(v > 0.0 ? "+" : "") + DoubleToString(v, dg); }
+
+string HtmlEsc(const string src)
+  {
+   string o = src;
+   StringReplace(o, "&", "&amp;");
+   StringReplace(o, "<", "&lt;");
+   StringReplace(o, ">", "&gt;");
+   return o;
+  }
+
+double MedianOf(double &a[], const int n)
+  {
+   if(n <= 0) return 0.0;
+   ArrayResize(a, n);
+   ArraySort(a);
+   return (n % 2 == 1) ? a[n / 2] : 0.5 * (a[n / 2 - 1] + a[n / 2]);
+  }
 
 void W(const string s) { if(g_fh != INVALID_HANDLE) FileWriteString(g_fh, s); }
 
@@ -496,6 +550,40 @@ bool SetupInputs()
        Print("InpParentTF ", EnumToString(InpParentTF), " non utilizzabile come contenitore (al massimo D1 e deve contenere almeno un TF analizzato): tabelle 'candela nel TF superiore' disattivate.");
    }
 
+   {
+    int tmp[];
+    const int nn = ParseIntList(InpNextCandles, tmp);
+    ArrayResize(g_nxM, 0);
+    for(int i = 0; i < nn && ArraySize(g_nxM) < 8; i++)
+       if(tmp[i] <= 100)
+         {
+          const int k = ArraySize(g_nxM);
+          ArrayResize(g_nxM, k + 1);
+          g_nxM[k] = tmp[i];
+         }
+    if(ArraySize(g_nxM) < 1)
+      {
+       Print("InpNextCandles non valido: uso 1,2,3,5,10.");
+       ArrayResize(g_nxM, 5);
+       g_nxM[0] = 1; g_nxM[1] = 2; g_nxM[2] = 3; g_nxM[3] = 5; g_nxM[4] = 10;
+      }
+    g_nM = ArraySize(g_nxM);
+    g_nxRef = 0;
+    int bdx = 1000000000;
+    for(int i = 0; i < g_nM; i++)
+      {
+       const int dx = MathAbs(g_nxM[i] - InpNextRef);
+       if(dx < bdx) { bdx = dx; g_nxRef = i; }
+      }
+    g_nMem = NMEM1 + g_nB;
+    g_ibEdge[0] = InpVsCompTh;
+    g_ibEdge[1] = 1.0;
+    g_ibEdge[2] = 0.5 * (1.0 + InpVsExpTh);
+    g_ibEdge[3] = InpVsExpTh;
+    g_ibEdge[4] = 1.4 * InpVsExpTh;
+    ArraySort(g_ibEdge);
+   }
+
    g_vpar.atrLen    = MathMax(2, InpVsAtrLen);
    g_vpar.lookback  = MathMax(10, InpVsLookback);
    g_vpar.emaSmooth = MathMax(1, InpVsEmaSmooth);
@@ -654,6 +742,111 @@ bool LoadM1()
   }
 
 //+------------------------------------------------------------------+
+//| CANDELE SUCCESSIVE AL SEGNALE                                     |
+//| Per ogni barra con ingresso valido (segnale o no) misura, dal     |
+//| prezzo d'ingresso (open della candela successiva), cosa fanno le  |
+//| prossime m candele DELLO STESSO TF: massimo e minimo raggiunti    |
+//| (cumulati) e chiusura dell'm-esima. In punti, lordo di spread.    |
+//| Le barre senza segnale alimentano la BASE (direzione casuale).    |
+//+------------------------------------------------------------------+
+int NxBin(const double v)
+  {
+   if(v <= 0.0) return 0;
+   const int b = (int)(MathLog(1.0 + v) / NXSTEP);
+   return (b >= NXB) ? NXB - 1 : b;
+  }
+
+void NxBar(const int t, const MqlRates &r[], const int n, const int i, const int mp,
+           const long xs, const bool chk, const long gapSec, const int ib, const uchar vs,
+           const int d0, const int d1)
+  {
+   const double o       = r[i + 1].open;
+   const int    maxM    = g_nxM[g_nM - 1];
+   const long   lastEnd = (long)g_m1Time[g_n1 - 1] + 60L;
+   double hi = r[i + 1].high, lo = r[i + 1].low;
+   double up[8], dn[8], mv[8];
+   int mi = 0;
+   for(int kk = 1; kk <= maxM; kk++)
+     {
+      const int x = i + kk;
+      if(x >= n) break;                                                       // storico finito
+      if(chk && ((long)(r[x].time - r[x - 1].time) - xs) > gapSec) break;     // buco di dati fra due candele (intraday)
+      if(x == n - 1 && ((long)r[x].time + xs) > lastEnd) break;               // ultima candela ancora in formazione
+      if(r[x].high > hi) hi = r[x].high;
+      if(r[x].low  < lo) lo = r[x].low;
+      if(g_nxM[mi] == kk)
+        {
+         up[mi] = (hi - o) / g_pt;
+         dn[mi] = (o - lo) / g_pt;
+         mv[mi] = (r[x].close - o) / g_pt;
+         mi++;
+         if(mi >= g_nM) break;
+        }
+     }
+   if(mi < 1) return;
+
+   //--- categorie a cui appartiene la barra
+   int mem[6];
+   int nm = 0;
+   mem[nm] = 0;                              nm++;
+   mem[nm] = 1 + (int)g_m1Dow[mp];           nm++;
+   if(ib >= 0 && ib < 6) { mem[nm] = 8 + ib; nm++; }
+   if(InpUseVolState && vs != 255)
+     {
+      mem[nm] = 14 + ((vs >> 1) & 3);        nm++;
+      mem[nm] = 18 + (vs & 1);               nm++;
+     }
+   mem[nm] = NMEM1 + (int)g_m1Bkt[mp];       nm++;
+
+   //--- base: ogni barra, direzione casuale (favorevole = avverso = meta' del range)
+   double rg[8];
+   for(int k = 0; k < mi; k++) rg[k] = up[k] + dn[k];
+   for(int q = 0; q < nm; q++)
+      for(int k = 0; k < mi; k++)
+        {
+         const int p = ((t * g_nMem + mem[q]) * g_nM + k) * NXF;
+         g_nxb[p]     += 1.0;
+         g_nxb[p + 1] += 0.5 * rg[k];
+         g_nxb[p + 2] += 0.5 * rg[k];
+         g_nxb[p + 3] += rg[k];
+         g_nxb[p + 4] += MathAbs(mv[k]);
+        }
+
+   //--- segnali di ciascuna serie
+   int ds[2];
+   ds[0] = d0; ds[1] = d1;
+   int bR[8], bF[8];
+   for(int s = 0; s < g_nSets; s++)
+     {
+      const int d = ds[s];
+      if(d == 0) continue;
+      for(int k = 0; k < mi; k++)
+        {
+         bR[k] = NxBin(rg[k]);
+         bF[k] = NxBin((d > 0) ? up[k] : dn[k]);
+        }
+      for(int q = 0; q < nm; q++)
+         for(int k = 0; k < mi; k++)
+           {
+            const int    cellI = (((s * g_nT + t) * g_nMem + mem[q]) * g_nM + k);
+            const int    p     = cellI * NXF;
+            const double fav   = (d > 0) ? up[k] : dn[k];
+            const double adv   = (d > 0) ? dn[k] : up[k];
+            const double sm    = (d > 0) ? mv[k] : -mv[k];
+            g_nx[p]     += 1.0;
+            g_nx[p + 1] += fav;
+            g_nx[p + 2] += adv;
+            g_nx[p + 3] += rg[k];
+            g_nx[p + 4] += MathAbs(mv[k]);
+            g_nx[p + 5] += sm;
+            g_nx[p + 6] += sm * sm;
+            g_nxh[cellI * 2 * NXB + bF[k]]++;
+            g_nxh[cellI * 2 * NXB + NXB + bR[k]]++;
+           }
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Per un TF: segnali + mappa verso l'ingresso M1                    |
 //+------------------------------------------------------------------+
 void ProcessTF(const int t, const MqlRates &r[], const int n)
@@ -678,6 +871,8 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
      {
       SD_VolState(r, n, g_vpar, g_pt, vsc);       // il warm-up dei segnali resta quello del segnale: lo stato ha il suo (g_volWarm)
      }
+   uchar ibn[];
+   SD_IntensityBins(r, n, g_vpar.atrLen, g_ibEdge, ibn);      // intensita' della candela del segnale (TR/ATR), anche senza stato di volatilita'
 
    const long   xs      = g_tfSec[t];
    const long   maxGap  = (long)InpMaxEntryGapMin * 60L;
@@ -711,6 +906,8 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
       g_vs[u]   = InpUseVolState ? ((i >= g_volWarm) ? vsc[i] : (uchar)255) : (uchar)10;   // 255 = finestra del percentile incompleta
       g_slot[u] = (ushort)(slotOK ? (int)(((long)r[i].time % g_parentSec) / xs) : 0);
       if(dir[i] != 0) ev++;
+      NxBar(t, r, n, i, p, xs, (xs < 86400L), (long)InpMaxGapMin * 60L, (int)ibn[i], g_vs[u], (int)dir[i],
+            (g_nSets > 1) ? (int)dir2[i] : 0);
       u++;
      }
    g_tfCnt[t]    = u - g_used;
@@ -757,6 +954,11 @@ bool AllocAcc()
    ArrayResize(g_tpTime, c); ArrayResize(g_tpTF, c); ArrayResize(g_tpDir, c);
    ArrayResize(g_tpBur, c);  ArrayResize(g_tpSlot, c);
    ArrayResize(g_tpMfe, c);  ArrayResize(g_tpMae, c); ArrayResize(g_tpRet, c); ArrayResize(g_tpCost, c);
+
+   //--- giorno x fascia x livello
+   ArrayResize(g_dbLev,   g_nT * 7 * g_nB * (g_nL + 1)); ArrayInitialize(g_dbLev, 0);
+   ArrayResize(g_dbBN,    g_nT * 7 * g_nB);              ArrayInitialize(g_dbBN, 0);
+   ArrayResize(g_dbBHist, g_nT * 7 * g_nB * (g_nL + 1)); ArrayInitialize(g_dbBHist, 0);
 
    //--- stato di volatilita'
    ArrayResize(g_accCnd, g_nT * NCAT * ACCN);      ArrayInitialize(g_accCnd, 0.0);
@@ -965,6 +1167,13 @@ void AccumulateHorizon(const int hi)
          int cs = 0; while(cs < g_nL && mS >= g_lev[cs]) cs++;
          g_bsHist[bi * nL1 + cb]++;
          g_bsHist[bi * nL1 + cs]++;
+         if(isRef)
+           {
+            const int dbi = (t * 7 + (int)g_m1Dow[j]) * g_nB + b;
+            g_dbBN[dbi]++;
+            g_dbBHist[dbi * nL1 + cb]++;
+            g_dbBHist[dbi * nL1 + cs]++;
+           }
          if(isRef && InpUseVolState && g_vs[k] != 255)
            {
             const int    vc = (int)g_vs[k];
@@ -1026,6 +1235,7 @@ void AccumulateHorizon(const int hi)
                   g_evMfe[q]  = fav; g_evMae[q] = adv; g_evRet[q] = retN;
                  }
               }
+            g_dbLev[((t * 7 + (int)g_m1Dow[j]) * g_nB + b) * nL1 + cf]++;
             if(InpUseVolState && g_vs[k] != 255)
               {
                const int vc2 = (int)g_vs[k];
@@ -1103,6 +1313,9 @@ bool GetCell(const int t, const int h, CellStat &s)
      }
    double se = MathSqrt(ss) / n;
    s.tCl = (se > 0.0) ? s.ret / se : 0.0;
+   s.se     = se;
+   s.gross  = s.ret + s.cost;                 // rendimento medio prima dei costi
+   s.tGross = (se > 0.0) ? s.gross / se : 0.0;
 
    s.win  = g_accTH[p + 6];
    s.lose = g_accTH[p + 7];
@@ -1152,6 +1365,8 @@ void RepHead()
    W("details{margin:6px 0}summary{cursor:pointer;color:#88c0d0;padding:3px 0}");
    W("pre{background:#0f1114;border:1px solid #2e3440;border-radius:6px;padding:14px;overflow-x:auto;font:11px/1.45 ui-monospace,Consolas,monospace;color:#d8dee9;white-space:pre}");
    W(".wrap{display:flex;flex-direction:column}.sec{width:100%}.setH{font-size:18px;margin:34px 0 4px;padding:8px 12px;background:#1e222a;border-left:4px solid #88c0d0}");
+   W("h4{font-size:12px;margin:12px 0 4px;color:#a3be8c}button{background:#2e3440;color:#d8dee9;border:1px solid #4c566a;border-radius:4px;padding:6px 14px;cursor:pointer}");
+   W(".sum td{text-align:left;vertical-align:top;line-height:1.5}.sum td:first-child{white-space:nowrap;font-weight:bold;color:#88c0d0}.sum td:nth-child(2){white-space:nowrap;color:#8fbcbb}");
    W("</style></head><body>");
   }
 
@@ -1599,6 +1814,8 @@ void RepRank()
    double chanceT = (m > 1) ? MathSqrt(2.0 * MathLog((double)m)) : 0.0;
    double bestT = pT[0];
    bool noisy = (bestT < chanceT + 1.0 || usable == 0 || posOOS * 2 < usable);
+   g_cAok = true; g_cAm = m; g_cAbestT = bestT; g_cAchance = chanceT; g_cApn = pn;
+   g_cAusable = usable; g_cApos = posOOS; g_cAstrong = strong;
    W("<div class='note " + string(noisy ? "ko" : "ok") + "'><b>Diagnostica della classifica.</b> Combinazioni valutate in-sample: <b>" + IS(m) +
      "</b>. Il miglior t in-sample trovato &egrave; <b>" + F2(bestT) + "</b>; per puro caso, su " + IS(m) +
      " tentativi indipendenti, ci si aspetta un massimo intorno a <b>" + F2(chanceT) + "</b> (stima per eccesso: le combinazioni vicine sono correlate, quindi i test davvero indipendenti sono meno). "
@@ -1634,6 +1851,19 @@ void RepRank()
    for(int i = 0; i < ns - 1; i++)
       for(int j2 = i + 1; j2 < ns; j2++)
          if(svT[j2] > svT[i]) { double tt = svT[i]; svT[i] = svT[j2]; svT[j2] = tt; int ti = sv[i]; sv[i] = sv[j2]; sv[j2] = ti; }
+   g_cAns = ns;
+   g_cAsurv = "";
+   if(ns > 0)
+     {
+      const int i0 = sv[0];
+      const int bs0 = ((pTf[i0] * g_nRB + pB[i0]) * g_nH + pH[i0]) * blk;
+      RkStat sa, sb;
+      RkRead(g_rk, bs0, pK[i0], pD[i0], 0, sa);
+      RkRead(g_rk, bs0, pK[i0], pD[i0], 1, sb);
+      g_cAsurv = g_tfName[pTf[i0]] + " " + RBktLabel(pB[i0]) + " " + (pD[i0] == 0 ? "SEGUI" : "INVERTI") + ", tieni " + IS(g_hor[pH[i0]]) +
+                 " min, target " + KLabel(pK[i0]) + " pt: netto in-sample " + Sg(sa.mean) + " (t " + F2(sa.t) + "), fuori campione " +
+                 Sg(sb.mean) + " (t " + F2(sb.t) + ", " + F0(sb.n) + " posizioni)";
+     }
    W("<h3>Fra le prime " + IS(pn) + " in-sample: quelle con IS t &ge; 2 che reggono anche fuori campione (OOS netto &gt; 0 e OOS t &ge; 2)</h3>");
    if(ns == 0)
       W("<div class='note ko'>Nessuna combinazione fra le migliori in-sample ha OOS positivo e significativo. &Egrave; il risultato atteso se il segnale non ha edge netto dei costi.</div>");
@@ -1837,6 +2067,10 @@ void RepRankNoise()
    RkStat top;
    RkReadAll(g_rk, ((pTf[0] * g_nRB + pB[0]) * g_nH + pH[0]) * blk, pK[0], pD[0], top);
    bool good = (sumAll > 0.0 && usable > 0 && bothPos * 2 >= usable && shareLate >= 0.5 * shareN);
+   g_cBok = true; g_cBm = m; g_cBtotal = top.sum; g_cBmean = top.mean; g_cBt = top.t; g_cBn = top.n;
+   g_cBshareN = shareN; g_cBshareLate = shareLate; g_cBboth = bothPos; g_cBincoh = incoh; g_cBusable = usable; g_cBpn = pn;
+   g_cBdesc = g_tfName[pTf[0]] + " " + RBktLabel(pB[0]) + " " + (pD[0] == 0 ? "SEGUI" : "INVERTI") + ", tieni " + IS(g_hor[pH[0]]) +
+              " min, target " + KLabel(pK[0]) + " pt";
    string shareTxt = (sumAll > 0.0)
       ? ("la parte pi&ugrave; recente del periodo contiene il <b>" + F1(shareN) + "%</b> delle posizioni ma il <b>" + F1(shareLate) +
          "%</b> del profitto: se l'edge fosse stabile le due quote sarebbero simili. ")
@@ -1975,6 +2209,706 @@ void RepVolState()
      }
   }
 
+//+------------------------------------------------------------------+
+//| GIORNI DELLA SETTIMANA E ORARI CHE RAGGIUNGONO I PUNTI            |
+//| P = % di segnali il cui movimento favorevole (lordo, dal prezzo   |
+//| d'ingresso) raggiunge il livello entro la tenuta di riferimento.  |
+//| Base = stessa probabilita' con entrata in direzione casuale nello |
+//| STESSO giorno e nella STESSA fascia: toglie l'effetto della       |
+//| volatilita' di quel momento.                                      |
+//+------------------------------------------------------------------+
+int DbIdx(const int t, const int d, const int b) { return (t * 7 + d) * g_nB + b; }
+
+double DbEvN(const int t, const int d, const int b)
+  {
+   const int base = DbIdx(t, d, b) * (g_nL + 1);
+   double sm = 0.0;
+   for(int c = 0; c <= g_nL; c++) sm += (double)g_dbLev[base + c];
+   return sm;
+  }
+
+double DbEvReach(const int t, const int d, const int b, const int l)
+  {
+   return SuffixCount(g_dbLev, DbIdx(t, d, b) * (g_nL + 1), l);
+  }
+
+double DbBase(const int t, const int d, const int b, const int l)
+  {
+   const int i = DbIdx(t, d, b);
+   if(g_dbBN[i] <= 0) return 0.0;
+   return SuffixCount(g_dbBHist, i * (g_nL + 1), l) / (2.0 * (double)g_dbBN[i]);
+  }
+
+//--- probabilita' osservata e di base su un insieme di celle (giorni dLo..dHi, fasce bLo..bHi); la base e' pesata sui segnali
+void DbAgg(const int t, const int dLo, const int dHi, const int bLo, const int bHi, const int l,
+           double &n, double &pObs, double &pBase)
+  {
+   double sn = 0.0, sr = 0.0, sb = 0.0;
+   for(int d = dLo; d <= dHi; d++)
+      for(int b = bLo; b <= bHi; b++)
+        {
+         const double en = DbEvN(t, d, b);
+         if(en <= 0.0) continue;
+         sn += en;
+         sr += DbEvReach(t, d, b, l);
+         sb += en * DbBase(t, d, b, l);
+        }
+   n = sn;
+   pObs  = (sn > 0.0) ? 100.0 * sr / sn : 0.0;
+   pBase = (sn > 0.0) ? 100.0 * sb / sn : 0.0;
+  }
+
+//--- fino a 4 livelli "chiave" per le tabelle compatte
+int KeyLevels(int &idx[])
+  {
+   ArrayResize(idx, 0);
+   if(g_nL <= 4)
+     {
+      ArrayResize(idx, g_nL);
+      for(int i = 0; i < g_nL; i++) idx[i] = i;
+      return g_nL;
+     }
+   int cand[4];
+   cand[0] = 0; cand[1] = g_nL / 3; cand[2] = (2 * g_nL) / 3; cand[3] = g_nL - 1;
+   for(int i = 0; i < 4; i++)
+     {
+      bool dup = false;
+      for(int q = 0; q < ArraySize(idx); q++) if(idx[q] == cand[i]) dup = true;
+      if(dup) continue;
+      const int k = ArraySize(idx);
+      ArrayResize(idx, k + 1);
+      idx[k] = cand[i];
+     }
+   return ArraySize(idx);
+  }
+
+int MatrixLevelIdx()
+  {
+   int best = 0;
+   double bd = 1.0e18;
+   for(int l = 0; l < g_nL; l++)
+     {
+      double d = MathAbs(g_lev[l] - InpMatrixLevel);
+      if(d < bd) { bd = d; best = l; }
+     }
+   return best;
+  }
+
+//--- TF di riferimento per le sintesi: quello dell'elenco spunte se ha campione, altrimenti il TF con piu' segnali misurati
+int RefTFIndex()
+  {
+   if(g_evT >= 0 && g_accTH[(g_evT * g_nH + g_refH) * ACCN] >= g_minN) return g_evT;
+   int best = -1;
+   double bn = 0.0;
+   for(int t = 0; t < g_nT; t++)
+     {
+      double n = g_accTH[(t * g_nH + g_refH) * ACCN];
+      if(n > bn) { bn = n; best = t; }
+     }
+   return best;
+  }
+
+//--- le k fasce con la P piu' alta (mode 0) o il maggior vantaggio sulla base P/base (mode 1) per il livello l
+int BestBuckets(const int t, const int l, const int mode, const int k, int &out[])
+  {
+   ArrayResize(out, 0);
+   double sc[];
+   bool   used[];
+   ArrayResize(sc, g_nB);
+   ArrayResize(used, g_nB);
+   for(int b = 0; b < g_nB; b++)
+     {
+      used[b] = false;
+      sc[b]   = -1.0e18;
+      double n, po, pb;
+      DbAgg(t, 0, 6, b, b, l, n, po, pb);
+      if(n < InpMinPerBucket) continue;
+      if(mode == 0) sc[b] = po;
+      else if(pb >= 1.0) sc[b] = po / pb;
+     }
+   for(int r = 0; r < k; r++)
+     {
+      int bi = -1;
+      double bs = -1.0e17;
+      for(int b = 0; b < g_nB; b++)
+         if(!used[b] && sc[b] > bs) { bs = sc[b]; bi = b; }
+      if(bi < 0) break;
+      used[bi] = true;
+      const int m = ArraySize(out);
+      ArrayResize(out, m + 1);
+      out[m] = bi;
+     }
+   return ArraySize(out);
+  }
+
+string BktInfo(const int t, const int b, const int l)
+  {
+   double n, po, pb;
+   DbAgg(t, 0, 6, b, b, l, n, po, pb);
+   return BktLabel(b) + " " + F0(po) + "% (base " + F0(pb) + "%, " + F0(n) + " segnali)";
+  }
+
+string ReachCol(const double po, const double pb)
+  {
+   if(po > pb * 1.1 && po >= 1.0) return "#a3be8c";
+   if(po < pb * 0.9 && pb >= 1.0) return "#bf616a";
+   return "#7b8794";
+  }
+
+//--- giorno della settimana: segnali, MFE/MAE, netto, costo e probabilita' di raggiungere ogni livello (base fra parentesi)
+void RepDowTable(const int t)
+  {
+   W("<table><tr><th>Giorno</th><th>Segnali</th><th>MFE medio</th><th>MAE medio</th><th>Netto medio</th><th>Costo medio</th>");
+   for(int l = 0; l < g_nL; l++) W("<th>&ge; " + F0(g_lev[l]) + " pt</th>");
+   W("</tr>");
+   int ord[7] = {1, 2, 3, 4, 5, 6, 0};
+   for(int q = 0; q < 7; q++)
+     {
+      const int d = ord[q];
+      const int p = (t * 7 + d) * ACCN;
+      const double n = g_accDow[p];
+      if(n < 1.0) continue;
+      const string cls = (n < InpMinPerBucket) ? " class='thin'" : "";
+      W("<tr" + cls + "><td>" + DowName(d) + "</td>" + Td(F0(n)) + Td(F0(g_accDow[p + 1] / n)) + Td(F0(g_accDow[p + 2] / n)) +
+        Td("<b>" + F1(g_accDow[p + 3] / n) + "</b>", ColSign(g_accDow[p + 3] / n)) + Td(F1(g_accDow[p + 5] / n)));
+      for(int l = 0; l < g_nL; l++)
+        {
+         double nn, po, pb;
+         DbAgg(t, d, d, 0, g_nB - 1, l, nn, po, pb);
+         W(Td(F0(po) + " (" + F0(pb) + ")", ReachCol(po, pb)));
+        }
+      W("</tr>");
+     }
+   W("</table>");
+  }
+
+//--- fasce orarie: probabilita' di raggiungere i livelli chiave
+void RepHoursReach(const int t)
+  {
+   int key[];
+   const int nk = KeyLevels(key);
+   if(nk < 1) return;
+   W("<table><tr><th>Fascia (entrata, server + offset)</th><th>Segnali</th>");
+   for(int q = 0; q < nk; q++) W("<th>&ge; " + F0(g_lev[key[q]]) + " pt: % (base)</th>");
+   W("</tr>");
+   for(int b = 0; b < g_nB; b++)
+     {
+      double n, po, pb;
+      DbAgg(t, 0, 6, b, b, key[0], n, po, pb);
+      if(n < 1.0) continue;
+      const string cls = (n < InpMinPerBucket) ? " class='thin'" : "";
+      W("<tr" + cls + "><td>" + BktLabel(b) + "</td>" + Td(F0(n)));
+      for(int q = 0; q < nk; q++)
+        {
+         double n2, po2, pb2;
+         DbAgg(t, 0, 6, b, b, key[q], n2, po2, pb2);
+         W(Td(F0(po2) + " (" + F0(pb2) + ")", ReachCol(po2, pb2)));
+        }
+      W("</tr>");
+     }
+   W("</table>");
+  }
+
+//--- classifica: per ogni livello le fasce che lo raggiungono piu' spesso
+void RepHoursRanking(const int t)
+  {
+   W("<table><tr><th>Livello</th><th>Fasce con la probabilit&agrave; pi&ugrave; alta (P %, base %, segnali)</th>"
+     "<th>Fasce con il maggior vantaggio sulla base (P / base)</th></tr>");
+   for(int l = 0; l < g_nL; l++)
+     {
+      int top0[], top1[];
+      const int n0 = BestBuckets(t, l, 0, 3, top0);
+      const int n1 = BestBuckets(t, l, 1, 3, top1);
+      if(n0 < 1) continue;
+      string c0 = "", c1 = "";
+      for(int r = 0; r < n0; r++) c0 += (r > 0 ? "<br>" : "") + BktInfo(t, top0[r], l);
+      for(int r = 0; r < n1; r++)
+        {
+         double n, po, pb;
+         DbAgg(t, 0, 6, top1[r], top1[r], l, n, po, pb);
+         c1 += (r > 0 ? "<br>" : "") + BktLabel(top1[r]) + " x" + F2(pb > 0.0 ? po / pb : 0.0) + " (" + F0(po) + "% contro " + F0(pb) + "%)";
+        }
+      W("<tr><td>&ge; " + F0(g_lev[l]) + " pt</td><td style='text-align:left'>" + c0 + "</td><td style='text-align:left'>" + c1 + "</td></tr>");
+     }
+   W("</table>");
+  }
+
+//--- matrice giorno x ora: probabilita' di raggiungere il livello InpMatrixLevel
+void RepDowHourMatrix(const int t)
+  {
+   const int lm  = MatrixLevelIdx();
+   const int per = MathMax(1, 60 / g_bMin);
+   W("<div class='note'>Probabilit&agrave; (%) di raggiungere <b>+" + F0(g_lev[lm]) + " pt</b> entro " + IS(g_hor[g_refH]) +
+     " min, per giorno e ora d'ingresso (server + offset). Verde = sopra la base dello stesso giorno e fascia, rosso = sotto. "
+     "Passa il mouse su una cella per vedere base e numero di segnali. Celle grigie = meno di " + IS(InpMinPerBucket) + " segnali.</div>");
+   W("<table><tr><th>Giorno \\ ora</th>");
+   for(int h = 0; h < 24; h++) W("<th>" + IntegerToString(h) + "</th>");
+   W("</tr>");
+   int ord[7] = {1, 2, 3, 4, 5, 6, 0};
+   for(int q = 0; q < 7; q++)
+     {
+      const int d = ord[q];
+      if(g_accDow[(t * 7 + d) * ACCN] < 1.0) continue;
+      W("<tr><td>" + DowName(d) + "</td>");
+      for(int h = 0; h < 24; h++)
+        {
+         const int bLo = h * per;
+         if(bLo >= g_nB) { W("<td>-</td>"); continue; }
+         const int bHi = MathMin(g_nB - 1, bLo + per - 1);
+         double n, po, pb;
+         DbAgg(t, d, d, bLo, bHi, lm, n, po, pb);
+         if(n < 1.0) { W("<td>-</td>"); continue; }
+         const string tip = " title='base " + F0(pb) + "% | segnali " + F0(n) + "'";
+         if(n < InpMinPerBucket) { W("<td class='thin'" + tip + ">" + F0(po) + "</td>"); continue; }
+         W("<td style='color:" + ReachCol(po, pb) + "'" + tip + ">" + F0(po) + "</td>");
+        }
+      W("</tr>");
+     }
+   W("</table>");
+  }
+
+void RepDowHours(const int t)
+  {
+   W("<h3>Per giorno della settimana: segnali, MFE/MAE, netto e probabilit&agrave; di raggiungere i livelli: P % (base %)</h3>");
+   RepDowTable(t);
+   W("<h3>Per fascia oraria: probabilit&agrave; di raggiungere i livelli chiave: P % (base %)</h3>");
+   RepHoursReach(t);
+   W("<h3>Quali orari raggiungono pi&ugrave; spesso ciascun livello</h3>");
+   RepHoursRanking(t);
+   W("<h3>Matrice giorno x ora</h3>");
+   RepDowHourMatrix(t);
+  }
+
+void RepDowHoursMain()
+  {
+   const int rt = RefTFIndex();
+   if(rt < 0) return;
+   W("<h2>Giorni della settimana e orari che raggiungono i punti &mdash; " + g_tfName[rt] + ", entro " + IS(g_hor[g_refH]) + " min</h2>");
+   W("<div class='note'><b>P</b> = percentuale di segnali il cui movimento favorevole (lordo, dal prezzo d'ingresso) raggiunge il livello entro la tenuta. "
+     "<b>Base</b> = la stessa probabilit&agrave; con entrata in direzione casuale nello <b>stesso giorno e nella stessa fascia</b>: "
+     "i momenti con pi&ugrave; volatilit&agrave; raggiungono i livelli pi&ugrave; spesso anche senza segnale, quindi conta il vantaggio sulla base (verde), non la P assoluta. "
+     "Con molte fasce e giorni testati qualcuno supera la base per caso: cerca regolarit&agrave; fra TF vicini, non la singola cella. "
+     "Le stesse tabelle per ogni timeframe sono nel dettaglio per TF.</div>");
+   RepDowHours(rt);
+  }
+
+//+------------------------------------------------------------------+
+//| CANDELE SUCCESSIVE AL SEGNALE - REPORT                            |
+//| Dopo ogni segnale: quanti punti fanno le prossime m candele dello |
+//| stesso TF, dal prezzo d'ingresso (open della candela successiva). |
+//| Favorevole = massimo nella direzione del segnale, avverso = nella |
+//| direzione opposta, range = massimo - minimo, chiusura = close     |
+//| dell'm-esima candela. La BASE e' la stessa misura su tutte le     |
+//| barre dello stesso TF e della stessa categoria (direzione         |
+//| casuale): senza di essa un movimento ampio sembra merito del      |
+//| segnale mentre e' solo la volatilita' di quel momento.            |
+//+------------------------------------------------------------------+
+struct NxStat
+  {
+   double n, fav, adv, rng, absMv, sMv, tMv;
+  };
+
+int NxCell(const int s, const int t, const int mem, const int mi)
+  {
+   return (((s * g_nT + t) * g_nMem + mem) * g_nM + mi);
+  }
+
+bool NxGet(const int s, const int t, const int mem, const int mi, NxStat &o)
+  {
+   const int p = NxCell(s, t, mem, mi) * NXF;
+   const double n = g_nx[p];
+   if(n < 1.0) return false;
+   o.n     = n;
+   o.fav   = g_nx[p + 1] / n;
+   o.adv   = g_nx[p + 2] / n;
+   o.rng   = g_nx[p + 3] / n;
+   o.absMv = g_nx[p + 4] / n;
+   o.sMv   = g_nx[p + 5] / n;
+   const double var = (n > 1.0) ? (g_nx[p + 6] - n * o.sMv * o.sMv) / (n - 1.0) : 0.0;
+   o.tMv   = (var > 0.0) ? o.sMv / (MathSqrt(var) / MathSqrt(n)) : 0.0;
+   return true;
+  }
+
+//--- base della categoria; per "tutti" (mem 0) e' la media delle basi di ciascuna fascia oraria pesata sui segnali della serie
+bool NxBase(const int s, const int t, const int mem, const int mi, NxStat &o)
+  {
+   o.n = 0.0; o.fav = 0.0; o.adv = 0.0; o.rng = 0.0; o.absMv = 0.0; o.sMv = 0.0; o.tMv = 0.0;
+   if(mem != 0)
+     {
+      const int p = ((t * g_nMem + mem) * g_nM + mi) * NXF;
+      const double n = g_nxb[p];
+      if(n < 1.0) return false;
+      o.n = n; o.fav = g_nxb[p + 1] / n; o.adv = g_nxb[p + 2] / n; o.rng = g_nxb[p + 3] / n; o.absMv = g_nxb[p + 4] / n;
+      return true;
+     }
+   double w = 0.0, f = 0.0, r = 0.0, a = 0.0;
+   for(int b = 0; b < g_nB; b++)
+     {
+      const int    mm = NMEM1 + b;
+      const double ns = g_nx[NxCell(s, t, mm, mi) * NXF];
+      const int    pb = ((t * g_nMem + mm) * g_nM + mi) * NXF;
+      const double nb = g_nxb[pb];
+      if(ns < 1.0 || nb < 1.0) continue;
+      w += ns;
+      f += ns * g_nxb[pb + 1] / nb;
+      r += ns * g_nxb[pb + 3] / nb;
+      a += ns * g_nxb[pb + 4] / nb;
+     }
+   if(w <= 0.0) return false;
+   o.n = w; o.fav = f / w; o.adv = o.fav; o.rng = r / w; o.absMv = a / w;
+   return true;
+  }
+
+//--- percentile q (0..1) dall'istogramma logaritmico; which: 0 = favorevole, 1 = range
+double NxPct(const int s, const int t, const int mem, const int mi, const int which, const double n, const double q)
+  {
+   const int    h      = (NxCell(s, t, mem, mi) * 2 + which) * NXB;
+   const double target = q * n;
+   double cum = 0.0;
+   for(int b = 0; b < NXB; b++)
+     {
+      const double c = (double)g_nxh[h + b];
+      if(c <= 0.0) continue;
+      if(cum + c >= target)
+        {
+         const double lo = MathExp(b * NXSTEP) - 1.0;
+         const double hi = MathExp((b + 1) * NXSTEP) - 1.0;
+         const double fr = MathMin(1.0, MathMax(0.0, (target - cum) / c));
+         return lo + (hi - lo) * fr;
+        }
+      cum += c;
+     }
+   return MathExp(NXB * NXSTEP) - 1.0;
+  }
+
+string NxIntLabel(const int b)
+  {
+   if(b <= 0) return "TR/ATR &lt; " + F2(g_ibEdge[0]);
+   if(b >= 5) return "TR/ATR &ge; " + F2(g_ibEdge[4]);
+   return "TR/ATR " + F2(g_ibEdge[b - 1]) + " &ndash; " + F2(g_ibEdge[b]);
+  }
+
+string NxIntPlain(const int b)
+  {
+   if(b <= 0) return "TR/ATR < " + F2(g_ibEdge[0]);
+   if(b >= 5) return "TR/ATR >= " + F2(g_ibEdge[4]);
+   return "TR/ATR " + F2(g_ibEdge[b - 1]) + "-" + F2(g_ibEdge[b]);
+  }
+
+string NxMemLabel(const int mem)
+  {
+   if(mem == 0)  return "Tutti i segnali";
+   if(mem <= 7)  return DowName(mem - 1);
+   if(mem <= 13) return NxIntLabel(mem - 8);
+   switch(mem)
+     {
+      case 14: return "Regime LOW";
+      case 15: return "Regime NORMAL";
+      case 16: return "Regime HIGH";
+      case 17: return "Regime EXTREME";
+      case 18: return "Volatilit&agrave; in calo o ferma";
+      case 19: return "Volatilit&agrave; in aumento";
+     }
+   return BktLabel(mem - NMEM1);
+  }
+
+//--- verde se il valore supera la base di oltre il 10%, rosso se e' sotto di oltre il 10%, grigio scuro se il campione e' piccolo
+string NxCol(const double v, const double base, const double n)
+  {
+   if(n < InpMinPerBucket) return "#4c566a";
+   if(base <= 0.0) return "#7b8794";
+   if(v > base * 1.1) return "#a3be8c";
+   if(v < base * 0.9) return "#bf616a";
+   return "#7b8794";
+  }
+
+string NxSub(const string txt)
+  {
+   return "<br><span style='color:#7b8794;font-size:11px'>" + txt + "</span>";
+  }
+
+string NxDuration(const int t, const int m)
+  {
+   const long mins = (long)m * g_tfSec[t] / 60L;
+   if(mins >= 1440L) return F1((double)mins / 1440.0) + " g";
+   if(mins >= 120L)  return F1((double)mins / 60.0) + " h";
+   return IS(mins) + " min";
+  }
+
+//--- matrice TF x numero di candele; kind 0 = favorevole, 1 = avverso, 2 = range, 3 = chiusura
+void RepNextMatrix(const int kind)
+  {
+   const int s = g_curSet;
+   W("<table><tr><th>TF</th>");
+   for(int k = 0; k < g_nM; k++) W("<th>dopo " + IS(g_nxM[k]) + " cand.</th>");
+   W("</tr>");
+   for(int t = 0; t < g_nT; t++)
+     {
+      bool any = false;
+      for(int k = 0; k < g_nM; k++) if(g_nx[NxCell(s, t, 0, k) * NXF] >= 1.0) any = true;
+      if(!any) continue;
+      W("<tr><td>" + g_tfName[t] + "</td>");
+      for(int k = 0; k < g_nM; k++)
+        {
+         NxStat a, b;
+         if(!NxGet(s, t, 0, k, a)) { W("<td>-</td>"); continue; }
+         const bool hb = NxBase(s, t, 0, k, b);
+         const string tip = " title='segnali " + F0(a.n) + " | durata " + NxDuration(t, g_nxM[k]) + "'";
+         if(kind == 0)
+           {
+            W("<td style='color:" + NxCol(a.fav, b.fav, a.n) + "'" + tip + ">" + F0(a.fav) + (hb ? " (base " + F0(b.fav) + ")" : "") +
+              NxSub("mediana " + F0(NxPct(s, t, 0, k, 0, a.n, 0.5)) + " &middot; p90 " + F0(NxPct(s, t, 0, k, 0, a.n, 0.9))) + "</td>");
+           }
+         else if(kind == 1)
+           {
+            const double ra = (a.adv > 0.0) ? a.fav / a.adv : 0.0;
+            const string col = (a.n < InpMinPerBucket) ? "#4c566a" : (ra > 1.05 ? "#a3be8c" : (ra < 0.95 ? "#bf616a" : "#7b8794"));
+            W("<td style='color:" + col + "'" + tip + ">" + F0(a.adv) + (hb ? " (base " + F0(b.adv) + ")" : "") +
+              NxSub("favorevole / avverso " + F2(ra)) + "</td>");
+           }
+         else if(kind == 2)
+           {
+            const double ratio = (hb && b.rng > 0.0) ? a.rng / b.rng : 0.0;
+            W("<td style='color:" + NxCol(a.rng, b.rng, a.n) + "'" + tip + ">" + F0(a.rng) + (hb ? " &times;" + F2(ratio) : "") +
+              NxSub("mediana " + F0(NxPct(s, t, 0, k, 1, a.n, 0.5)) + " &middot; p90 " + F0(NxPct(s, t, 0, k, 1, a.n, 0.9))) + "</td>");
+           }
+         else
+           {
+            const string col = (a.n < InpMinPerBucket) ? "#4c566a" : ColTNaive(a.tMv);
+            W("<td style='color:" + col + "'" + tip + ">" + Sg(a.sMv, 0) + " / " + F0(a.absMv) + NxSub("t naive " + F2(a.tMv)) + "</td>");
+           }
+        }
+      W("</tr>");
+     }
+   W("</table>");
+  }
+
+//--- TF x intensita' della candela del segnale, alla distanza di riferimento
+void RepNextIntensity()
+  {
+   const int s = g_curSet, k = g_nxRef;
+   W("<table><tr><th>TF</th>");
+   for(int b = 0; b < 6; b++) W("<th>" + NxIntLabel(b) + "</th>");
+   W("</tr>");
+   for(int t = 0; t < g_nT; t++)
+     {
+      bool any = false;
+      for(int b = 0; b < 6; b++) if(g_nx[NxCell(s, t, 8 + b, k) * NXF] >= 1.0) any = true;
+      if(!any) continue;
+      W("<tr><td>" + g_tfName[t] + "</td>");
+      for(int b = 0; b < 6; b++)
+        {
+         NxStat a, bs;
+         if(!NxGet(s, t, 8 + b, k, a)) { W("<td>-</td>"); continue; }
+         const bool hb = NxBase(s, t, 8 + b, k, bs);
+         W("<td style='color:" + NxCol(a.fav, bs.fav, a.n) + "'>" + F0(a.fav) + (hb ? " (base " + F0(bs.fav) + ")" : "") +
+           NxSub("range " + F0(a.rng) + (hb && bs.rng > 0.0 ? " &times;" + F2(a.rng / bs.rng) : "") + " &middot; n " + F0(a.n)) + "</td>");
+        }
+      W("</tr>");
+     }
+   W("</table>");
+  }
+
+//--- fasce orarie x TF, alla distanza di riferimento; kind 0 = favorevole, 1 = range
+void RepNextHours(const int kind)
+  {
+   const int s = g_curSet, k = g_nxRef;
+   int cols[];
+   ArrayResize(cols, 0);
+   for(int t = 0; t < g_nT; t++)
+     {
+      if(g_nx[NxCell(s, t, 0, k) * NXF] < 1.0) continue;
+      const int c = ArraySize(cols);
+      ArrayResize(cols, c + 1);
+      cols[c] = t;
+     }
+   const int nc = ArraySize(cols);
+   if(nc < 1) return;
+   W("<table><tr><th>Fascia (entrata, server + offset)</th>");
+   for(int c = 0; c < nc; c++) W("<th>" + g_tfName[cols[c]] + "</th>");
+   W("</tr>");
+   for(int b = 0; b < g_nB; b++)
+     {
+      bool any = false;
+      for(int c = 0; c < nc; c++) if(g_nx[NxCell(s, cols[c], NMEM1 + b, k) * NXF] >= 1.0) any = true;
+      if(!any) continue;
+      W("<tr><td>" + BktLabel(b) + "</td>");
+      for(int c = 0; c < nc; c++)
+        {
+         NxStat a, bs;
+         if(!NxGet(s, cols[c], NMEM1 + b, k, a)) { W("<td>-</td>"); continue; }
+         const bool hb = NxBase(s, cols[c], NMEM1 + b, k, bs);
+         const double v  = (kind == 0) ? a.fav : a.rng;
+         const double vb = hb ? ((kind == 0) ? bs.fav : bs.rng) : 0.0;
+         W("<td style='color:" + NxCol(v, vb, a.n) + "' title='segnali " + F0(a.n) + " | base " + F0(vb) + "'>" + F0(v) + "</td>");
+        }
+      W("</tr>");
+     }
+   W("</table>");
+  }
+
+//--- TF x giorno della settimana, alla distanza di riferimento
+void RepNextDow()
+  {
+   const int s = g_curSet, k = g_nxRef;
+   int ord[7] = {1, 2, 3, 4, 5, 6, 0};
+   W("<table><tr><th>TF</th>");
+   for(int q = 0; q < 7; q++) W("<th>" + DowName(ord[q]) + "</th>");
+   W("</tr>");
+   for(int t = 0; t < g_nT; t++)
+     {
+      if(g_nx[NxCell(s, t, 0, k) * NXF] < 1.0) continue;
+      W("<tr><td>" + g_tfName[t] + "</td>");
+      for(int q = 0; q < 7; q++)
+        {
+         NxStat a, bs;
+         if(!NxGet(s, t, 1 + ord[q], k, a)) { W("<td>-</td>"); continue; }
+         const bool hb = NxBase(s, t, 1 + ord[q], k, bs);
+         W("<td style='color:" + NxCol(a.fav, bs.fav, a.n) + "'>" + F0(a.fav) + (hb ? " (base " + F0(bs.fav) + ")" : "") +
+           NxSub("range " + F0(a.rng) + (hb && bs.rng > 0.0 ? " &times;" + F2(a.rng / bs.rng) : "") + " &middot; n " + F0(a.n)) + "</td>");
+        }
+      W("</tr>");
+     }
+   W("</table>");
+  }
+
+//--- righe per categoria (un TF): segnali, favorevole/avverso per ogni m, e a distanza di riferimento range, base, percentili, chiusura
+void RepNextCat(const int t, const int &mems[], const int cnt, const string head)
+  {
+   const int s = g_curSet, k = g_nxRef;
+   W("<table><tr><th>" + head + "</th><th>Segnali</th>");
+   for(int q = 0; q < g_nM; q++) W("<th>dopo " + IS(g_nxM[q]) + ": favorevole / avverso</th>");
+   W("<th>Range dopo " + IS(g_nxM[k]) + "</th><th>Range base</th><th>&times; base</th><th>Favorevole mediana</th><th>Favorevole p90</th>"
+     "<th>Range mediana</th><th>Range p90</th><th>Chiusura con segno</th></tr>");
+   for(int r = 0; r < cnt; r++)
+     {
+      const int mem = mems[r];
+      NxStat a, b;
+      if(!NxGet(s, t, mem, k, a)) continue;
+      const bool hb = NxBase(s, t, mem, k, b);
+      const string cls = (a.n < InpMinPerBucket) ? " class='thin'" : "";
+      W("<tr" + cls + "><td>" + NxMemLabel(mem) + "</td>" + Td(F0(a.n)));
+      for(int q = 0; q < g_nM; q++)
+        {
+         NxStat c;
+         if(NxGet(s, t, mem, q, c)) W(Td(F0(c.fav) + " / " + F0(c.adv)));
+         else W("<td>-</td>");
+        }
+      const double ratio = (hb && b.rng > 0.0) ? a.rng / b.rng : 0.0;
+      W(Td("<b>" + F0(a.rng) + "</b>") + Td(hb ? F0(b.rng) : "-") + (hb ? Td(F2(ratio), NxCol(a.rng, b.rng, a.n)) : Td("-")) +
+        Td(F0(NxPct(s, t, mem, k, 0, a.n, 0.5))) + Td(F0(NxPct(s, t, mem, k, 0, a.n, 0.9))) +
+        Td(F0(NxPct(s, t, mem, k, 1, a.n, 0.5))) + Td(F0(NxPct(s, t, mem, k, 1, a.n, 0.9))) +
+        Td(Sg(a.sMv, 0) + " (t " + F2(a.tMv) + ")", ColTNaive(a.tMv)) + "</tr>");
+     }
+   W("</table>");
+  }
+
+//--- dettaglio di un TF: intensita', giorno, regime, fascia oraria
+void RepNextTF(const int t)
+  {
+   int ms[];
+   W("<p style='color:#7b8794'>Candele successive del TF " + g_tfName[t] + ": ogni candela dura " + NxDuration(t, 1) +
+     ". Punti dal prezzo d'ingresso (open della candela dopo il segnale), media su tutti i segnali della categoria.</p>");
+   ArrayResize(ms, 7);
+   ms[0] = 0;
+   for(int i = 0; i < 6; i++) ms[i + 1] = 8 + i;
+   W("<h4>Per intensit&agrave; della candela del segnale</h4>");
+   RepNextCat(t, ms, 7, "Intensit&agrave;");
+   int ord[7] = {1, 2, 3, 4, 5, 6, 0};
+   ArrayResize(ms, 7);
+   for(int i = 0; i < 7; i++) ms[i] = 1 + ord[i];
+   W("<h4>Per giorno della settimana</h4>");
+   RepNextCat(t, ms, 7, "Giorno");
+   if(InpUseVolState)
+     {
+      ArrayResize(ms, 6);
+      for(int i = 0; i < 6; i++) ms[i] = 14 + i;
+      W("<h4>Per regime di volatilit&agrave; e direzione del percentile</h4>");
+      RepNextCat(t, ms, 6, "Stato");
+     }
+   ArrayResize(ms, g_nB);
+   for(int b = 0; b < g_nB; b++) ms[b] = NMEM1 + b;
+   W("<h4>Per fascia oraria</h4>");
+   RepNextCat(t, ms, g_nB, "Fascia");
+  }
+
+void RepNext()
+  {
+   const int s = g_curSet;
+   W("<h2>Quanto si muove il prezzo dopo il segnale: le candele successive (punti)</h2>");
+   W("<div class='note'>Per ogni segnale si misurano le <b>prossime m candele dello stesso timeframe</b> (m = " + InpNextCandles +
+     "), in punti dal prezzo d'ingresso (open della candela che segue il segnale, spread escluso). "
+     "<b>Favorevole</b> = massimo raggiunto nella direzione del segnale; <b>avverso</b> = nella direzione opposta; "
+     "<b>range</b> = massimo meno minimo, senza direzione: &egrave; la risposta a &laquo;quanto pu&ograve; spostarsi la candela dopo il segnale&raquo;; "
+     "<b>chiusura</b> = spostamento fino alla chiusura dell'm-esima candela, con segno positivo se nella direzione del segnale / valore assoluto. "
+     "<b>Mediana</b> e <b>p90</b> mostrano la dispersione: la media &egrave; trascinata dai giorni eccezionali. "
+     "La <b>base</b> (fra parentesi, &times;) &egrave; la stessa misura su tutte le barre dello stesso TF e della stessa categoria, direzione casuale: "
+     "verde = oltre la base di pi&ugrave; del 10%, rosso = sotto di pi&ugrave; del 10%. Per la riga &laquo;tutti&raquo; la base &egrave; pesata sulle stesse fasce orarie dei segnali. "
+     "Una candela ampia prima del segnale rende pi&ugrave; ampia anche la successiva (la volatilit&agrave; si raggruppa), per questo le tabelle per intensit&agrave; hanno la propria base. "
+     "Intensit&agrave; = TR/ATR della candela del segnale (soglie " + F2(g_ibEdge[0]) + ", " + F2(g_ibEdge[1]) + ", " + F2(g_ibEdge[2]) + ", " + F2(g_ibEdge[3]) + ", " + F2(g_ibEdge[4]) +
+     "). Le finestre intraday che attraversano un buco di dati oltre " + IS(InpMaxGapMin) + " min (weekend, festivi) non sono contate. "
+     "Celle grigie scure = meno di " + IS(InpMinPerBucket) + " segnali; passa il mouse su una cella per numero di segnali e durata.</div>");
+
+   W("<h3>1. Escursione favorevole media (punti nella direzione del segnale) &mdash; base fra parentesi</h3>");
+   RepNextMatrix(0);
+   W("<h3>2. Escursione avversa media (punti contro la direzione del segnale)</h3>");
+   RepNextMatrix(1);
+   W("<h3>3. Range medio (massimo &minus; minimo, senza direzione) &mdash; &times; base</h3>");
+   RepNextMatrix(2);
+   W("<h3>4. Chiusura dell'm-esima candela: spostamento con segno nella direzione del segnale / valore assoluto</h3>");
+   RepNextMatrix(3);
+   W("<h3>5. Per intensit&agrave; della candela del segnale &mdash; dopo " + IS(g_nxM[g_nxRef]) + " candela/e: favorevole (base), range &times; base, segnali</h3>");
+   RepNextIntensity();
+   W("<h3>6. Per giorno della settimana &mdash; dopo " + IS(g_nxM[g_nxRef]) + " candela/e: favorevole (base), range &times; base, segnali</h3>");
+   RepNextDow();
+   W("<h3>7. Per fascia oraria e TF &mdash; escursione favorevole media dopo " + IS(g_nxM[g_nxRef]) + " candela/e</h3>");
+   RepNextHours(0);
+   W("<h3>8. Per fascia oraria e TF &mdash; range medio dopo " + IS(g_nxM[g_nxRef]) + " candela/e</h3>");
+   RepNextHours(1);
+   W("<div class='note'>Il dettaglio per categoria (intensit&agrave;, giorno, regime, fascia) con mediana, p90 e base di ciascun TF &egrave; nel riquadro di ogni TF, pi&ugrave; in basso.</div>");
+
+   //--- digest
+   for(int t = 0; t < g_nT; t++)
+     {
+      for(int q = 0; q < g_nM; q++)
+        {
+         NxStat a, b;
+         if(!NxGet(s, t, 0, q, a)) continue;
+         const bool hb = NxBase(s, t, 0, q, b);
+         g_dg += "NXT|" + g_tfName[t] + "|m|" + IS(g_nxM[q]) + "|n|" + F0(a.n) + "|fav|" + F0(a.fav) + "|adv|" + F0(a.adv) +
+                 "|rng|" + F0(a.rng) + "|basefav|" + (hb ? F0(b.fav) : "-") + "|baserng|" + (hb ? F0(b.rng) : "-") +
+                 "|abs|" + F0(a.absMv) + "|smv|" + F1(a.sMv) + "|tmv|" + F2(a.tMv) +
+                 "|favp50|" + F0(NxPct(s, t, 0, q, 0, a.n, 0.5)) + "|favp90|" + F0(NxPct(s, t, 0, q, 0, a.n, 0.9)) +
+                 "|rngp50|" + F0(NxPct(s, t, 0, q, 1, a.n, 0.5)) + "|rngp90|" + F0(NxPct(s, t, 0, q, 1, a.n, 0.9)) + "\n";
+        }
+      for(int b2 = 0; b2 < 6; b2++)
+        {
+         NxStat a, b;
+         if(!NxGet(s, t, 8 + b2, g_nxRef, a)) continue;
+         const bool hb = NxBase(s, t, 8 + b2, g_nxRef, b);
+         g_dg += "NXI|" + g_tfName[t] + "|" + NxIntPlain(b2) + "|m|" + IS(g_nxM[g_nxRef]) + "|n|" + F0(a.n) + "|fav|" + F0(a.fav) +
+                 "|adv|" + F0(a.adv) + "|rng|" + F0(a.rng) + "|basefav|" + (hb ? F0(b.fav) : "-") + "|baserng|" + (hb ? F0(b.rng) : "-") + "\n";
+        }
+      for(int d2 = 0; d2 < 7; d2++)
+        {
+         NxStat a, b;
+         if(!NxGet(s, t, 1 + d2, g_nxRef, a)) continue;
+         const bool hb = NxBase(s, t, 1 + d2, g_nxRef, b);
+         g_dg += "NXD|" + g_tfName[t] + "|" + DowName(d2) + "|m|" + IS(g_nxM[g_nxRef]) + "|n|" + F0(a.n) + "|fav|" + F0(a.fav) +
+                 "|rng|" + F0(a.rng) + "|basefav|" + (hb ? F0(b.fav) : "-") + "|baserng|" + (hb ? F0(b.rng) : "-") + "\n";
+        }
+      if(InpDigestTOD)
+         for(int bk = 0; bk < g_nB; bk++)
+           {
+            NxStat a, b;
+            if(!NxGet(s, t, NMEM1 + bk, g_nxRef, a)) continue;
+            const bool hb = NxBase(s, t, NMEM1 + bk, g_nxRef, b);
+            g_dg += "NXH|" + g_tfName[t] + "|" + BktLabel(bk) + "|m|" + IS(g_nxM[g_nxRef]) + "|n|" + F0(a.n) + "|fav|" + F0(a.fav) +
+                    "|rng|" + F0(a.rng) + "|basefav|" + (hb ? F0(b.fav) : "-") + "|baserng|" + (hb ? F0(b.rng) : "-") + "\n";
+           }
+     }
+  }
+
 void RepStruct()
   {
    W("<h2>Posizione nella raffica (come il Sequence Filter dell'EA) &mdash; netto medio (n)</h2>");
@@ -2078,7 +3012,7 @@ void RepDetails()
    for(int t = 0; t < g_nT; t++)
      {
       if(g_accTH[(t * g_nH + g_refH) * ACCN] < 1.0) continue;
-      W("<details><summary><b>" + g_tfName[t] + "</b> &mdash; fasce orarie, " + string(g_slotOK[t] ? "candela nel contenitore, " : "") + "target e tenuta</summary>");
+      W("<details><summary><b>" + g_tfName[t] + "</b> &mdash; fasce orarie, " + string(g_slotOK[t] ? "candela nel contenitore, " : "") + "target, tenuta e candele successive</summary>");
       W("<h3>Fasce orarie</h3>");
       RepTOD(t);
       if(g_slotOK[t])
@@ -2090,6 +3024,10 @@ void RepDetails()
       RepReach(t);
       W("<h3>Quanto tenere e per quanti punti (una posizione per volta, tutto il giorno)</h3>");
       RepHeat(t);
+      W("<h3>Giorni della settimana e orari che raggiungono i punti</h3>");
+      RepDowHours(t);
+      W("<h3>Candele successive al segnale: quanti punti si muove il prezzo</h3>");
+      RepNextTF(t);
       W("</details>");
      }
   }
@@ -2129,6 +3067,516 @@ void RepTop()
                  "|mae|" + F0(g_tpMae[q]) + "|ret|" + F0(g_tpRet[q]) + "|cost|" + F1(g_tpCost[q]) + "\n";
      }
    W("</table>");
+  }
+
+//+------------------------------------------------------------------+
+//| RIEPILOGO SCRITTO E CONCLUSIONI                                   |
+//| Testo generato con regole fisse dai numeri di questa corsa: non e' |
+//| un giudizio, e' la lettura prudente delle tabelle. Solo ASCII e   |
+//| nessun carattere '|' (il testo finisce anche nel digest).         |
+//+------------------------------------------------------------------+
+void AddConc(const int s, const string topic, const string text)
+  {
+   const int k = ArraySize(g_cSet);
+   ArrayResize(g_cSet, k + 1);
+   ArrayResize(g_cTopic, k + 1);
+   ArrayResize(g_cText, k + 1);
+   g_cSet[k]   = s;
+   g_cTopic[k] = topic;
+   g_cText[k]  = text;
+  }
+
+bool CndStat(const int t, const int cat, double &n, double &mean, double &var)
+  {
+   const int p = (t * NCAT + cat) * ACCN;
+   n = g_accCnd[p];
+   mean = 0.0;
+   var  = 0.0;
+   if(n < 1.0) return false;
+   mean = g_accCnd[p + 3] / n;
+   var  = (n > 1.0) ? (g_accCnd[p + 4] - n * mean * mean) / (n - 1.0) : 0.0;
+   return true;
+  }
+
+void BuildConclusions(const int sIdx)
+  {
+   const int    rt   = RefTFIndex();
+   const int    minN = (int)g_minN;
+   const string hs   = IS(g_hor[g_refH]);
+
+   //--- Dati
+   {
+    double tot = 0.0;
+    for(int t = 0; t < g_nT; t++) tot += g_accTH[(t * g_nH + g_refH) * ACCN];
+    bool used[];
+    ArrayResize(used, g_nT);
+    for(int t = 0; t < g_nT; t++) used[t] = false;
+    string top = "";
+    for(int q = 0; q < 3; q++)
+      {
+       int bi0 = -1;
+       double bn = 0.0;
+       for(int t = 0; t < g_nT; t++)
+         {
+          const double nn = g_accTH[(t * g_nH + g_refH) * ACCN];
+          if(!used[t] && nn > bn) { bn = nn; bi0 = t; }
+         }
+       if(bi0 < 0) break;
+       used[bi0] = true;
+       top += (top == "" ? "" : ", ") + g_tfName[bi0] + " " + F0(bn);
+      }
+    datetime tEnd = (datetime)MathMin((long)InpTo, (long)g_m1Time[g_n1 - 1]);
+    AddConc(sIdx, "Dati", "Simbolo " + _Symbol + ", periodo " + TimeToString(g_tStart, TIME_DATE) + " - " + TimeToString(tEnd, TIME_DATE) +
+            ", " + IS(g_nT) + " TF analizzati. Segnali misurati a " + hs + " min: " + F0(tot) + " in totale" +
+            (top != "" ? " (TF con piu' segnali: " + top + ")" : "") + ". Costo: " +
+            (InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : ("spread M1 mediano " + F0(g_medSpr) + " pt")) +
+            (InpExtraCostPts > 0.0 ? (" + extra " + F1(InpExtraCostPts) + " pt") : "") +
+            ". Tutti i valori sono in punti (1 punto = " + DoubleToString(g_pt, _Digits) + ")." +
+            (g_histWarn ? " ATTENZIONE: lo storico M1 e' piu' corto del periodo richiesto." : ""));
+   }
+
+   //--- direzione prima dei costi e netto dopo i costi, per TF all'orizzonte di riferimento
+   int    K = 0, posN = 0, posS = 0, negS = 0, netPos = 0, netSig = 0;
+   double wN = 0.0, wG = 0.0, wNet = 0.0, wCost = 0.0;
+   double bestT = -1.0e9, worstT = 1.0e9, bestNet = -1.0e18;
+   int    bi = -1, wi = -1, bni = -1;
+   string sigList = "";
+   for(int t = 0; t < g_nT; t++)
+     {
+      CellStat c;
+      if(!GetCell(t, g_refH, c) || c.n < g_minN) continue;
+      K++;
+      if(c.gross > 0.0) posN++;
+      if(c.tGross >= g_zB)  posS++;
+      if(c.tGross <= -g_zB) negS++;
+      if(c.ret > 0.0) netPos++;
+      if(c.ret > 0.0 && c.tCl >= g_zB) { netSig++; sigList += (sigList == "" ? "" : ", ") + g_tfName[t]; }
+      if(c.tGross > bestT)  { bestT = c.tGross;  bi = t; }
+      if(c.tGross < worstT) { worstT = c.tGross; wi = t; }
+      if(c.ret > bestNet)   { bestNet = c.ret;   bni = t; }
+      wN += c.n; wG += c.n * c.gross; wNet += c.n * c.ret; wCost += c.n * c.cost;
+     }
+   g_agN[sIdx] = wN; g_agNet[sIdx] = wNet; g_agGross[sIdx] = wG;
+   g_agGpos[sIdx] = posS; g_agGneg[sIdx] = negS; g_agNsig[sIdx] = netSig; g_agNtf[sIdx] = K;
+   g_agAns[sIdx] = g_cAns;
+   {
+    int a1 = 0;
+    for(int t = 0; t < g_nT; t++)
+      {
+       const int ci = sIdx * g_nT + t;
+       if(g_cmpBoN[ci] >= MathMax(10.0, g_minN / 3.0) && g_cmpBoM[ci] > 0.0 && g_cmpBoT[ci] >= 2.0) a1++;
+      }
+    g_agA1ok[sIdx] = a1;
+   }
+
+   if(K < 1)
+     {
+      AddConc(sIdx, "Direzione prima dei costi", "Nessun TF ha almeno " + IS(minN) + " segnali misurati a " + hs + " min: campione insufficiente per qualunque conclusione.");
+      AddConc(sIdx, "Dopo i costi", "Non valutabile: campione insufficiente.");
+     }
+   else
+     {
+      CellStat cb, cw, cn;
+      GetCell(bi, g_refH, cb);
+      GetCell(wi, g_refH, cw);
+      GetCell(bni, g_refH, cn);
+      string v1, v2;
+      if(posS + negS == 0)
+         v1 = "Nessun TF mostra una direzione distinguibile dal caso: da solo il segnale non anticipa la direzione del prezzo.";
+      else if(negS == 0)
+         v1 = "In almeno un TF il segnale anticipa la direzione gia' prima dei costi: controlla che lo stesso segno compaia nei TF vicini (il t cluster resta ottimista sulle tenute lunghe).";
+      else if(posS == 0)
+         v1 = "Il segnale e' contrario alla direzione del prezzo in almeno un TF: guarda la lettura INVERTI nelle tabelle A.";
+      else
+         v1 = "Segni opposti in TF diversi: nessuna direzione coerente.";
+      AddConc(sIdx, "Direzione prima dei costi", "Orizzonte " + hs + " min, " + IS(K) + " TF con almeno " + IS(minN) +
+              " segnali. Rendimento lordo medio (prima dei costi) positivo in " + IS(posN) + " TF; significativamente positivo in " + IS(posS) +
+              " e significativamente negativo in " + IS(negS) + " (soglia di Bonferroni |t cluster| >= " + F2(g_zB) + "). Migliore: " + g_tfName[bi] +
+              " lordo " + Sg(cb.gross) + " pt (t " + F2(cb.tGross) + "); peggiore: " + g_tfName[wi] + " lordo " + Sg(cw.gross) + " pt (t " + F2(cw.tGross) + "). " + v1);
+      if(netSig == 0)
+         v2 = "Nessun TF resta significativamente positivo dopo i costi: come entrata autonoma, con uscita a tempo, il segnale non ha un vantaggio operabile. "
+              "Con segnali senza informazione il netto atteso e' circa meno il costo, qualunque sia la tenuta.";
+      else
+         v2 = "TF con netto positivo significativo: " + sigList + ". Sono candidati, non conferme: guarda se reggono fuori campione nelle tabelle A e se il segno e' lo stesso nei TF vicini.";
+      AddConc(sIdx, "Dopo i costi", "Costo medio pesato " + F1(wCost / wN) + " pt, lordo medio pesato " + Sg(wG / wN) + " pt, netto medio pesato " + Sg(wNet / wN) +
+              " pt (pesi = segnali di ciascun TF). Netto positivo in " + IS(netPos) + " TF su " + IS(K) + ", positivo e significativo (t cluster >= " + F2(g_zB) +
+              ") in " + IS(netSig) + ". Miglior netto: " + g_tfName[bni] + " " + Sg(cn.ret) + " pt (t cluster " + F2(cn.tCl) + "). " + v2);
+     }
+
+   //--- tenuta: lordo e netto medi pesati per ogni orizzonte
+   {
+    string sh = "";
+    double bestG = -1.0e18;
+    int bh = -1;
+    for(int h = 0; h < g_nH; h++)
+      {
+       double wn = 0.0, wg = 0.0, wr = 0.0;
+       for(int t = 0; t < g_nT; t++)
+         {
+          CellStat c;
+          if(!GetCell(t, h, c) || c.n < g_minN) continue;
+          wn += c.n; wg += c.n * c.gross; wr += c.n * c.ret;
+         }
+       if(wn <= 0.0) continue;
+       sh += (sh == "" ? "" : "; ") + IS(g_hor[h]) + "m " + Sg(wg / wn, 0) + "/" + Sg(wr / wn, 0);
+       if(wg / wn > bestG) { bestG = wg / wn; bh = h; }
+      }
+    if(bh >= 0)
+       AddConc(sIdx, "Tenuta", "Lordo/netto medio pesato per tenuta in minuti (pt, media dei TF con campione sufficiente, pesata sui segnali): " + sh +
+               ". Se il lordo resta intorno a zero a ogni tenuta il segnale non ha informazione direzionale e il netto e' circa meno il costo qualunque sia la tenuta: "
+               "allungare la tenuta non lo cambia. Tenuta con il lordo migliore: " + IS(g_hor[bh]) + " min (" + Sg(bestG) + " pt). "
+               "La media pesata e' dominata dai TF con piu' segnali; il dettaglio per TF e' nelle tabelle A1 e B1.");
+   }
+
+   if(rt >= 0)
+     {
+      CellStat c;
+      if(GetCell(rt, g_refH, c))
+        {
+         //--- punti raggiunti
+         const int cell = rt * g_nH + g_refH;
+         int key[];
+         const int nk = KeyLevels(key);
+         string sl = "";
+         int above = 0, below = 0;
+         for(int q = 0; q < nk; q++)
+           {
+            const int    l  = key[q];
+            const double pf = 100.0 * SuffixCount(g_exFav, cell * (g_nL + 1), l) / c.n;
+            const double pa = 100.0 * SuffixCount(g_exAdv, cell * (g_nL + 1), l) / c.n;
+            const double pb = 100.0 * BaseExcMatched(rt, g_refH, l);
+            sl += "+" + F0(g_lev[l]) + " pt: " + F0(pf) + "% (avverso " + F0(pa) + "%, base " + F0(pb) + "%); ";
+            if(pf > pb * 1.1 && pf >= 1.0) above++;
+            else if(pf < pb * 0.9 && pb >= 1.0) below++;
+           }
+         double l50 = 0.0, l25 = 0.0;
+         for(int l = 0; l < g_nL; l++)
+           {
+            const double pf = 100.0 * SuffixCount(g_exFav, cell * (g_nL + 1), l) / c.n;
+            if(pf >= 50.0) l50 = g_lev[l];
+            if(pf >= 25.0) l25 = g_lev[l];
+           }
+         string v3;
+         if(above * 2 > nk)      v3 = "La probabilita' supera quella di un'entrata casuale nelle stesse ore nella maggior parte dei livelli: il segnale raggiunge i punti piu' spesso del caso.";
+         else if(below * 2 > nk) v3 = "La probabilita' e' inferiore a quella di un'entrata casuale nelle stesse ore: nessun vantaggio sulla base.";
+         else v3 = "La probabilita' e' praticamente quella di un'entrata casuale nelle stesse ore e vicina a quella del movimento contrario: i punti si raggiungono perche' "
+                   "il mercato si muove in quell'orario, non perche' c'e' il segnale.";
+         AddConc(sIdx, "Punti raggiunti", "TF " + g_tfName[rt] + " (quello dell'elenco spunte se ha campione, altrimenti il piu' popolato), entro " + hs +
+                 " min dal segnale: MFE medio " + F0(c.mfe) + " pt, MAE medio " + F0(c.mae) + " pt. Probabilita' di toccare il livello nella direzione del segnale: " + sl +
+                 "Livello toccato da almeno meta' dei segnali: " + (l50 > 0.0 ? (F0(l50) + " pt") : ("meno di " + F0(g_lev[0]) + " pt")) +
+                 "; da almeno un quarto: " + (l25 > 0.0 ? (F0(l25) + " pt") : ("meno di " + F0(g_lev[0]) + " pt")) + ". " + v3 +
+                 " Le stesse probabilita' per ogni TF sono nella tabella dei livelli.");
+
+         //--- giorni della settimana al livello della matrice
+         const int lm = MatrixLevelIdx();
+         int ord[7] = {1, 2, 3, 4, 5, 6, 0};
+         string sd = "";
+         double bestR = -1.0, worstR = 1.0e9, bestZ = 0.0, worstZ = 0.0;
+         int bd = -1, wd = -1;
+         for(int q = 0; q < 7; q++)
+           {
+            double nn, po, pb;
+            DbAgg(rt, ord[q], ord[q], 0, g_nB - 1, lm, nn, po, pb);
+            if(nn < InpMinPerBucket || pb <= 0.0 || pb >= 100.0) continue;
+            sd += DowName(ord[q]) + " " + F0(po) + "% (base " + F0(pb) + "%, " + F0(nn) + " segnali); ";
+            const double ratio = po / pb;
+            const double z = (po - pb) / MathSqrt(pb * (100.0 - pb) / nn);
+            if(ratio > bestR)  { bestR = ratio;  bd = ord[q]; bestZ = z; }
+            if(ratio < worstR) { worstR = ratio; wd = ord[q]; worstZ = z; }
+           }
+         if(bd >= 0)
+            AddConc(sIdx, "Giorni della settimana", "TF " + g_tfName[rt] + ", probabilita' di toccare +" + F0(g_lev[lm]) + " pt entro " + hs +
+                    " min per giorno d'ingresso (server + offset): " + sd + "Giorno migliore rispetto alla base: " + DowName(bd) + " x" + F2(bestR) +
+                    " (z naive " + F2(bestZ) + "); peggiore: " + DowName(wd) + " x" + F2(worstR) + " (z naive " + F2(worstZ) + "). "
+                    "Il z non corregge la sovrapposizione dei segnali: una differenza con |z| sotto 3 non e' distinguibile dal caso. "
+                    "Usala solo se compare con lo stesso segno nei TF vicini. Le tabelle per ogni TF sono nel dettaglio.");
+
+         //--- orari che raggiungono piu' spesso i punti
+         int top0[], top1[];
+         const int n0 = BestBuckets(rt, lm, 0, 3, top0);
+         const int n1 = BestBuckets(rt, lm, 1, 3, top1);
+         if(n0 > 0)
+           {
+            string c0 = "", c1 = "";
+            for(int q = 0; q < n0; q++) c0 += (q > 0 ? "; " : "") + BktInfo(rt, top0[q], lm);
+            for(int q = 0; q < n1; q++)
+              {
+               double nn, po, pb;
+               DbAgg(rt, 0, 6, top1[q], top1[q], lm, nn, po, pb);
+               c1 += (q > 0 ? "; " : "") + BktLabel(top1[q]) + " x" + F2(pb > 0.0 ? po / pb : 0.0) + " (" + F0(po) + "% contro " + F0(pb) + "%, " + F0(nn) + " segnali)";
+              }
+            AddConc(sIdx, "Orari che raggiungono piu' spesso i punti", "TF " + g_tfName[rt] + ", +" + F0(g_lev[lm]) + " pt entro " + hs + " min, orario d'ingresso (server + offset). "
+                    "Fasce con la probabilita' piu' alta: " + c0 + ". Fasce con il maggior vantaggio sulla base: " + (n1 > 0 ? c1 : "nessuna con campione sufficiente") + ". "
+                    "Le fasce con la probabilita' assoluta piu' alta sono di norma le ore piu' volatili: la base le tocca altrettanto spesso, quindi non sono ore in cui il segnale funziona meglio. "
+                    "Il vantaggio sulla base e' l'unico indizio, ma con " + IS(g_nB) + " fasce testate qualcuna supera la base per caso: serve coerenza fra TF vicini.");
+           }
+
+         //--- raffica e verso
+         {
+          string sb = "";
+          for(int q = 0; q < 4; q++)
+            {
+             const int pq = (rt * BCAP + q) * ACCN;
+             const double nq = g_accBur[pq];
+             if(nq < 1.0) continue;
+             sb += IS(q + 1) + (q == 3 ? "a+" : "a") + " posizione " + Sg(g_accBur[pq + 3] / nq) + " pt (" + F0(nq) + "); ";
+            }
+          if(sb != "")
+             AddConc(sIdx, "Raffica", "TF " + g_tfName[rt] + ", netto medio per posizione nella raffica (1a = primo segnale dopo uno opposto): " + sb +
+                     "Se il netto non cambia in modo sistematico con la posizione, il Sequence Filter non trova qui un fondamento; una differenza va comunque verificata fuori campione, cosa che questa tabella non fa.");
+          string sdr = "";
+          for(int k2 = 0; k2 < 2; k2++)
+            {
+             const int pq = (rt * 2 + k2) * ACCN;
+             const double nq = g_accDir[pq];
+             if(nq < 1.0) continue;
+             sdr += string(k2 == 0 ? "BUY" : "SELL") + " " + Sg(g_accDir[pq + 3] / nq) + " pt su " + F0(nq) + " segnali (MFE " + F0(g_accDir[pq + 1] / nq) + ", MAE " + F0(g_accDir[pq + 2] / nq) + "); ";
+            }
+          if(sdr != "")
+             AddConc(sIdx, "Direzione BUY e SELL", "TF " + g_tfName[rt] + ", netto medio per verso: " + sdr +
+                     "Una differenza marcata riflette di norma la deriva del simbolo nel periodo (trend), non il segnale: confrontala con la base prima di dedurne un'asimmetria.");
+         }
+
+         //--- stato di volatilita'
+         if(InpUseVolState)
+           {
+            double n0v, m0v, v0v, n1v, m1v, v1v, n2v, m2v, v2v, nrv, mrv, vrv, nfv, mfv, vfv;
+            const bool h0 = CndStat(rt, 0, n0v, m0v, v0v);
+            const bool h1 = CndStat(rt, 1, n1v, m1v, v1v);
+            const bool h2 = CndStat(rt, 2, n2v, m2v, v2v);
+            const bool hr = CndStat(rt, 8, nrv, mrv, vrv);
+            const bool hf = CndStat(rt, 7, nfv, mfv, vfv);
+            if(h0 || h1 || h2)
+              {
+               string sv = "TF " + g_tfName[rt] + ", netto medio per intensita' della candela del segnale: ";
+               sv += "compressione (TR/ATR < " + F2(InpVsCompTh) + ") " + (h0 ? (Sg(m0v) + " pt (" + F0(n0v) + ")") : string("-")) +
+                     ", normale " + (h1 ? (Sg(m1v) + " pt (" + F0(n1v) + ")") : string("-")) +
+                     ", espansione (> " + F2(InpVsExpTh) + ") " + (h2 ? (Sg(m2v) + " pt (" + F0(n2v) + ")") : string("-")) + ". ";
+               if(h0 && h2 && n0v >= 30.0 && n2v >= 30.0)
+                 {
+                  const double se = MathSqrt(v0v / n0v + v2v / n2v);
+                  const double zw = (se > 0.0) ? (m2v - m0v) / se : 0.0;
+                  sv += "Differenza espansione meno compressione " + Sg(m2v - m0v) + " pt (z naive " + F2(zw) + "). ";
+                 }
+               if(h2)
+                 {
+                  const double bs2 = CndBase(rt, 2);
+                  if(bs2 > 0.0) sv += "MFE in espansione / base della stessa categoria: " + F2((g_accCnd[(rt * NCAT + 2) * ACCN + 1] / n2v) / bs2) + ". ";
+                 }
+               if(hr && hf) sv += "Volatilita' in aumento " + Sg(mrv) + " pt (" + F0(nrv) + ") contro in calo o ferma " + Sg(mfv) + " pt (" + F0(nfv) + "). ";
+               sv += "Con segnali senza informazione ogni categoria ha netto circa meno il costo: una categoria migliore e' un'ipotesi da verificare fuori campione, non un filtro pronto.";
+               AddConc(sIdx, "Stato di volatilita'", sv);
+              }
+           }
+
+         //--- candele successive al segnale
+         if(g_nM > 0)
+           {
+            string sn = "";
+            for(int q = 0; q < g_nM; q++)
+              {
+               NxStat a, b;
+               if(!NxGet(sIdx, rt, 0, q, a)) continue;
+               const bool hb = NxBase(sIdx, rt, 0, q, b);
+               sn += "dopo " + IS(g_nxM[q]) + " cand. (" + NxDuration(rt, g_nxM[q]) + "): favorevole " + F0(a.fav) + " (mediana " + F0(NxPct(sIdx, rt, 0, q, 0, a.n, 0.5)) +
+                     ", p90 " + F0(NxPct(sIdx, rt, 0, q, 0, a.n, 0.9)) + "), avverso " + F0(a.adv) + ", range " + F0(a.rng) +
+                     ((hb && b.rng > 0.0) ? (" (x" + F2(a.rng / b.rng) + " la base)") : "") + "; ";
+              }
+            NxStat ar, br;
+            if(sn != "" && NxGet(sIdx, rt, 0, g_nxRef, ar))
+              {
+               const bool hbr = NxBase(sIdx, rt, 0, g_nxRef, br);
+               string v4;
+               const double rr = (hbr && br.rng > 0.0) ? ar.rng / br.rng : 0.0;
+               if(!hbr)          v4 = "";
+               else if(rr >= 1.1) v4 = "Il range dopo il segnale supera di oltre il 10% quello di una barra qualunque nelle stesse ore: il segnale arriva quando il mercato si sta gia' muovendo (la volatilita' si raggruppa). Puo' servire a dimensionare target e stop, non a scegliere il verso. ";
+               else if(rr <= 0.9) v4 = "Il range dopo il segnale e' inferiore di oltre il 10% a quello di una barra qualunque nelle stesse ore. ";
+               else               v4 = "Il range dopo il segnale e' in linea con quello di una barra qualunque nelle stesse ore: il segnale non anticipa ne' una volatilita' maggiore ne' minore. ";
+               string v5;
+               if(MathAbs(ar.tMv) < 2.0)
+                  v5 = "La direzione di chiusura non e' distinguibile dal caso: l'informazione e' sull'ampiezza, non sul verso.";
+               else
+                  v5 = "La chiusura ha una tendenza nel verso " + string(ar.sMv > 0.0 ? "del segnale" : "opposto al segnale") + " (t naive gonfiato dalla sovrapposizione: verifica fuori campione).";
+               AddConc(sIdx, "Candele successive", "TF " + g_tfName[rt] + " (ogni candela dura " + NxDuration(rt, 1) + "), punti dal prezzo d'ingresso: " + sn +
+                       "Chiusura dopo " + IS(g_nxM[g_nxRef]) + " cand.: spostamento medio con segno nella direzione del segnale " + Sg(ar.sMv) + " pt (t naive " + F2(ar.tMv) +
+                       "), valore assoluto medio " + F0(ar.absMv) + " pt. " + v4 + v5);
+
+               //--- per intensita' della candela del segnale
+               string si = "";
+               for(int bb = 0; bb < 6; bb++)
+                 {
+                  NxStat ai, bi2;
+                  if(!NxGet(sIdx, rt, 8 + bb, g_nxRef, ai) || ai.n < InpMinPerBucket) continue;
+                  const bool hbi = NxBase(sIdx, rt, 8 + bb, g_nxRef, bi2);
+                  si += NxIntPlain(bb) + ": range " + F0(ai.rng) + ((hbi && bi2.rng > 0.0) ? (" (x" + F2(ai.rng / bi2.rng) + " la base)") : "") +
+                        ", favorevole " + F0(ai.fav) + ", avverso " + F0(ai.adv) + " su " + F0(ai.n) + " segnali; ";
+                 }
+               if(si != "")
+                  AddConc(sIdx, "Candele successive per intensita'", "TF " + g_tfName[rt] + ", dopo " + IS(g_nxM[g_nxRef]) + " candela/e, per intensita' della candela del segnale (TR/ATR): " + si +
+                          "L'intensita' conta perche' la volatilita' si raggruppa anche senza segnale: la base di ogni categoria ne tiene conto, il confronto utile e' il rapporto con la base.");
+
+               //--- per orario
+               double hr2[], hn2[];
+               bool usedH[];
+               ArrayResize(hr2, g_nB); ArrayResize(hn2, g_nB); ArrayResize(usedH, g_nB);
+               for(int bb = 0; bb < g_nB; bb++)
+                 {
+                  hr2[bb] = -1.0; hn2[bb] = 0.0; usedH[bb] = false;
+                  NxStat ah;
+                  if(NxGet(sIdx, rt, NMEM1 + bb, g_nxRef, ah) && ah.n >= InpMinPerBucket) { hr2[bb] = ah.rng; hn2[bb] = ah.n; }
+                 }
+               string hiTxt = "", loTxt = "";
+               for(int q = 0; q < 3; q++)
+                 {
+                  int bsel = -1;
+                  double bv = -1.0;
+                  for(int bb = 0; bb < g_nB; bb++) if(!usedH[bb] && hr2[bb] > bv) { bv = hr2[bb]; bsel = bb; }
+                  if(bsel < 0) break;
+                  usedH[bsel] = true;
+                  hiTxt += (hiTxt == "" ? "" : "; ") + BktLabel(bsel) + " " + F0(bv) + " pt (" + F0(hn2[bsel]) + " segnali)";
+                 }
+               for(int bb = 0; bb < g_nB; bb++) usedH[bb] = false;
+               for(int q = 0; q < 2; q++)
+                 {
+                  int bsel = -1;
+                  double bv = 1.0e18;
+                  for(int bb = 0; bb < g_nB; bb++) if(!usedH[bb] && hr2[bb] >= 0.0 && hr2[bb] < bv) { bv = hr2[bb]; bsel = bb; }
+                  if(bsel < 0) break;
+                  usedH[bsel] = true;
+                  loTxt += (loTxt == "" ? "" : "; ") + BktLabel(bsel) + " " + F0(bv) + " pt (" + F0(hn2[bsel]) + " segnali)";
+                 }
+               if(hiTxt != "")
+                  AddConc(sIdx, "Candele successive per orario", "TF " + g_tfName[rt] + ", range medio dopo " + IS(g_nxM[g_nxRef]) + " candela/e, per orario d'ingresso (server + offset). "
+                          "Fasce con il range piu' alto: " + hiTxt + ". Fasce piu' quiete: " + (loTxt != "" ? loTxt : "-") + ". "
+                          "Il range segue la volatilita' oraria del mercato, con o senza segnale: la tabella per orario e TF mostra anche il confronto con la base di ogni fascia.");
+              }
+           }
+        }
+     }
+
+   //--- tabella A (scelta in-sample, verifica fuori campione)
+   if(!g_cAok)
+      AddConc(sIdx, "Tabella A (scelta in-sample)", "Non calcolabile: nessuna combinazione con almeno " + IS(minN) + " posizioni in-sample.");
+   else
+      AddConc(sIdx, "Tabella A (scelta in-sample)", "Valutate " + IS(g_cAm) + " combinazioni TF x fascia x tenuta x target x verso sul primo periodo. Miglior t in-sample " + F2(g_cAbestT) +
+              " contro un massimo atteso per puro caso di circa " + F2(g_cAchance) + ". Fra le prime " + IS(g_cApn) + " in-sample, " + IS(g_cApos) + " su " + IS(g_cAusable) +
+              " restano positive fuori campione e " + IS(g_cAstrong) + " con t OOS >= 2. " +
+              (g_cAns > 0 ? ("Combinazioni che reggono (OOS positivo e t >= 2): " + IS(g_cAns) + "; la prima: " + g_cAsurv +
+                             ". Sono candidate da confermare su dati mai visti, non risultati: l'OOS e' stato usato per sceglierle.")
+                          : "Nessuna combinazione regge fuori campione: la classifica in-sample e' rumore di selezione, nessuna riga va operata."));
+
+   //--- tabella B (con rumore)
+   if(!g_cBok)
+      AddConc(sIdx, "Tabella B (con rumore)", "Non calcolabile: nessuna combinazione con almeno " + IS(minN) + " posizioni.");
+   else
+     {
+      const double chB = (g_cBm > 1) ? MathSqrt(2.0 * MathLog((double)g_cBm)) : 0.0;
+      AddConc(sIdx, "Tabella B (con rumore)", "Ordinata per " + NoiseSortName() + " sull'intero storico, senza protezione. La prima riga (" + g_cBdesc + ") promette " + F0(g_cBtotal) +
+              " pt su " + F0(g_cBn) + " posizioni (netto medio " + F1(g_cBmean) + ", t " + F2(g_cBt) + "); il t massimo atteso per puro caso su " + IS(g_cBm) + " tentativi e' circa " + F2(chB) + ". " +
+              "Nelle prime righe la parte piu' recente del periodo contiene il " + F1(g_cBshareN) + "% delle posizioni e il " + F1(g_cBshareLate) + "% del profitto. "
+              "Fra le prime " + IS(g_cBpn) + " con campione sufficiente, " + IS(g_cBboth) + " su " + IS(g_cBusable) + " sono positive in entrambe le parti del periodo e " + IS(g_cBincoh) +
+              " cambiano segno. La distanza fra il profitto promesso qui e quello della tabella A e' la misura del rumore di selezione.");
+     }
+
+   //--- conclusione
+   {
+    string c;
+    const bool oosEdge = (g_cAok && g_cAns > 0);
+    if(K < 1)
+       c = "Campione insufficiente: nessuna conclusione.";
+    else if(netSig == 0 && !oosEdge)
+      {
+       c = "Nessuna evidenza di vantaggio operabile al netto dei costi in questa serie. ";
+       if(posS > 0)
+          c += "Il segnale ha contenuto direzionale lordo in " + IS(posS) + " TF, ma i costi lo assorbono. ";
+       else
+          c += "Il segnale non anticipa la direzione del prezzo oltre il caso. ";
+       c += "I punti toccati dopo il segnale descrivono la volatilita' del momento, non un vantaggio direzionale. "
+            "Uso ragionevole: indicazione di ampiezza (quanto puo' muoversi la candela successiva, vedi 'Candele successive'), non trigger di direzione. "
+            "Prima di qualunque uso operativo: ripeti lo studio su altri simboli e su un periodo successivo.";
+      }
+    else
+      {
+       c = "Ci sono indizi da verificare: ";
+       if(netSig > 0) c += "netto positivo e significativo in " + sigList + "; ";
+       if(oosEdge)    c += IS(g_cAns) + " combinazioni della tabella A reggono fuori campione; ";
+       c += "non sono conferme. Servono un test su dati mai visti (forward) e su altri simboli, e la verifica che l'esecuzione reale (spread, slippage, commissioni) non cancelli il margine.";
+      }
+    AddConc(sIdx, "Conclusione", c);
+   }
+  }
+
+//--- confronto fra le due serie (Delta contro EXP_ADDED)
+void BuildCrossConclusions()
+  {
+   if(g_nSets < 2) return;
+   const string a0 = g_setTag[0], a1 = g_setTag[1];
+   long ev0 = 0, ev1 = 0;
+   for(int t = 0; t < g_nT; t++) { ev0 += (long)g_cmpEv[t]; ev1 += (long)g_cmpEv[g_nT + t]; }
+   AddConc(-1, "Quanti segnali in piu'", a1 + ": " + IS(ev1) + " segnali contro " + IS(ev0) + " del " + a0 +
+           (ev0 > 0 ? (" (" + F1(100.0 * (double)ev1 / (double)ev0) + "% rispetto al Delta)") : "") +
+           ". Le due serie sono disgiunte: l'Expansion aggiunge segnali solo dove il Delta tace.");
+
+   int both = 0, better = 0;
+   double bestDiff = -1.0e18;
+   int bdT = -1;
+   for(int t = 0; t < g_nT; t++)
+     {
+      if(g_cmpN[t] < g_minN || g_cmpN[g_nT + t] < g_minN) continue;
+      both++;
+      const double diff = g_cmpRet[g_nT + t] - g_cmpRet[t];
+      if(diff > 0.0) better++;
+      if(diff > bestDiff) { bestDiff = diff; bdT = t; }
+     }
+   const double net0 = (g_agN[0] > 0.0) ? g_agNet[0] / g_agN[0] : 0.0;
+   const double net1 = (g_agN[1] > 0.0) ? g_agNet[1] / g_agN[1] : 0.0;
+   const double gr0  = (g_agN[0] > 0.0) ? g_agGross[0] / g_agN[0] : 0.0;
+   const double gr1  = (g_agN[1] > 0.0) ? g_agGross[1] / g_agN[1] : 0.0;
+   AddConc(-1, "Netto a confronto", "All'orizzonte di " + IS(g_hor[g_refH]) + " min, netto medio pesato sui segnali dei TF con campione sufficiente: " + a0 + " " + Sg(net0) + " pt, " + a1 + " " + Sg(net1) +
+           " pt; lordo medio pesato: " + a0 + " " + Sg(gr0) + " pt, " + a1 + " " + Sg(gr1) + " pt. " +
+           (both > 0 ? ("Su " + IS(both) + " TF con campione sufficiente in entrambe le serie, " + a1 + " ha netto migliore in " + IS(better) + "; la differenza maggiore e' su " +
+                        g_tfName[bdT] + " (" + Sg(bestDiff) + " pt). ") : "Nessun TF ha campione sufficiente in entrambe le serie. ") +
+           "TF con netto positivo significativo: " + a0 + " " + IS(g_agNsig[0]) + ", " + a1 + " " + IS(g_agNsig[1]) + ". TF con lordo significativo positivo: " +
+           a0 + " " + IS(g_agGpos[0]) + ", " + a1 + " " + IS(g_agGpos[1]) + ", negativo: " + a0 + " " + IS(g_agGneg[0]) + ", " + a1 + " " + IS(g_agGneg[1]) + ".");
+   AddConc(-1, "Tabelle A a confronto", "Combinazioni della tabella A che reggono fuori campione (OOS positivo e t >= 2): " + a0 + " " + IS(g_agAns[0]) + ", " + a1 + " " + IS(g_agAns[1]) +
+           ". TF in cui la miglior combinazione A1 resta positiva fuori campione con t >= 2: " + a0 + " " + IS(g_agA1ok[0]) + ", " + a1 + " " + IS(g_agA1ok[1]) + ".");
+   string c;
+   if(g_agNsig[1] == 0 && g_agAns[1] == 0 && g_agA1ok[1] == 0)
+      c = "I segnali che l'Expansion aggiunge non mostrano un vantaggio netto dimostrabile: allargano il numero di operazioni (e dei costi) senza una prova che valgano il costo. ";
+   else
+      c = "I segnali aggiunti mostrano qualche indizio di vantaggio: va confermato fuori campione prima di aggiungerli alla strategia. ";
+   if(g_agN[0] > 0.0 && g_agN[1] > 0.0)
+      c += (net1 > net0) ? ("Il netto medio pesato degli aggiunti e' migliore di quello del Delta di " + F1(net1 - net0) + " pt, ma conta la significativita', non la differenza puntuale.")
+                         : ("Il netto medio pesato degli aggiunti non e' migliore di quello del Delta (differenza " + Sg(net1 - net0) + " pt).");
+   AddConc(-1, "Conclusione del confronto", c);
+  }
+
+string SummaryPlain()
+  {
+   string out = "SignalLab MultiTF - riepilogo e conclusioni - " + _Symbol + " - " + ModeName() + "\n";
+   for(int k = 0; k < ArraySize(g_cSet); k++)
+      out += "\n[" + string(g_cSet[k] < 0 ? "CONFRONTO" : g_setTag[g_cSet[k]]) + "] " + g_cTopic[k] + ": " + g_cText[k] + "\n";
+   return out;
+  }
+
+void RepSummary()
+  {
+   const int nc = ArraySize(g_cSet);
+   if(nc < 1) return;
+   W("<div class='sec' style='order:1'>");
+   W("<h1 class='setH'>Riepilogo e conclusioni</h1>");
+   W("<div class='note'>Riassunto scritto generato dai numeri di questa corsa con regole fisse: riporta quello che le tabelle dicono, con le cautele statistiche del caso, "
+     "e non sostituisce la lettura delle tabelle. Il testo qui sotto si pu&ograve; copiare con il pulsante (stesso testo in <b>MQL5/Files/SignalLab_MultiTF_riepilogo_" + g_reportTag + ".txt</b>). "
+     "I numeri di dettaglio sono nelle serie pi&ugrave; in basso.</div>");
+   W("<table class='sum'><tr><th>Serie</th><th>Tema</th><th>Cosa dicono i dati</th></tr>");
+   for(int k = 0; k < nc; k++)
+      W("<tr><td>" + HtmlEsc(g_cSet[k] < 0 ? string("CONFRONTO") : g_setTag[g_cSet[k]]) + "</td><td>" + HtmlEsc(g_cTopic[k]) + "</td><td>" + HtmlEsc(g_cText[k]) + "</td></tr>");
+   W("</table>");
+   W("<h2>Testo da copiare</h2>");
+   W("<button onclick=\"var t=document.getElementById('sumTxt');t.select();document.execCommand('copy');\">Copia il riepilogo</button>");
+   W("<textarea id='sumTxt' readonly style='width:100%;height:320px;margin-top:8px;background:#0f1114;color:#d8dee9;border:1px solid #2e3440;border-radius:6px;padding:10px;font:12px/1.5 ui-monospace,Consolas,monospace'>" +
+     HtmlEsc(SummaryPlain()) + "</textarea>");
+   W("</div>");
   }
 
 //--- digest compatto da incollare in chat
@@ -2260,7 +3708,8 @@ void ReportSet(const int sIdx)
    g_zB = ZCrit(MathMax(1, m));
 
    g_dg = "";
-   W("<div class='sec' style='order:" + IS(2 + sIdx) + "'>");
+   g_cAok = false; g_cBok = false; g_cAns = 0; g_cAsurv = ""; g_cBdesc = "";
+   W("<div class='sec' style='order:" + IS(3 + sIdx) + "'>");
    W("<h1 class='setH'>Serie " + IS(sIdx + 1) + " di " + IS(g_nSets) + " &mdash; " + g_setName[sIdx] + "</h1>");
    W("<div class='note'>" + g_setNote[sIdx] + " Soglia di Bonferroni su " + IS(m) + " celle TF x orizzonte: |t| &ge; <b>" + F2(g_zB) + "</b>.</div>");
    RepCoverage();
@@ -2268,6 +3717,7 @@ void ReportSet(const int sIdx)
    RepMatrices();
    RepExceed();
    RepEvents();
+   RepNext();
    RepNoiseIntro();
    RepBestTF();
    RepRank();
@@ -2275,10 +3725,12 @@ void ReportSet(const int sIdx)
    RepRankNoise();
    RepVolState();
    RepStruct();
+   RepDowHoursMain();
    RepDetails();
    RepTop();
    W("</div>");
    CaptureSummary(sIdx);
+   BuildConclusions(sIdx);
    g_dgSets += "### SET|" + g_setTag[sIdx] + "\n" + BuildDigestSet() + g_dg;
   }
 
@@ -2286,7 +3738,7 @@ void ReportSet(const int sIdx)
 void RepCompare()
   {
    if(g_nSets < 2) return;
-   W("<div class='sec' style='order:1'>");
+   W("<div class='sec' style='order:2'>");
    W("<h1 class='setH'>Confronto fra le due serie &mdash; orizzonte " + IS(g_hor[g_refH]) + " min</h1>");
    W("<div class='note'><b>" + g_setTag[0] + "</b> = solo Synthetic Delta. <b>" + g_setTag[1] + "</b> = segnali che l'Expansion aggiunge dove il Delta non d&agrave; segnale. "
      "Le serie sono disgiunte e misurate con lo stesso metodo (stessi costi, stesse tenute, stessa base): ciascuna ha sotto il proprio gruppo completo di tabelle. "
@@ -2358,7 +3810,15 @@ void ReportAbort()
 
 void ReportEnd()
   {
+   BuildCrossConclusions();
    RepCompare();
+   RepSummary();
+   if(ArraySize(g_cSet) > 0)
+     {
+      g_dgSets += "### CONCL\n";
+      for(int k = 0; k < ArraySize(g_cSet); k++)
+         g_dgSets += "CONCL|" + string(g_cSet[k] < 0 ? "CONFRONTO" : g_setTag[g_cSet[k]]) + "|" + g_cTopic[k] + "|" + g_cText[k] + "\n";
+     }
    g_dg = BuildDigestHeader() + g_dgSets;
    string esc = g_dg;
    StringReplace(esc, "&", "&amp;");
@@ -2377,6 +3837,13 @@ void ReportEnd()
          Print("Report: MQL5/Files/", g_reportFile);
       else
          Print("Report completo ma non rinominabile (errore ", GetLastError(), "): si trova in MQL5/Files/", g_reportTmp);
+     }
+   int sf = FileOpen("SignalLab_MultiTF_riepilogo_" + g_reportTag + ".txt", FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(sf != INVALID_HANDLE)
+     {
+      FileWriteString(sf, SummaryPlain());
+      FileClose(sf);
+      Print("Riepilogo: MQL5/Files/SignalLab_MultiTF_riepilogo_", g_reportTag, ".txt");
      }
    int df = FileOpen("SignalLab_MultiTF_digest_" + g_reportTag + ".txt", FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(df != INVALID_HANDLE)
@@ -2426,6 +3893,20 @@ void OnStart()
    }
    ArrayResize(g_tfRejGap, g_nT); ArrayInitialize(g_tfRejGap, 0);
    ArrayResize(g_tfRejM1, g_nT);  ArrayInitialize(g_tfRejM1, 0);
+   {
+    //--- candele successive: accumulatori di entrambe le serie (riempiti durante il calcolo dei segnali)
+    const long cells = (long)g_nSets * g_nT * g_nMem * g_nM;
+    if(ArrayResize(g_nx, (int)(cells * NXF)) != (int)(cells * NXF) ||
+       ArrayResize(g_nxh, (int)(cells * 2 * NXB)) != (int)(cells * 2 * NXB) ||
+       ArrayResize(g_nxb, (int)((long)g_nT * g_nMem * g_nM * NXF)) != (int)((long)g_nT * g_nMem * g_nM * NXF))
+      {
+       Print("Memoria insufficiente per le candele successive: riduci InpNextCandles, i TF o allarga le fasce.");
+       return;
+      }
+    ArrayInitialize(g_nx, 0.0);
+    ArrayInitialize(g_nxh, 0);
+    ArrayInitialize(g_nxb, 0.0);
+   }
 
    Print("=== SignalLab MultiTF | ", _Symbol, " | modo ", ModeName(), " | ", g_nT, " TF | ", g_nH,
          " orizzonti | riferimento ", g_hor[g_refH], " min");

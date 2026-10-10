@@ -148,6 +148,30 @@ void SD_VolState(const MqlRates &r[], const int n, const SDVolParams &p, const d
   }
 
 //+------------------------------------------------------------------+
+//| INTENSITA' DELLA CANDELA: classe del rapporto TR/ATR (ATR = SMA   |
+//| del TR su 'atrLen' barre, barra inclusa) rispetto a 5 soglie      |
+//| crescenti 'edge': 0 = sotto la prima soglia ... 5 = sopra         |
+//| l'ultima. 255 = ATR non ancora disponibile.                       |
+//+------------------------------------------------------------------+
+void SD_IntensityBins(const MqlRates &r[], const int n, const int atrLen, const double &edge[], uchar &bin[])
+  {
+   ArrayResize(bin, n);
+   ArrayInitialize(bin, 255);
+   if(atrLen < 1 || n < atrLen + 2) return;
+   double atr[];
+   SD_Atr(r, n, atrLen, atr);
+   for(int i = MathMax(1, atrLen); i < n; i++)
+     {
+      if(atr[i] <= 0.0) continue;
+      double tr    = MathMax(r[i].high, r[i-1].close) - MathMin(r[i].low, r[i-1].close);
+      double ratio = tr / atr[i];
+      int    b     = 0;
+      while(b < 5 && ratio >= edge[b]) b++;
+      bin[i] = (uchar)b;
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| SD_BuildSignals                                                   |
 //| Per ogni barra CHIUSA i (0..n-2) calcola la direzione del        |
 //| segnale (+1/-1/0) e la posizione nella raffica (burst >= 1).      |
