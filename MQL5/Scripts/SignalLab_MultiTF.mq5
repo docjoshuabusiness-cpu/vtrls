@@ -31,6 +31,10 @@
 //|  Errore standard raggruppato per giorno (cluster) perche' i      |
 //|  segnali sono sovrapposti.                                       |
 //|                                                                  |
+//|  InpMode = DELTA_E_EXP_ADDED (default): in UN SOLO LANCIO calcola |
+//|  la serie Delta e la serie EXP_ADDED (segnali che l'Expansion    |
+//|  aggiunge), ciascuna con il proprio gruppo di tabelle, piu' una  |
+//|  tabella di confronto in cima.                                   |
 //|  Esegui su un simbolo alla volta (quello del grafico).           |
 //|  Output: MQL5/Files/SignalLab_MultiTF_<simbolo>_<modo>.html e    |
 //|          SignalLab_MultiTF_digest_<simbolo>_<modo>.txt           |
@@ -49,7 +53,8 @@ enum ENUM_SD_MODE
    SDM_EXP   = 1,  // Solo Expansion Candle
    SDM_AND   = 2,  // Entrambi concordi sulla stessa barra (AND)
    SDM_OR    = 3,  // Delta + Expansion: basta uno dei due (OR)
-   SDM_ADDED = 4   // Solo i segnali che l'Expansion AGGIUNGE a Delta (Expansion accesa, Delta spento)
+   SDM_ADDED = 4,  // Solo i segnali che l'Expansion AGGIUNGE a Delta (Expansion accesa, Delta spento)
+   SDM_DELTA_ADDED = 5  // IN UN SOLO LANCIO: serie DELTA e serie EXP_ADDED, in tabelle distinte + confronto
   };
 
 enum ENUM_NOISE_SORT
@@ -60,7 +65,7 @@ enum ENUM_NOISE_SORT
   };
 
 input group "=== SEGNALE (stessi parametri dell'EA) ==="
-input ENUM_SD_MODE InpMode          = SDM_DELTA;
+input ENUM_SD_MODE InpMode          = SDM_DELTA_ADDED;
 input int      InpEmaPeriod         = 13;     // EmaPeriod
 input int      InpVolAvgPeriod      = 20;     // VolAvgPeriod
 input double   InpThreshold         = 0.15;   // SignalThreshold
@@ -148,6 +153,23 @@ long     g_off = 0;
 double   g_pt = 0.0;
 double   g_zB = 3.0;
 double   g_minN = 100.0;                // minimo posizioni (>= 1)
+
+//--- serie di segnali analizzate in un solo lancio (0 = Delta, 1 = EXP_ADDED)
+int      g_nSets = 1;
+int      g_curSet = 0;
+int      g_setMode[2];
+string   g_setName[2];     // titolo HTML
+string   g_setTag[2];      // etichetta semplice (digest)
+string   g_setNote[2];
+char     g_dirAlt[];       // direzioni della seconda serie, parallele a g_dir
+uchar    g_burAlt[];
+int      g_tfEvAlt[];
+string   g_dgSets = "";
+//--- sintesi di ogni serie per la tabella di confronto: indice = serie * g_nT + t
+int      g_cmpEv[];
+double   g_cmpN[], g_cmpMfe[], g_cmpMae[], g_cmpRet[], g_cmpTcl[];
+string   g_cmpDesc[];
+double   g_cmpBoN[], g_cmpBoM[], g_cmpBoT[];
 datetime g_tStart = 0;                  // primo istante M1 effettivamente disponibile nel periodo
 bool     g_histWarn = false;            // lo storico M1 inizia molto dopo InpFrom
 int      g_rbMin = 15, g_nRB = 96;   // fasce della classifica
@@ -324,6 +346,7 @@ string ModeName()
       case SDM_AND:   return "AND";
       case SDM_OR:    return "OR";
       case SDM_ADDED: return "EXP_ADDED";
+      case SDM_DELTA_ADDED: return "DELTA_E_EXP_ADDED";
      }
    return "?";
   }
@@ -483,7 +506,26 @@ bool SetupInputs()
    g_vpar.extremeTh = InpVsExtremeTh;
    g_volWarm        = g_vpar.atrLen + g_vpar.lookback + g_vpar.emaSmooth + 10;
 
-   g_par.mode             = (int)InpMode;
+   if(InpMode == SDM_DELTA_ADDED)
+     {
+      g_nSets = 2;
+      g_setMode[0] = SD_MODE_DELTA;  g_setTag[0] = "DELTA";
+      g_setName[0] = "DELTA &mdash; solo Synthetic Delta";
+      g_setNote[0] = "Segnali emessi dal solo Synthetic Delta, con i parametri dell'EA.";
+      g_setMode[1] = SD_MODE_ADDED;  g_setTag[1] = "EXP_ADDED";
+      g_setName[1] = "EXP_ADDED &mdash; segnali che l'Expansion aggiunge al Delta";
+      g_setNote[1] = "Segnali dell'Expansion Candle (TR/ATR sopra soglia, direzione = colore della candela) sulle barre in cui il Delta <b>non</b> d&agrave; segnale. "
+                     "Le due serie non si sovrappongono: nessun segnale della serie Delta compare qui. La posizione nella raffica segue il flusso Delta + Expansion dell'EA.";
+     }
+   else
+     {
+      g_nSets = 1;
+      g_setMode[0] = (int)InpMode;
+      g_setTag[0]  = ModeName();
+      g_setName[0] = ModeName();
+      g_setNote[0] = "Serie unica scelta con InpMode.";
+     }
+   g_par.mode             = g_setMode[0];
    g_par.emaPeriod        = MathMax(1, InpEmaPeriod);
    g_par.volAvgPeriod     = MathMax(1, InpVolAvgPeriod);
    g_par.threshold        = InpThreshold;
@@ -623,6 +665,14 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    char  dir[];
    uchar bur[];
    int   warm = SD_BuildSignals(r, n, g_par, dir, bur);
+   char  dir2[];
+   uchar bur2[];
+   if(g_nSets > 1)
+     {
+      SDParams p2 = g_par;
+      p2.mode = g_setMode[1];
+      SD_BuildSignals(r, n, p2, dir2, bur2);
+     }
    uchar vsc[];
    if(InpUseVolState)
      {
@@ -640,9 +690,10 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    ArrayResize(g_bur,  need, 2000000);
    ArrayResize(g_slot, need, 2000000);
    ArrayResize(g_vs,   need, 2000000);
+   if(g_nSets > 1) { ArrayResize(g_dirAlt, need, 2000000); ArrayResize(g_burAlt, need, 2000000); }
 
    int u = g_used, p = 0;
-   int bars = 0, rejGap = 0, rejM1 = 0, ev = 0;
+   int bars = 0, rejGap = 0, rejM1 = 0, ev = 0, ev2 = 0;
    for(int i = warm; i < n - 1; i++)
      {
       datetime tNext = r[i+1].time;
@@ -656,6 +707,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
       g_ent[u]  = p;
       g_dir[u]  = dir[i];
       g_bur[u]  = bur[i];
+      if(g_nSets > 1) { g_dirAlt[u] = dir2[i]; g_burAlt[u] = bur2[i]; if(dir2[i] != 0) ev2++; }
       g_vs[u]   = InpUseVolState ? ((i >= g_volWarm) ? vsc[i] : (uchar)255) : (uchar)10;   // 255 = finestra del percentile incompleta
       g_slot[u] = (ushort)(slotOK ? (int)(((long)r[i].time % g_parentSec) / xs) : 0);
       if(dir[i] != 0) ev++;
@@ -665,6 +717,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    g_used        = u;
    g_tfBars[t]   = bars;
    g_tfEv[t]     = ev;
+   g_tfEvAlt[t]  = ev2;
    g_tfRejGap[t] = rejGap;
    g_tfRejM1[t]  = rejM1;
    ArrayResize(g_ent,  g_used);
@@ -672,7 +725,8 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    ArrayResize(g_bur,  g_used);
    ArrayResize(g_slot, g_used);
    ArrayResize(g_vs,   g_used);
-   Print("TF ", g_tfName[t], ": barre ", n, " | in periodo ", bars, " | segnali ", ev,
+   if(g_nSets > 1) { ArrayResize(g_dirAlt, g_used); ArrayResize(g_burAlt, g_used); }
+   Print("TF ", g_tfName[t], ": barre ", n, " | in periodo ", bars, " | segnali ", ev, (g_nSets > 1 ? (" / " + IntegerToString(ev2) + " (EXP_ADDED)") : ""),
          " | scartate gap sessione ", rejGap, " | senza M1 ", rejM1);
   }
 
@@ -1097,6 +1151,7 @@ void RepHead()
    W(".ko{border-left-color:#bf616a}.ok{border-left-color:#a3be8c}");
    W("details{margin:6px 0}summary{cursor:pointer;color:#88c0d0;padding:3px 0}");
    W("pre{background:#0f1114;border:1px solid #2e3440;border-radius:6px;padding:14px;overflow-x:auto;font:11px/1.45 ui-monospace,Consolas,monospace;color:#d8dee9;white-space:pre}");
+   W(".wrap{display:flex;flex-direction:column}.sec{width:100%}.setH{font-size:18px;margin:34px 0 4px;padding:8px 12px;background:#1e222a;border-left:4px solid #88c0d0}");
    W("</style></head><body>");
   }
 
@@ -1151,7 +1206,7 @@ void RepIntro()
      "Contano <b>MFE/MAE</b> (asimmetria dentro lo stesso evento) e il confronto con la <b>base</b> = entrate in direzione casuale, stesso TF, stessa fascia oraria.</div>");
    W("<div class='note'><b>t cluster</b> usa l'errore standard raggruppato per giorno: i segnali di barre vicine si sovrappongono, "
      "il t naive &egrave; gonfiato. Giallo = |t| &ge; 2 (debole, atteso per caso su 1 cella su 20). Verde/rosso = oltre la soglia di Bonferroni "
-     "sul numero di celle TF x orizzonte di questo report: |t| &ge; <b>" + F2(g_zB) + "</b>. Non cercare la cella migliore: cerca coerenza fra TF vicini e orizzonti vicini. "
+     "sul numero di celle TF x orizzonte di ciascuna serie (la soglia &egrave; scritta in testa alla serie). Non cercare la cella migliore: cerca coerenza fra TF vicini e orizzonti vicini. "
      "Il t cluster &egrave; ottimista per orizzonti di un giorno o pi&ugrave;, perch&eacute; giorni adiacenti condividono parte del percorso del prezzo.</div>");
    W("<div class='note'>Tutte le tabelle con <b>t naive</b> o z del segno (fasce orarie, candela nel TF superiore, raffica, direzione, giorno, classifiche) "
      "non sono corrette per i test multipli (e quelle non a posizione singola nemmeno per la sovrapposizione): nelle colonne t e z il giallo significa solo |t| &ge; 2, mai verde o rosso; "
@@ -1467,11 +1522,15 @@ void RepBestTF()
                if(a.n < g_minN) continue;
                if(a.t > bt) { bt = a.t; bh = h; bk = kk; bd = dd; }
               }
+      const int ci = g_curSet * g_nT + t;
+      g_cmpBoN[ci] = 0.0; g_cmpBoM[ci] = 0.0; g_cmpBoT[ci] = 0.0; g_cmpDesc[ci] = "-";
       if(bh < 0)
         { W("<tr class='thin'><td>" + g_tfName[t] + "</td><td colspan='11'>campione in-sample insufficiente</td></tr>"); continue; }
       RkStat a, b;
       RkRead(g_rg, (t * g_nH + bh) * blk, bk, bd, 0, a);
       RkRead(g_rg, (t * g_nH + bh) * blk, bk, bd, 1, b);
+      g_cmpBoN[ci] = b.n; g_cmpBoM[ci] = b.mean; g_cmpBoT[ci] = b.t;
+      g_cmpDesc[ci] = string(bd == 0 ? "SEGUI" : "INVERTI") + " " + IS(g_hor[bh]) + "m, TP " + KLabel(bk);
       W("<tr><td>" + g_tfName[t] + "</td>" + Td(bd == 0 ? "SEGUI" : "INVERTI") + Td(IS(g_hor[bh])) + Td(KLabel(bk)) +
         Td(F0(a.n)) + Td("<b>" + F1(a.mean) + "</b>", ColSign(a.mean)) + Td(F2(a.t)) + Td(bk == 0 ? "-" : F1(a.hit)) +
         Td(F0(b.n)) + Td("<b>" + F1(b.mean) + "</b>", ColSign(b.mean)) + Td(F2(b.t), ColTNaive(b.t)) + EsitoCell(a, b) + "</tr>");
@@ -2073,7 +2132,7 @@ void RepTop()
   }
 
 //--- digest compatto da incollare in chat
-void BuildDigest()
+string BuildDigestHeader()
   {
    string d = "### SIGNALLAB MULTITF DIGEST v1\n";
    d += "# tutto in punti; netto = rendimento a fine orizzonte nella direzione del segnale meno costo\n";
@@ -2092,9 +2151,16 @@ void BuildDigest()
         "|exp|" + F2(InpVsExpTh) + "|comp|" + F2(InpVsCompTh) + "|low|" + IS(InpVsLowTh) + "|high|" + IS(InpVsHighTh) + "|extreme|" + IS(InpVsExtremeTh) + "\n";
    d += "RUN|costfix|" + F1(InpCostPoints) + "|extra|" + F1(InpExtraCostPts) + "|maxgap|" + IS(InpMaxGapMin) +
         "|entrygap|" + IS(InpMaxEntryGapMin) + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +
-        "|ref|" + IS(g_hor[g_refH]) + "|zbonf|" + F2(g_zB) + "\n";
+        "|ref|" + IS(g_hor[g_refH]) + "|sets|" + IS(g_nSets) + "\n";
    d += "DATA|m1bars|" + IS(g_n1) + "|days|" + IS(g_nDays) + "|medrange|" + F0(g_medRange) + "|medspr|" + F0(g_medSpr) +
         "|zerospr|" + F1(g_zeroSprPct) + "\n";
+   return d;
+  }
+
+//--- righe della singola serie (le righe RANK, NOISE, VST, TOP... le aggiungono le funzioni Rep*)
+string BuildDigestSet()
+  {
+   string d = "SETINFO|name|" + g_setTag[g_curSet] + "|zbonf|" + F2(g_zB) + "\n";
    for(int t = 0; t < g_nT; t++)
       d += "TF|" + g_tfName[t] + "|bars|" + IS(g_tfBars[t]) + "|base|" + IS(g_tfCnt[t]) + "|signals|" + IS(g_tfEv[t]) +
            "|rejgap|" + IS(g_tfRejGap[t]) + "|rejm1|" + IS(g_tfRejM1[t]) + "\n";
@@ -2142,26 +2208,59 @@ void BuildDigest()
          d += "DOW|" + g_tfName[t] + "|" + DowName(k) + "|n|" + F0(n) + "|ret|" + F1(g_accDow[p+3]/n) + "\n";
         }
      }
-   g_dg = d + g_dg;
+   return d;
   }
 
-void WriteReport()
+//+------------------------------------------------------------------+
+//| REPORT A SERIE: ogni serie ha il suo gruppo completo di tabelle,   |
+//| piu' una tabella di confronto mostrata in cima (CSS order).        |
+//+------------------------------------------------------------------+
+string g_reportTag = "";
+string g_reportFile = "";
+
+void ReportBegin()
   {
-   //--- soglia di Bonferroni sul numero di celle con dati
+   g_reportTag  = SafeTag(_Symbol) + "_" + ModeName();
+   g_reportFile = "SignalLab_MultiTF_" + g_reportTag + ".html";
+   g_fh = FileOpen(g_reportFile, FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(g_fh == INVALID_HANDLE) Print("HTML non scrivibile (errore ", GetLastError(), "): salvo solo il digest.");
+   g_dgSets = "";
+   RepHead();
+   W("<div class='wrap'>");
+   W("<div class='sec' style='order:0'>");
+   RepIntro();
+   W("</div>");
+  }
+
+//--- sintesi della serie corrente (orizzonte di riferimento) per il confronto
+void CaptureSummary(const int sIdx)
+  {
+   for(int t = 0; t < g_nT; t++)
+     {
+      const int ci = sIdx * g_nT + t;
+      g_cmpEv[ci] = g_tfEv[t];
+      CellStat cs;
+      if(GetCell(t, g_refH, cs))
+        { g_cmpN[ci] = cs.n; g_cmpMfe[ci] = cs.mfe; g_cmpMae[ci] = cs.mae; g_cmpRet[ci] = cs.ret; g_cmpTcl[ci] = cs.tCl; }
+      else
+        { g_cmpN[ci] = 0.0; g_cmpMfe[ci] = 0.0; g_cmpMae[ci] = 0.0; g_cmpRet[ci] = 0.0; g_cmpTcl[ci] = 0.0; }
+     }
+  }
+
+void ReportSet(const int sIdx)
+  {
+   g_curSet = sIdx;
+   //--- soglia di Bonferroni sul numero di celle con dati di questa serie
    int m = 0;
    for(int t = 0; t < g_nT; t++)
       for(int h = 0; h < g_nH; h++)
          if(g_accTH[(t * g_nH + h) * ACCN] >= 1.0) m++;
    g_zB = ZCrit(MathMax(1, m));
 
-   string tag = SafeTag(_Symbol) + "_" + ModeName();
-   string fn  = "SignalLab_MultiTF_" + tag + ".html";
-   g_fh = FileOpen(fn, FILE_WRITE | FILE_TXT | FILE_ANSI);
-   if(g_fh == INVALID_HANDLE) Print("HTML non scrivibile (errore ", GetLastError(), "): salvo solo il digest.");
-
    g_dg = "";
-   RepHead();
-   RepIntro();
+   W("<div class='sec' style='order:" + IS(2 + sIdx) + "'>");
+   W("<h1 class='setH'>Serie " + IS(sIdx + 1) + " di " + IS(g_nSets) + " &mdash; " + g_setName[sIdx] + "</h1>");
+   W("<div class='note'>" + g_setNote[sIdx] + " Soglia di Bonferroni su " + IS(m) + " celle TF x orizzonte: |t| &ge; <b>" + F2(g_zB) + "</b>.</div>");
    RepCoverage();
    RepVerdict();
    RepMatrices();
@@ -2176,28 +2275,97 @@ void WriteReport()
    RepStruct();
    RepDetails();
    RepTop();
-   BuildDigest();
+   W("</div>");
+   CaptureSummary(sIdx);
+   g_dgSets += "### SET|" + g_setTag[sIdx] + "\n" + BuildDigestSet() + g_dg;
+  }
 
+//--- tabella di confronto Delta / EXP_ADDED (mostrata per prima)
+void RepCompare()
+  {
+   if(g_nSets < 2) return;
+   W("<div class='sec' style='order:1'>");
+   W("<h1 class='setH'>Confronto fra le due serie &mdash; orizzonte " + IS(g_hor[g_refH]) + " min</h1>");
+   W("<div class='note'><b>" + g_setTag[0] + "</b> = solo Synthetic Delta. <b>" + g_setTag[1] + "</b> = segnali che l'Expansion aggiunge dove il Delta non d&agrave; segnale. "
+     "Le serie sono disgiunte e misurate con lo stesso metodo (stessi costi, stesse tenute, stessa base): ciascuna ha sotto il proprio gruppo completo di tabelle. "
+     "La colonna <b>Aggiunti / Delta</b> dice di quanto l'Expansion allarga il numero di segnali. Il netto medio &egrave; per posizione, in punti, al netto del costo; "
+     "t cluster = errore standard raggruppato per giorno, giallo se |t| &ge; 2 (la soglia di Bonferroni &egrave; nelle singole serie).</div>");
+   W("<table><tr><th rowspan='2'>TF</th><th colspan='5'>" + g_setTag[0] + "</th><th colspan='5'>" + g_setTag[1] + "</th><th rowspan='2'>Aggiunti / Delta %</th></tr>");
+   W("<tr><th>Segnali</th><th>Misurati</th><th>Netto medio</th><th>t cluster</th><th>MFE/MAE</th>"
+     "<th>Segnali</th><th>Misurati</th><th>Netto medio</th><th>t cluster</th><th>MFE/MAE</th></tr>");
+   for(int t = 0; t < g_nT; t++)
+     {
+      if(g_cmpEv[t] < 1 && g_cmpEv[g_nT + t] < 1) continue;
+      W("<tr><td>" + g_tfName[t] + "</td>");
+      for(int s2 = 0; s2 < 2; s2++)
+        {
+         const int ci = s2 * g_nT + t;
+         if(g_cmpN[ci] < 1.0) { W("<td>" + IS(g_cmpEv[ci]) + "</td><td>-</td><td>-</td><td>-</td><td>-</td>"); continue; }
+         double ra = (g_cmpMae[ci] > 0.0) ? g_cmpMfe[ci] / g_cmpMae[ci] : 0.0;
+         W(Td(IS(g_cmpEv[ci])) + Td(F0(g_cmpN[ci])) + Td("<b>" + F1(g_cmpRet[ci]) + "</b>", ColSign(g_cmpRet[ci])) +
+           Td(F2(g_cmpTcl[ci]), ColTNaive(g_cmpTcl[ci])) + Td(F2(ra), ra > 1.0 ? "#a3be8c" : "#bf616a"));
+        }
+      double add = (g_cmpEv[t] > 0) ? 100.0 * g_cmpEv[g_nT + t] / g_cmpEv[t] : 0.0;
+      W(Td(g_cmpEv[t] > 0 ? F1(add) : "-") + "</tr>");
+     }
+   W("</table>");
+
+   W("<h2>Miglior combinazione per TF (tabella A1 di ciascuna serie): scelta in-sample, risultato fuori campione</h2>");
+   W("<div class='note'>Per ogni serie e TF: la combinazione verso/tenuta/target scelta sul primo periodo e il suo risultato nel periodo successivo, mai usato per sceglierla. "
+     "Il netto OOS &egrave; la sola colonna che conta; un netto OOS positivo con t &ge; 2 su una sola riga non basta, serve coerenza fra TF vicini.</div>");
+   W("<table><tr><th rowspan='2'>TF</th><th colspan='4'>" + g_setTag[0] + "</th><th colspan='4'>" + g_setTag[1] + "</th></tr>");
+   W("<tr><th>Combinazione</th><th>OOS pos.</th><th>OOS netto</th><th>OOS t</th><th>Combinazione</th><th>OOS pos.</th><th>OOS netto</th><th>OOS t</th></tr>");
+   for(int t = 0; t < g_nT; t++)
+     {
+      if(g_cmpEv[t] < 1 && g_cmpEv[g_nT + t] < 1) continue;
+      W("<tr><td>" + g_tfName[t] + "</td>");
+      for(int s2 = 0; s2 < 2; s2++)
+        {
+         const int ci = s2 * g_nT + t;
+         if(g_cmpBoN[ci] < 1.0) { W("<td>" + g_cmpDesc[ci] + "</td><td>-</td><td>-</td><td>-</td>"); continue; }
+         W(Td(g_cmpDesc[ci]) + Td(F0(g_cmpBoN[ci])) + Td("<b>" + F1(g_cmpBoM[ci]) + "</b>", ColSign(g_cmpBoM[ci])) +
+           Td(F2(g_cmpBoT[ci]), ColTNaive(g_cmpBoT[ci])));
+        }
+      W("</tr>");
+     }
+   W("</table>");
+   W("</div>");
+   //--- righe per il digest
+   for(int s2 = 0; s2 < 2; s2++)
+      for(int t = 0; t < g_nT; t++)
+        {
+         const int ci = s2 * g_nT + t;
+         if(g_cmpEv[ci] < 1) continue;
+         g_dgSets += "CMP|" + g_setTag[s2] + "|" + g_tfName[t] + "|signals|" + IS(g_cmpEv[ci]) + "|n|" + F0(g_cmpN[ci]) +
+                     "|ret|" + F1(g_cmpRet[ci]) + "|tcl|" + F2(g_cmpTcl[ci]) + "|mfe|" + F0(g_cmpMfe[ci]) + "|mae|" + F0(g_cmpMae[ci]) +
+                     "|best|" + g_cmpDesc[ci] + "|oosn|" + F0(g_cmpBoN[ci]) + "|oosmean|" + F1(g_cmpBoM[ci]) + "|oost|" + F2(g_cmpBoT[ci]) + "\n";
+        }
+  }
+
+void ReportEnd()
+  {
+   RepCompare();
+   g_dg = BuildDigestHeader() + g_dgSets;
    string esc = g_dg;
    StringReplace(esc, "&", "&amp;");
    StringReplace(esc, "<", "&lt;");
+   W("<div class='sec' style='order:9'>");
    W("<h2>Digest da copiare</h2>");
-   W("<div class='note'>Seleziona e incolla in chat. Stesso testo in <b>MQL5/Files/SignalLab_MultiTF_digest_" + tag + ".txt</b>.</div>");
+   W("<div class='note'>Seleziona e incolla in chat. Stesso testo in <b>MQL5/Files/SignalLab_MultiTF_digest_" + g_reportTag + ".txt</b>.</div>");
    W("<pre>" + esc + "### END\n</pre>");
-   W("</body></html>");
+   W("</div></div></body></html>");
    if(g_fh != INVALID_HANDLE)
      {
       FileClose(g_fh);
       g_fh = INVALID_HANDLE;
-      Print("Report: MQL5/Files/", fn);
+      Print("Report: MQL5/Files/", g_reportFile);
      }
-
-   int df = FileOpen("SignalLab_MultiTF_digest_" + tag + ".txt", FILE_WRITE | FILE_TXT | FILE_ANSI);
+   int df = FileOpen("SignalLab_MultiTF_digest_" + g_reportTag + ".txt", FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(df != INVALID_HANDLE)
      {
       FileWriteString(df, g_dg + "### END\n");
       FileClose(df);
-      Print("Digest: MQL5/Files/SignalLab_MultiTF_digest_", tag, ".txt");
+      Print("Digest: MQL5/Files/SignalLab_MultiTF_digest_", g_reportTag, ".txt");
      }
   }
 
@@ -2223,6 +2391,21 @@ void OnStart()
    ArrayResize(g_tfCnt, g_nT);    ArrayInitialize(g_tfCnt, 0);
    ArrayResize(g_tfBars, g_nT);   ArrayInitialize(g_tfBars, 0);
    ArrayResize(g_tfEv, g_nT);     ArrayInitialize(g_tfEv, 0);
+   ArrayResize(g_tfEvAlt, g_nT);  ArrayInitialize(g_tfEvAlt, 0);
+   {
+    const int nc = 2 * g_nT;
+    ArrayResize(g_cmpEv, nc);  ArrayInitialize(g_cmpEv, 0);
+    ArrayResize(g_cmpN, nc);   ArrayInitialize(g_cmpN, 0.0);
+    ArrayResize(g_cmpMfe, nc); ArrayInitialize(g_cmpMfe, 0.0);
+    ArrayResize(g_cmpMae, nc); ArrayInitialize(g_cmpMae, 0.0);
+    ArrayResize(g_cmpRet, nc); ArrayInitialize(g_cmpRet, 0.0);
+    ArrayResize(g_cmpTcl, nc); ArrayInitialize(g_cmpTcl, 0.0);
+    ArrayResize(g_cmpBoN, nc); ArrayInitialize(g_cmpBoN, 0.0);
+    ArrayResize(g_cmpBoM, nc); ArrayInitialize(g_cmpBoM, 0.0);
+    ArrayResize(g_cmpBoT, nc); ArrayInitialize(g_cmpBoT, 0.0);
+    ArrayResize(g_cmpDesc, nc);
+    for(int q = 0; q < nc; q++) g_cmpDesc[q] = "-";
+   }
    ArrayResize(g_tfRejGap, g_nT); ArrayInitialize(g_tfRejGap, 0);
    ArrayResize(g_tfRejM1, g_nT);  ArrayInitialize(g_tfRejM1, 0);
 
@@ -2247,21 +2430,33 @@ void OnStart()
    Comment("SignalLab MultiTF: segnali pronti, misura in corso...");
    if(g_used == 0) { Print("Nessuna barra valida: controlla periodo e storico."); Comment(""); return; }
 
-   //--- finestre forward e accumulo, un orizzonte alla volta
-   if(!AllocAcc()) { Comment(""); return; }
+   //--- finestre forward e accumulo, un orizzonte alla volta, per ciascuna serie
    ArrayResize(g_fHi, g_n1); ArrayResize(g_fLo, g_n1); ArrayResize(g_fCl, g_n1);
    ArrayResize(g_ok, g_n1);  ArrayResize(g_dqH, g_n1); ArrayResize(g_dqL, g_n1);
-   for(int hi = 0; hi < g_nH; hi++)
+   ReportBegin();
+   for(int sIdx = 0; sIdx < g_nSets; sIdx++)
      {
-      if(IsStopped()) { Print("Interrotto dall'utente."); Comment(""); return; }
-      ComputeForward(g_hor[hi]);
-      AccumulateHorizon(hi);
-      Print("Orizzonte ", g_hor[hi], " min completato (", (GetTickCount() - t0) / 1000.0, " s)");
-      Comment("SignalLab MultiTF: orizzonte ", g_hor[hi], " min completato (", hi + 1, "/", g_nH, ")");
+      if(sIdx == 1)
+        {
+         ArrayCopy(g_dir, g_dirAlt);       // la seconda serie diventa quella attiva
+         ArrayCopy(g_bur, g_burAlt);
+         ArrayCopy(g_tfEv, g_tfEvAlt);
+        }
+      g_curSet = sIdx;
+      Print("--- Serie ", sIdx + 1, "/", g_nSets, ": ", g_setTag[sIdx]);
+      if(!AllocAcc()) { Comment(""); if(g_fh != INVALID_HANDLE) { FileClose(g_fh); g_fh = INVALID_HANDLE; } return; }
+      for(int hi = 0; hi < g_nH; hi++)
+        {
+         if(IsStopped()) { Print("Interrotto dall'utente."); Comment(""); if(g_fh != INVALID_HANDLE) { FileClose(g_fh); g_fh = INVALID_HANDLE; } return; }
+         ComputeForward(g_hor[hi]);
+         AccumulateHorizon(hi);
+         Print(g_setTag[sIdx], ": orizzonte ", g_hor[hi], " min completato (", (GetTickCount() - t0) / 1000.0, " s)");
+         Comment("SignalLab MultiTF [", g_setTag[sIdx], "]: orizzonte ", g_hor[hi], " min completato (", hi + 1, "/", g_nH, ")");
+        }
+      ComputeEventReach();
+      ReportSet(sIdx);
      }
-
-   ComputeEventReach();
-   WriteReport();
+   ReportEnd();
    Comment("");
    Print("Fatto in ", (GetTickCount() - t0) / 1000.0, " s");
   }
