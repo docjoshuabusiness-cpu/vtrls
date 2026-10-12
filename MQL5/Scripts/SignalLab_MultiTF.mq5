@@ -577,6 +577,7 @@ bool InSkipWin(const long tsec)
 bool SetupInputs()
   {
    if(InpFrom >= InpTo) { Print("InpFrom deve precedere InpTo."); return false; }
+   if(InpEntryLagMin < 0) { Print("InpEntryLagMin deve essere >= 0."); return false; }
    g_minN = MathMax(1.0, (double)InpRankMinN);
    if(!ParseTFs()) { Print("Nessun timeframe valido in InpTFs"); return false; }
    g_nH = ParseIntList(InpHorizons, g_hor);
