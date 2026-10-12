@@ -48,7 +48,14 @@
 //|    tester. Lo spread e' gia' nei prezzi di riempimento.            |
 //|  - Funziona su conti NETTING e HEDGING: una sola posizione per     |
 //|    volta (in netting un segnale opposto chiuderebbe la posizione   |
-//|    invece di aprirne una, falsando le statistiche).                |
+//|    invece di aprirne una, falsando le statistiche). In netting non |
+//|    entra se sul simbolo c'e' una posizione di QUALUNQUE magic.     |
+//|  - TESTER per la scansione: ottimizzazione = Algoritmo completo,   |
+//|    criterio = Max personalizzato (non Balance max). Il t di        |
+//|    OnTester e' evidenza, non effetto: confrontalo con la soglia di |
+//|    Bonferroni stampata nel report, e verifica fuori campione.      |
+//|  - Input non validi (maschere ore/giorni, filtri in contraddizione |
+//|    con la classe) fanno fallire OnInit: nessuna passata "vuota".   |
 //|  - Tutto il segnale e' calcolato sulla barra CHIUSA (shift 1); si  |
 //|    entra al primo tick della barra successiva.                     |
 //|  - Lo stato (raffica, expansion pending) e' ricostruito all'avvio  |
@@ -70,7 +77,7 @@ CTrade trade;
 enum ENUM_SD_SRCSEL { SDE_SRC_ANY = 0, SDE_SRC_DELTA = 1, SDE_SRC_EXPADDED = 2 };
 enum ENUM_SD_DIRSEL { SDE_DIR_ANY = 0, SDE_DIR_BUY = 1, SDE_DIR_SELL = 2 };
 enum ENUM_SD_REQ    { SDE_REQ_IGNORE = 0, SDE_REQ_PASS = 1, SDE_REQ_FAIL = 2 };
-enum ENUM_SD_EXPREL { SDE_EXPREL_ANY = 0, SDE_EXPREL_NONE = 1, SDE_EXPREL_AGREE = 2, SDE_EXPREL_NOCONFLICT = 3 };
+enum ENUM_SD_EXPREL { SDE_EXPREL_ANY = 0, SDE_EXPREL_NONE = 1, SDE_EXPREL_AGREE = 2, SDE_EXPREL_NOCONFLICT = 3, SDE_EXPREL_CONFLICT = 4 };
 enum ENUM_SD_FIT    { SDE_FIT_T_R = 0, SDE_FIT_EXPECT_R = 1, SDE_FIT_RECOVERY_PF = 2 };
 
 //+------------------------------------------------------------------+
@@ -86,9 +93,9 @@ input ENUM_SD_SRCSEL Inp_SrcSel = SDE_SRC_ANY;   // sorgente del segnale
 input ENUM_SD_DIRSEL Inp_DirSel = SDE_DIR_ANY;   // verso del segnale (prima di Inp_Invert)
 input int    Inp_BurstMin       = 1;      // posizione minima nella raffica
 input int    Inp_BurstMax       = 255;    // posizione massima nella raffica
-input string Inp_Hours          = "";     // ore ammesse (0-23, server+offset), es. "7-11,13,15-17". Vuoto = tutte. "22-3" = a cavallo di mezzanotte
-input string Inp_Days           = "";     // giorni ammessi (0=Dom..6=Sab), es. "1-5". Vuoto = tutti
-input ENUM_SD_EXPREL Inp_ExpRel = SDE_EXPREL_ANY; // solo segnali DELTA: relazione con l'Expansion nella stessa barra (nessuna / concorde / discorde)
+input string Inp_Hours          = "";     // ore ammesse (0-23, server+offset), SOLO cifre, virgole e trattini: "7-11,13,15-17". Vuoto = tutte. "22-3" = a cavallo di mezzanotte. Formato errato = EA non parte
+input string Inp_Days           = "";     // giorni ammessi (0=Dom..6=Sab), SOLO cifre, virgole e trattini: "1-5". Vuoto = tutti. Formato errato = EA non parte
+input ENUM_SD_EXPREL Inp_ExpRel = SDE_EXPREL_ANY; // solo segnali DELTA, Expansion nella stessa barra: ANY / NONE (silenziosa) / AGREE (concorde) / NOCONFLICT (silenziosa o concorde) / CONFLICT (discorde)
 input ENUM_SD_REQ Inp_ADXReq    = SDE_REQ_IGNORE; // ADX >= soglia: ignora / richiedi PASSATO / richiedi FALLITO
 input ENUM_SD_REQ Inp_SRReq     = SDE_REQ_IGNORE; // filtro S/R: ignora / richiedi PASSATO / richiedi FALLITO
 input bool   Inp_SRDirAware     = false;  // S/R direzionale (BUY vicino a supporto o sopra resistenza, SELL il contrario) invece che simmetrico
@@ -119,7 +126,7 @@ input int    Inp_MaxSpreadPts   = 0;      // 0 = off. Salta il segnale se spread
 input int    Inp_Slippage       = 30;     // deviazione massima in punti
 input int    Inp_Magic          = 20202;  // magic number
 
-input group "=== PROFILO ESECUZIONE: segnali DELTA (0 = disattivato per TP, trailing, tempo) ==="
+input group "=== PROFILO ESECUZIONE: segnali DELTA (TP = 0 e MaxBars = 0 = disattivati; trailing: solo con TrailOn) ==="
 input double Inp_D_SL           = 1.5;    // SL in ATR (> 0)
 input double Inp_D_TP           = 3.0;    // TP in ATR (0 = nessun TP)
 input bool   Inp_D_TrailOn      = true;   // trailing attivo
@@ -197,7 +204,9 @@ bool     g_expPending = false;
 int      g_expAge = 0;
 int      g_runDirD = 0, g_runCntD = 0, g_gapD = 0;   // raffica del flusso Delta
 int      g_runDirO = 0, g_runCntO = 0, g_gapO = 0;   // raffica del flusso Delta+Expansion (OR)
-datetime g_lastBar = 0;
+datetime g_lastBar = 0;    // ultima barra (in formazione) consumata: le barre chiuse precedenti sono state valutate
+datetime g_barDone = 0;    // ultima barra per cui e' stato eseguito il passo 'una volta per barra' sulla posizione
+bool     g_primed = false; // stato ricostruito da PrimeState
 
 //--- profili di esecuzione: indice 0 = DELTA, 1 = EXP_ADDED
 double g_pSL[2], g_pTP[2], g_pTrS[2], g_pTrD[2];
@@ -209,6 +218,11 @@ bool   g_hasPos = false;
 double g_posAtr = 0.0;
 int    g_posProf = 0;
 int    g_posBars = 0;
+datetime g_posOpenBar = 0;     // apertura della barra in cui e' stata aperta la posizione
+bool     g_stopDue = false;    // stop a tempo scattato ma chiusura non riuscita: riprova
+datetime g_stopTry = 0;
+bool     g_isHedging = false;
+int      g_nRej = 0;           // ordini rifiutati
 
 //--- registro dei trade aperti (array paralleli, un elemento per trade)
 int      g_nRec = 0;
@@ -220,7 +234,10 @@ int      g_rSrc[], g_rDir[], g_rTdir[], g_rBucket[], g_rBurst[], g_rHour[], g_rD
 datetime g_rTime[];
 
 //--- risultati calcolati da CollectResults
-double g_stN = 0.0, g_stS = 0.0, g_stS2 = 0.0, g_stW = 0.0;
+double g_stN = 0.0, g_stS = 0.0, g_stS2 = 0.0, g_stW = 0.0, g_stSpr = 0.0;
+
+//--- diagnostica tick_volume (solo test singolo): il tester usa il volume storico del simbolo?
+double g_tvN = 0.0, g_tvS = 0.0, g_tvS2 = 0.0;
 
 //--- file
 int    g_fhSig = INVALID_HANDLE;
@@ -248,8 +265,22 @@ int SnapBucket(const int req)
    return best;
   }
 
-//--- maschera da lista tipo "7-11,13,15-17" sull'intervallo [lo, hi]; stringa vuota = tutto ammesso
-void ParseMask(const string src, bool &mask[], const int lo, const int hi)
+//--- solo cifre (nessun segno, spazio, punto): StringToInteger("abc") darebbe 0 senza errore
+bool IsDigits(const string t)
+  {
+   const int n = StringLen(t);
+   if(n < 1) return false;
+   for(int i = 0; i < n; i++)
+     {
+      const ushort c = StringGetCharacter(t, i);
+      if(c < '0' || c > '9') return false;
+     }
+   return true;
+  }
+
+//--- maschera da lista tipo "7-11,13,15-17" sull'intervallo [lo, hi]; stringa vuota = tutto ammesso.
+//--- Ritorna false se un token e' malformato o fuori range (l'EA non deve partire con una maschera diversa da quella voluta).
+bool ParseMask(const string src, bool &mask[], const int lo, const int hi)
   {
    ArrayResize(mask, hi - lo + 1);
    string s = src;
@@ -257,40 +288,41 @@ void ParseMask(const string src, bool &mask[], const int lo, const int hi)
    StringTrimRight(s);
    if(s == "")
      {
-      ArrayInitialize(mask, true);
-      return;
+      for(int i = 0; i <= hi - lo; i++) mask[i] = true;
+      return true;
      }
-   ArrayInitialize(mask, false);
+   for(int i = 0; i <= hi - lo; i++) mask[i] = false;
+   bool ok = true;
    string parts[];
-   int np = StringSplit(s, ',', parts);
+   const int np = StringSplit(s, ',', parts);
    for(int i = 0; i < np; i++)
      {
       string p = parts[i];
       StringTrimLeft(p);
       StringTrimRight(p);
       if(p == "") continue;
-      int dash = StringFind(p, "-");
-      if(dash > 0)
+      const int dash = StringFind(p, "-");
+      string sa = (dash > 0) ? StringSubstr(p, 0, dash) : p;
+      string sb = (dash > 0) ? StringSubstr(p, dash + 1) : p;
+      StringTrimLeft(sa);
+      StringTrimRight(sa);
+      StringTrimLeft(sb);
+      StringTrimRight(sb);
+      if(!IsDigits(sa) || !IsDigits(sb)) { ok = false; continue; }
+      const int a = (int)StringToInteger(sa);
+      const int b = (int)StringToInteger(sb);
+      if(a < lo || a > hi || b < lo || b > hi) { ok = false; continue; }
+      if(a <= b)
         {
-         int a = (int)StringToInteger(StringSubstr(p, 0, dash));
-         int b = (int)StringToInteger(StringSubstr(p, dash + 1));
-         if(a < lo || a > hi || b < lo || b > hi) continue;
-         if(a <= b)
-           {
-            for(int v = a; v <= b; v++) mask[v - lo] = true;
-           }
-         else
-           {
-            for(int v = a; v <= hi; v++) mask[v - lo] = true;
-            for(int v = lo; v <= b; v++) mask[v - lo] = true;
-           }
+         for(int v = a; v <= b; v++) mask[v - lo] = true;
         }
       else
         {
-         int v1 = (int)StringToInteger(p);
-         if(v1 >= lo && v1 <= hi) mask[v1 - lo] = true;
+         for(int v = a; v <= hi; v++) mask[v - lo] = true;
+         for(int v = lo; v <= b; v++) mask[v - lo] = true;
         }
      }
+   return ok;
   }
 
 bool MaskHasAny(const bool &mask[])
@@ -302,9 +334,9 @@ bool MaskHasAny(const bool &mask[])
 
 double NormalizeLots(double lots)
   {
-   lots = MathFloor(lots / g_lotStep) * g_lotStep;
+   lots = MathFloor(lots / g_lotStep + 1.0e-7) * g_lotStep;   // epsilon: 0.29/0.01 = 28.999999999999996
    lots = MathMax(g_lotMin, MathMin(g_lotMax, lots));
-   return NormalizeDouble(lots, g_lotDigits);
+   return NormalizeDouble(lots, 8);
   }
 
 string BucketLabel(const int b)
@@ -396,11 +428,17 @@ int OnInit()
      { Print("Input non validi: Inp_Lot e SL (ATR) devono essere > 0."); return INIT_PARAMETERS_INCORRECT; }
    if(Inp_EmaPeriod < 1 || Inp_VolAvgPeriod < 1 || Inp_ATRPeriod < 1 || Inp_ADXPeriod < 1 || Inp_ExpATRPeriod < 1)
      { Print("Input non validi: i periodi devono essere >= 1."); return INIT_PARAMETERS_INCORRECT; }
-   if(Inp_ClassID >= g_nClasses)
+   if(Inp_ClassID < -1 || Inp_ClassID >= g_nClasses)
      {
-      if(!g_isOptim) Print("Inp_ClassID ", Inp_ClassID, " fuori range -1..", g_nClasses - 1, " per bucket ", g_bucketMin, " min.");
+      Print("Inp_ClassID ", Inp_ClassID, " fuori range -1..", g_nClasses - 1, " per bucket ", g_bucketMin, " min.");
       return INIT_PARAMETERS_INCORRECT;
      }
+   if(Inp_TrailStep < 0.0 || Inp_D_TP < 0.0 || Inp_E_TP < 0.0 || Inp_D_TrailStart < 0.0 || Inp_E_TrailStart < 0.0 ||
+      Inp_D_MaxBars < 0 || Inp_E_MaxBars < 0 ||
+      (Inp_D_TrailOn && Inp_D_TrailDist <= 0.0) || (Inp_E_TrailOn && Inp_E_TrailDist <= 0.0))
+     { Print("Input non validi: TrailStep, TP, TrailStart, MaxBars >= 0 e TrailDist > 0 (con TrailOn)."); return INIT_PARAMETERS_INCORRECT; }
+   if(Inp_ExpConfirmOffset < 0 || Inp_RunGapBars < 0 || Inp_BurstMin > Inp_BurstMax || Inp_IntensityMin > Inp_IntensityMax)
+     { Print("Input non validi: ExpConfirmOffset/RunGapBars >= 0, BurstMin <= BurstMax, IntensityMin <= IntensityMax."); return INIT_PARAMETERS_INCORRECT; }
    if(Inp_ClassID >= 0) DecodeClass(Inp_ClassID, g_cSrc, g_cDir, g_cBurst, g_cHour);
    else { g_cSrc = 0; g_cDir = 0; g_cBurst = 0; g_cHour = 0; }
 
@@ -422,11 +460,30 @@ int OnInit()
    g_pSL[1] = Inp_E_SL; g_pTP[1] = Inp_E_TP; g_pTrOn[1] = Inp_E_TrailOn;
    g_pTrS[1] = Inp_E_TrailStart; g_pTrD[1] = Inp_E_TrailDist; g_pMax[1] = Inp_E_MaxBars;
 
-   //--- maschere ore / giorni
-   ParseMask(Inp_Hours, g_hourMask, 0, 23);
-   ParseMask(Inp_Days,  g_dowMask,  0, 6);
-   if(!MaskHasAny(g_hourMask) || !MaskHasAny(g_dowMask))
-      Print("ATTENZIONE: Inp_Hours o Inp_Days non contengono nessun valore valido: l'EA non operera' mai.");
+   //--- maschere ore / giorni: formato rigoroso, un input sbagliato non deve produrre passate identiche e vuote
+   if(!ParseMask(Inp_Hours, g_hourMask, 0, 23) || !ParseMask(Inp_Days, g_dowMask, 0, 6) ||
+      !MaskHasAny(g_hourMask) || !MaskHasAny(g_dowMask))
+     {
+      Print("Input non validi: Inp_Hours (0-23) / Inp_Days (0-6): token non numerico, fuori range o lista vuota. Formato: 7-11,13,15-17");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+
+   //--- filtri manuali in contraddizione con la classe scansionata, o fasce irregolari: la passata non potrebbe mai operare
+   string why = "";
+   if(g_cSrc != 0 && Inp_SrcSel != SDE_SRC_ANY && (int)Inp_SrcSel != g_cSrc) why = "Inp_SrcSel contraddice la classe";
+   else if(g_cDir != 0 && Inp_DirSel != SDE_DIR_ANY && (int)Inp_DirSel != g_cDir) why = "Inp_DirSel contraddice la classe";
+   else if(g_cBurst != 0 && (((g_cBurst >= 4) ? 255 : g_cBurst) < Inp_BurstMin || g_cBurst > Inp_BurstMax)) why = "Inp_BurstMin/Max contraddice la classe";
+   else if(g_cHour != 0)
+     {
+      bool anyHour = false;
+      for(int m = (g_cHour - 1) * g_bucketMin; m < g_cHour * g_bucketMin && !anyHour; m++)
+         if(g_hourMask[m / 60]) anyHour = true;
+      if(!anyHour) why = "Inp_Hours non interseca la fascia oraria della classe";
+     }
+   if(why != "") { Print("Input non validi: ", why); return INIT_PARAMETERS_INCORRECT; }
+   const int tfMin = PeriodSeconds(PERIOD_CURRENT) / 60;
+   if(!g_isOptim && tfMin > 0 && (g_bucketMin % tfMin) != 0)
+      Print("ATTENZIONE: Inp_BucketMin=", g_bucketMin, " non e' multiplo del timeframe (", tfMin, " min): fasce irregolari o vuote.");
 
    //--- soglie di intensita' (ordinate)
    g_ibEdge[0] = Inp_CompTh;
@@ -457,19 +514,27 @@ int OnInit()
    ArraySetAsSeries(g_adx,    true);
    ArraySetAsSeries(g_atrExp, true);
 
-   g_reach = MathMax(Inp_VolAvgPeriod, Inp_SRLookback + 1) + 2;
+   //--- come il warm-up di SignalLab: max(periodi) + 3; copre anche S/R e media volume
+   g_reach = MathMax(MathMax(MathMax(Inp_VolAvgPeriod, Inp_EmaPeriod), MathMax(Inp_ATRPeriod, Inp_ExpATRPeriod)), Inp_SRLookback + 1) + 3;
 
    //--- stato
    g_expPending = false; g_expAge = 0;
    g_runDirD = 0; g_runCntD = 0; g_gapD = 0;
    g_runDirO = 0; g_runCntO = 0; g_gapO = 0;
-   g_hasPos = false; g_posAtr = 0.0; g_posProf = 0; g_posBars = 0;
+   g_hasPos = false; g_posAtr = 0.0; g_posProf = 0; g_posBars = 0; g_posOpenBar = 0;
+   g_stopDue = false; g_stopTry = 0; g_nRej = 0;
    g_nRec = 0;
-   g_lastBar = 0;
+   g_lastBar = 0; g_barDone = 0; g_primed = false;
+   g_tvN = 0.0; g_tvS = 0.0; g_tvS2 = 0.0;
+   g_isHedging = ((ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING);
+
+   //--- live: gli handle appena creati si calcolano in modo asincrono; senza attesa la ricostruzione dello stato fallirebbe in silenzio
+   if(!g_isTester) WaitIndicators(MathMin(Bars(_Symbol, PERIOD_CURRENT), 400), 3000);
 
    AdoptPosition();
-   PrimeState();
-   g_lastBar = iTime(_Symbol, PERIOD_CURRENT, 0);   // la barra in formazione non va rielaborata
+   const datetime primedBar0 = PrimeState();
+   if(primedBar0 != 0) { g_primed = true; g_lastBar = primedBar0; }   // barra in formazione dello STESSO snapshot: nessuna barra persa o doppia
+   else if(!g_isOptim) Print("PrimeState: dati indicatori non pronti, riprovo al primo tick");
 
    //--- file
    if(!g_isOptim)
@@ -480,10 +545,9 @@ int OnInit()
 
    if(!g_isOptim)
      {
-      ENUM_ACCOUNT_MARGIN_MODE mm = (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
       Print("============================================================");
       Print("SyntheticDelta EA v2.0 | ", _Symbol, " ", EnumToString((ENUM_TIMEFRAMES)Period()),
-            " | conto ", (mm == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING) ? "HEDGING" : "NETTING/EXCHANGE");
+            " | conto ", g_isHedging ? "HEDGING" : "NETTING/EXCHANGE");
       if(Inp_ClassID >= 0)
          Print("Classe ", Inp_ClassID, " di ", g_nClasses, ": ", ClassLabel(Inp_ClassID));
       else
@@ -508,6 +572,13 @@ void OnDeinit(const int reason)
    if(g_hAdx    != INVALID_HANDLE) IndicatorRelease(g_hAdx);
    if(g_hAtrExp != INVALID_HANDLE) IndicatorRelease(g_hAtrExp);
    if(g_fhSig != INVALID_HANDLE) { FileClose(g_fhSig); g_fhSig = INVALID_HANDLE; }
+   if(g_isTester && !g_isOptim && g_tvN > 1.0)
+     {
+      const double m = g_tvS / g_tvN;
+      Print("DIAGNOSTICA tick_volume (", (int)g_tvN, " barre): media ", DoubleToString(m, 1), " | dev.std ",
+            DoubleToString(MathSqrt(MathMax(0.0, g_tvS2 / g_tvN - m * m)), 1),
+            " | una media costante con dev.std ~0 significa volume GENERATO dal tester, non storico: i segnali DELTA non sarebbero quelli di SignalLab");
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -517,15 +588,44 @@ void OnTick()
   {
    if(g_hasPos) ManagePosition();
 
+   //--- ricostruzione dello stato se non e' riuscita in OnInit (indicatori non ancora pronti)
+   if(!g_primed)
+     {
+      const datetime pb = PrimeState();
+      if(pb == 0) return;
+      g_primed = true;
+      g_lastBar = pb;
+     }
+
    const datetime cur = iTime(_Symbol, PERIOD_CURRENT, 0);
-   if(cur == g_lastBar) return;
+   if(cur == 0 || cur == g_lastBar) return;
+
+   //--- passo una-tantum per barra sulla posizione (stop a tempo), anche se PrepareData va ritentato
+   if(cur != g_barDone)
+     {
+      g_barDone = cur;
+      if(!g_hasPos && HavePosition()) AdoptPosition();   // riallinea il flag se un ordine e' stato eseguito ma segnalato come fallito
+      if(g_hasPos) OnNewBarPosition();
+     }
+
+   //--- barre chiuse non ancora valutate: sempre 1 nel tester; in live piu' di 1 se il terminale ha saltato barre
+   int nNew = 1;
+   if(!g_isTester && g_lastBar != 0)
+     {
+      const int sh = iBarShift(_Symbol, PERIOD_CURRENT, g_lastBar, false);
+      if(sh > 1) nNew = MathMin(sh, 100);
+     }
+   if(!PrepareData(g_reach + 7 + nNew, 4 + nNew)) return;   // dati non pronti: g_lastBar invariato, si riprova al prossimo tick
    g_lastBar = cur;
 
-   if(g_hasPos) OnNewBarPosition();
-
-   if(!PrepareData(g_reach + 8, 5)) return;
+   if(g_isTester && !g_isOptim)
+     {
+      const double v = (double)g_rates[1].tick_volume;
+      g_tvN += 1.0; g_tvS += v; g_tvS2 += v * v;
+     }
 
    SigTag tag;
+   for(int s = nNew; s > 1; s--) EvalBar(s, tag);   // barre perse: avanza solo lo stato, non si opera
    if(!EvalBar(1, tag)) return;
 
    int reason = GateReason(tag);
@@ -549,18 +649,37 @@ bool PrepareData(const int nRates, const int nBuf)
    return (g_nb > 1 && g_n > 5);
   }
 
+//--- live: attende che gli indicatori appena creati abbiano calcolato abbastanza barre
+bool WaitIndicators(const int minBars, const uint timeoutMs)
+  {
+   const uint t0 = GetTickCount();
+   while(!IsStopped())
+     {
+      if(BarsCalculated(g_hEma) >= minBars && BarsCalculated(g_hAtr) >= minBars &&
+         BarsCalculated(g_hAdx) >= minBars && BarsCalculated(g_hAtrExp) >= minBars) return true;
+      if(GetTickCount() - t0 > timeoutMs) return false;
+      Sleep(50);
+     }
+   return false;
+  }
+
 //+------------------------------------------------------------------+
 //| PrimeState - rielabora le ultime barre per ricostruire raffica e  |
-//| stato dell'Expansion (utile ai riavvii in live; nel tester parte  |
-//| dalla storia precedente la data iniziale, se presente).           |
+//| stato dell'Expansion (riavvii in live; nel tester parte dalla      |
+//| storia precedente la data iniziale, se presente). Ritorna l'orario |
+//| della barra in formazione DELLO STESSO snapshot (0 = non riuscito):|
+//| e' la barra che OnTick deve trattare come "gia' vista".            |
+//| Una raffica piu' lunga di primeBars non e' riproducibile.          |
 //+------------------------------------------------------------------+
-void PrimeState()
+datetime PrimeState()
   {
-   const int primeBars = 300;
-   if(!PrepareData(primeBars + g_reach + 5, primeBars + 5)) return;
+   const int primeBars = 1000;
+   if(!PrepareData(primeBars + g_reach + 5, primeBars + 5)) return 0;
+   const datetime bar0 = g_rates[0].time;
    SigTag tmp;
    for(int s = primeBars; s >= 1; s--)
       EvalBar(s, tmp);
+   return bar0;
   }
 
 //+------------------------------------------------------------------+
@@ -595,6 +714,8 @@ void ClearTag(SigTag &t)
 //| quando non c'e' segnale. Ritorna true se c'e' un segnale emesso.  |
 //| Logica Delta / Expansion identica a v1.13 e a SD_Core (SignalLab).|
 //+------------------------------------------------------------------+
+bool BufOK(const double v) { return (v != EMPTY_VALUE && MathIsValidNumber(v)); }
+
 bool EvalBar(const int s, SigTag &tag)
   {
    ClearTag(tag);
@@ -609,12 +730,14 @@ bool EvalBar(const int s, SigTag &tag)
    const double range = hi - lo;
    const double atr  = g_atr[s];
    const double atrE = g_atrExp[s];
+   const bool atrOk  = (BufOK(atr) && atr > 0.0);
+   const bool atrEok = (BufOK(atrE) && atrE > 0.0);
 
    //--- 1) Synthetic Delta
    int dD = 0;
    double nd = 0.0;
    const double tv = (double)g_rates[s].tick_volume;
-   if(range > 0.0 && tv > 0.0 && atr > 0.0 && g_ema[s] > 0.0)
+   if(range > 0.0 && tv > 0.0 && atrOk && BufOK(g_ema[s]) && g_ema[s] > 0.0)
      {
       const double ema = g_ema[s];
       const double fracBuy   = (cl - lo) / range;
@@ -637,7 +760,7 @@ bool EvalBar(const int s, SigTag &tag)
    int dE = 0;
    int intens = 0;
    double trAtr = 0.0;
-   if(atrE > 0.0)
+   if(atrEok)
      {
       const double prevClose = g_rates[s + 1].close;
       const double tr = MathMax(range, MathMax(MathAbs(hi - prevClose), MathAbs(lo - prevClose)));
@@ -652,7 +775,7 @@ bool EvalBar(const int s, SigTag &tag)
       else if(g_expAge > Inp_ExpConfirmOffset)
          g_expPending = false;
      }
-   else if(atrE > 0.0 && trAtr > Inp_ExpThreshold)
+   else if(atrEok && trAtr > Inp_ExpThreshold)
      {
       if(Inp_ExpConfirmOffset == 0) dE = ColorDir(op, cl);
       else { g_expPending = true; g_expAge = 0; }
@@ -671,7 +794,7 @@ bool EvalBar(const int s, SigTag &tag)
    if(dD != 0)      { src = SD_SRC_DELTA; dir = dD; }
    else if(dE != 0) { src = SD_SRC_EXP;   dir = dE; }
    if(src < 0) return false;
-   if(atr <= 0.0) return false;
+   if(!atrOk) return false;
 
    tag.src    = src;
    tag.dir    = dir;
@@ -685,7 +808,7 @@ bool EvalBar(const int s, SigTag &tag)
 
    //--- 5) etichette ADX e S/R (non filtrano: si misurano)
    tag.adx     = g_adx[s];
-   tag.adxPass = (tag.adx >= Inp_ADXMin);
+   tag.adxPass = (BufOK(tag.adx) && tag.adx >= Inp_ADXMin);
 
    double res = g_rates[s + 1].high;
    double sup = g_rates[s + 1].low;
@@ -741,6 +864,7 @@ int GateReason(const SigTag &t)
       if(Inp_ExpRel == SDE_EXPREL_NONE      && t.exprel != 0) return 3;
       if(Inp_ExpRel == SDE_EXPREL_AGREE     && t.exprel != 1) return 3;
       if(Inp_ExpRel == SDE_EXPREL_NOCONFLICT && t.exprel == 2) return 3;
+      if(Inp_ExpRel == SDE_EXPREL_CONFLICT   && t.exprel != 2) return 3;
      }
    if(Inp_ADXReq == SDE_REQ_PASS && !t.adxPass) return 3;
    if(Inp_ADXReq == SDE_REQ_FAIL &&  t.adxPass) return 3;
@@ -769,6 +893,14 @@ ulong FindOurPosition()
 
 bool HavePosition() { return (FindOurPosition() != 0); }
 
+//--- su NETTING/EXCHANGE esiste una sola posizione per simbolo: un ordine nostro verrebbe aggregato a QUALUNQUE posizione
+//--- aperta sul simbolo (manuale, altro EA, altro magic). In hedging basta guardare le posizioni con il nostro magic.
+bool SymbolBusy()
+  {
+   if(g_isHedging) return HavePosition();
+   return PositionSelect(_Symbol);
+  }
+
 void ClosePosition()
   {
    const ulong t = FindOurPosition();
@@ -784,10 +916,12 @@ void AdoptPosition()
    g_hasPos = true;
    const string cm = PositionGetString(POSITION_COMMENT);
    g_posProf = (StringFind(cm, "_E") >= 0) ? 1 : 0;
-   const long ps = PeriodSeconds(PERIOD_CURRENT);
    const datetime ot = (datetime)PositionGetInteger(POSITION_TIME);
-   g_posBars = (ps > 0) ? (int)(((long)TimeCurrent() - (long)ot) / ps) : 0;
+   const int sh = iBarShift(_Symbol, PERIOD_CURRENT, ot, false);
+   g_posBars    = (sh >= 0) ? sh : 0;                                                   // barre nuove dall'apertura, come OnNewBarPosition
+   g_posOpenBar = (sh >= 0) ? iTime(_Symbol, PERIOD_CURRENT, sh) : iTime(_Symbol, PERIOD_CURRENT, 0);
    g_posAtr = 0.0;   // ricalcolato al primo tick (ATR corrente: approssimazione)
+   g_stopDue = false;
    if(!g_isOptim) Print("Posizione esistente adottata (profilo ", g_posProf == 0 ? "DELTA" : "EXP_ADDED", ", barre ", g_posBars, ")");
   }
 
@@ -798,21 +932,34 @@ void LazyAtr()
    if(CopyBuffer(g_hAtr, 0, 1, 1, a) > 0) g_posAtr = a[0];
   }
 
-//--- chiamata alla prima tick di ogni nuova barra con posizione aperta: stop a tempo
+//--- chiamata una volta alla prima tick di ogni nuova barra con posizione aperta: stop a tempo.
+//--- Le barre trascorse si leggono dalla serie (iBarShift), non da un contatore: nessuna deriva se il terminale salta una barra.
 void OnNewBarPosition()
   {
-   if(!HavePosition()) { g_hasPos = false; return; }
-   g_posBars++;
+   if(!HavePosition()) { g_hasPos = false; g_stopDue = false; return; }
+   const int sh = iBarShift(_Symbol, PERIOD_CURRENT, g_posOpenBar, false);
+   g_posBars = (sh >= 0) ? sh : g_posBars + 1;
    const int mb = g_pMax[g_posProf];
-   if(mb > 0 && g_posBars >= mb) ClosePosition();
+   if(mb > 0 && g_posBars >= mb)
+     {
+      g_stopDue = true;
+      g_stopTry = TimeCurrent();
+      ClosePosition();
+     }
   }
 
-//--- trailing in ATR (distanze congelate all'ingresso), ad ogni tick
+//--- trailing in ATR (distanze congelate all'ingresso), ad ogni tick; e ripetizione di uno stop a tempo la cui chiusura e' fallita
 void ManagePosition()
   {
+   if(!g_stopDue && !g_pTrOn[g_posProf]) return;   // niente da fare: la chiusura della posizione si rileva a nuova barra e in TryEnter
+
    const ulong ticket = FindOurPosition();
-   if(ticket == 0) { g_hasPos = false; return; }
-   if(!g_pTrOn[g_posProf]) return;
+   if(ticket == 0) { g_hasPos = false; g_stopDue = false; return; }
+   if(g_stopDue)
+     {
+      if(TimeCurrent() != g_stopTry) { g_stopTry = TimeCurrent(); ClosePosition(); }   // al massimo una volta al secondo
+      return;
+     }
    if(g_posAtr <= 0.0) { LazyAtr(); if(g_posAtr <= 0.0) return; }
 
    const ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
@@ -829,7 +976,7 @@ void ManagePosition()
       const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       if(bid - openPx < startD) return;
       const double newSL = NormalizeDouble(bid - distD, g_digits);
-      if(oldSL == 0.0 || newSL - oldSL >= stepD)
+      if(oldSL == 0.0 || newSL - oldSL > stepD)
          trade.PositionModify(ticket, newSL, curTP);
      }
    else
@@ -837,7 +984,7 @@ void ManagePosition()
       const double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       if(openPx - ask < startD) return;
       const double newSL = NormalizeDouble(ask + distD, g_digits);
-      if(oldSL == 0.0 || oldSL - newSL >= stepD)
+      if(oldSL == 0.0 || oldSL - newSL > stepD)
          trade.PositionModify(ticket, newSL, curTP);
      }
   }
@@ -849,28 +996,30 @@ void ManagePosition()
 //+------------------------------------------------------------------+
 int TryEnter(const SigTag &tag)
   {
-   if(HavePosition()) return 4;
+   if(SymbolBusy()) return 4;
 
    const double atr = tag.atr;
    if(atr <= 0.0) return 7;
 
-   const long spreadPts = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   //--- spread dai prezzi (ask - bid): e' quello che paga davvero il trade, anche su simboli custom
+   const double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(ask <= 0.0 || bid <= 0.0) { g_nRej++; return 6; }
+   const double spreadPx  = ask - bid;
+   const long   spreadPts = (long)MathRound(spreadPx / g_point);
    if(Inp_MaxSpreadPts > 0 && spreadPts > Inp_MaxSpreadPts) return 5;
-   if(Inp_MaxSpreadATR > 0.0 && (double)spreadPts * g_point > Inp_MaxSpreadATR * atr) return 5;
+   if(Inp_MaxSpreadATR > 0.0 && spreadPx > Inp_MaxSpreadATR * atr) return 5;
+   g_stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);   // puo' cambiare (rollover, news)
 
    const int  tdir  = Inp_Invert ? -tag.dir : tag.dir;
    const bool isBuy = (tdir > 0);
    const int  pi    = (tag.src == SD_SRC_DELTA) ? 0 : 1;
-
-   const double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(ask <= 0.0 || bid <= 0.0) return 6;
    const double price = isBuy ? ask : bid;
 
    //--- distanze: SL almeno stops level + spread (lo SL si misura dal lato opposto)
    const double minStop = (double)g_stopsLevel * g_point;
    double slDist = g_pSL[pi] * atr;
-   slDist = MathMax(slDist, minStop + (ask - bid));
+   slDist = MathMax(slDist, minStop + spreadPx);
    double tpDist = g_pTP[pi] * atr;
    if(tpDist > 0.0) tpDist = MathMax(tpDist, minStop);
 
@@ -878,7 +1027,7 @@ int TryEnter(const SigTag &tag)
    double tp = 0.0;
    if(tpDist > 0.0) tp = NormalizeDouble(isBuy ? price + tpDist : price - tpDist, g_digits);
    const double slReal = MathAbs(price - sl);
-   if(slReal <= 0.0) return 6;
+   if(slReal <= 0.0) { g_nRej++; return 6; }
 
    const double lots = NormalizeLots(Inp_Lot);
    const string comment = (pi == 0) ? "SDv2_D" : "SDv2_E";
@@ -888,6 +1037,7 @@ int TryEnter(const SigTag &tag)
    const uint rc = trade.ResultRetcode();
    if(!ok || (rc != TRADE_RETCODE_DONE && rc != TRADE_RETCODE_DONE_PARTIAL && rc != TRADE_RETCODE_PLACED))
      {
+      g_nRej++;
       if(!g_isOptim && Inp_Debug)
          Print("Errore apertura: ", rc, " - ", trade.ResultRetcodeDescription());
       return 6;
@@ -900,10 +1050,12 @@ int TryEnter(const SigTag &tag)
       posId = (ulong)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
    if(posId == 0) posId = trade.ResultOrder();
 
-   g_hasPos  = true;
-   g_posAtr  = atr;
-   g_posProf = pi;
-   g_posBars = 0;
+   g_hasPos     = true;
+   g_posAtr     = atr;
+   g_posProf    = pi;
+   g_posBars    = 0;
+   g_posOpenBar = iTime(_Symbol, PERIOD_CURRENT, 0);
+   g_stopDue    = false;
 
    AddRec(posId, slReal, tag, tdir, (double)spreadPts);
 
@@ -960,7 +1112,8 @@ int FindRec(const ulong pid, int &hint)
 //+------------------------------------------------------------------+
 void OpenSignalLog()
   {
-   const string name = "SDv2_signals_" + _Symbol + "_" + EnumToString((ENUM_TIMEFRAMES)Period()) + ".csv";
+   const string name = "SDv2_signals_" + _Symbol + "_" + EnumToString((ENUM_TIMEFRAMES)Period()) +
+                       "_c" + IntegerToString(Inp_ClassID) + "_b" + IntegerToString(g_bucketMin) + ".csv";
    g_fhSig = FileOpen(name, FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_COMMON, ';');
    if(g_fhSig == INVALID_HANDLE) { Print("Signal log non scrivibile, errore ", GetLastError()); return; }
    FileWrite(g_fhSig, "time", "source", "dir", "exprel", "burst", "bucket", "hour", "dow", "nd",
@@ -972,19 +1125,39 @@ void LogSignal(const SigTag &t, const int reason)
    FileWrite(g_fhSig, TimeToString(t.time, TIME_DATE | TIME_MINUTES), SrcName(t.src), t.dir, t.exprel, t.burst,
              BucketLabel(t.bucket), t.hour, t.dow, DoubleToString(t.nd, 4), DoubleToString(t.adx, 1),
              (int)t.adxPass, (int)t.srSym, (int)t.srDir, t.intens, DoubleToString(t.atr / g_point, 0),
-             (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD), reason);
+             (int)MathRound((SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / g_point), reason);
   }
 
 //+------------------------------------------------------------------+
 //| CollectResults - R di ogni trade chiuso, dallo storico deal.      |
 //| R = (uscita - entrata) * verso / distanza SL - costo extra / SL.  |
-//| I trade sono sequenziali (uno per volta): l'i-esimo deal di       |
-//| ingresso corrisponde all'i-esimo record, verificato col position  |
-//| id.                                                               |
+//| Entrata e uscita di ogni trade sono accoppiate per POSITION ID,   |
+//| quindi l'ordine dei deal nello storico non conta (un'uscita a     |
+//| tempo e l'ingresso successivo possono avere lo stesso timestamp). |
 //+------------------------------------------------------------------+
+//--- t-statistic della media di R. La dispersione e' limitata dal basso a 0.25R: una classe con dispersione ~0
+//--- (tutti i trade chiusi esattamente a TP, o tutti a SL) non e' evidenza, e senza il floor otterrebbe t enormi
+//--- (o t = 0 se tutti perdenti, cioe' sopra le classi che perdono davvero).
+double TStatR(const double n, const double sum, const double sum2)
+  {
+   if(n < 1.0) return 0.0;
+   const double mean = sum / n;
+   const double var  = (n > 1.0) ? MathMax(0.0, (sum2 - n * mean * mean) / (n - 1.0)) : 0.0;
+   const double sdE  = MathMax(MathSqrt(var), 0.25);
+   return mean / (sdE / MathSqrt(n));
+  }
+
+//--- z unilaterale con P(Z > z) = alpha / m (Abramowitz-Stegun 26.2.23): soglia di Bonferroni su m prove
+double BonferroniT(const int m, const double alpha)
+  {
+   const double p = alpha / (double)MathMax(1, m);
+   const double u = MathSqrt(-2.0 * MathLog(p));
+   return u - (2.515517 + 0.802853 * u + 0.010328 * u * u) / (1.0 + 1.432788 * u + 0.189269 * u * u + 0.001308 * u * u * u);
+  }
+
 void CollectResults(const bool detail)
   {
-   g_stN = 0.0; g_stS = 0.0; g_stS2 = 0.0; g_stW = 0.0;
+   g_stN = 0.0; g_stS = 0.0; g_stS2 = 0.0; g_stW = 0.0; g_stSpr = 0.0;
 
    double bN[], bS[];
    ArrayResize(bN, g_nB);
@@ -998,7 +1171,8 @@ void CollectResults(const bool detail)
    int fh = INVALID_HANDLE;
    if(detail && Inp_LogTrades)
      {
-      const string name = "SDv2_trades_" + _Symbol + "_" + EnumToString((ENUM_TIMEFRAMES)Period()) + ".csv";
+      const string name = "SDv2_trades_" + _Symbol + "_" + EnumToString((ENUM_TIMEFRAMES)Period()) +
+                          "_c" + IntegerToString(Inp_ClassID) + "_b" + IntegerToString(g_bucketMin) + ".csv";
       fh = FileOpen(name, FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_COMMON, ';');
       if(fh == INVALID_HANDLE) Print("Trade log non scrivibile, errore ", GetLastError());
       else FileWrite(fh, "openTime", "closeTime", "source", "signalDir", "tradeDir", "burst", "bucket", "hour", "dow",
@@ -1008,9 +1182,12 @@ void CollectResults(const bool detail)
    if(!HistorySelect(0, TimeCurrent())) { if(fh != INVALID_HANDLE) FileClose(fh); return; }
    const int total = HistoryDealsTotal();
 
-   int    cur = -1, hint = 0;
-   double entryPx = 0.0;
-   datetime entryTime = 0;
+   int      hintIn = 0, hintOut = 0;
+   double   ePx[];
+   datetime eTm[];
+   ArrayResize(ePx, g_nRec);
+   ArrayResize(eTm, g_nRec);
+   for(int i = 0; i < g_nRec; i++) { ePx[i] = 0.0; eTm[i] = 0; }
 
    for(int i = 0; i < total; i++)
      {
@@ -1023,20 +1200,27 @@ void CollectResults(const bool detail)
 
       if(en == DEAL_ENTRY_IN)
         {
-         cur = FindRec(pid, hint);
-         entryPx = HistoryDealGetDouble(dt, DEAL_PRICE);
-         entryTime = (datetime)HistoryDealGetInteger(dt, DEAL_TIME);
+         const int ri = FindRec(pid, hintIn);
+         if(ri >= 0)
+           {
+            ePx[ri] = HistoryDealGetDouble(dt, DEAL_PRICE);
+            eTm[ri] = (datetime)HistoryDealGetInteger(dt, DEAL_TIME);
+           }
         }
       else if(en == DEAL_ENTRY_OUT || en == DEAL_ENTRY_OUT_BY)
         {
-         if(cur < 0) continue;
+         const int cur = FindRec(pid, hintOut);
+         if(cur < 0 || ePx[cur] <= 0.0) continue;          // uscita senza ingresso abbinato, o seconda uscita parziale
+         const double   entryPx   = ePx[cur];
+         const datetime entryTime = eTm[cur];
+         ePx[cur] = 0.0;
          const double exitPx = HistoryDealGetDouble(dt, DEAL_PRICE);
          const double sl = g_rSlDist[cur];
-         if(sl <= 0.0) { cur = -1; continue; }
+         if(sl <= 0.0) continue;
          const double move = (g_rTdir[cur] > 0) ? (exitPx - entryPx) : (entryPx - exitPx);
          const double r = move / sl - (Inp_ExtraCostPts * g_point) / sl;
 
-         g_stN += 1.0; g_stS += r; g_stS2 += r * r;
+         g_stN += 1.0; g_stS += r; g_stS2 += r * r; g_stSpr += g_rSpr[cur];
          if(r > 0.0) g_stW += 1.0;
          const int b = g_rBucket[cur];
          if(b >= 0 && b < g_nB) { bN[b] += 1.0; bS[b] += r; }
@@ -1054,7 +1238,6 @@ void CollectResults(const bool detail)
                       DoubleToString(g_rSpr[cur], 0), DoubleToString(entryPx, g_digits), DoubleToString(exitPx, g_digits),
                       DoubleToString(r, 4), DoubleToString(money, 2));
            }
-         cur = -1;
         }
      }
    if(fh != INVALID_HANDLE) FileClose(fh);
@@ -1065,14 +1248,29 @@ void CollectResults(const bool detail)
 void PrintReport(const double &bN[], const double &bS[], const double &sdN[], const double &sdS[])
   {
    Print("============================================================");
-   if(g_stN < 1.0) { Print("Nessun trade chiuso."); Print("============================================================"); return; }
+   if(g_stN < 1.0)
+     {
+      Print("Nessun trade chiuso. Ordini aperti: ", g_nRec, " | rifiutati: ", g_nRej);
+      Print("============================================================");
+      return;
+     }
    const double mean = g_stS / g_stN;
    const double var  = (g_stN > 1.0) ? (g_stS2 - g_stN * mean * mean) / (g_stN - 1.0) : 0.0;
    const double sd   = (var > 0.0) ? MathSqrt(var) : 0.0;
-   const double t    = (sd > 0.0) ? mean / (sd / MathSqrt(g_stN)) : 0.0;
+   const double t    = TStatR(g_stN, g_stS, g_stS2);
    Print("R PER TRADE: n=", (int)g_stN, " | media ", DoubleToString(mean, 4), " R | dev.std ", DoubleToString(sd, 3),
-         " | t ", DoubleToString(t, 2), " | win ", DoubleToString(100.0 * g_stW / g_stN, 1), "% | somma R ", DoubleToString(g_stS, 1));
-   Print("Il t va confrontato con la soglia di Bonferroni sul numero di classi provate, NON con 2.");
+         " | t ", DoubleToString(t, 2), " (dev.std minima 0.25R) | win ", DoubleToString(100.0 * g_stW / g_stN, 1),
+         "% | somma R ", DoubleToString(g_stS, 1));
+   Print("Ordini aperti ", g_nRec, " | chiusi e abbinati ", (int)g_stN, " | rifiutati ", g_nRej,
+         " (aperti - chiusi = posizione ancora aperta a fine test + record non abbinati)");
+   const double avgSpr = g_stSpr / g_stN;
+   const int ptPerPip = (g_digits == 3 || g_digits == 5) ? 10 : 1;
+   Print("Spread medio all'ingresso: ", DoubleToString(avgSpr, 1), " pt (1 pip = ", ptPerPip, " pt) | costo extra: ",
+         DoubleToString(Inp_ExtraCostPts, 1), " pt");
+   if(avgSpr <= 0.0 && Inp_ExtraCostPts <= 0.0)
+      Print("ATTENZIONE: spread = 0 e costo extra = 0: R senza costi di transazione, risultati ottimistici.");
+   Print("Soglia di Bonferroni su ", g_nClasses, " classi (alpha 5% unilaterale): t > ", DoubleToString(BonferroniT(g_nClasses, 0.05), 2),
+         ". Classi annidate e prove aggiuntive la alzano: conferma sempre fuori campione.");
 
    string names[4] = {"DELTA  BUY ", "DELTA  SELL", "EXP_AD BUY ", "EXP_AD SELL"};
    for(int q = 0; q < 4; q++)
@@ -1088,9 +1286,12 @@ void PrintReport(const double &bN[], const double &bS[], const double &sdN[], co
 
 //+------------------------------------------------------------------+
 //| OnTester                                                          |
-//| SDE_FIT_T_R (default): t-statistic della media di R. Confrontabile |
-//|   fra classi con numero di trade diverso; negativa se la classe   |
-//|   perde. Sotto Inp_FitMinTrades la parte positiva e' ridotta.     |
+//| SDE_FIT_T_R (default): t-statistic della media di R, con        |
+//|   dispersione minima 0.25R. E' una misura di EVIDENZA (cresce con |
+//|   la radice di n), non della dimensione dell'effetto: guarda anche|
+//|   la media di R. Negativa se la classe perde. Sotto               |
+//|   Inp_FitMinTrades la parte positiva e' ridotta. Nessun trade =   |
+//|   -1000 (in fondo alla classifica).                               |
 //| SDE_FIT_EXPECT_R: media di R per radice di n.                      |
 //| SDE_FIT_RECOVERY_PF: RecoveryFactor * min(PF,3) (in denaro).       |
 //+------------------------------------------------------------------+
@@ -1098,13 +1299,11 @@ double OnTester()
   {
    CollectResults(!g_isOptim);
 
-   if(g_stN < 1.0) return 0.0;
+   if(g_stN < 1.0) return -1000.0;
    const double minT = (double)MathMax(1, Inp_FitMinTrades);
    const double pen  = (g_stN >= minT) ? 1.0 : MathPow(g_stN / minT, 2.0);
    const double mean = g_stS / g_stN;
-   const double var  = (g_stN > 1.0) ? (g_stS2 - g_stN * mean * mean) / (g_stN - 1.0) : 0.0;
-   const double sd   = (var > 0.0) ? MathSqrt(var) : 0.0;
-   const double t    = (sd > 0.0) ? mean / (sd / MathSqrt(g_stN)) : 0.0;
+   const double t    = TStatR(g_stN, g_stS, g_stS2);
 
    switch(Inp_FitMode)
      {
