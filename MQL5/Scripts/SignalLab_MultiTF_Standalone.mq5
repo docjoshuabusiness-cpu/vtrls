@@ -415,6 +415,7 @@ input string   InpTFs               = "ALL";  // ALL oppure lista, es. M1,M5,M15
 input int      InpTimeOffsetH       = 0;      // ore da sommare al server time per fasce e giorni
 input int      InpMaxGapMin         = 90;     // scarta finestre che contengono un buco di dati > N minuti (weekend, festivi)
 input int      InpMaxEntryGapMin    = 5;      // scarta segnali se l'ingresso e' oltre N minuti dopo la chiusura (pausa di sessione)
+input string   InpSkipEntryWin      = "";     // finestre d'ingresso da escludere da TUTTE le tabelle (ora server + offset), es. 22:00-00:30,06:00-06:15 (vuoto = nessuna): prova per il rollover
 
 input group "=== MISURA (tutto in PUNTI) ==="
 input string   InpHorizons          = "1,2,3,5,10,15,30,45,60,120,240,1440"; // orizzonti = tempo di tenuta in minuti, uguali per tutti i TF
@@ -448,7 +449,7 @@ input int      InpNextRef           = 1;      // numero di candele di riferiment
 //--- ================================================================
 #define ACCN 8       // campi per accumulatore: n, mfe, mae, retNet, retNet^2, costo, win, lose
 #define BCAP 8       // posizione raffica: 1..7, 8+
-#define RKN  8       // campi classifica: n, somma pnl, somma pnl^2, hit, somma MAE, somma verso (+1 lungo/-1 corto), somma Delta, somma verso*pnl
+#define RKN  10      // campi classifica: n, somma pnl, somma pnl^2, hit, somma MAE, somma verso s (+1 lungo/-1 corto), somma D, somma s*D, somma D^2, somma s*D^2 (D = (pnl se lungo - pnl se corto)/2)
 #define NCAT 9       // categorie di stato di volatilita': 3 intensita' + 4 regimi + 2 direzioni del percentile
 #define NXF    7     // candele successive, campi: n, favorevole, avverso, range, |chiusura|, chiusura con segno, chiusura con segno^2
 #define NXB    64    // classi dell'istogramma logaritmico (favorevole e range) per mediana e 90 percentile
@@ -526,7 +527,7 @@ string   g_cTopic[], g_cText[];
 bool     g_cAok = false, g_cBok = false;
 long     g_cAm = 0, g_cBm = 0;
 double   g_cAbestT = 0.0, g_cAchance = 0.0;
-int      g_cApn = 0, g_cAusable = 0, g_cApos = 0, g_cAstrong = 0, g_cAstrongN = 0, g_cAns = 0;
+int      g_cApn = 0, g_cAusable = 0, g_cApos = 0, g_cAstrong = 0, g_cAstrongN = 0, g_cAone = 0, g_cAns = 0;
 string   g_cAsurv = "", g_cBdesc = "";
 double   g_cBsumAll = 0.0, g_cBtotal = 0.0, g_cBmean = 0.0, g_cBt = 0.0, g_cBn = 0.0, g_cBshareN = 0.0, g_cBshareLate = 0.0;
 int      g_cBboth = 0, g_cBincoh = 0, g_cBusable = 0, g_cBpn = 0;
@@ -559,7 +560,9 @@ uchar    g_ok[];
 int      g_dqH[], g_dqL[];
 
 //--- barre di ogni TF con ingresso valido (appese in sequenza)
-int      g_tfOff[], g_tfCnt[], g_tfBars[], g_tfEv[], g_tfRejGap[], g_tfRejM1[];
+int      g_tfOff[], g_tfCnt[], g_tfBars[], g_tfEv[], g_tfRejGap[], g_tfRejM1[], g_tfRejWin[];
+int      g_skN = 0;                 // finestre d'ingresso escluse (InpSkipEntryWin)
+int      g_skA[], g_skB[];          // minuto di inizio e fine (del giorno, ora server + offset)
 int      g_ent[];
 uchar    g_vs[];            // codice stato di volatilita' per barra (vedi SD_VolState)
 char     g_dir[];
@@ -834,6 +837,65 @@ int ParseDoubleList(const string src, double &out[])
    return ArraySize(out);
   }
 
+//+------------------------------------------------------------------+
+//| Finestre d'ingresso escluse (InpSkipEntryWin)                     |
+//+------------------------------------------------------------------+
+int ClockToMin(string s)
+  {
+   StringTrimLeft(s);
+   StringTrimRight(s);
+   string hm[];
+   if(StringSplit(s, ':', hm) != 2) return -1;
+   const int h = (int)StringToInteger(hm[0]);
+   const int m = (int)StringToInteger(hm[1]);
+   if(h < 0 || h > 24 || m < 0 || m > 59) return -1;
+   return (h * 60 + m) % 1440;
+  }
+
+void ParseSkipWin()
+  {
+   g_skN = 0;
+   ArrayResize(g_skA, 0);
+   ArrayResize(g_skB, 0);
+   string src = InpSkipEntryWin;
+   StringTrimLeft(src);
+   StringTrimRight(src);
+   if(src == "") return;
+   string parts[];
+   const int np = StringSplit(src, ',', parts);
+   for(int i = 0; i < np; i++)
+     {
+      string w = parts[i];
+      StringTrimLeft(w);
+      StringTrimRight(w);
+      if(w == "") continue;
+      string ab[];
+      if(StringSplit(w, '-', ab) != 2) { Print("InpSkipEntryWin: finestra non valida '", w, "' (ignorata)."); continue; }
+      const int mA = ClockToMin(ab[0]);
+      const int mB = ClockToMin(ab[1]);
+      if(mA < 0 || mB < 0 || mA == mB) { Print("InpSkipEntryWin: finestra non valida '", w, "' (ignorata)."); continue; }
+      const int k = ArraySize(g_skA);
+      ArrayResize(g_skA, k + 1);
+      ArrayResize(g_skB, k + 1);
+      g_skA[k] = mA;
+      g_skB[k] = mB;
+     }
+   g_skN = ArraySize(g_skA);
+  }
+
+//--- true se l'istante (tempo server in secondi) cade in una finestra esclusa; le finestre possono attraversare la mezzanotte
+bool InSkipWin(const long tsec)
+  {
+   if(g_skN == 0) return false;
+   const int mn = (int)(((((tsec + g_off) % 86400L) + 86400L) % 86400L) / 60L);
+   for(int i = 0; i < g_skN; i++)
+     {
+      if(g_skA[i] < g_skB[i]) { if(mn >= g_skA[i] && mn < g_skB[i]) return true; }
+      else if(mn >= g_skA[i] || mn < g_skB[i]) return true;
+     }
+   return false;
+  }
+
 bool SetupInputs()
   {
    if(InpFrom >= InpTo) { Print("InpFrom deve precedere InpTo."); return false; }
@@ -920,6 +982,7 @@ bool SetupInputs()
     ArraySort(g_ibEdge);
    }
 
+   ParseSkipWin();
    g_vpar.atrLen    = MathMax(2, InpVsAtrLen);
    g_vpar.lookback  = MathMax(10, InpVsLookback);
    g_vpar.emaSmooth = MathMax(1, InpVsEmaSmooth);
@@ -1235,7 +1298,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    if(g_nSets > 1) { ArrayResize(g_dirAlt, need, 2000000); ArrayResize(g_burAlt, need, 2000000); }
 
    int u = g_used, p = 0;
-   int bars = 0, rejGap = 0, rejM1 = 0, ev = 0, ev2 = 0;
+   int bars = 0, rejGap = 0, rejM1 = 0, rejWin = 0, ev = 0, ev2 = 0;
    for(int i = warm; i < n - 1; i++)
      {
       datetime tNext = r[i+1].time;
@@ -1246,6 +1309,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
       while(p < g_n1 && g_m1Time[p] < tNext) p++;
       if(p >= g_n1) break;
       if((long)(g_m1Time[p] - tNext) > maxGap) { rejM1++; continue; }
+      if(InSkipWin((long)g_m1Time[p])) { rejWin++; continue; }
       g_ent[u]  = p;
       g_dir[u]  = dir[i];
       g_bur[u]  = bur[i];
@@ -1264,6 +1328,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    g_tfEvAlt[t]  = ev2;
    g_tfRejGap[t] = rejGap;
    g_tfRejM1[t]  = rejM1;
+   g_tfRejWin[t] = rejWin;
    ArrayResize(g_ent,  g_used);
    ArrayResize(g_dir,  g_used);
    ArrayResize(g_bur,  g_used);
@@ -1458,21 +1523,31 @@ void BuildPlcQ()
    for(int i = 0; i < nQ; i++) g_plcQ[i] = (nt[i] > 0.0) ? nb[i] / nt[i] : 0.5;
   }
 
-//--- verso casuale deterministico (splitmix64 dell'indice M1 d'ingresso) con probabilita' q di acquisto
+//--- prodotto modulo 2^32 senza overflow (h e m < 2^32 : ogni addendo resta sotto 2^49)
+long Mul32(const long h, const long m)
+  {
+   const long lo = h * (m & 65535);
+   const long hi = (h * (m >> 16)) & 65535;
+   return (lo + (hi << 16)) & 4294967295;
+  }
+
+//--- verso casuale deterministico (rimescolamento a 32 bit dell'indice M1 d'ingresso, solo aritmetica long mascherata) con probabilita' q di acquisto
 int PlaceboDir(const int j, const double q)
   {
-   ulong z = ((ulong)j + 1) * 0x9E3779B97F4A7C15;
-   z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9;
-   z = (z ^ (z >> 27)) * 0x94D049BB133111EB;
-   z = z ^ (z >> 31);
-   const double u = (double)(z >> 11) / 9007199254740992.0;
+   long h = ((long)j + 1) & 4294967295;
+   h = h ^ (h >> 16);
+   h = Mul32(h, 2246822507);
+   h = h ^ (h >> 13);
+   h = Mul32(h, 3266489909);
+   h = h ^ (h >> 16);
+   const double u = (double)(h & 16777215) / 16777216.0;
    return (u < q) ? 1 : -1;
   }
 
-//--- d = verso del segnale (+1 acquisto, -1 vendita). Oltre alle somme usuali accumula, per ogni combinazione:
-//--- somma del verso della POSIZIONE (+1 lunga, -1 corta), somma di Delta = (pnl se lungo - pnl se corto)/2 nello stesso istante
-//--- (quanto vale in media stare lunghi invece che corti: deriva del prezzo, dislocazione d'ingresso...) e somma verso*pnl.
-//--- pnl - verso*DeltaMedio ha media -costo+struttura per QUALUNQUE segnale senza informazione, qualunque sia la quota BUY/SELL.
+//--- somme per separare TRE cose: pnl = M + s*D, dove s = verso della POSIZIONE (+1 lunga, -1 corta), D = (pnl se lungo - pnl se corto)/2 nello
+//--- stesso istante e M = (pnl se lungo + pnl se corto)/2 = valore dell'ISTANTE per chi sceglie il verso a caso (rollover, spread, code di prezzo...).
+//--- Media di D = deriva/dislocazione (il verso la sfrutta solo se i segnali sono sbilanciati); ABILITA' = covarianza fra s e D:
+//--- un segnale senza informazione ha abilita' nulla (t attorno a 0) anche con M molto positivo e segnali sbilanciati.
 void AddRank(double &a[], const int base, const int smp, const int d,
              const double mfeF, const double maeF, const double retF,
              const double mfeI, const double maeI, const double retI)
@@ -1499,7 +1574,9 @@ void AddRank(double &a[], const int base, const int smp, const int d,
          a[p + 4] += mae;
          a[p + 5] += sd;
          a[p + 6] += dl;
-         a[p + 7] += sd * pnl;
+         a[p + 7] += sd * dl;
+         a[p + 8] += dl * dl;
+         a[p + 9] += sd * dl * dl;
         }
      }
   }
@@ -1507,7 +1584,7 @@ void AddRank(double &a[], const int base, const int smp, const int d,
 struct RkStat
   {
    double n, mean, t, hit, mae, sum;
-   double fl, dlt, nm, nt;          // quota di posizioni lunghe, Delta medio, media e t "neutri" (senza deriva/composizione BUY-SELL)
+   double fl, dlt, mc, nm, nt;      // quota di posizioni lunghe, D medio, valore medio dell'istante M, abilita' della direzione (cov(s,D)) e suo t
   };
 
 void RkRead(const double &a[], const int base, const int kk, const int dd, const int smp, RkStat &s)
@@ -1515,7 +1592,7 @@ void RkRead(const double &a[], const int base, const int kk, const int dd, const
    const int p = base + (((kk * 2 + dd) * 2 + smp) * RKN);
    double n = a[p];
    s.n = n; s.mean = 0.0; s.t = 0.0; s.hit = 0.0; s.mae = 0.0; s.sum = 0.0;
-   s.fl = 0.5; s.dlt = 0.0; s.nm = 0.0; s.nt = 0.0;
+   s.fl = 0.5; s.dlt = 0.0; s.mc = 0.0; s.nm = 0.0; s.nt = 0.0;
    if(n < 1.0) return;
    s.sum  = a[p + 1];
    s.mean = a[p + 1] / n;
@@ -1524,13 +1601,15 @@ void RkRead(const double &a[], const int base, const int kk, const int dd, const
    s.t   = (sd > 0.0) ? s.mean / (sd / MathSqrt(n)) : 0.0;
    s.hit = 100.0 * a[p + 3] / n;
    s.mae = a[p + 4] / n;
-   //--- risultato neutro: r = pnl - verso*DeltaMedio (verso della posizione, +1 lunga / -1 corta)
+   //--- valore dell'istante e abilita' della direzione (vedi AddRank)
    const double sbar = a[p + 5] / n;
+   const double msd  = a[p + 7] / n;                       // media di s*D
    s.fl  = 0.5 * (1.0 + sbar);
    s.dlt = a[p + 6] / n;
-   s.nm  = s.mean - s.dlt * sbar;
-   const double ss = a[p + 2] - 2.0 * s.dlt * a[p + 7] + s.dlt * s.dlt * n;
-   const double vr = (n > 1.0) ? (ss - n * s.nm * s.nm) / (n - 1.0) : 0.0;
+   s.mc  = s.mean - msd;                                   // M medio: cosa guadagna chi sceglie il verso a caso in quegli istanti
+   s.nm  = msd - sbar * s.dlt;                             // abilita': covarianza fra il verso della posizione e D
+   const double suu = (1.0 + sbar * sbar) * a[p + 8] - 2.0 * sbar * a[p + 9];     // somma di ((s - sbar)*D)^2
+   const double vr  = (n > 1.0) ? (suu - n * s.nm * s.nm) / (n - 1.0) : 0.0;
    s.nt  = (vr > 0.0) ? s.nm / (MathSqrt(vr) / MathSqrt(n)) : 0.0;
   }
 
@@ -1541,7 +1620,7 @@ void RkReadAll(const double &a[], const int base, const int kk, const int dd, Rk
    const int p1 = base + (((kk * 2 + dd) * 2 + 1) * RKN);
    double n = a[p0] + a[p1];
    s.n = n; s.mean = 0.0; s.t = 0.0; s.hit = 0.0; s.mae = 0.0; s.sum = 0.0;
-   s.fl = 0.5; s.dlt = 0.0; s.nm = 0.0; s.nt = 0.0;
+   s.fl = 0.5; s.dlt = 0.0; s.mc = 0.0; s.nm = 0.0; s.nt = 0.0;
    if(n < 1.0) return;
    double sm = a[p0 + 1] + a[p1 + 1];
    double s2 = a[p0 + 2] + a[p1 + 2];
@@ -1824,7 +1903,7 @@ void RepIntro()
    W("<tr><th>Costo</th><td>" + (InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : "spread reale M1") +
      " + extra " + F1(InpExtraCostPts) + " pt</td></tr>");
    W("<tr><th>Finestre</th><td>buco dati massimo " + IS(InpMaxGapMin) + " min | gap massimo all'ingresso " +
-     IS(InpMaxEntryGapMin) + " min | fasce da " + IS(g_bMin) + " min | offset orario " + IS(InpTimeOffsetH) + " h | ritardo d'ingresso " + IS(InpEntryLagMin) + " min</td></tr>");
+     IS(InpMaxEntryGapMin) + " min | fasce da " + IS(g_bMin) + " min | offset orario " + IS(InpTimeOffsetH) + " h | ritardo d'ingresso " + IS(InpEntryLagMin) + " min | finestre d'ingresso escluse: " + (g_skN > 0 ? InpSkipEntryWin : string("nessuna")) + "</td></tr>");
    string hs = "";
    for(int i = 0; i < g_nH; i++) hs += (i > 0 ? ", " : "") + IS(g_hor[i]);
    W("<tr><th>Tenute / orizzonti (min)</th><td>" + hs + "</td></tr>");
@@ -1868,13 +1947,13 @@ void RepCoverage()
    W("<div class='note'>Un segnale viene scartato se tra la chiusura della barra e la barra successiva c'&egrave; una pausa di sessione "
      "oltre <b>" + IS(InpMaxEntryGapMin) + "</b> min (weekend, chiusura giornaliera): l'ingresso non sarebbe quello del segnale. "
      "Per D1, W1 e MN1 la pausa di sessione o il weekend pu&ograve; scartare una quota alta dei segnali (vedi le colonne sopra): aumenta <b>InpMaxEntryGapMin</b> se vuoi entrare comunque all'apertura successiva.</div>");
-   W("<table><tr><th>TF</th><th>Barre in periodo</th><th>Scartate gap sessione</th><th>Senza M1</th><th>Barre base</th>"
+   W("<table><tr><th>TF</th><th>Barre in periodo</th><th>Scartate gap sessione</th><th>Senza M1</th><th>Escluse (finestre)</th><th>Barre base</th>"
      "<th>Segnali</th><th>Misurati @" + IS(g_hor[g_refH]) + "m</th><th>% misurati</th></tr>");
    for(int t = 0; t < g_nT; t++)
      {
       double nref = g_accTH[(t * g_nH + g_refH) * ACCN];
       double pc = (g_tfEv[t] > 0) ? 100.0 * nref / g_tfEv[t] : 0.0;
-      W("<tr><td>" + g_tfName[t] + "</td>" + Td(IS(g_tfBars[t])) + Td(IS(g_tfRejGap[t])) + Td(IS(g_tfRejM1[t])) +
+      W("<tr><td>" + g_tfName[t] + "</td>" + Td(IS(g_tfBars[t])) + Td(IS(g_tfRejGap[t])) + Td(IS(g_tfRejM1[t])) + Td(IS(g_tfRejWin[t])) +
         Td(IS(g_tfCnt[t])) + Td(IS(g_tfEv[t])) + Td(F0(nref)) + Td(F1(pc)) + "</tr>");
      }
    W("</table>");
@@ -2107,7 +2186,7 @@ string KLabel(const int kk) { return (kk == 0) ? string("nessuno") : F0(g_lev[kk
 string EsitoCell(const RkStat &a, const RkStat &b)
   {
    if(b.n < MathMax(10.0, g_minN / 3.0)) return Td("OOS scarso", "#4c566a");
-   if(b.mean > 0.0 && b.t >= 2.0)             return (b.nt >= 2.0) ? Td("<b>TIENE</b>", "#a3be8c") : Td("deriva/composizione", "#d08770");
+   if(b.mean > 0.0 && b.t >= 2.0)             return (b.nm > 0.0 && b.nt >= 2.0) ? Td("<b>TIENE</b>", "#a3be8c") : Td("istante/deriva", "#d08770");
    if(b.mean > 0.0)                           return Td("debole", "#ebcb8b");
    return Td("NO", "#bf616a");
   }
@@ -2116,7 +2195,7 @@ string RankHead()
   {
    return "<table><tr><th>#</th><th>TF</th><th>Fascia (entrata, server + offset)</th><th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th>"
           "<th>IS pos.</th><th>IS netto</th><th>IS t</th><th>Target raggiunto % (netto)</th>"
-          "<th>OOS pos.</th><th>OOS netto</th><th>OOS t</th><th>OOS % lunghe</th><th>OOS netto neutro</th><th>OOS t neutro</th><th>Esito</th></tr>";
+          "<th>OOS pos.</th><th>OOS netto</th><th>OOS t</th><th>OOS % lunghe</th><th>OOS valore istante (M)</th><th>OOS abilit&agrave; direzione</th><th>OOS t abilit&agrave;</th><th>Esito</th></tr>";
   }
 
 string RankRow(const int rank, const int t, const int rb, const int h, const int kk, const int dd)
@@ -2130,7 +2209,7 @@ string RankRow(const int rank, const int t, const int rb, const int h, const int
           Td(dd == 0 ? "SEGUI" : "INVERTI") + Td(IS(g_hor[h])) + Td(KLabel(kk)) +
           Td(F0(a.n)) + Td("<b>" + F1(a.mean) + "</b>", ColSign(a.mean)) + Td(F2(a.t)) + Td(hs) +
           Td(F0(b.n)) + Td("<b>" + F1(b.mean) + "</b>", ColSign(b.mean)) + Td(F2(b.t), ColTNaive(b.t)) +
-          Td(F0(100.0 * b.fl) + "%") + Td(F1(b.nm), ColSign(b.nm)) + Td(F2(b.nt), ColTNaive(b.nt)) +
+          Td(F0(100.0 * b.fl) + "%") + Td(F1(b.mc), ColSign(b.mc)) + Td(F1(b.nm), ColSign(b.nm)) + Td(F2(b.nt), ColTNaive(b.nt)) +
           EsitoCell(a, b) + "</tr>";
   }
 
@@ -2143,7 +2222,7 @@ void RankDigest(const string tag, const int rank, const int t, const int rb, con
    g_dg += tag + "|" + IS(rank) + "|" + g_tfName[t] + "|" + RBktLabel(rb) + "|" + (dd == 0 ? "SEGUI" : "INVERTI") +
            "|hold|" + IS(g_hor[h]) + "|tp|" + KLabel(kk) + "|isn|" + F0(a.n) + "|ismean|" + F1(a.mean) + "|ist|" + F2(a.t) +
            "|hit|" + (kk == 0 ? "-" : F1(a.hit)) + "|oosn|" + F0(b.n) + "|oosmean|" + F1(b.mean) + "|oost|" + F2(b.t) +
-           "|ooslong|" + F0(100.0 * b.fl) + "|oosdelta|" + F1(b.dlt) + "|oosneutral|" + F1(b.nm) + "|oosnt|" + F2(b.nt) + "\n";
+           "|ooslong|" + F0(100.0 * b.fl) + "|oosdelta|" + F1(b.dlt) + "|oosm|" + F1(b.mc) + "|oosskill|" + F1(b.nm) + "|oosskt|" + F2(b.nt) + "\n";
   }
 
 //--- migliore combinazione (tenuta, target, verso) per ogni TF, su tutto il giorno
@@ -2314,7 +2393,7 @@ void RepRank()
      { W("<div class='note ko'>Nessuna combinazione con almeno " + IS((long)g_minN) + " posizioni in-sample. Riduci <b>InpRankMinN</b> o allarga il periodo.</div>"); return; }
 
    //--- diagnostica sull'insieme dei migliori in-sample
-   int posOOS = 0, strong = 0, usable = 0, strongN = 0;
+   int posOOS = 0, strong = 0, usable = 0, strongN = 0, strongOne = 0;
    for(int i = 0; i < pn; i++)
      {
       RkStat b;
@@ -2322,20 +2401,22 @@ void RepRank()
       if(b.n < MathMax(10.0, g_minN / 3.0)) continue;
       usable++;
       if(b.mean > 0.0) posOOS++;
-      if(b.mean > 0.0 && b.t >= 2.0) strong++;
+      if(b.mean > 0.0 && b.t >= 2.0) { strong++; if(b.fl <= 0.1 || b.fl >= 0.9) strongOne++; }       // strongOne: fasce in cui il segnale va quasi sempre nello stesso verso (abilita' non misurabile)
       if(b.mean > 0.0 && b.t >= 2.0 && b.nm > 0.0 && b.nt >= 2.0) strongN++;
      }
    double chanceT = (m > 1) ? MathSqrt(2.0 * MathLog((double)m)) : 0.0;
    double bestT = pT[0];
    bool noisy = (bestT < chanceT + 1.0 || usable == 0 || posOOS * 2 < usable);
    g_cAok = true; g_cAm = m; g_cAbestT = bestT; g_cAchance = chanceT; g_cApn = pn;
-   g_cAusable = usable; g_cApos = posOOS; g_cAstrong = strong; g_cAstrongN = strongN;
+   g_cAusable = usable; g_cApos = posOOS; g_cAstrong = strong; g_cAstrongN = strongN; g_cAone = strongOne;
    W("<div class='note " + string(noisy ? "ko" : "ok") + "'><b>Diagnostica della classifica.</b> Combinazioni valutate in-sample: <b>" + IS(m) +
      "</b>. Il miglior t in-sample trovato &egrave; <b>" + F2(bestT) + "</b>; per puro caso, su " + IS(m) +
      " tentativi indipendenti, ci si aspetta un massimo intorno a <b>" + F2(chanceT) + "</b> (stima per eccesso: le combinazioni vicine sono correlate, quindi i test davvero indipendenti sono meno). "
      "Fra le prime <b>" + IS(pn) + "</b> in-sample, <b>" + IS(posOOS) + "</b> su " + IS(usable) + " con campione OOS sufficiente restano positive fuori campione, <b>" +
-     IS(strong) + "</b> con OOS t &ge; 2, di cui <b>" + IS(strongN) + "</b> con t &ge; 2 anche al netto di deriva e composizione BUY/SELL (colonne 'neutro': pnl - verso x Delta medio, "
-     "dove Delta = (pnl lungo - pnl corto)/2 sulle stesse posizioni; un segnale senza informazione ha netto neutro = -costo qualunque sia la quota di acquisti). " +
+     IS(strong) + "</b> con OOS t &ge; 2, di cui <b>" + IS(strongN) + "</b> con <b>abilit&agrave; della direzione</b> significativa (t &ge; 2). "
+     "Il netto grezzo mescola tre cose: il <b>valore dell'istante M</b> (cosa guadagna in media chi sceglie il verso a caso in quegli istanti: rollover, spread, code di prezzo), la deriva del prezzo sfruttata da chi ha pi&ugrave; acquisti che vendite, "
+     "e l'<b>abilit&agrave;</b>, cio&egrave; quanto la scelta del verso del segnale guadagna in pi&ugrave; di un verso casuale. Un segnale senza informazione ha abilit&agrave; nulla (t attorno a 0) anche con netto grezzo molto positivo. "
+     "Dove il segnale va quasi sempre nello stesso verso (colonna % lunghe vicina a 0 o 100) l'abilit&agrave; non &egrave; misurabile: <b>" + IS(strongOne) + "</b> delle " + IS(strong) + " righe con OOS t &ge; 2 sono di questo tipo. " +
      string(noisy ? "Se questi numeri sono vicini a zero la classifica &egrave; rumore di selezione: non operare nessuna di queste righe."
                   : "Il risultato regge la prima verifica, ma resta da confermare su dati mai visti (forward o altro simbolo).") + "</div>");
 
@@ -2350,7 +2431,7 @@ void RepRank()
       W("<div class='note'><b>Controllo placebo.</b> Stessa classifica ricalcolata con una direzione casuale al posto di quella del segnale: stessi istanti, stesse regole di tenuta e di target, "
         "e la <b>stessa quota di acquisti e vendite</b> del segnale in ogni TF, fascia e periodo (cos&igrave; condivide con il segnale l'esposizione alla deriva del prezzo). Una sola estrazione: &egrave; molto variabile. "
         "Miglior t in-sample <b>" + F2(pbT) + "</b> contro " + F2(bestT) + " del segnale reale; fra le prime con campione OOS sufficiente <b>" + IS(pstr) + "</b> hanno OOS positivo e t &ge; 2 contro <b>" + IS(strong) +
-        "</b> del segnale reale; al netto di deriva e composizione (neutro) <b>" + IS(pstrN) + "</b> contro <b>" + IS(strongN) + "</b>. "
+        "</b> del segnale reale; con abilit&agrave; significativa <b>" + IS(pstrN) + "</b> contro <b>" + IS(strongN) + "</b>. "
         "Se il placebo ne trova quanto il segnale la classifica misura rumore di selezione, combinazioni quasi duplicate, oppure deriva o dislocazione del prezzo d'ingresso per sbilanciamento acquisti/vendite: non la direzione del segnale.</div>");
       g_dg += "PLACEBO|combos|" + IS(pm) + "|bestt|" + F2(pbT) + "|poosn|" + IS(pus) + "|pos|" + IS(ppos) + "|strong|" + IS(pstr) + "|strongneutral|" + IS(pstrN) + "\n";
      }
@@ -2395,7 +2476,7 @@ void RepRank()
                  " min, target " + KLabel(pK[i0]) + " pt: netto in-sample " + Sg(sa.mean) + " (t " + F2(sa.t) + "), fuori campione " +
                  Sg(sb.mean) + " (t " + F2(sb.t) + ", " + F0(sb.n) + " posizioni)";
      }
-   W("<h3>Fra le prime " + IS(pn) + " in-sample: quelle con IS t &ge; 2 che reggono anche fuori campione (OOS netto &gt; 0 e OOS t &ge; 2, anche al netto di deriva e composizione BUY/SELL)</h3>");
+   W("<h3>Fra le prime " + IS(pn) + " in-sample: quelle con IS t &ge; 2 che reggono anche fuori campione (OOS netto &gt; 0 e OOS t &ge; 2, con abilit&agrave; della direzione significativa)</h3>");
    if(ns == 0)
       W("<div class='note ko'>Nessuna combinazione fra le migliori in-sample ha OOS positivo e significativo. &Egrave; il risultato atteso se il segnale non ha edge netto dei costi.</div>");
    else
@@ -3721,6 +3802,7 @@ void BuildConclusions(const int sIdx)
             (InpExtraCostPts > 0.0 ? (" + extra " + F1(InpExtraCostPts) + " pt") : "") +
             ". Tutti i valori sono in punti (1 punto = " + DoubleToString(g_pt, _Digits) + ")." +
             (g_histWarn ? " ATTENZIONE: lo storico M1 e' piu' corto del periodo richiesto." : "") +
+            (g_skN > 0 ? (" ATTENZIONE: escluse le finestre d'ingresso " + InpSkipEntryWin + " (ora server + offset): i risultati non sono quelli dell'EA su quelle fasce.") : "") +
             (InpEntryLagMin > 0 ? (" ATTENZIONE: corsa con ingresso ritardato di " + IS(InpEntryLagMin) + " min dopo la chiusura del segnale (prova di stress): i risultati non sono quelli dell'EA.") : ""));
    }
 
@@ -4111,20 +4193,24 @@ void BuildConclusions(const int sIdx)
       const double expAn = 0.0228 * (double)g_cAusable;
       string ta = "Valutate " + IS(g_cAm) + " combinazioni TF x fascia x tenuta x target x verso sul primo periodo. Miglior t in-sample " + F2(g_cAbestT) +
                   " contro un massimo atteso per puro caso di circa " + F2(g_cAchance) + ". Fra le prime " + IS(g_cApn) + " in-sample, " + IS(g_cApos) + " su " + IS(g_cAusable) +
-                  " restano positive fuori campione, " + IS(g_cAstrong) + " con t OOS >= 2 e " + IS(g_cAstrongN) + " con t OOS >= 2 anche al netto di deriva del prezzo e composizione BUY/SELL (neutro); " +
+                  " restano positive fuori campione, " + IS(g_cAstrong) + " con t OOS >= 2 e " + IS(g_cAstrongN) + " con t OOS >= 2 e abilita' della direzione significativa; " +
                   "per puro caso, con combinazioni indipendenti, se ne attendono circa " + F1(expAn) + " (probabilita' di un t >= 2 positivo circa il 2.3%). ";
       if(g_cPok)
          ta += "Controllo placebo (direzione casuale con la stessa quota di acquisti e vendite, stessi istanti e stesse regole; una sola estrazione, molto variabile): miglior t in-sample " + F2(g_cPbest) +
-               ", t OOS >= 2 fra le prime: " + IS(g_cPstrong) + " (neutro " + IS(g_cPstrongN) + ") contro " + IS(g_cAstrong) + " (neutro " + IS(g_cAstrongN) + ") del segnale reale; TF con A1 positiva fuori campione: " +
+               ", t OOS >= 2 fra le prime: " + IS(g_cPstrong) + " (con abilita' " + IS(g_cPstrongN) + ") contro " + IS(g_cAstrong) + " (con abilita' " + IS(g_cAstrongN) + ") del segnale reale; TF con A1 positiva fuori campione: " +
                IS(a1P) + " contro " + IS(a1) + ". ";
       if(aEdge)
-         ta += "Il conteggio neutro del segnale reale supera nettamente quello atteso dal caso e dal placebo: la direzione del segnale sembra portare informazione oltre deriva e composizione" +
+         ta += "Il conteggio con abilita' significativa del segnale reale supera nettamente quello atteso dal caso e dal placebo: la direzione del segnale sembra portare informazione oltre il valore dell'istante e la deriva" +
                string(g_cAsurv != "" ? ("; la prima: " + g_cAsurv) : "") + ". Sono candidate da confermare su dati mai visti (l'OOS e' stato usato per sceglierle), non risultati. ";
+      else if(g_cAstrong >= 3 && 2 * g_cAstrongN < g_cAstrong && 2 * g_cAone > g_cAstrong)
+         ta += "Molte combinazioni sembrano reggere fuori campione, ma per la maggior parte (" + IS(g_cAone) + " su " + IS(g_cAstrong) + ") sono fasce in cui il segnale va quasi sempre nello stesso verso: li' l'abilita' della direzione "
+               "non e' misurabile e il guadagno puo' essere deriva oppure direzione. Servono un altro simbolo, un altro periodo o la prova con InpEntryLagMin = 5. ";
       else if(g_cAstrong >= 3 && 2 * g_cAstrongN < g_cAstrong)
-         ta += "Molte combinazioni sembrano reggere fuori campione, ma quasi tutte spariscono al netto di deriva e composizione: il risultato dipende da quanti acquisti e vendite compongono il segnale in quel TF e fascia "
-               "(deriva del prezzo o dislocazione del prezzo d'ingresso), non dalla direzione del segnale. Prova di stress: ripeti con InpEntryLagMin = 5. ";
+         ta += "Molte combinazioni sembrano reggere fuori campione, ma quasi nessuna ha abilita' della direzione: il guadagno e' dell'istante (chi sceglie il verso a caso negli stessi istanti guadagna lo stesso, valore M) "
+               "o della deriva sfruttata da una quota sbilanciata di acquisti o vendite, non della direzione del segnale. Un valore M positivo in una fascia e' tipicamente un artefatto dei dati (rollover, spread, code di prezzo). "
+               "Prova di stress: ripeti con InpEntryLagMin = 5 oppure escludi la fascia con InpSkipEntryWin. ";
       else
-         ta += "Il conteggio neutro del segnale reale non si distingue da quello atteso dal caso" + string(g_cPok ? " e dal placebo" : "") + ": la tabella A non prova che la direzione del segnale porti informazione" +
+         ta += "Il conteggio con abilita' significativa del segnale reale non si distingue da quello atteso dal caso" + string(g_cPok ? " e dal placebo" : "") + ": la tabella A non prova che la direzione del segnale porti informazione" +
                string(g_cAns > 0 && g_cAsurv != "" ? ("; fra quelle che passano il filtro (" + IS(g_cAns) + ") la prima e': " + g_cAsurv) : "") + ". ";
       ta += "Le combinazioni vicine (TF contigui, fasce e target adiacenti) sono quasi duplicati: il numero di sopravvissute non conta conferme indipendenti.";
       AddConc(sIdx, "Tabella A (scelta in-sample)", ta);
@@ -4159,9 +4245,12 @@ void BuildConclusions(const int sIdx)
           c += "Il segnale e' significativamente contrario alla direzione del prezzo in " + IS(negS) + " TF: la lettura INVERTI va verificata nelle tabelle A (il netto dell'inverso e' meno il lordo, meno il costo). ";
        else
           c += "Il segnale non anticipa la direzione del prezzo oltre il caso. ";
-       if(g_cAok && g_cAstrong >= 3 && !aEdge && 2 * g_cAstrongN < g_cAstrong)
-          c += "Nella tabella A " + IS(g_cAstrong) + " combinazioni sembrano reggere fuori campione ma solo " + IS(g_cAstrongN) + " al netto di deriva e composizione BUY/SELL: dipende da quanti acquisti e vendite compongono il segnale in quel TF e fascia "
-               "(deriva o dislocazione del prezzo d'ingresso), non e' prova che il segnale abbia informazione direzionale; verifica con InpEntryLagMin = 5. ";
+       if(g_cAok && g_cAstrong >= 3 && !aEdge && 2 * g_cAstrongN < g_cAstrong && 2 * g_cAone > g_cAstrong)
+          c += "Nella tabella A " + IS(g_cAstrong) + " combinazioni sembrano reggere fuori campione ma per la maggior parte (" + IS(g_cAone) + ") il segnale va quasi sempre nello stesso verso: l'abilita' della direzione non e' misurabile "
+               "li' e il guadagno puo' essere deriva oppure direzione; servono un altro simbolo o periodo, o la prova con InpEntryLagMin = 5. ";
+       else if(g_cAok && g_cAstrong >= 3 && !aEdge && 2 * g_cAstrongN < g_cAstrong)
+          c += "Nella tabella A " + IS(g_cAstrong) + " combinazioni sembrano reggere fuori campione ma solo " + IS(g_cAstrongN) + " hanno abilita' della direzione: il guadagno e' dell'istante (valore M, tipicamente rollover, spread o code di prezzo) "
+               "o della deriva per una quota sbilanciata di acquisti e vendite, non e' prova che il segnale abbia informazione direzionale; verifica con InpEntryLagMin = 5 o escludendo la fascia con InpSkipEntryWin. ";
        if(ptsAbove)
           c += "I punti toccati nel verso del segnale superano la base e il movimento contrario (vedi 'Punti raggiunti'): da confermare fuori campione. ";
        else
@@ -4179,7 +4268,7 @@ void BuildConclusions(const int sIdx)
        c = "Ci sono indizi da verificare: ";
        if(netSig > 0) c += "netto positivo e significativo in " + sigList + "; ";
        if(negS > 0 && wN > 0.0) c += "il lordo e' significativamente contrario al segnale in " + IS(negS) + " TF (media pesata di tutti i TF " + Sg(wG / wN) + " pt contro un costo medio di " + F1(wCost / wN) + " pt); ";
-       if(aEdge)      c += IS(g_cAstrongN) + " combinazioni della tabella A hanno t OOS >= 2 anche al netto di deriva e composizione, contro circa " + F1(expA) + " attese tra caso e placebo; ";
+       if(aEdge)      c += IS(g_cAstrongN) + " combinazioni della tabella A hanno abilita' della direzione significativa fuori campione, contro circa " + F1(expA) + " attese tra caso e placebo; ";
        if(a1Edge)     c += "in " + IS(a1) + " TF la miglior combinazione A1 resta positiva fuori campione con t >= 2; ";
        c += "non sono conferme. Servono un test su dati mai visti (forward) e su altri simboli, e la verifica che l'esecuzione reale (spread, slippage, commissioni) non cancelli il margine.";
       }
@@ -4222,10 +4311,10 @@ void BuildCrossConclusions()
          ". TF con lordo significativo positivo: " + a0 + " " + IS(g_agGpos[0]) + ", " + a1 + " " + IS(g_agGpos[1]) +
          "; negativo: " + a0 + " " + IS(g_agGneg[0]) + ", " + a1 + " " + IS(g_agGneg[1]) + ".";
    AddConc(-1, "Netto a confronto", tx);
-   AddConc(-1, "Tabelle A a confronto", "Combinazioni della tabella A con OOS positivo e t >= 2 anche al netto di deriva e composizione: " + a0 + " " + (g_agAok[0] > 0 ? IS(g_agAns[0]) : string("non valutabile")) + ", " +
+   AddConc(-1, "Tabelle A a confronto", "Combinazioni della tabella A con OOS positivo e t >= 2 e abilita' della direzione significativa: " + a0 + " " + (g_agAok[0] > 0 ? IS(g_agAns[0]) : string("non valutabile")) + ", " +
            a1 + " " + (g_agAok[1] > 0 ? IS(g_agAns[1]) : string("non valutabile")) +
            " (una piccola quota e' attesa per puro caso, circa il 2.3% di quelle valutate). TF in cui la miglior combinazione A1 resta positiva fuori campione con t >= 2: " +
-           a0 + " " + IS(g_agA1ok[0]) + ", " + a1 + " " + IS(g_agA1ok[1]) + ". Evidenza oltre il caso e oltre il placebo nelle tabelle A (conteggio neutro): " + a0 + " " +
+           a0 + " " + IS(g_agA1ok[0]) + ", " + a1 + " " + IS(g_agA1ok[1]) + ". Evidenza oltre il caso e oltre il placebo nelle tabelle A (conteggio con abilita'): " + a0 + " " +
            (g_agAok[0] > 0 ? string(g_agAedge[0] > 0 ? "si" : "no") : string("non valutabile")) + ", " + a1 + " " + (g_agAok[1] > 0 ? string(g_agAedge[1] > 0 ? "si" : "no") : string("non valutabile")) + ".");
    string c;
    const bool enough = (g_agNtf[0] >= 1 && g_agNtf[1] >= 1);
@@ -4291,7 +4380,7 @@ string BuildDigestHeader()
    else d += "VOLCFG|on|1|atr|" + IS(g_vpar.atrLen) + "|lookback|" + IS(g_vpar.lookback) + "|ema|" + IS(g_vpar.emaSmooth) +
         "|exp|" + F2(InpVsExpTh) + "|comp|" + F2(InpVsCompTh) + "|low|" + IS(InpVsLowTh) + "|high|" + IS(InpVsHighTh) + "|extreme|" + IS(InpVsExtremeTh) + "\n";
    d += "RUN|costfix|" + F1(InpCostPoints) + "|extra|" + F1(InpExtraCostPts) + "|maxgap|" + IS(InpMaxGapMin) +
-        "|entrygap|" + IS(InpMaxEntryGapMin) + "|entrylag|" + IS(InpEntryLagMin) + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +
+        "|entrygap|" + IS(InpMaxEntryGapMin) + "|entrylag|" + IS(InpEntryLagMin) + "|skipwin|" + InpSkipEntryWin + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +
         "|ref|" + IS(g_hor[g_refH]) + "|sets|" + IS(g_nSets) + "\n";
    d += "DATA|m1bars|" + IS(g_n1) + "|days|" + IS(g_nDays) + "|medrange|" + F0(g_medRange) + "|medspr|" + F0(g_medSpr) +
         "|zerospr|" + F1(g_zeroSprPct) + "\n";
@@ -4304,7 +4393,7 @@ string BuildDigestSet()
    string d = "SETINFO|name|" + g_setTag[g_curSet] + "|zbonf|" + F2(g_zB) + "\n";
    for(int t = 0; t < g_nT; t++)
       d += "TF|" + g_tfName[t] + "|bars|" + IS(g_tfBars[t]) + "|base|" + IS(g_tfCnt[t]) + "|signals|" + IS(g_tfEv[t]) +
-           "|rejgap|" + IS(g_tfRejGap[t]) + "|rejm1|" + IS(g_tfRejM1[t]) + "\n";
+           "|rejgap|" + IS(g_tfRejGap[t]) + "|rejm1|" + IS(g_tfRejM1[t]) + "|rejwin|" + IS(g_tfRejWin[t]) + "\n";
    for(int t = 0; t < g_nT; t++)
       for(int h = 0; h < g_nH; h++)
         {
@@ -4398,7 +4487,7 @@ void ReportSet(const int sIdx)
    g_zB = ZCrit(MathMax(1, m));
 
    g_dg = "";
-   g_cAok = false; g_cBok = false; g_cPok = false; g_cPstrong = 0; g_cPstrongN = 0; g_cAstrongN = 0; g_cPusable = 0; g_cPpos = 0; g_cPbest = 0.0; g_cAns = 0; g_cAsurv = ""; g_cBdesc = ""; g_cBsumAll = 0.0;
+   g_cAok = false; g_cBok = false; g_cPok = false; g_cPstrong = 0; g_cPstrongN = 0; g_cAstrongN = 0; g_cAone = 0; g_cPusable = 0; g_cPpos = 0; g_cPbest = 0.0; g_cAns = 0; g_cAsurv = ""; g_cBdesc = ""; g_cBsumAll = 0.0;
    W("<div class='sec' style='order:" + IS(3 + sIdx) + "'>");
    W("<h1 class='setH'>Serie " + IS(sIdx + 1) + " di " + IS(g_nSets) + " &mdash; " + g_setName[sIdx] + "</h1>");
    W("<div class='note'>" + g_setNote[sIdx] + " Soglia di Bonferroni su " + IS(m) + " celle TF x orizzonte: |t| &ge; <b>" + F2(g_zB) + "</b>.</div>");
@@ -4584,6 +4673,7 @@ void OnStart()
    }
    ArrayResize(g_tfRejGap, g_nT); ArrayInitialize(g_tfRejGap, 0);
    ArrayResize(g_tfRejM1, g_nT);  ArrayInitialize(g_tfRejM1, 0);
+   ArrayResize(g_tfRejWin, g_nT); ArrayInitialize(g_tfRejWin, 0);
    {
     //--- candele successive: accumulatori di entrambe le serie (riempiti durante il calcolo dei segnali)
     const long cells = (long)g_nSets * g_nT * g_nMem * g_nM;
