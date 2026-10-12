@@ -379,6 +379,13 @@ enum ENUM_SD_MODE
    SDM_DELTA_ADDED = 5  // IN UN SOLO LANCIO: serie DELTA e serie EXP_ADDED, in tabelle distinte + confronto
   };
 
+enum ENUM_RANK_SIDE
+  {
+   RS_FOLLOW = 0,  // Solo SEGUI il segnale (apri nel suo verso)
+   RS_BOTH   = 1,  // SEGUI e INVERTI
+   RS_FADE   = 2   // Solo INVERTI
+  };
+
 enum ENUM_NOISE_SORT
   {
    NS_TOTAL = 0,  // Profitto totale in punti sull'intero storico
@@ -424,6 +431,12 @@ input string   InpLevels            = "50,100,150,200,250,300,350,400,450,500,55
 input double   InpCostPoints        = 0;      // 0 = spread reale della barra M1 d'ingresso
 input double   InpExtraCostPts      = 0;      // commissione/slippage extra in punti
 input int      InpEntryLagMin       = 0;      // ritardo d'ingresso in minuti dopo la chiusura del segnale (0 = open della prima barra M1): prova di stress, se un risultato sparisce con 5 era una dislocazione del prezzo d'ingresso
+
+input group "=== DENARO (posizione ipotetica) ==="
+input double   InpLotSize           = 0.01;   // lotto ipotetico di ogni posizione
+input double   InpCommissionPerLotSide = 3.0; // commissione per 1.00 lotto e per lato, in valuta del conto (conti Raw IC Markets / FP Markets: circa 3-3.5): contata due volte e convertita in punti
+input double   InpPointValuePerLot  = 0;      // valore di 1 punto per 1.00 lotto in valuta del conto; 0 = automatico dal simbolo (valore del tick)
+input ENUM_RANK_SIDE InpRankSide    = RS_FOLLOW; // verso studiato nelle classifiche A/B: solo il verso del segnale (come un EA che apre dove dice il segnale), oppure anche l'inverso
 
 input group "=== TABELLE ==="
 input int      InpBucketMin         = 15;     // fasce orarie: 1,2,3,4,5,6,10,12,15,20,30,60
@@ -529,6 +542,7 @@ long     g_cAm = 0, g_cBm = 0;
 double   g_cAbestT = 0.0, g_cAchance = 0.0;
 int      g_cApn = 0, g_cAusable = 0, g_cApos = 0, g_cAstrong = 0, g_cAstrongN = 0, g_cAone = 0, g_cAns = 0;
 string   g_cAsurv = "", g_cBdesc = "";
+double   g_cAsurvMean = 0.0, g_cAsurvN = 0.0;       // prima sopravvissuta della tabella A: netto medio OOS (pt) e posizioni OOS
 double   g_cBsumAll = 0.0, g_cBtotal = 0.0, g_cBmean = 0.0, g_cBt = 0.0, g_cBn = 0.0, g_cBshareN = 0.0, g_cBshareLate = 0.0;
 int      g_cBboth = 0, g_cBincoh = 0, g_cBusable = 0, g_cBpn = 0;
 //--- aggregati per serie, usati dal confronto
@@ -553,6 +567,15 @@ int      g_nextBrk[];
 int      g_nDays = 1;
 long     g_day0 = 0;
 double   g_medRange = 0.0, g_medSpr = 0.0, g_zeroSprPct = 0.0;
+
+//--- denaro: valore di 1 punto per 1.00 lotto nella valuta del conto, commissione in punti, costo extra totale in punti
+double   g_pv = 0.0, g_commPts = 0.0, g_extraPts = 0.0;
+bool     g_money = false;
+string   g_ccy = "EUR";
+
+//--- spread M1 per fascia d'entrata (stesse fasce della classifica, ora server + offset)
+#define SPRBIN 400
+double   g_sprN[], g_sprMean[], g_sprMed[], g_sprP90[];
 
 //--- finestre forward per l'orizzonte corrente
 double   g_fHi[], g_fLo[], g_fCl[];
@@ -748,6 +771,91 @@ string BktLabel(const int b)
   {
    int s = b * g_bMin, e = s + g_bMin;
    return StringFormat("%02d:%02d-%02d:%02d", s / 60, s % 60, e / 60, e % 60);
+  }
+
+string RBktLabel(const int b)
+  {
+   int s0 = b * g_rbMin, e0 = s0 + g_rbMin;
+   return StringFormat("%02d:%02d-%02d:%02d", s0 / 60, s0 % 60, e0 / 60, e0 % 60);
+  }
+
+//--- spread medio della fascia in rapporto alla mediana generale (1 = nella norma)
+double SprRatio(const int rb)
+  {
+   if(rb < 0 || rb >= ArraySize(g_sprMean)) return 0.0;
+   return g_sprMean[rb] / MathMax(1.0, g_medSpr);
+  }
+
+string SprColor(const int rb)
+  {
+   const double r = SprRatio(rb);
+   if(r >= 2.5) return "#bf616a";
+   if(r >= 1.5) return "#d08770";
+   return "";
+  }
+
+//--- frase per il riepilogo: le fasce piu' care (spread medio >= 1.5 volte la mediana generale), massimo tre
+string SprTopText()
+  {
+   if(InpCostPoints > 0.0 || g_nRB < 1 || ArraySize(g_sprMean) < g_nRB) return "";
+   bool used[];
+   ArrayResize(used, g_nRB);
+   ArrayInitialize(used, false);
+   string out = "";
+   int shown = 0;
+   for(int k = 0; k < 3; k++)
+     {
+      int bi = -1;
+      double bv = 0.0;
+      for(int rb = 0; rb < g_nRB; rb++)
+         if(!used[rb] && g_sprN[rb] >= 100.0 && g_sprMean[rb] > bv) { bv = g_sprMean[rb]; bi = rb; }
+      if(bi < 0 || SprRatio(bi) < 1.5) break;
+      used[bi] = true;
+      out += (shown > 0 ? ", " : "") + RBktLabel(bi) + " " + F1(g_sprMean[bi]) + " pt";
+      shown++;
+     }
+   if(shown == 0) return "";
+   return " Spread M1 medio piu' alto nelle fasce (ora server + offset): " + out + ", contro una mediana generale di " + F0(g_medSpr) +
+          " pt: dove lo spread e' largo il netto e' piu' fragile, controlla la colonna Spread fascia nelle classifiche.";
+  }
+
+//--- denaro della posizione ipotetica (InpLotSize) per una quantita' in punti; 3 decimali per posizione, 2 per i totali
+double MnyV(const double pts) { return pts * g_pv * InpLotSize; }
+string Mny(const double pts)  { return g_money ? DoubleToString(MnyV(pts), 3) : string("n.d."); }
+string MnyT(const double pts) { return g_money ? DoubleToString(MnyV(pts), 2) : string("n.d."); }
+string MnyU(const double pts) { return g_money ? (DoubleToString(MnyV(pts), 3) + " " + g_ccy) : string("n.d."); }
+string MnyTU(const double pts) { return g_money ? (DoubleToString(MnyV(pts), 2) + " " + g_ccy) : string("n.d."); }
+
+//--- verso studiato nelle classifiche
+bool SideOK(const int dd)
+  {
+   if(InpRankSide == RS_BOTH) return true;
+   return (InpRankSide == RS_FOLLOW) ? (dd == 0) : (dd == 1);
+  }
+
+//--- valore del punto, commissione in punti e costo extra totale
+void SetupMoney()
+  {
+   g_ccy = AccountInfoString(ACCOUNT_CURRENCY);
+   if(g_ccy == "") g_ccy = "EUR";
+   g_pv = 0.0;
+   g_commPts = 0.0;
+   if(InpPointValuePerLot > 0.0) g_pv = InpPointValuePerLot;
+   else
+     {
+      double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_PROFIT);
+      if(tv <= 0.0) tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      const double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+      if(tv > 0.0 && ts > 0.0) g_pv = tv * g_pt / ts;
+     }
+   g_money = (g_pv > 0.0 && InpLotSize > 0.0);
+   if(g_pv > 0.0 && InpCommissionPerLotSide > 0.0) g_commPts = 2.0 * InpCommissionPerLotSide / g_pv;
+   g_extraPts = InpExtraCostPts + g_commPts;
+   if(g_money)
+      Print("Denaro: lotto ", DoubleToString(InpLotSize, 2), " | 1 punto per 1.00 lotto = ", DoubleToString(g_pv, 4), " ", g_ccy,
+            " | commissione ", DoubleToString(InpCommissionPerLotSide, 2), " per lato e per lotto = ", DoubleToString(g_commPts, 2), " pt a/r");
+   else
+      Print("!!! Valore del punto non disponibile per ", _Symbol, ": colonne in denaro e commissione non calcolabili. Imposta InpPointValuePerLot.");
   }
 
 string DowName(const int d)
@@ -1051,6 +1159,47 @@ int LoadTF(const int t, MqlRates &r[])
    return LoadRates(g_tf[t], (datetime)f, InpTo, r);
   }
 
+//--- spread M1 per fascia: media, mediana e p90 (istogramma a passo 1 punto, ultimo bin = SPRBIN-1 o piu'), solo barre nel periodo richiesto
+void BuildSpreadStats()
+  {
+   double hist[], sSum[];
+   ArrayResize(hist, g_nRB * SPRBIN);
+   ArrayInitialize(hist, 0.0);
+   ArrayResize(sSum, g_nRB);
+   ArrayInitialize(sSum, 0.0);
+   ArrayResize(g_sprN, g_nRB);
+   ArrayInitialize(g_sprN, 0.0);
+   ArrayResize(g_sprMean, g_nRB);
+   ArrayResize(g_sprMed, g_nRB);
+   ArrayResize(g_sprP90, g_nRB);
+   const long rbSec = (long)g_rbMin * 60L;
+   for(int i = 0; i < g_n1; i++)
+     {
+      if(g_m1Time[i] < InpFrom || g_m1Time[i] > InpTo) continue;
+      const long tsr = ((((long)g_m1Time[i] + g_off) % 86400L) + 86400L) % 86400L;
+      const int rb = (int)(tsr / rbSec);
+      if(rb < 0 || rb >= g_nRB) continue;
+      const int sv = (g_m1Spr[i] < 0) ? 0 : g_m1Spr[i];
+      hist[rb * SPRBIN + ((sv >= SPRBIN) ? SPRBIN - 1 : sv)] += 1.0;
+      g_sprN[rb] += 1.0;
+      sSum[rb] += (double)sv;
+     }
+   for(int rb = 0; rb < g_nRB; rb++)
+     {
+      g_sprMean[rb] = 0.0; g_sprMed[rb] = 0.0; g_sprP90[rb] = 0.0;
+      if(g_sprN[rb] <= 0.0) continue;
+      g_sprMean[rb] = sSum[rb] / g_sprN[rb];
+      double cum = 0.0;
+      bool gotMed = false, gotP90 = false;
+      for(int b = 0; b < SPRBIN; b++)
+        {
+         cum += hist[rb * SPRBIN + b];
+         if(!gotMed && cum >= 0.5 * g_sprN[rb]) { g_sprMed[rb] = (double)b; gotMed = true; }
+         if(!gotP90 && cum >= 0.9 * g_sprN[rb]) { g_sprP90[rb] = (double)b; gotP90 = true; break; }
+        }
+     }
+  }
+
 bool LoadM1()
   {
    datetime from = (datetime)((long)InpFrom - 300L * 60L);
@@ -1138,6 +1287,7 @@ bool LoadM1()
       g_medSpr     = sp[cnt / 2];
       g_zeroSprPct = 100.0 * zero / cnt;
      }
+   BuildSpreadStats();
    return true;
   }
 
@@ -1692,7 +1842,7 @@ void AccumulateHorizon(const int hi)
          const double fav  = (d > 0) ? mB : mS;
          const double adv  = (d > 0) ? mS : mB;
          const double retG = (d > 0) ? (g_fCl[j] - o) / pt : (o - g_fCl[j]) / pt;
-         const double cost = ((InpCostPoints > 0.0) ? InpCostPoints : (double)g_m1Spr[j]) + InpExtraCostPts;
+         const double cost = ((InpCostPoints > 0.0) ? InpCostPoints : (double)g_m1Spr[j]) + g_extraPts;
          const double retN = retG - cost;
 
          AddAcc(g_accTH, cell, fav, adv, retN, cost);
@@ -1881,6 +2031,25 @@ void RepHead()
    W("</style></head><body>");
   }
 
+void RepSpread()
+  {
+   W("<h2>Spread M1 per fascia d'entrata</h2>");
+   W("<div class='note'>Spread della barra M1 (punti) per fascia oraria (ora server + offset), su tutto il periodo. "
+     "Il costo di ogni posizione &egrave; lo spread della barra M1 d'ingresso" + string(InpCostPoints > 0.0 ? " (qui sostituito dal costo fisso impostato)" : "") +
+     ": una fascia con spread molto sopra la mediana generale (" + F0(g_medSpr) + " pt) rende fragile ogni guadagno netto trovato l&igrave;. "
+     "Arancio = spread medio almeno 1.5 volte la mediana generale; rosso = almeno 2.5 volte. Se i dati storici hanno uno spread fisso o modellato, "
+     "la tabella non mostra l'allargamento reale del broker: confrontala con lo spread che vedi sul conto.</div>");
+   W("<table><tr><th>Fascia</th><th>Barre M1</th><th>Spread medio</th><th>Mediano</th><th>p90</th><th>Medio / mediana generale</th></tr>");
+   for(int rb = 0; rb < g_nRB; rb++)
+     {
+      if(g_sprN[rb] <= 0.0) continue;
+      const string col = SprColor(rb);
+      W("<tr><td>" + RBktLabel(rb) + "</td>" + Td(F0(g_sprN[rb])) + Td("<b>" + F1(g_sprMean[rb]) + "</b>", col) + Td(F0(g_sprMed[rb])) +
+        Td(F0(g_sprP90[rb])) + Td(F2(SprRatio(rb)), col) + "</tr>");
+     }
+   W("</table>");
+  }
+
 void RepIntro()
   {
    W("<h1>SignalLab MultiTF &mdash; " + ModeName() + " &mdash; " + _Symbol + "</h1>");
@@ -1901,8 +2070,11 @@ void RepIntro()
       W("<tr><th>Stato di volatilit&agrave;</th><td>ATR " + IS(g_vpar.atrLen) + " | percentile su " + IS(g_vpar.lookback) + " barre | EMA " + IS(g_vpar.emaSmooth) +
         " | espansione TR/ATR &gt; " + F2(InpVsExpTh) + " | compressione &lt; " + F2(InpVsCompTh) + " | LOW &lt; " + IS(InpVsLowTh) +
         ", HIGH &ge; " + IS(InpVsHighTh) + ", EXTREME &ge; " + IS(InpVsExtremeTh) + "</td></tr>");
-   W("<tr><th>Costo</th><td>" + (InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : "spread reale M1") +
-     " + extra " + F1(InpExtraCostPts) + " pt</td></tr>");
+   W("<tr><th>Costo</th><td>" + (InpCostPoints > 0.0 ? ("spread fisso " + F1(InpCostPoints) + " pt") : "spread reale M1") +
+     " + extra " + F1(InpExtraCostPts) + " pt + commissione " + F1(g_commPts) + " pt (" + F2(InpCommissionPerLotSide) + " " + g_ccy + " per lato e per lotto, due lati)</td></tr>");
+   W("<tr><th>Denaro</th><td>lotto ipotetico " + F2(InpLotSize) + " | 1 punto per 1.00 lotto = " + (g_pv > 0.0 ? (DoubleToString(g_pv, 4) + " " + g_ccy) : string("non disponibile (imposta InpPointValuePerLot)")) +
+     " | valuta del conto " + g_ccy + " | verso nelle classifiche: " + string(InpRankSide == RS_FOLLOW ? "solo SEGUI" : (InpRankSide == RS_FADE ? "solo INVERTI" : "SEGUI e INVERTI")) +
+     "</td></tr>");
    W("<tr><th>Finestre</th><td>buco dati massimo " + IS(InpMaxGapMin) + " min | gap massimo all'ingresso " +
      IS(InpMaxEntryGapMin) + " min | fasce da " + IS(g_bMin) + " min | offset orario " + IS(InpTimeOffsetH) + " h | ritardo d'ingresso " + IS(InpEntryLagMin) + " min | finestre d'ingresso escluse: " + (g_skN > 0 ? InpSkipEntryWin : string("nessuna")) + "</td></tr>");
    string hs = "";
@@ -1921,9 +2093,9 @@ void RepIntro()
    if(InpCostPoints <= 0.0 && g_zeroSprPct > 20.0)
       W("<div class='note ko'><b>Spread storico spesso pari a 0.</b> Il costo &egrave; sottostimato e il netto medio &egrave; "
         "ottimista. Imposta <b>InpCostPoints</b> con lo spread tipico del simbolo o <b>InpExtraCostPts</b> con la commissione.</div>");
-   if(InpCostPoints <= 0.0 && InpExtraCostPts <= 0.0)
-      W("<div class='note'>Nessuna commissione inclusa. Su conti Raw (FP Markets, IC Markets) aggiungila in "
-        "<b>InpExtraCostPts</b>, convertita in punti.</div>");
+   if(g_extraPts <= 0.0)
+      W("<div class='note'>Nessuna commissione inclusa. Su conti Raw (FP Markets, IC Markets) imposta "
+        "<b>InpCommissionPerLotSide</b> (e il valore del punto se non viene letto dal simbolo).</div>");
 
    W("<h2>Come leggere</h2>");
    W("<div class='note'><b>Netto medio</b> = rendimento a fine orizzonte nella direzione del segnale meno il costo, in punti. "
@@ -1940,6 +2112,7 @@ void RepIntro()
      "Nelle classifiche la posizione occupa il suo slot per tutta la tenuta anche se il target esce prima (scelta prudente).</div>");
    W("<div class='note'>Le misure sono <b>in punti</b>: i simboli non sono confrontabili fra loro e le ore con volatilit&agrave; alta dominano i totali. "
      "Per questo le tabelle orarie sono affiancate dalla base della stessa fascia.</div>");
+   RepSpread();
   }
 
 void RepCoverage()
@@ -2001,6 +2174,29 @@ void RepMatrices()
       W("</tr>");
      }
    W("</table>");
+
+   if(g_money)
+     {
+      W("<h2>Netto medio in " + g_ccy + " per posizione (lotto " + F2(InpLotSize) + ") per TF e orizzonte</h2>");
+      W("<div class='note'>Entrando a ogni segnale nel suo verso e uscendo dopo l'orizzonte indicato (tempo fisso, senza stop), al netto di spread e commissione. "
+        "Passando il mouse su una cella si vede dopo quante candele del TF si esce. Le posizioni si sovrappongono: &egrave; il risultato medio di un singolo segnale, non di un conto che apre una posizione alla volta.</div>");
+      W("<table><tr><th>TF</th>");
+      for(int h = 0; h < g_nH; h++) W("<th>" + IS(g_hor[h]) + "m</th>");
+      W("</tr>");
+      for(int t = 0; t < g_nT; t++)
+        {
+         W("<tr><td>" + g_tfName[t] + "</td>");
+         for(int h = 0; h < g_nH; h++)
+           {
+            CellStat s;
+            if(!GetCell(t, h, s)) { W("<td>-</td>"); continue; }
+            const string tip = " title='uscita dopo " + F1((double)g_hor[h] / MathMax(1.0, (double)g_tfSec[t] / 60.0)) + " candele; posizioni " + F0(s.n) + "'";
+            W("<td style='color:" + ColT(s.tCl) + "'" + tip + ">" + Mny(s.ret) + "</td>");
+           }
+         W("</tr>");
+        }
+      W("</table>");
+     }
 
    W("<h2>MFE medio (punti) per TF e orizzonte &mdash; [MFE/MAE]</h2>");
    W("<div class='note'>Descrive per quanti punti il prezzo prosegue nella direzione del segnale, ma &egrave; confuso dalla volatilit&agrave;. "
@@ -2145,6 +2341,7 @@ void RepHeat(const int t)
    const int blk = (g_nL + 1) * 4 * RKN;
    for(int dd = 0; dd < 2; dd++)
      {
+        if(!SideOK(dd)) continue;
       W("<h3>" + string(dd == 0 ? "SEGUI il segnale" : "INVERTI il segnale") +
         " &mdash; netto medio per posizione (punti), in-sample / out-of-sample</h3>");
       W("<table><tr><th>Target \\ Tieni (min)</th>");
@@ -2176,12 +2373,6 @@ void RepHeat(const int t)
 //+------------------------------------------------------------------+
 //| CLASSIFICA                                                        |
 //+------------------------------------------------------------------+
-string RBktLabel(const int b)
-  {
-   int s0 = b * g_rbMin, e0 = s0 + g_rbMin;
-   return StringFormat("%02d:%02d-%02d:%02d", s0 / 60, s0 % 60, e0 / 60, e0 % 60);
-  }
-
 string KLabel(const int kk) { return (kk == 0) ? string("nessuno") : F0(g_lev[kk - 1]); }
 
 string EsitoCell(const RkStat &a, const RkStat &b)
@@ -2194,9 +2385,9 @@ string EsitoCell(const RkStat &a, const RkStat &b)
 
 string RankHead()
   {
-   return "<table><tr><th>#</th><th>TF</th><th>Fascia (entrata, server + offset)</th><th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th>"
+   return "<table><tr><th>#</th><th>TF</th><th>Fascia (entrata, server + offset)</th><th>Verso</th><th>Tieni (min)</th><th>Candele TF</th><th>Target (pt)</th>"
           "<th>IS pos.</th><th>IS netto</th><th>IS t</th><th>Target raggiunto % (netto)</th>"
-          "<th>OOS pos.</th><th>OOS netto</th><th>OOS t</th><th>OOS % lunghe</th><th>OOS valore istante (M)</th><th>OOS abilit&agrave; direzione</th><th>OOS t abilit&agrave;</th><th>Esito</th></tr>";
+          "<th>OOS pos.</th><th>OOS netto</th><th>OOS netto (&euro;/pos.)</th><th>OOS totale (&euro;)</th><th>OOS t</th><th>OOS % lunghe</th><th>OOS valore istante (M)</th><th>OOS abilit&agrave; direzione</th><th>OOS t abilit&agrave;</th><th>Spread fascia (pt)</th><th>Esito</th></tr>";
   }
 
 string RankRow(const int rank, const int t, const int rb, const int h, const int kk, const int dd)
@@ -2207,11 +2398,11 @@ string RankRow(const int rank, const int t, const int rb, const int h, const int
    RkRead(g_rk, base, kk, dd, 1, b);
    string hs = (kk == 0) ? "-" : F1(a.hit);
    return "<tr>" + Td(IS(rank)) + "<td>" + g_tfName[t] + "</td><td>" + RBktLabel(rb) + "</td>" +
-          Td(dd == 0 ? "SEGUI" : "INVERTI") + Td(IS(g_hor[h])) + Td(KLabel(kk)) +
+          Td(dd == 0 ? "SEGUI" : "INVERTI") + Td(IS(g_hor[h])) + Td(F1((double)g_hor[h] / MathMax(1.0, (double)g_tfSec[t] / 60.0))) + Td(KLabel(kk)) +
           Td(F0(a.n)) + Td("<b>" + F1(a.mean) + "</b>", ColSign(a.mean)) + Td(F2(a.t)) + Td(hs) +
-          Td(F0(b.n)) + Td("<b>" + F1(b.mean) + "</b>", ColSign(b.mean)) + Td(F2(b.t), ColTNaive(b.t)) +
+          Td(F0(b.n)) + Td("<b>" + F1(b.mean) + "</b>", ColSign(b.mean)) + Td(Mny(b.mean), ColSign(b.mean)) + Td(MnyT(b.mean * b.n), ColSign(b.mean)) + Td(F2(b.t), ColTNaive(b.t)) +
           Td(F0(100.0 * b.fl) + "%") + Td(F1(b.mc), ColSign(b.mc)) + Td(F1(b.nm), ColSign(b.nm)) + Td(F2(b.nt), ColTNaive(b.nt)) +
-          EsitoCell(a, b) + "</tr>";
+          Td(F1(g_sprMean[rb]), SprColor(rb)) + EsitoCell(a, b) + "</tr>";
   }
 
 void RankDigest(const string tag, const int rank, const int t, const int rb, const int h, const int kk, const int dd)
@@ -2223,7 +2414,8 @@ void RankDigest(const string tag, const int rank, const int t, const int rb, con
    g_dg += tag + "|" + IS(rank) + "|" + g_tfName[t] + "|" + RBktLabel(rb) + "|" + (dd == 0 ? "SEGUI" : "INVERTI") +
            "|hold|" + IS(g_hor[h]) + "|tp|" + KLabel(kk) + "|isn|" + F0(a.n) + "|ismean|" + F1(a.mean) + "|ist|" + F2(a.t) +
            "|hit|" + (kk == 0 ? "-" : F1(a.hit)) + "|oosn|" + F0(b.n) + "|oosmean|" + F1(b.mean) + "|oost|" + F2(b.t) +
-           "|ooslong|" + F0(100.0 * b.fl) + "|oosdelta|" + F1(b.dlt) + "|oosm|" + F1(b.mc) + "|oosskill|" + F1(b.nm) + "|oosskt|" + F2(b.nt) + "\n";
+           "|ooslong|" + F0(100.0 * b.fl) + "|oosdelta|" + F1(b.dlt) + "|oosm|" + F1(b.mc) + "|oosskill|" + F1(b.nm) + "|oosskt|" + F2(b.nt) + "|candles|" + F1((double)g_hor[h] / MathMax(1.0, (double)g_tfSec[t] / 60.0)) +
+           "|oosmny|" + Mny(b.mean) + "|oosmnytot|" + MnyT(b.mean * b.n) + "|spr|" + F1(g_sprMean[rb]) + "\n";
   }
 
 //--- migliore combinazione (tenuta, target, verso) per ogni TF, su tutto il giorno
@@ -2237,7 +2429,7 @@ void RepBestTF()
      "le colonne OOS sono il restante periodo, mai usato per scegliere. <b>Solo l'OOS conta.</b> "
      "&laquo;INVERTI&raquo; = fare l'opposto del segnale: &egrave; incluso perch&eacute; un trigger pu&ograve; contenere informazione dal lato sbagliato.</div>");
    W("<table><tr><th>TF</th><th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th><th>IS pos.</th><th>IS netto</th><th>IS t</th>"
-     "<th>Target raggiunto % (netto)</th><th>OOS pos.</th><th>OOS netto</th><th>OOS t</th><th>Esito</th></tr>");
+     "<th>Target raggiunto % (netto)</th><th>OOS pos.</th><th>OOS netto</th><th>OOS netto (&euro;/pos.)</th><th>OOS t</th><th>Esito</th></tr>");
    for(int t = 0; t < g_nT; t++)
      {
       double bt = -1.0e9; int bh = -1, bk = -1, bd = -1;
@@ -2245,6 +2437,7 @@ void RepBestTF()
          for(int kk = 0; kk <= g_nL; kk++)
             for(int dd = 0; dd < 2; dd++)
               {
+                 if(!SideOK(dd)) continue;
                RkStat a;
                RkRead(g_rg, (t * g_nH + h) * blk, kk, dd, 0, a);
                if(a.n < g_minN) continue;
@@ -2253,7 +2446,7 @@ void RepBestTF()
       const int ci = g_curSet * g_nT + t;
       g_cmpBoN[ci] = 0.0; g_cmpBoM[ci] = 0.0; g_cmpBoT[ci] = 0.0; g_cmpDesc[ci] = "-";
       if(bh < 0)
-        { W("<tr class='thin'><td>" + g_tfName[t] + "</td><td colspan='11'>campione in-sample insufficiente</td></tr>"); continue; }
+        { W("<tr class='thin'><td>" + g_tfName[t] + "</td><td colspan='12'>campione in-sample insufficiente</td></tr>"); continue; }
       RkStat a, b;
       RkRead(g_rg, (t * g_nH + bh) * blk, bk, bd, 0, a);
       RkRead(g_rg, (t * g_nH + bh) * blk, bk, bd, 1, b);
@@ -2261,7 +2454,7 @@ void RepBestTF()
       g_cmpDesc[ci] = string(bd == 0 ? "SEGUI" : "INVERTI") + " " + IS(g_hor[bh]) + "m, TP " + KLabel(bk);
       W("<tr><td>" + g_tfName[t] + "</td>" + Td(bd == 0 ? "SEGUI" : "INVERTI") + Td(IS(g_hor[bh])) + Td(KLabel(bk)) +
         Td(F0(a.n)) + Td("<b>" + F1(a.mean) + "</b>", ColSign(a.mean)) + Td(F2(a.t)) + Td(bk == 0 ? "-" : F1(a.hit)) +
-        Td(F0(b.n)) + Td("<b>" + F1(b.mean) + "</b>", ColSign(b.mean)) + Td(F2(b.t), ColTNaive(b.t)) + EsitoCell(a, b) + "</tr>");
+        Td(F0(b.n)) + Td("<b>" + F1(b.mean) + "</b>", ColSign(b.mean)) + Td(Mny(b.mean), ColSign(b.mean)) + Td(F2(b.t), ColTNaive(b.t)) + EsitoCell(a, b) + "</tr>");
       g_dg += "BESTTF|" + g_tfName[t] + "|" + (bd == 0 ? "SEGUI" : "INVERTI") + "|hold|" + IS(g_hor[bh]) + "|tp|" + KLabel(bk) +
               "|isn|" + F0(a.n) + "|ismean|" + F1(a.mean) + "|ist|" + F2(a.t) + "|hit|" + (bk == 0 ? "-" : F1(a.hit)) +
               "|oosn|" + F0(b.n) + "|oosmean|" + F1(b.mean) + "|oost|" + F2(b.t) + "\n";
@@ -2290,6 +2483,7 @@ void RankPool(const double &arr[], double &bestT, int &usable, int &pos, int &st
             for(int kk = 0; kk <= g_nL; kk++)
                for(int dd = 0; dd < 2; dd++)
                  {
+                    if(!SideOK(dd)) continue;
                   RkStat a;
                   RkRead(arr, base, kk, dd, 0, a);
                   m++;
@@ -2336,6 +2530,7 @@ int A1Count(const double &arr[])
          for(int kk = 0; kk <= g_nL; kk++)
             for(int dd = 0; dd < 2; dd++)
               {
+                 if(!SideOK(dd)) continue;
                RkStat a;
                RkRead(arr, (t * g_nH + h) * blk, kk, dd, 0, a);
                if(a.n < g_minN) continue;
@@ -2369,6 +2564,7 @@ void RepRank()
             for(int kk = 0; kk <= g_nL; kk++)
                for(int dd = 0; dd < 2; dd++)
                  {
+                    if(!SideOK(dd)) continue;
                   RkStat a;
                   RkRead(g_rk, base, kk, dd, 0, a);
                   m++;
@@ -2466,6 +2662,7 @@ void RepRank()
          if(svT[j2] > svT[i]) { double tt = svT[i]; svT[i] = svT[j2]; svT[j2] = tt; int ti = sv[i]; sv[i] = sv[j2]; sv[j2] = ti; }
    g_cAns = ns;
    g_cAsurv = "";
+   g_cAsurvMean = 0.0; g_cAsurvN = 0.0;
    if(ns > 0)
      {
       const int i0 = sv[0];
@@ -2473,9 +2670,12 @@ void RepRank()
       RkStat sa, sb;
       RkRead(g_rk, bs0, pK[i0], pD[i0], 0, sa);
       RkRead(g_rk, bs0, pK[i0], pD[i0], 1, sb);
+      g_cAsurvMean = sb.mean; g_cAsurvN = sb.n;
       g_cAsurv = g_tfName[pTf[i0]] + " " + RBktLabel(pB[i0]) + " " + (pD[i0] == 0 ? "SEGUI" : "INVERTI") + ", tieni " + IS(g_hor[pH[i0]]) +
                  " min, target " + KLabel(pK[i0]) + " pt: netto in-sample " + Sg(sa.mean) + " (t " + F2(sa.t) + "), fuori campione " +
-                 Sg(sb.mean) + " (t " + F2(sb.t) + ", " + F0(sb.n) + " posizioni)";
+                 Sg(sb.mean) + " (t " + F2(sb.t) + ", " + F0(sb.n) + " posizioni" + (g_money ? ("; = " + MnyU(sb.mean) + " a posizione con " + F2(InpLotSize) + " lotti, " + MnyTU(sb.mean * sb.n) + " in totale fuori campione") : "") +
+                 "), spread medio della fascia " + F1(g_sprMean[pB[i0]]) +
+                 " pt contro una mediana generale di " + F0(g_medSpr);
      }
    W("<h3>Fra le prime " + IS(pn) + " in-sample: quelle con IS t &ge; 2 che reggono anche fuori campione (OOS netto &gt; 0 e OOS t &ge; 2, con abilit&agrave; della direzione significativa)</h3>");
    if(ns == 0)
@@ -2543,15 +2743,15 @@ string CoerenzaCell(const RkStat &a, const RkStat &b)
 string NoiseHead(const bool withBucket)
   {
    return "<table><tr><th>#</th><th>TF</th>" + string(withBucket ? "<th>Fascia (entrata, server + offset)</th>" : "") +
-          "<th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th><th>Posizioni</th><th>Profitto totale (pt)</th>"
-          "<th>Netto medio</th><th>t</th><th>Target raggiunto % (netto)</th>"
+          "<th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th><th>Posizioni</th><th>Profitto totale (pt)</th><th>Totale (&euro;)</th>"
+          "<th>Netto medio</th><th>Netto medio (&euro;/pos.)</th><th>t</th><th>Target raggiunto % (netto)</th>"
           "<th>Netto 1a parte</th><th>Netto 2a parte</th><th>Fra le due parti</th></tr>";
   }
 
 string NoiseCells(const RkStat &all, const RkStat &a, const RkStat &b, const int kk)
   {
-   return Td(F0(all.n)) + Td("<b>" + F0(all.sum) + "</b>", ColSign(all.sum)) + Td(F1(all.mean), ColSign(all.mean)) +
-          Td(F2(all.t), ColTNaive(all.t)) + Td(kk == 0 ? "-" : F1(all.hit)) +
+   return Td(F0(all.n)) + Td("<b>" + F0(all.sum) + "</b>", ColSign(all.sum)) + Td(MnyT(all.sum), ColSign(all.sum)) + Td(F1(all.mean), ColSign(all.mean)) +
+          Td(Mny(all.mean), ColSign(all.mean)) + Td(F2(all.t), ColTNaive(all.t)) + Td(kk == 0 ? "-" : F1(all.hit)) +
           Td(F1(a.mean), ColSign(a.mean)) + Td(F1(b.mean), ColSign(b.mean)) + CoerenzaCell(a, b);
   }
 
@@ -2584,6 +2784,7 @@ void RepBestTFNoise()
          for(int kk = 0; kk <= g_nL; kk++)
             for(int dd = 0; dd < 2; dd++)
               {
+                 if(!SideOK(dd)) continue;
                RkStat all;
                RkReadAll(g_rg, (t * g_nH + h) * blk, kk, dd, all);
                if(all.n < g_minN) continue;
@@ -2591,7 +2792,7 @@ void RepBestTFNoise()
                if(key > bk0) { bk0 = key; bh = h; bk = kk; bd = dd; }
               }
       if(bh < 0)
-        { W("<tr class='thin'><td>-</td><td>" + g_tfName[t] + "</td><td colspan='11'>campione insufficiente</td></tr>"); continue; }
+        { W("<tr class='thin'><td>-</td><td>" + g_tfName[t] + "</td><td colspan='13'>campione insufficiente</td></tr>"); continue; }
       RkStat all, a, b;
       RkReadAll(g_rg, (t * g_nH + bh) * blk, bk, bd, all);
       RkRead(g_rg, (t * g_nH + bh) * blk, bk, bd, 0, a);
@@ -2625,6 +2826,7 @@ void RepRankNoise()
             for(int kk = 0; kk <= g_nL; kk++)
                for(int dd = 0; dd < 2; dd++)
                  {
+                    if(!SideOK(dd)) continue;
                   RkStat all;
                   RkReadAll(g_rk, base, kk, dd, all);
                   m++;
@@ -3801,8 +4003,10 @@ void BuildConclusions(const int sIdx)
             (top != "" ? " (TF con piu' segnali: " + top + ")" : "") + ". Costo: " +
             (InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : ("spread M1 mediano " + F0(g_medSpr) + " pt")) +
             (InpExtraCostPts > 0.0 ? (" + extra " + F1(InpExtraCostPts) + " pt") : "") +
+            (g_commPts > 0.0 ? (" + commissione " + F1(g_commPts) + " pt (" + F2(InpCommissionPerLotSide) + " " + g_ccy + " per lato e per lotto)") : "") +
+            (g_money ? (". Posizione ipotetica " + F2(InpLotSize) + " lotti: 1 punto = " + DoubleToString(MnyV(1.0), 4) + " " + g_ccy) : "") +
             ". Tutti i valori sono in punti (1 punto = " + DoubleToString(g_pt, _Digits) + ")." +
-            (g_histWarn ? " ATTENZIONE: lo storico M1 e' piu' corto del periodo richiesto." : "") +
+            (g_histWarn ? " ATTENZIONE: lo storico M1 e' piu' corto del periodo richiesto." : "") + SprTopText() +
             (g_skN > 0 ? (" ATTENZIONE: escluse le finestre d'ingresso " + InpSkipEntryWin + " (ora server + offset): i risultati non sono quelli dell'EA su quelle fasce.") : "") +
             (InpEntryLagMin > 0 ? (" ATTENZIONE: corsa con ingresso ritardato di " + IS(InpEntryLagMin) + " min dopo la chiusura del segnale (prova di stress): i risultati non sono quelli dell'EA.") : ""));
    }
@@ -3859,7 +4063,8 @@ void BuildConclusions(const int sIdx)
       else if(negS == 0)
          v1 = "In almeno un TF il segnale anticipa la direzione gia' prima dei costi: i TF vicini condividono gran parte dei segnali e non sono conferme indipendenti, serve una verifica su un periodo successivo e su altri simboli (il t cluster resta ottimista sulle tenute lunghe).";
       else if(posS == 0)
-         v1 = "Il segnale e' contrario alla direzione del prezzo in almeno un TF: guarda la lettura INVERTI nelle tabelle A.";
+         v1 = "Il segnale e' contrario alla direzione del prezzo in almeno un TF: " +
+              string(InpRankSide == RS_FOLLOW ? "seguirlo perde piu' del costo; per vedere la lettura INVERTI rilancia con InpRankSide = SEGUI e INVERTI." : "guarda la lettura INVERTI nelle tabelle A.");
       else
          v1 = "Segni opposti in TF diversi: nessuna direzione coerente.";
       AddConc(sIdx, "Direzione prima dei costi", "Orizzonte " + hs + " min, " + IS(K) + " TF con almeno " + IS(minN) +
@@ -3874,6 +4079,8 @@ void BuildConclusions(const int sIdx)
       AddConc(sIdx, "Dopo i costi", "Costo medio pesato " + F1(wCost / wN) + " pt, lordo medio pesato " + Sg(wG / wN) + " pt, netto medio pesato " + Sg(wNet / wN) +
               " pt (pesi = segnali di ciascun TF). Netto positivo in " + IS(netPos) + " TF su " + IS(K) + ", positivo e significativo (t cluster >= " + F2(g_zB) +
               ") in " + IS(netSig) + ". Miglior netto: " + g_tfName[bni] + " " + Sg(cn.ret) + " pt (t cluster " + F2(cn.tCl) + "). " +
+              (g_money ? ("Con " + F2(InpLotSize) + " lotti il netto medio di una posizione che segue il segnale e' " + MnyU(wNet / wN) + " (costo medio " + MnyU(wCost / wN) +
+                         ", commissione inclusa nel costo extra). ") : "") +
               (wG < 0.0 ? ("Se si invertisse il segnale: lordo " + Sg(-wG / wN) + " pt, meno il costo medio " + F1(wCost / wN) + " pt = netto " + Sg(-wG / wN - wCost / wN) + " pt (media pesata). ") : "") + v2);
      }
 
@@ -4231,6 +4438,41 @@ void BuildConclusions(const int sIdx)
               " cambiano segno. La distanza fra il profitto promesso qui e quello della tabella A e' la misura del rumore di selezione.");
      }
 
+   //--- fattibilita' di un EA che apre nel verso del segnale (lotto ipotetico, costi inclusi)
+   if(K >= 1 && wN > 0.0)
+     {
+      const bool oosOk = (aEdge || a1Edge);
+      const double years = MathMax(0.1, (double)((long)g_m1Time[g_n1 - 1] - (long)g_tStart) / 86400.0 / 365.25);
+      const double oosYears = MathMax(0.05, (double)(g_nDays - g_splitDay) / 365.25);
+      string fz = "";
+      CellStat cr;
+      const bool haveRef = (rt >= 0 && GetCell(rt, g_refH, cr) && cr.n >= g_minN);
+      if(netSig == 0 && !oosOk)
+        {
+         fz = "Statisticamente non fattibile come EA che apre nel verso del segnale: nessun TF ha netto positivo e significativo e la tabella A non mostra evidenza oltre il caso. "
+              "Lordo medio pesato " + Sg(wG / wN) + " pt contro un costo medio (spread e commissione) di " + F1(wCost / wN) + " pt: mancano " + F1(wCost / wN - wG / wN) + " pt a posizione per pareggiare";
+         if(g_money) fz += " (" + MnyU(wCost / wN - wG / wN) + " con " + F2(InpLotSize) + " lotti)";
+         fz += ". ";
+         if(haveRef && g_money)
+            fz += "Esempio sul TF " + g_tfName[rt] + " con uscita dopo " + hs + " min: " + F0(cr.n) + " segnali in " + F1(years) + " anni (circa " + F0(cr.n / years) + " all'anno), netto medio " + MnyU(cr.ret) +
+                  " a posizione, circa " + MnyTU(cr.ret * cr.n / years) + " all'anno se si aprisse ogni segnale (le posizioni si sovrappongono: e' un ordine di grandezza, non il risultato di un conto). ";
+         fz += "Un EA con questa entrata non puo' guadagnare dalla direzione: potrebbe farlo solo con una gestione (uscite, dimensionamento) che crea un profilo diverso e che questo studio non misura.";
+        }
+      else
+        {
+         fz = "Da verificare, non ancora fattibile: ";
+         if(netSig > 0) fz += "netto positivo e significativo in " + sigList + "; ";
+         if(aEdge)      fz += "la tabella A ha " + IS(g_cAstrongN) + " combinazioni con abilita' della direzione significativa fuori campione contro circa " + F1(expA) + " attese; ";
+         if(a1Edge)     fz += "in " + IS(a1) + " TF la miglior combinazione A1 resta positiva fuori campione; ";
+         if(g_money && g_cAsurvN > 0.0)
+            fz += "la prima candidata vale " + MnyU(g_cAsurvMean) + " a posizione con " + F2(InpLotSize) + " lotti, " + F0(g_cAsurvN) + " posizioni fuori campione in " + F1(oosYears) + " anni, cioe' circa " +
+                  MnyTU(g_cAsurvMean * g_cAsurvN / oosYears) + " all'anno al lordo di slippage e swap; ";
+         fz += "prima di scrivere un EA servono tutte queste conferme: netto OOS positivo con spread e commissione reali; risultato che regge con InpEntryLagMin = 5 e con spread doppio nelle ore di news; "
+               "non concentrato in pochi giorni di eventi (tabella dei giorni piu' lunghi); ripetuto su un periodo successivo e su un altro simbolo.";
+        }
+      AddConc(sIdx, "Fattibilita' EA", fz);
+     }
+
    //--- conclusione
    {
     string c;
@@ -4380,11 +4622,16 @@ string BuildDigestHeader()
    if(!InpUseVolState) d += "VOLCFG|on|0\n";
    else d += "VOLCFG|on|1|atr|" + IS(g_vpar.atrLen) + "|lookback|" + IS(g_vpar.lookback) + "|ema|" + IS(g_vpar.emaSmooth) +
         "|exp|" + F2(InpVsExpTh) + "|comp|" + F2(InpVsCompTh) + "|low|" + IS(InpVsLowTh) + "|high|" + IS(InpVsHighTh) + "|extreme|" + IS(InpVsExtremeTh) + "\n";
-   d += "RUN|costfix|" + F1(InpCostPoints) + "|extra|" + F1(InpExtraCostPts) + "|maxgap|" + IS(InpMaxGapMin) +
+   d += "RUN|costfix|" + F1(InpCostPoints) + "|extra|" + F1(InpExtraCostPts) + "|commpts|" + F1(g_commPts) + "|lot|" + F2(InpLotSize) + "|pv|" + DoubleToString(g_pv, 4) + "|ccy|" + g_ccy +
+        "|side|" + string(InpRankSide == RS_FOLLOW ? "follow" : (InpRankSide == RS_FADE ? "fade" : "both")) + "|maxgap|" + IS(InpMaxGapMin) +
         "|entrygap|" + IS(InpMaxEntryGapMin) + "|entrylag|" + IS(InpEntryLagMin) + "|skipwin|" + InpSkipEntryWin + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +
         "|ref|" + IS(g_hor[g_refH]) + "|sets|" + IS(g_nSets) + "\n";
    d += "DATA|m1bars|" + IS(g_n1) + "|days|" + IS(g_nDays) + "|medrange|" + F0(g_medRange) + "|medspr|" + F0(g_medSpr) +
         "|zerospr|" + F1(g_zeroSprPct) + "\n";
+   d += "# SPRH: spread M1 (punti) per fascia d'entrata (ora server + offset): barre, medio, mediano, p90\n";
+   for(int rb = 0; rb < g_nRB; rb++)
+      if(g_sprN[rb] > 0.0)
+         d += "SPRH|" + RBktLabel(rb) + "|n|" + F0(g_sprN[rb]) + "|mean|" + F1(g_sprMean[rb]) + "|med|" + F0(g_sprMed[rb]) + "|p90|" + F0(g_sprP90[rb]) + "\n";
    return d;
   }
 
@@ -4488,7 +4735,7 @@ void ReportSet(const int sIdx)
    g_zB = ZCrit(MathMax(1, m));
 
    g_dg = "";
-   g_cAok = false; g_cBok = false; g_cPok = false; g_cPstrong = 0; g_cPstrongN = 0; g_cAstrongN = 0; g_cAone = 0; g_cPusable = 0; g_cPpos = 0; g_cPbest = 0.0; g_cAns = 0; g_cAsurv = ""; g_cBdesc = ""; g_cBsumAll = 0.0;
+   g_cAok = false; g_cBok = false; g_cPok = false; g_cPstrong = 0; g_cPstrongN = 0; g_cAstrongN = 0; g_cAone = 0; g_cPusable = 0; g_cPpos = 0; g_cPbest = 0.0; g_cAns = 0; g_cAsurv = ""; g_cAsurvMean = 0.0; g_cAsurvN = 0.0; g_cBdesc = ""; g_cBsumAll = 0.0;
    W("<div class='sec' style='order:" + IS(3 + sIdx) + "'>");
    W("<h1 class='setH'>Serie " + IS(sIdx + 1) + " di " + IS(g_nSets) + " &mdash; " + g_setName[sIdx] + "</h1>");
    W("<div class='note'>" + g_setNote[sIdx] + " Soglia di Bonferroni su " + IS(m) + " celle TF x orizzonte: |t| &ge; <b>" + F2(g_zB) + "</b>.</div>");
@@ -4641,6 +4888,7 @@ void OnStart()
    g_pt  = _Point;
    g_off = (long)InpTimeOffsetH * 3600L;
    if(!SetupInputs()) return;
+   SetupMoney();
    if(!LoadM1()) return;
 
    //--- primo giorno out-of-sample: la classifica si costruisce solo sul periodo precedente
