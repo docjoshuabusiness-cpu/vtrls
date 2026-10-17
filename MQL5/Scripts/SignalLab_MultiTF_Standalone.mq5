@@ -2902,7 +2902,7 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
    W("</table>");
 
    //--- testo per il riepilogo
-   string tx = "Prove di stress sulle prime " + IS(nr) + " regole della tabella A (fuori campione): " +
+   string tx = "Sulle prime " + IS(nr) + " regole della tabella A (fuori campione): " +
                string(nSurv > 0 ? (IS(nSurv) + " sono regole che reggono fuori campione, le altre le migliori in-sample") : "nessuna regge fuori campione, sono le migliori in-sample") + ". ";
    if(nUse == 0)
       tx += "Campione fuori campione troppo scarso per valutarle. ";
