@@ -112,9 +112,15 @@ input int      InpEntryLagMin       = 0;      // ritardo d'ingresso in minuti do
 
 input group "=== DENARO (posizione ipotetica) ==="
 input double   InpLotSize           = 0.01;   // lotto ipotetico di ogni posizione
-input double   InpCommissionPerLotSide = 3.0; // commissione per 1.00 lotto e per lato, in valuta del conto (conti Raw IC Markets / FP Markets: circa 3-3.5): contata due volte e convertita in punti
+input double   InpCommissionPerLotSide = 3.0; // commissione per 1.00 lotto e per lato, in valuta del conto (conti Raw IC Markets / FP Markets: circa 3-3.5): contata due volte e convertita in punti; se hai gia' messo la commissione in InpExtraCostPts, qui imposta 0
 input double   InpPointValuePerLot  = 0;      // valore di 1 punto per 1.00 lotto in valuta del conto; 0 = automatico dal simbolo (valore del tick)
 input ENUM_RANK_SIDE InpRankSide    = RS_FOLLOW; // verso studiato nelle classifiche A/B: solo il verso del segnale (come un EA che apre dove dice il segnale), oppure anche l'inverso
+
+input group "=== PROVE DI STRESS ==="
+input bool     InpStress            = true;   // tabella di stress: rifa' le regole migliori della tabella A con ingresso ritardato e costi piu' alti
+input string   InpStressLags        = "0,1,2,3,5,10,15,30"; // ritardi d'ingresso in minuti dopo la chiusura del segnale (massimo 10 valori, lo zero e' sempre il riferimento)
+input string   InpStressExtra       = "0,5,10,20";          // costo extra in punti da sommare allo spread e alla commissione (massimo 6 valori)
+input int      InpStressRules       = 6;      // quante regole mettere sotto stress (1-12): prima quelle che reggono fuori campione, poi le migliori in-sample
 
 input group "=== TABELLE ==="
 input int      InpBucketMin         = 15;     // fasce orarie: 1,2,3,4,5,6,10,12,15,20,30,60
@@ -245,6 +251,12 @@ int      g_nextBrk[];
 int      g_nDays = 1;
 long     g_day0 = 0;
 double   g_medRange = 0.0, g_medSpr = 0.0, g_zeroSprPct = 0.0;
+
+//--- prove di stress: ritardi (minuti) e costi extra (punti) provati, testo per il riepilogo
+int      g_slag[];
+double   g_sext[];
+int      g_nSlag = 0, g_nSext = 0;
+string   g_cStress = "";
 
 //--- denaro: valore di 1 punto per 1.00 lotto nella valuta del conto, commissione in punti, costo extra totale in punti
 double   g_pv = 0.0, g_commPts = 0.0, g_extraPts = 0.0;
@@ -504,6 +516,14 @@ string MnyT(const double pts) { return g_money ? DoubleToString(MnyV(pts), 2) : 
 string MnyU(const double pts) { return g_money ? (DoubleToString(MnyV(pts), 3) + " " + g_ccy) : string("n.d."); }
 string MnyTU(const double pts) { return g_money ? (DoubleToString(MnyV(pts), 2) + " " + g_ccy) : string("n.d."); }
 
+//--- lotto ipotetico senza zeri finali (0.01, 0.005, 1.00)
+string LotTxt()
+  {
+   string t = DoubleToString(InpLotSize, 3);
+   while(StringLen(t) > 4 && StringSubstr(t, StringLen(t) - 1, 1) == "0") t = StringSubstr(t, 0, StringLen(t) - 1);
+   return t;
+  }
+
 //--- verso studiato nelle classifiche
 bool SideOK(const int dd)
   {
@@ -616,6 +636,32 @@ int ParseDoubleList(const string src, double &out[])
       double v = StringToDouble(pp);
       if(v <= 0.0) continue;
       int k = ArraySize(out);
+      ArrayResize(out, k + 1);
+      out[k] = v;
+     }
+   if(ArraySize(out) > 1) ArraySort(out);
+   return ArraySize(out);
+  }
+
+//--- lista di numeri positivi (ritardi, costi extra) con lo zero sempre in testa come riferimento, senza doppioni, ordinata
+int ParseNonNegList(const string src, double &out[], const int maxN, const double maxV)
+  {
+   string parts[];
+   const int np = StringSplit(src, ',', parts);
+   ArrayResize(out, 1);
+   out[0] = 0.0;
+   for(int i = 0; i < np; i++)
+     {
+      string pp = parts[i];
+      StringTrimLeft(pp); StringTrimRight(pp);
+      if(pp == "") continue;
+      const double v = StringToDouble(pp);
+      if(v <= 0.0 || v > maxV) continue;
+      const int k = ArraySize(out);
+      if(k >= maxN) break;
+      bool dup = false;
+      for(int q = 0; q < k; q++) if(MathAbs(out[q] - v) < 1.0e-9) { dup = true; break; }
+      if(dup) continue;
       ArrayResize(out, k + 1);
       out[k] = v;
      }
@@ -808,6 +854,23 @@ bool SetupInputs()
    g_par.expThreshold     = InpExpThreshold;
    g_par.expConfirmOffset = MathMax(0, InpExpConfirmOffset);
    g_par.runGapBars       = MathMax(0, InpRunGapBars);
+   {
+    double stTmp[];
+    ParseNonNegList(InpStressLags, stTmp, 10, 240.0);
+    ArrayResize(g_slag, 0);
+    for(int sq = 0; sq < ArraySize(stTmp); sq++)
+      {
+       const int sV = (int)MathRound(stTmp[sq]);
+       bool sDup = false;
+       for(int sw = 0; sw < ArraySize(g_slag); sw++) if(g_slag[sw] == sV) sDup = true;
+       if(sDup) continue;
+       const int sK = ArraySize(g_slag);
+       ArrayResize(g_slag, sK + 1);
+       g_slag[sK] = sV;
+      }
+    g_nSlag = ArraySize(g_slag);
+    g_nSext = ParseNonNegList(InpStressExtra, g_sext, 6, 1000.0);
+   }
    return true;
   }
 
@@ -1750,7 +1813,7 @@ void RepIntro()
         ", HIGH &ge; " + IS(InpVsHighTh) + ", EXTREME &ge; " + IS(InpVsExtremeTh) + "</td></tr>");
    W("<tr><th>Costo</th><td>" + (InpCostPoints > 0.0 ? ("spread fisso " + F1(InpCostPoints) + " pt") : "spread reale M1") +
      " + extra " + F1(InpExtraCostPts) + " pt + commissione " + F1(g_commPts) + " pt (" + F2(InpCommissionPerLotSide) + " " + g_ccy + " per lato e per lotto, due lati)</td></tr>");
-   W("<tr><th>Denaro</th><td>lotto ipotetico " + F2(InpLotSize) + " | 1 punto per 1.00 lotto = " + (g_pv > 0.0 ? (DoubleToString(g_pv, 4) + " " + g_ccy) : string("non disponibile (imposta InpPointValuePerLot)")) +
+   W("<tr><th>Denaro</th><td>lotto ipotetico " + LotTxt() + " | 1 punto per 1.00 lotto = " + (g_pv > 0.0 ? (DoubleToString(g_pv, 4) + " " + g_ccy) : string("non disponibile (imposta InpPointValuePerLot)")) +
      " | valuta del conto " + g_ccy + " | verso nelle classifiche: " + string(InpRankSide == RS_FOLLOW ? "solo SEGUI" : (InpRankSide == RS_FADE ? "solo INVERTI" : "SEGUI e INVERTI")) +
      "</td></tr>");
    W("<tr><th>Finestre</th><td>buco dati massimo " + IS(InpMaxGapMin) + " min | gap massimo all'ingresso " +
@@ -1855,7 +1918,7 @@ void RepMatrices()
 
    if(g_money)
      {
-      W("<h2>Netto medio in " + g_ccy + " per posizione (lotto " + F2(InpLotSize) + ") per TF e orizzonte</h2>");
+      W("<h2>Netto medio in " + g_ccy + " per posizione (lotto " + LotTxt() + ") per TF e orizzonte</h2>");
       W("<div class='note'>Entrando a ogni segnale nel suo verso e uscendo dopo l'orizzonte indicato (tempo fisso, senza stop), al netto di spread e commissione. "
         "Passando il mouse su una cella si vede dopo quante candele del TF si esce. Le posizioni si sovrappongono: &egrave; il risultato medio di un singolo segnale, non di un conto che apre una posizione alla volta.</div>");
       W("<table><tr><th>TF</th>");
@@ -2065,7 +2128,7 @@ string RankHead()
   {
    return "<table><tr><th>#</th><th>TF</th><th>Fascia (entrata, server + offset)</th><th>Verso</th><th>Tieni (min)</th><th>Candele TF</th><th>Target (pt)</th>"
           "<th>IS pos.</th><th>IS netto</th><th>IS t</th><th>Target raggiunto % (netto)</th>"
-          "<th>OOS pos.</th><th>OOS netto</th><th>OOS netto (&euro;/pos.)</th><th>OOS totale (&euro;)</th><th>OOS t</th><th>OOS % lunghe</th><th>OOS valore istante (M)</th><th>OOS abilit&agrave; direzione</th><th>OOS t abilit&agrave;</th><th>Spread fascia (pt)</th><th>Esito</th></tr>";
+          "<th>OOS pos.</th><th>OOS netto</th><th>OOS netto (" + g_ccy + "/pos.)</th><th>OOS totale (" + g_ccy + ")</th><th>OOS t</th><th>OOS % lunghe</th><th>OOS valore istante (M)</th><th>OOS abilit&agrave; direzione</th><th>OOS t abilit&agrave;</th><th>Spread fascia (pt)</th><th>Esito</th></tr>";
   }
 
 string RankRow(const int rank, const int t, const int rb, const int h, const int kk, const int dd)
@@ -2105,9 +2168,10 @@ void RepBestTF()
      "si esce al target (se indicato) oppure dopo <b>Tieni</b> minuti, senza stop. Il risultato &egrave; netto del costo. "
      "La combinazione migliore &egrave; scelta sul <b>primo " + IS(MathMin(95, MathMax(5, InpSplitPct))) + "%</b> del periodo (in-sample, IS) per t-statistic; "
      "le colonne OOS sono il restante periodo, mai usato per scegliere. <b>Solo l'OOS conta.</b> "
-     "&laquo;INVERTI&raquo; = fare l'opposto del segnale: &egrave; incluso perch&eacute; un trigger pu&ograve; contenere informazione dal lato sbagliato.</div>");
+     + string(InpRankSide == RS_FOLLOW ? "Il verso studiato &egrave; solo SEGUI il segnale (InpRankSide)."
+                                       : "&laquo;INVERTI&raquo; = fare l'opposto del segnale: &egrave; incluso perch&eacute; un trigger pu&ograve; contenere informazione dal lato sbagliato.") + "</div>");
    W("<table><tr><th>TF</th><th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th><th>IS pos.</th><th>IS netto</th><th>IS t</th>"
-     "<th>Target raggiunto % (netto)</th><th>OOS pos.</th><th>OOS netto</th><th>OOS netto (&euro;/pos.)</th><th>OOS t</th><th>Esito</th></tr>");
+     "<th>Target raggiunto % (netto)</th><th>OOS pos.</th><th>OOS netto</th><th>OOS netto (" + g_ccy + "/pos.)</th><th>OOS t</th><th>Esito</th></tr>");
    for(int t = 0; t < g_nT; t++)
      {
       double bt = -1.0e9; int bh = -1, bk = -1, bd = -1;
@@ -2220,6 +2284,321 @@ int A1Count(const double &arr[])
       if(b.n >= MathMax(10.0, g_minN / 3.0) && b.mean > 0.0 && b.t >= 2.0 && b.nm > 0.0 && b.nt >= 2.0) cnt++;
      }
    return cnt;
+  }
+
+//+------------------------------------------------------------------+
+//| PROVE DI STRESS                                                   |
+//| Rifanno la stessa posizione ipotetica della classifica (entrata   |
+//| sul segnale, uscita al target netto o dopo la tenuta, nessuno     |
+//| stop, una per volta) ma con ingresso ritardato di N minuti e/o    |
+//| costo maggiorato. Il ritardo non cambia l'insieme dei segnali: la |
+//| fascia e' quella dell'ingresso senza ritardo. Richiedono che      |
+//| ComputeForward(tenuta) sia stato eseguito.                        |
+//+------------------------------------------------------------------+
+double StressT(const double n, const double sum, const double sum2)
+  {
+   if(n < 2.0) return 0.0;
+   const double mean = sum / n;
+   const double var  = (sum2 - n * mean * mean) / (n - 1.0);
+   return (var > 0.0) ? mean / (MathSqrt(var) / MathSqrt(n)) : 0.0;
+  }
+
+//--- indici dei segnali del TF la cui fascia d'ingresso (senza ritardo) e' rb
+int StressCollect(const int t, const int rb, int &idx[])
+  {
+   const long rbSec = (long)g_rbMin * 60L;
+   int cnt = 0;
+   ArrayResize(idx, 0, 4096);
+   const int k0 = g_tfOff[t];
+   const int k1 = k0 + g_tfCnt[t];
+   for(int k = k0; k < k1; k++)
+     {
+      if(g_dir[k] == 0) continue;
+      const int j0 = g_ent[k];
+      if((int)(((((long)g_m1Time[j0] + g_off) % 86400L) + 86400L) % 86400L / rbSec) != rb) continue;
+      cnt++;
+      ArrayResize(idx, cnt, 4096);
+      idx[cnt - 1] = k;
+     }
+   return cnt;
+  }
+
+//--- st: [0..2] in-sample posizioni, somma, somma dei quadrati; [3..5] lo stesso fuori campione
+void StressSim(const int &idx[], const int nIdx, const int h, const int kk, const int dd,
+               const int lag, const double extra, const double sprMult, double &st[])
+  {
+   for(int q = 0; q < 6; q++) st[q] = 0.0;
+   const long   Hs = (long)g_hor[h] * 60L;
+   const double lv = (kk == 0) ? 0.0 : g_lev[kk - 1];
+   long lockT = 0;
+   for(int a = 0; a < nIdx; a++)
+     {
+      const int k  = idx[a];
+      const int d  = (int)g_dir[k];
+      const int j0 = g_ent[k];
+      const int j  = j0 + lag;
+      if(lag > 0 && (j >= g_n1 || (long)(g_m1Time[j] - g_m1Time[j0]) != (long)lag * 60L)) continue;
+      if(g_ok[j] == 0) continue;
+      const double o    = g_m1Open[j];
+      const double mB   = (g_fHi[j] - o) / g_pt;
+      const double mS   = (o - g_fLo[j]) / g_pt;
+      const double fav  = (d > 0) ? mB : mS;
+      const double adv  = (d > 0) ? mS : mB;
+      const double retG = (d > 0) ? (g_fCl[j] - o) / g_pt : (o - g_fCl[j]) / g_pt;
+      const double spr  = (InpCostPoints > 0.0) ? InpCostPoints : (double)g_m1Spr[j];
+      const double cost = spr * sprMult + g_extraPts + extra;
+      const long   tj   = (long)g_m1Time[j];
+      if(lockT != 0 && (tj - lockT) < Hs) continue;
+      lockT = tj;
+      const double mfe = (dd == 0) ? (fav - cost) : (adv - cost);
+      const double ret = (dd == 0) ? (retG - cost) : (-retG - cost);
+      const double pnl = (kk > 0 && mfe >= lv) ? lv : ret;
+      const int smp = (g_m1Day[j] >= g_splitDay) ? 1 : 0;
+      st[smp * 3]     += 1.0;
+      st[smp * 3 + 1] += pnl;
+      st[smp * 3 + 2] += pnl * pnl;
+     }
+  }
+
+//--- tutti i segnali di un TF alla tenuta di riferimento, senza target e senza blocco: netto medio con ingresso ritardato e t raggruppato per giorno
+void StressPop(const int t, const int lag, double &dayS[], double &dayN[], double &nOut, double &meanOut, double &tclOut)
+  {
+   ArrayInitialize(dayS, 0.0);
+   ArrayInitialize(dayN, 0.0);
+   double n = 0.0, sum = 0.0;
+   const int k0 = g_tfOff[t];
+   const int k1 = k0 + g_tfCnt[t];
+   for(int k = k0; k < k1; k++)
+     {
+      const int d = (int)g_dir[k];
+      if(d == 0) continue;
+      const int j0 = g_ent[k];
+      const int j  = j0 + lag;
+      if(lag > 0 && (j >= g_n1 || (long)(g_m1Time[j] - g_m1Time[j0]) != (long)lag * 60L)) continue;
+      if(g_ok[j] == 0) continue;
+      const double o    = g_m1Open[j];
+      const double retG = (d > 0) ? (g_fCl[j] - o) / g_pt : (o - g_fCl[j]) / g_pt;
+      const double spr  = (InpCostPoints > 0.0) ? InpCostPoints : (double)g_m1Spr[j];
+      const double retN = retG - spr - g_extraPts;
+      const int day = g_m1Day[j];
+      dayS[day] += retN;
+      dayN[day] += 1.0;
+      n += 1.0;
+      sum += retN;
+     }
+   nOut = n;
+   meanOut = (n > 0.0) ? sum / n : 0.0;
+   double ss = 0.0;
+   for(int dI = 0; dI < g_nDays; dI++)
+      if(dayN[dI] > 0.0) { const double e = dayS[dI] - meanOut * dayN[dI]; ss += e * e; }
+   tclOut = (n > 1.0 && ss > 0.0) ? meanOut / (MathSqrt(ss) / n) : 0.0;
+  }
+
+string StressCell(const double mean, const double n, const double t)
+  {
+   if(n < 1.0) return "<td>-</td>";
+   const string tip = " title='posizioni " + F0(n) + ", t " + F2(t) + "'";
+   return "<td style='color:" + ColSign(mean) + "'" + tip + ">" + F1(mean) + string(g_money ? (" (" + Mny(mean) + ")") : "") + "</td>";
+  }
+
+void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &rD[], bool &rS[])
+  {
+   g_cStress = "";
+   if(!InpStress || nr < 1 || g_nSlag < 1) return;
+   const int OKLAG = 5;
+   const int nLag = g_nSlag, nExt = g_nSext;
+   const int blk  = (g_nL + 1) * 4 * RKN;
+   const double minOos = MathMax(10.0, g_minN / 3.0);
+
+   W("<h2>Prove di stress: entrare pi&ugrave; tardi e costi pi&ugrave; alti</h2>");
+   W("<div class='note'>Le stesse posizioni ipotetiche della classifica, rifatte con <b>ingresso ritardato</b> di N minuti dopo la chiusura del segnale e con un <b>costo extra</b> in punti "
+     "(sommato a spread e commissione). Se un risultato positivo sparisce con pochi minuti di ritardo o con pochi punti di costo era una dislocazione del prezzo d'ingresso o un'illusione di costo: non regge in un conto reale. "
+     "Il ritardo non cambia l'insieme dei segnali (la fascia resta quella dell'ingresso senza ritardo). Valori in punti" + string(g_money ? (" e, fra parentesi, in " + g_ccy + " per posizione con " + LotTxt() + " lotti") : "") + ".</div>");
+
+   //--- 1. tutti i segnali di ogni TF, alla tenuta di riferimento
+   ComputeForward(g_hor[g_refH]);
+   double dayS[], dayN[];
+   ArrayResize(dayS, g_nDays);
+   ArrayResize(dayN, g_nDays);
+   double wN[], wS[], rowN[], rowM[], rowT[];
+   ArrayResize(wN, nLag); ArrayResize(wS, nLag); ArrayInitialize(wN, 0.0); ArrayInitialize(wS, 0.0);
+   ArrayResize(rowN, nLag); ArrayResize(rowM, nLag); ArrayResize(rowT, nLag);
+   W("<h3>1. Seguire ogni segnale, uscita dopo " + IS(g_hor[g_refH]) + " min, con ingresso ritardato</h3>");
+   W("<table><tr><th>TF</th><th>Segnali</th>");
+   for(int li = 0; li < nLag; li++) W("<th>" + string(g_slag[li] == 0 ? "subito" : ("+" + IS(g_slag[li]) + " min")) + "</th>");
+   W("</tr>");
+   for(int t = 0; t < g_nT; t++)
+     {
+      if(g_tfCnt[t] < 1) continue;
+      for(int li = 0; li < nLag; li++) StressPop(t, g_slag[li], dayS, dayN, rowN[li], rowM[li], rowT[li]);
+      if(rowN[0] < g_minN) continue;
+      W("<tr><td>" + g_tfName[t] + "</td>" + Td(F0(rowN[0])));
+      for(int li = 0; li < nLag; li++)
+        {
+         W(StressCell(rowM[li], rowN[li], rowT[li]));
+         wN[li] += rowN[li];
+         wS[li] += rowN[li] * rowM[li];
+         g_dg += "STRESSPOP|" + g_tfName[t] + "|lag|" + IS(g_slag[li]) + "|n|" + F0(rowN[li]) + "|mean|" + F1(rowM[li]) + "|tcl|" + F2(rowT[li]) + "\n";
+        }
+      W("</tr>");
+     }
+   W("<tr><td><b>Media pesata</b></td>" + Td(F0(wN[0])));
+   for(int li = 0; li < nLag; li++)
+     {
+      const double wm = (wN[li] > 0.0) ? wS[li] / wN[li] : 0.0;
+      W(StressCell(wm, wN[li], 0.0));
+     }
+   W("</tr></table>");
+   //--- media pesata al ritardo di riferimento (il massimo ritardo non oltre OKLAG minuti)
+   int liRef = 0;
+   for(int li = 0; li < nLag; li++) if(g_slag[li] <= OKLAG) liRef = li;
+   const double popM0   = (wN[0] > 0.0) ? wS[0] / wN[0] : 0.0;
+   const double popMRef = (wN[liRef] > 0.0) ? wS[liRef] / wN[liRef] : 0.0;
+
+   //--- 2. regole della classifica: ritardo e costi
+   const int nCost = nExt + 1;                       // l'ultima colonna e' lo spread raddoppiato
+   double lagM[], lagN[], lagT[], cM[], cN[], cT[];
+   ArrayResize(lagM, nr * nLag); ArrayResize(lagN, nr * nLag); ArrayResize(lagT, nr * nLag);
+   ArrayResize(cM, nr * nCost);  ArrayResize(cN, nr * nCost);  ArrayResize(cT, nr * nCost);
+   bool done[];
+   ArrayResize(done, nr);
+   ArrayInitialize(done, false);
+   double st[6];
+   int idx[];
+   for(int a = 0; a < nr; a++)
+     {
+      if(done[a]) continue;
+      const int h = rH[a];
+      ComputeForward(g_hor[h]);
+      for(int b = a; b < nr; b++)
+        {
+         if(done[b] || rH[b] != h) continue;
+         done[b] = true;
+         const int nIdx = StressCollect(rTf[b], rB[b], idx);
+         for(int li = 0; li < nLag; li++)
+           {
+            StressSim(idx, nIdx, h, rK[b], rD[b], g_slag[li], 0.0, 1.0, st);
+            lagN[b * nLag + li] = st[3];
+            lagM[b * nLag + li] = (st[3] > 0.0) ? st[4] / st[3] : 0.0;
+            lagT[b * nLag + li] = StressT(st[3], st[4], st[5]);
+           }
+         for(int ci = 0; ci < nCost; ci++)
+           {
+            StressSim(idx, nIdx, h, rK[b], rD[b], 0, (ci < nExt) ? g_sext[ci] : 0.0, (ci < nExt) ? 1.0 : 2.0, st);
+            cN[b * nCost + ci] = st[3];
+            cM[b * nCost + ci] = (st[3] > 0.0) ? st[4] / st[3] : 0.0;
+            cT[b * nCost + ci] = StressT(st[3], st[4], st[5]);
+           }
+         //--- controllo di coerenza: senza ritardo e senza extra la simulazione deve riprodurre la classifica
+         StressSim(idx, nIdx, h, rK[b], rD[b], 0, 0.0, 1.0, st);
+         RkStat chk;
+         RkRead(g_rk, ((rTf[b] * g_nRB + rB[b]) * g_nH + h) * blk, rK[b], rD[b], 1, chk);
+         if(MathAbs(chk.n - st[3]) > 0.5 || MathAbs(chk.sum - st[4]) > 1.0e-6 * MathMax(1.0, MathAbs(chk.sum)))
+            Print("!!! Stress: la regola ", g_tfName[rTf[b]], " ", RBktLabel(rB[b]), " non coincide con la classifica (OOS ", F0(chk.n), " contro ", F0(st[3]), " posizioni)");
+        }
+     }
+
+   //--- esiti
+   int ciRef = nExt - 1;                              // costo extra di riferimento: il primo >= 10 punti, altrimenti l'ultimo
+   for(int ci = 0; ci < nExt; ci++) if(g_sext[ci] >= 10.0) { ciRef = ci; break; }
+   int nLagOk = 0, nCostOk = 0, nBoth = 0, nSurv = 0, nUse = 0;
+   int vLag[], vCost[];
+   ArrayResize(vLag, nr);
+   ArrayResize(vCost, nr);
+   for(int b = 0; b < nr; b++)
+     {
+      if(rS[b]) nSurv++;
+      vLag[b] = 0; vCost[b] = 0;
+      if(lagN[b * nLag] < minOos) { vLag[b] = -1; vCost[b] = -1; continue; }
+      nUse++;
+      bool lagOk = (lagM[b * nLag] > 0.0);
+      for(int li = 0; li < nLag; li++) if(g_slag[li] > 0 && g_slag[li] <= OKLAG && lagM[b * nLag + li] <= 0.0) lagOk = false;
+      const bool costOk = (cM[b * nCost] > 0.0 && cM[b * nCost + ciRef] > 0.0);
+      vLag[b]  = lagOk ? 1 : 0;
+      vCost[b] = costOk ? 1 : 0;
+      if(lagOk) nLagOk++;
+      if(costOk) nCostOk++;
+      if(lagOk && costOk) nBoth++;
+     }
+
+   //--- tabella ritardo
+   W("<h3>2. Le regole della classifica con ingresso ritardato (fuori campione, netto per posizione)</h3>");
+   W("<table><tr><th>#</th><th>TF</th><th>Fascia</th><th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th><th>Origine</th><th>OOS pos.</th>");
+   for(int li = 0; li < nLag; li++) W("<th>" + string(g_slag[li] == 0 ? "subito" : ("+" + IS(g_slag[li]) + " min")) + "</th>");
+   W("<th>Esito (ritardo fino a " + IS(OKLAG) + " min)</th></tr>");
+   for(int b = 0; b < nr; b++)
+     {
+      W("<tr>" + Td(IS(b + 1)) + "<td>" + g_tfName[rTf[b]] + "</td><td>" + RBktLabel(rB[b]) + "</td>" + Td(rD[b] == 0 ? "SEGUI" : "INVERTI") +
+        Td(IS(g_hor[rH[b]])) + Td(KLabel(rK[b])) + Td(rS[b] ? "regge fuori campione" : "migliore in-sample") + Td(F0(lagN[b * nLag])));
+      for(int li = 0; li < nLag; li++)
+        {
+         W(StressCell(lagM[b * nLag + li], lagN[b * nLag + li], lagT[b * nLag + li]));
+         g_dg += "STRESSLAG|" + IS(b + 1) + "|" + g_tfName[rTf[b]] + "|" + RBktLabel(rB[b]) + "|" + string(rD[b] == 0 ? "SEGUI" : "INVERTI") + "|hold|" + IS(g_hor[rH[b]]) +
+                 "|tp|" + KLabel(rK[b]) + "|lag|" + IS(g_slag[li]) + "|oosn|" + F0(lagN[b * nLag + li]) + "|oosmean|" + F1(lagM[b * nLag + li]) + "|oost|" + F2(lagT[b * nLag + li]) + "\n";
+        }
+      W(vLag[b] < 0 ? Td("OOS scarso", "#4c566a") : (vLag[b] == 1 ? Td("<b>REGGE</b>", "#a3be8c") : Td("CADE", "#bf616a")));
+      W("</tr>");
+     }
+   W("</table>");
+
+   //--- tabella costi
+   W("<h3>3. Le stesse regole con costi pi&ugrave; alti, senza ritardo (fuori campione, netto per posizione)</h3>");
+   W("<table><tr><th>#</th><th>TF</th><th>Fascia</th><th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th>");
+   for(int ci = 0; ci < nExt; ci++) W("<th>" + string(g_sext[ci] == 0.0 ? "costo attuale" : ("+" + F0(g_sext[ci]) + " pt")) + "</th>");
+   W("<th>Spread x2</th><th>Extra che azzera il netto</th><th>Esito (+" + F0(g_sext[ciRef]) + " pt)</th></tr>");
+   for(int b = 0; b < nr; b++)
+     {
+      W("<tr>" + Td(IS(b + 1)) + "<td>" + g_tfName[rTf[b]] + "</td><td>" + RBktLabel(rB[b]) + "</td>" + Td(rD[b] == 0 ? "SEGUI" : "INVERTI") +
+        Td(IS(g_hor[rH[b]])) + Td(KLabel(rK[b])));
+      for(int ci = 0; ci < nCost; ci++)
+        {
+         W(StressCell(cM[b * nCost + ci], cN[b * nCost + ci], cT[b * nCost + ci]));
+         g_dg += "STRESSCOST|" + IS(b + 1) + "|" + g_tfName[rTf[b]] + "|" + RBktLabel(rB[b]) + "|" + string(rD[b] == 0 ? "SEGUI" : "INVERTI") + "|hold|" + IS(g_hor[rH[b]]) +
+                 "|tp|" + KLabel(rK[b]) + "|extra|" + string(ci < nExt ? F0(g_sext[ci]) : "spreadx2") + "|oosn|" + F0(cN[b * nCost + ci]) + "|oosmean|" + F1(cM[b * nCost + ci]) + "|oost|" + F2(cT[b * nCost + ci]) + "\n";
+        }
+      //--- extra che azzera il netto: interpolazione lineare fra i costi provati
+      string be = "-";
+      if(cN[b * nCost] >= minOos)
+        {
+         if(cM[b * nCost] <= 0.0) be = "nessuno";
+         else
+           {
+            be = "oltre " + F0(g_sext[nExt - 1]) + " pt";
+            for(int ci = 1; ci < nExt; ci++)
+               if(cM[b * nCost + ci] <= 0.0)
+                 {
+                  const double m0 = cM[b * nCost + ci - 1], m1 = cM[b * nCost + ci];
+                  be = "circa " + F1(g_sext[ci - 1] + m0 / (m0 - m1) * (g_sext[ci] - g_sext[ci - 1])) + " pt";
+                  break;
+                 }
+           }
+        }
+      W(Td(be));
+      W(vCost[b] < 0 ? Td("OOS scarso", "#4c566a") : (vCost[b] == 1 ? Td("<b>REGGE</b>", "#a3be8c") : Td("CADE", "#bf616a")));
+      W("</tr>");
+     }
+   W("</table>");
+
+   //--- testo per il riepilogo
+   string tx = "Prove di stress sulle prime " + IS(nr) + " regole della tabella A (fuori campione): " +
+               string(nSurv > 0 ? (IS(nSurv) + " sono regole che reggono fuori campione, le altre le migliori in-sample") : "nessuna regge fuori campione, sono le migliori in-sample") + ". ";
+   if(nUse == 0)
+      tx += "Campione fuori campione troppo scarso per valutarle. ";
+   else
+      tx += "Con ingresso ritardato fino a " + IS(OKLAG) + " min il netto fuori campione resta positivo in " + IS(nLagOk) + " regole su " + IS(nUse) + "; con " + F0(g_sext[ciRef]) +
+            " pt di costo in piu' in " + IS(nCostOk) + "; reggono a entrambe le prove " + IS(nBoth) + ". ";
+   {
+    string ds = g_tfName[rTf[0]] + " " + RBktLabel(rB[0]) + " " + string(rD[0] == 0 ? "SEGUI" : "INVERTI") + ", tieni " + IS(g_hor[rH[0]]) + " min, target " + KLabel(rK[0]);
+    tx += "La prima (" + ds + "): netto fuori campione";
+    for(int li = 0; li < nLag; li++)
+       if(g_slag[li] == 0 || g_slag[li] == OKLAG || li == nLag - 1)
+          tx += string(g_slag[li] == 0 ? " subito " : (" con " + IS(g_slag[li]) + " min di ritardo ")) + Sg(lagM[li]) + " pt" + string(g_money ? (" (" + MnyU(lagM[li]) + ")") : "") + ",";
+    tx += " con " + F0(g_sext[ciRef]) + " pt di costo in piu' " + Sg(cM[ciRef]) + " pt. ";
+   }
+   tx += "Seguendo ogni segnale (media pesata dei TF, uscita dopo " + IS(g_hor[g_refH]) + " min) il netto medio e' " + Sg(popM0) + " pt subito e " + Sg(popMRef) + " pt con " + IS(g_slag[liRef]) + " min di ritardo" +
+         string(g_money ? (" (" + MnyU(popMRef) + " a posizione con " + LotTxt() + " lotti)") : "") + ". ";
+   tx += "Una regola che non regge a pochi minuti di ritardo o a pochi punti di costo non e' operabile in un conto reale.";
+   g_cStress = tx;
   }
 
 //--- classifica congiunta: TF x fascia x tenuta x target x verso
@@ -2351,9 +2730,9 @@ void RepRank()
       g_cAsurvMean = sb.mean; g_cAsurvN = sb.n;
       g_cAsurv = g_tfName[pTf[i0]] + " " + RBktLabel(pB[i0]) + " " + (pD[i0] == 0 ? "SEGUI" : "INVERTI") + ", tieni " + IS(g_hor[pH[i0]]) +
                  " min, target " + KLabel(pK[i0]) + " pt: netto in-sample " + Sg(sa.mean) + " (t " + F2(sa.t) + "), fuori campione " +
-                 Sg(sb.mean) + " (t " + F2(sb.t) + ", " + F0(sb.n) + " posizioni" + (g_money ? ("; = " + MnyU(sb.mean) + " a posizione con " + F2(InpLotSize) + " lotti, " + MnyTU(sb.mean * sb.n) + " in totale fuori campione") : "") +
+                 Sg(sb.mean) + " (t " + F2(sb.t) + ", " + F0(sb.n) + " posizioni" + (g_money ? ("; = " + MnyU(sb.mean) + " a posizione con " + LotTxt() + " lotti, " + MnyTU(sb.mean * sb.n) + " in totale fuori campione") : "") +
                  "), spread medio della fascia " + F1(g_sprMean[pB[i0]]) +
-                 " pt contro una mediana generale di " + F0(g_medSpr);
+                 " pt contro una mediana generale di " + F0(g_medSpr) + " pt";
      }
    W("<h3>Fra le prime " + IS(pn) + " in-sample: quelle con IS t &ge; 2 che reggono anche fuori campione (OOS netto &gt; 0 e OOS t &ge; 2, con abilit&agrave; della direzione significativa)</h3>");
    if(ns == 0)
@@ -2370,6 +2749,30 @@ void RepRank()
          RankDigest("SURV", i + 1, pTf[sv[i]], pB[sv[i]], pH[sv[i]], pK[sv[i]], pD[sv[i]]);
         }
       W("</table>");
+     }
+
+   //--- prove di stress: prima le regole che reggono fuori campione, poi le migliori in-sample (senza doppioni di TF, fascia, verso e tenuta)
+   if(InpStress)
+     {
+      const int maxR = MathMin(12, MathMax(1, InpStressRules));
+      int rTf[12], rB[12], rH[12], rK[12], rD[12];
+      bool rS[12];
+      int nr = 0;
+      for(int pass = 0; pass < 2 && nr < maxR; pass++)
+        {
+         const int lim = (pass == 0) ? ns : pn;
+         for(int ii = 0; ii < lim && nr < maxR; ii++)
+           {
+            const int ix = (pass == 0) ? sv[ii] : ii;
+            bool dupR = false;
+            for(int q2 = 0; q2 < nr; q2++)
+               if(rTf[q2] == pTf[ix] && rB[q2] == pB[ix] && rD[q2] == pD[ix] && rH[q2] == pH[ix]) { dupR = true; break; }
+            if(dupR) continue;
+            rTf[nr] = pTf[ix]; rB[nr] = pB[ix]; rH[nr] = pH[ix]; rK[nr] = pK[ix]; rD[nr] = pD[ix]; rS[nr] = (pass == 0);
+            nr++;
+           }
+        }
+      RepStress(nr, rTf, rB, rH, rK, rD, rS);
      }
   }
 
@@ -2421,8 +2824,8 @@ string CoerenzaCell(const RkStat &a, const RkStat &b)
 string NoiseHead(const bool withBucket)
   {
    return "<table><tr><th>#</th><th>TF</th>" + string(withBucket ? "<th>Fascia (entrata, server + offset)</th>" : "") +
-          "<th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th><th>Posizioni</th><th>Profitto totale (pt)</th><th>Totale (&euro;)</th>"
-          "<th>Netto medio</th><th>Netto medio (&euro;/pos.)</th><th>t</th><th>Target raggiunto % (netto)</th>"
+          "<th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th><th>Posizioni</th><th>Profitto totale (pt)</th><th>Totale (" + g_ccy + ")</th>"
+          "<th>Netto medio</th><th>Netto medio (" + g_ccy + "/pos.)</th><th>t</th><th>Target raggiunto % (netto)</th>"
           "<th>Netto 1a parte</th><th>Netto 2a parte</th><th>Fra le due parti</th></tr>";
   }
 
@@ -3682,7 +4085,7 @@ void BuildConclusions(const int sIdx)
             (InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : ("spread M1 mediano " + F0(g_medSpr) + " pt")) +
             (InpExtraCostPts > 0.0 ? (" + extra " + F1(InpExtraCostPts) + " pt") : "") +
             (g_commPts > 0.0 ? (" + commissione " + F1(g_commPts) + " pt (" + F2(InpCommissionPerLotSide) + " " + g_ccy + " per lato e per lotto)") : "") +
-            (g_money ? (". Posizione ipotetica " + F2(InpLotSize) + " lotti: 1 punto = " + DoubleToString(MnyV(1.0), 4) + " " + g_ccy) : "") +
+            (g_money ? (". Posizione ipotetica " + LotTxt() + " lotti: 1 punto = " + DoubleToString(MnyV(1.0), 4) + " " + g_ccy) : "") +
             ". Tutti i valori sono in punti (1 punto = " + DoubleToString(g_pt, _Digits) + ")." +
             (g_histWarn ? " ATTENZIONE: lo storico M1 e' piu' corto del periodo richiesto." : "") + SprTopText() +
             (g_skN > 0 ? (" ATTENZIONE: escluse le finestre d'ingresso " + InpSkipEntryWin + " (ora server + offset): i risultati non sono quelli dell'EA su quelle fasce.") : "") +
@@ -3742,7 +4145,7 @@ void BuildConclusions(const int sIdx)
          v1 = "In almeno un TF il segnale anticipa la direzione gia' prima dei costi: i TF vicini condividono gran parte dei segnali e non sono conferme indipendenti, serve una verifica su un periodo successivo e su altri simboli (il t cluster resta ottimista sulle tenute lunghe).";
       else if(posS == 0)
          v1 = "Il segnale e' contrario alla direzione del prezzo in almeno un TF: " +
-              string(InpRankSide == RS_FOLLOW ? "seguirlo perde piu' del costo; per vedere la lettura INVERTI rilancia con InpRankSide = SEGUI e INVERTI." : "guarda la lettura INVERTI nelle tabelle A.");
+              string(InpRankSide == RS_FOLLOW ? "seguirlo perde gia' prima dei costi; per vedere la lettura INVERTI rilancia con InpRankSide = SEGUI e INVERTI." : "guarda la lettura INVERTI nelle tabelle A.");
       else
          v1 = "Segni opposti in TF diversi: nessuna direzione coerente.";
       AddConc(sIdx, "Direzione prima dei costi", "Orizzonte " + hs + " min, " + IS(K) + " TF con almeno " + IS(minN) +
@@ -3757,7 +4160,7 @@ void BuildConclusions(const int sIdx)
       AddConc(sIdx, "Dopo i costi", "Costo medio pesato " + F1(wCost / wN) + " pt, lordo medio pesato " + Sg(wG / wN) + " pt, netto medio pesato " + Sg(wNet / wN) +
               " pt (pesi = segnali di ciascun TF). Netto positivo in " + IS(netPos) + " TF su " + IS(K) + ", positivo e significativo (t cluster >= " + F2(g_zB) +
               ") in " + IS(netSig) + ". Miglior netto: " + g_tfName[bni] + " " + Sg(cn.ret) + " pt (t cluster " + F2(cn.tCl) + "). " +
-              (g_money ? ("Con " + F2(InpLotSize) + " lotti il netto medio di una posizione che segue il segnale e' " + MnyU(wNet / wN) + " (costo medio " + MnyU(wCost / wN) +
+              (g_money ? ("Con " + LotTxt() + " lotti il netto medio di una posizione che segue il segnale e' " + MnyU(wNet / wN) + " (costo medio " + MnyU(wCost / wN) +
                          ", commissione inclusa nel costo extra). ") : "") +
               (wG < 0.0 ? ("Se si invertisse il segnale: lordo " + Sg(-wG / wN) + " pt, meno il costo medio " + F1(wCost / wN) + " pt = netto " + Sg(-wG / wN - wCost / wN) + " pt (media pesata). ") : "") + v2);
      }
@@ -4116,6 +4519,8 @@ void BuildConclusions(const int sIdx)
               " cambiano segno. La distanza fra il profitto promesso qui e quello della tabella A e' la misura del rumore di selezione.");
      }
 
+   if(g_cStress != "") AddConc(sIdx, "Prove di stress", g_cStress);
+
    //--- fattibilita' di un EA che apre nel verso del segnale (lotto ipotetico, costi inclusi)
    if(K >= 1 && wN > 0.0)
      {
@@ -4127,14 +4532,24 @@ void BuildConclusions(const int sIdx)
       const bool haveRef = (rt >= 0 && GetCell(rt, g_refH, cr) && cr.n >= g_minN);
       if(netSig == 0 && !oosOk)
         {
-         fz = "Statisticamente non fattibile come EA che apre nel verso del segnale: nessun TF ha netto positivo e significativo e la tabella A non mostra evidenza oltre il caso. "
-              "Lordo medio pesato " + Sg(wG / wN) + " pt contro un costo medio (spread e commissione) di " + F1(wCost / wN) + " pt: mancano " + F1(wCost / wN - wG / wN) + " pt a posizione per pareggiare";
-         if(g_money) fz += " (" + MnyU(wCost / wN - wG / wN) + " con " + F2(InpLotSize) + " lotti)";
+         const double gapPts = (wCost - wG) / wN;
+         fz = "Statisticamente non fattibile come EA che apre nel verso del segnale: nessun TF ha netto positivo e significativo dopo la correzione per test multipli e la tabella A non mostra evidenza oltre il caso. "
+              "Lordo medio pesato " + Sg(wG / wN) + " pt contro un costo medio (spread e commissione) di " + F1(wCost / wN) + " pt";
+         if(gapPts > 0.0)
+           {
+            fz += ": mancano " + F1(gapPts) + " pt a posizione per pareggiare";
+            if(g_money) fz += " (" + MnyU(gapPts) + " con " + LotTxt() + " lotti)";
+           }
+         else
+            fz += ": il netto medio pesato e' " + Sg(wNet / wN) + " pt ma nessun TF e' significativo, quindi non e' distinguibile dal caso";
          fz += ". ";
          if(haveRef && g_money)
             fz += "Esempio sul TF " + g_tfName[rt] + " con uscita dopo " + hs + " min: " + F0(cr.n) + " segnali in " + F1(years) + " anni (circa " + F0(cr.n / years) + " all'anno), netto medio " + MnyU(cr.ret) +
                   " a posizione, circa " + MnyTU(cr.ret * cr.n / years) + " all'anno se si aprisse ogni segnale (le posizioni si sovrappongono: e' un ordine di grandezza, non il risultato di un conto). ";
-         fz += "Un EA con questa entrata non puo' guadagnare dalla direzione: potrebbe farlo solo con una gestione (uscite, dimensionamento) che crea un profilo diverso e che questo studio non misura.";
+         if(gapPts > 0.0)
+            fz += "Un EA con questa entrata non puo' guadagnare dalla direzione: potrebbe farlo solo con una gestione (uscite, dimensionamento) che crea un profilo diverso e che questo studio non misura.";
+         else
+            fz += "Un netto positivo ma non significativo non basta: serve una conferma su dati mai visti e su altri simboli prima di scrivere un EA.";
         }
       else
         {
@@ -4143,7 +4558,7 @@ void BuildConclusions(const int sIdx)
          if(aEdge)      fz += "la tabella A ha " + IS(g_cAstrongN) + " combinazioni con abilita' della direzione significativa fuori campione contro circa " + F1(expA) + " attese; ";
          if(a1Edge)     fz += "in " + IS(a1) + " TF la miglior combinazione A1 resta positiva fuori campione; ";
          if(g_money && g_cAsurvN > 0.0)
-            fz += "la prima candidata vale " + MnyU(g_cAsurvMean) + " a posizione con " + F2(InpLotSize) + " lotti, " + F0(g_cAsurvN) + " posizioni fuori campione in " + F1(oosYears) + " anni, cioe' circa " +
+            fz += "la prima candidata vale " + MnyU(g_cAsurvMean) + " a posizione con " + LotTxt() + " lotti, " + F0(g_cAsurvN) + " posizioni fuori campione in " + F1(oosYears) + " anni, cioe' circa " +
                   MnyTU(g_cAsurvMean * g_cAsurvN / oosYears) + " all'anno al lordo di slippage e swap; ";
          fz += "prima di scrivere un EA servono tutte queste conferme: netto OOS positivo con spread e commissione reali; risultato che regge con InpEntryLagMin = 5 e con spread doppio nelle ore di news; "
                "non concentrato in pochi giorni di eventi (tabella dei giorni piu' lunghi); ripetuto su un periodo successivo e su un altro simbolo.";
@@ -4163,7 +4578,9 @@ void BuildConclusions(const int sIdx)
        if(posS > 0)
           c += "Il segnale ha contenuto direzionale lordo in " + IS(posS) + " TF, ma i costi lo assorbono. ";
        else if(negS > 0)
-          c += "Il segnale e' significativamente contrario alla direzione del prezzo in " + IS(negS) + " TF: la lettura INVERTI va verificata nelle tabelle A (il netto dell'inverso e' meno il lordo, meno il costo). ";
+          c += "Il segnale e' significativamente contrario alla direzione del prezzo in " + IS(negS) + " TF: " +
+               string(InpRankSide == RS_FOLLOW ? "seguirlo perde gia' prima dei costi; per la lettura INVERTI rilancia con InpRankSide = SEGUI e INVERTI. "
+                                               : "la lettura INVERTI va verificata nelle tabelle A (il netto dell'inverso e' meno il lordo, meno il costo). ");
        else
           c += "Il segnale non anticipa la direzione del prezzo oltre il caso. ";
        if(g_cAok && g_cAstrong >= 3 && !aEdge && 2 * g_cAstrongN < g_cAstrong && 2 * g_cAone > g_cAstrong)
@@ -4300,12 +4717,13 @@ string BuildDigestHeader()
    if(!InpUseVolState) d += "VOLCFG|on|0\n";
    else d += "VOLCFG|on|1|atr|" + IS(g_vpar.atrLen) + "|lookback|" + IS(g_vpar.lookback) + "|ema|" + IS(g_vpar.emaSmooth) +
         "|exp|" + F2(InpVsExpTh) + "|comp|" + F2(InpVsCompTh) + "|low|" + IS(InpVsLowTh) + "|high|" + IS(InpVsHighTh) + "|extreme|" + IS(InpVsExtremeTh) + "\n";
-   d += "RUN|costfix|" + F1(InpCostPoints) + "|extra|" + F1(InpExtraCostPts) + "|commpts|" + F1(g_commPts) + "|lot|" + F2(InpLotSize) + "|pv|" + DoubleToString(g_pv, 4) + "|ccy|" + g_ccy +
+   d += "RUN|costfix|" + F1(InpCostPoints) + "|extra|" + F1(InpExtraCostPts) + "|commpts|" + F1(g_commPts) + "|lot|" + LotTxt() + "|pv|" + DoubleToString(g_pv, 4) + "|ccy|" + g_ccy +
         "|side|" + string(InpRankSide == RS_FOLLOW ? "follow" : (InpRankSide == RS_FADE ? "fade" : "both")) + "|maxgap|" + IS(InpMaxGapMin) +
         "|entrygap|" + IS(InpMaxEntryGapMin) + "|entrylag|" + IS(InpEntryLagMin) + "|skipwin|" + InpSkipEntryWin + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +
         "|ref|" + IS(g_hor[g_refH]) + "|sets|" + IS(g_nSets) + "\n";
    d += "DATA|m1bars|" + IS(g_n1) + "|days|" + IS(g_nDays) + "|medrange|" + F0(g_medRange) + "|medspr|" + F0(g_medSpr) +
         "|zerospr|" + F1(g_zeroSprPct) + "\n";
+   d += "# STRESSPOP/STRESSLAG/STRESSCOST: prove di stress (ritardo d'ingresso in minuti, costo extra in punti), netto medio in punti; POP = ogni segnale del TF, LAG/COST = regole della tabella A fuori campione\n";
    d += "# SPRH: spread M1 (punti) per fascia d'entrata (ora server + offset): barre, medio, mediano, p90\n";
    for(int rb = 0; rb < g_nRB; rb++)
       if(g_sprN[rb] > 0.0)
@@ -4413,7 +4831,7 @@ void ReportSet(const int sIdx)
    g_zB = ZCrit(MathMax(1, m));
 
    g_dg = "";
-   g_cAok = false; g_cBok = false; g_cPok = false; g_cPstrong = 0; g_cPstrongN = 0; g_cAstrongN = 0; g_cAone = 0; g_cPusable = 0; g_cPpos = 0; g_cPbest = 0.0; g_cAns = 0; g_cAsurv = ""; g_cAsurvMean = 0.0; g_cAsurvN = 0.0; g_cBdesc = ""; g_cBsumAll = 0.0;
+   g_cAok = false; g_cBok = false; g_cPok = false; g_cPstrong = 0; g_cPstrongN = 0; g_cAstrongN = 0; g_cAone = 0; g_cPusable = 0; g_cPpos = 0; g_cPbest = 0.0; g_cAns = 0; g_cAsurv = ""; g_cAsurvMean = 0.0; g_cAsurvN = 0.0; g_cBdesc = ""; g_cBsumAll = 0.0; g_cStress = "";
    W("<div class='sec' style='order:" + IS(3 + sIdx) + "'>");
    W("<h1 class='setH'>Serie " + IS(sIdx + 1) + " di " + IS(g_nSets) + " &mdash; " + g_setName[sIdx] + "</h1>");
    W("<div class='note'>" + g_setNote[sIdx] + " Soglia di Bonferroni su " + IS(m) + " celle TF x orizzonte: |t| &ge; <b>" + F2(g_zB) + "</b>.</div>");
