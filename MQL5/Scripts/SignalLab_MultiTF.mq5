@@ -536,6 +536,36 @@ bool SideOK(const int dd)
    return (InpRankSide == RS_FOLLOW) ? (dd == 0) : (dd == 1);
   }
 
+//--- valore del tick di un simbolo: dopo SymbolSelect il terminale puo' impiegare qualche istante a fornirlo (0 nel frattempo)
+double PvTickValue(const string name)
+  {
+   for(int w = 0; w < 30; w++)
+     {
+      double tv = SymbolInfoDouble(name, SYMBOL_TRADE_TICK_VALUE_PROFIT);
+      if(tv <= 0.0) tv = SymbolInfoDouble(name, SYMBOL_TRADE_TICK_VALUE);
+      if(tv > 0.0) return tv;
+      Sleep(100);
+     }
+   return 0.0;
+  }
+
+//--- simboli del terminale che contengono i primi 6 caratteri del simbolo analizzato (senza il suffisso _QDM): per suggerire il nome reale del broker
+string PvCandidates()
+  {
+   const string base = StringSubstr(_Symbol, 0, 6);
+   string out = "";
+   int found = 0;
+   const int n = SymbolsTotal(false);
+   for(int i = 0; i < n && found < 8; i++)
+     {
+      const string nm = SymbolName(i, false);
+      if(StringFind(nm, base) < 0 || nm == _Symbol) continue;
+      out += string(found > 0 ? ", " : "") + nm;
+      found++;
+     }
+   return out;
+  }
+
 //--- valore del punto, commissione in punti e costo extra totale
 void SetupMoney()
   {
@@ -552,17 +582,54 @@ void SetupMoney()
    else
      {
       string src = _Symbol;
-      if(InpPointValueSymbol != "") { src = InpPointValueSymbol; SymbolSelect(src, true); }
-      double tv = SymbolInfoDouble(src, SYMBOL_TRADE_TICK_VALUE_PROFIT);
-      if(tv <= 0.0) tv = SymbolInfoDouble(src, SYMBOL_TRADE_TICK_VALUE);
+      if(InpPointValueSymbol != "")
+        {
+         src = InpPointValueSymbol;
+         if(!SymbolSelect(src, true)) g_pvInfo = "il simbolo '" + src + "' non esiste nel terminale (controlla il nome con Ctrl+U)";
+        }
+      const double tv = PvTickValue(src);
       const double ts = SymbolInfoDouble(src, SYMBOL_TRADE_TICK_SIZE);
-      if(tv > 0.0 && ts > 0.0) g_pv = tv / ts * g_pt;
       const double cs = SymbolInfoDouble(src, SYMBOL_TRADE_CONTRACT_SIZE);
       const string pc = SymbolInfoString(src, SYMBOL_CURRENCY_PROFIT);
-      if(g_pv > 0.0 && cs > 0.0)
-         g_pvInfo = "valore letto da " + src + ": contratto " + F0(cs) + " x " + DoubleToString(g_pt, _Digits) + " " + pc + " = " + F2(cs * g_pt) + " " + pc +
-                    " per punto e per lotto, cioe' un cambio implicito 1 " + g_ccy + " = " + F2(cs * g_pt / g_pv) + " " + pc +
-                    ": se non coincide con il cambio reale imposta InpPointValuePerLot o InpPointValueSymbol";
+      if(tv > 0.0 && ts > 0.0)
+        {
+         g_pv = tv / ts * g_pt;
+         g_pvInfo = "valore letto da " + src;
+         if(cs > 0.0)
+            g_pvInfo += ": contratto " + F0(cs) + " x " + DoubleToString(g_pt, _Digits) + " " + pc + " = " + F2(cs * g_pt) + " " + pc +
+                        " per punto e per lotto, cioe' un cambio implicito 1 " + g_ccy + " = " + F2(cs * g_pt / g_pv) + " " + pc +
+                        ": se non coincide con il cambio reale imposta InpPointValuePerLot o InpPointValueSymbol";
+        }
+      else if(cs > 0.0 && pc != "" && pc != g_ccy)
+        {
+         //--- il valore del tick non e' leggibile: lo si ricava dal cambio fra la valuta del conto e quella di profitto (es. EURJPY)
+         const string sfx = (StringLen(src) > 6) ? StringSubstr(src, 6) : "";
+         string crs[2];
+         crs[0] = g_ccy + pc + sfx;
+         crs[1] = g_ccy + pc;
+         for(int q = 0; q < 2 && g_pv <= 0.0; q++)
+           {
+            if(!SymbolSelect(crs[q], true)) continue;
+            double bid = 0.0;
+            for(int w = 0; w < 30 && bid <= 0.0; w++)
+              {
+               bid = SymbolInfoDouble(crs[q], SYMBOL_BID);
+               if(bid <= 0.0) Sleep(100);
+              }
+            if(bid > 0.0)
+              {
+               g_pv = cs * g_pt / bid;
+               g_pvInfo = "valore calcolato dal cambio " + crs[q] + " = " + DoubleToString(bid, 3) + " (contratto " + F0(cs) + " x " + DoubleToString(g_pt, _Digits) + " " + pc + " per punto e per lotto)";
+              }
+           }
+        }
+      if(g_pv <= 0.0)
+         g_pvInfo += string(g_pvInfo != "" ? "; " : "") + "il valore del tick non e' leggibile da '" + src + "'";
+      if(g_pv <= 0.0 || InpPointValueSymbol == "")
+        {
+         const string cand = PvCandidates();
+         if(cand != "") g_pvInfo += string(g_pvInfo != "" ? ". " : "") + "Simboli simili nel terminale: " + cand;
+        }
      }
    g_money = (g_pv > 0.0 && InpLotSize > 0.0);
    if(g_pv > 0.0 && InpCommissionPerLotSide > 0.0) g_commPts = 2.0 * InpCommissionPerLotSide / g_pv;
@@ -571,7 +638,7 @@ void SetupMoney()
       Print("Denaro: lotto ", LotTxt(), " | 1 punto per 1.00 lotto = ", DoubleToString(g_pv, 4), " ", g_ccy, " (", g_pvInfo, ")",
             " | commissione ", DoubleToString(InpCommissionPerLotSide, 2), " per lato e per lotto = ", DoubleToString(g_commPts, 2), " pt a/r");
    else
-      Print("!!! Valore del punto non disponibile per ", _Symbol, ": colonne in denaro e commissione non calcolabili. Imposta InpPointValuePerLot.");
+      Print("!!! Valore del punto non disponibile: colonne in denaro e commissione NON incluse (", g_pvInfo, "). Imposta InpPointValueSymbol con il nome reale del broker o InpPointValuePerLot.");
   }
 
 string DowName(const int d)
@@ -1852,7 +1919,10 @@ void RepIntro()
    if(InpCostPoints <= 0.0 && g_zeroSprPct > 20.0)
       W("<div class='note ko'><b>Spread storico spesso pari a 0.</b> Il costo &egrave; sottostimato e il netto medio &egrave; "
         "ottimista. Imposta <b>InpCostPoints</b> con lo spread tipico del simbolo o <b>InpExtraCostPts</b> con la commissione.</div>");
-   if(g_extraPts <= 0.0)
+   if(!g_money)
+      W("<div class='note ko'><b>Valore del punto non disponibile.</b> " + g_pvInfo + ". La commissione NON &egrave; inclusa nel costo e le colonne in denaro mancano: "
+        "imposta <b>InpPointValueSymbol</b> con il nome di un simbolo reale del broker oppure <b>InpPointValuePerLot</b>.</div>");
+   if(g_extraPts <= 0.0 && g_money)
       W("<div class='note'>Nessuna commissione inclusa. Su conti Raw (FP Markets, IC Markets) imposta "
         "<b>InpCommissionPerLotSide</b> (e il valore del punto se non viene letto dal simbolo).</div>");
 
@@ -4283,6 +4353,7 @@ void BuildConclusions(const int sIdx)
             (InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : ("spread M1 mediano " + F0(g_medSpr) + " pt")) +
             (InpExtraCostPts > 0.0 ? (" + extra " + F1(InpExtraCostPts) + " pt") : "") +
             (g_commPts > 0.0 ? (" + commissione " + F1(g_commPts) + " pt (" + F2(InpCommissionPerLotSide) + " " + g_ccy + " per lato e per lotto)") : "") +
+            (!g_money ? (" ATTENZIONE: valore del punto non disponibile (" + g_pvInfo + "): la commissione NON e' inclusa nel costo e mancano i valori in denaro. Imposta InpPointValueSymbol con il nome di un simbolo reale del broker oppure InpPointValuePerLot.") : "") +
             (g_money ? (". Posizione ipotetica " + LotTxt() + " lotti: 1 punto = " + DoubleToString(MnyV(1.0), 4) + " " + g_ccy + string(g_pvInfo != "" ? (" (" + g_pvInfo + ")") : "")) : "") +
             ". Tutti i valori sono in punti (1 punto = " + DoubleToString(g_pt, _Digits) + ")." +
             (g_histWarn ? " ATTENZIONE: lo storico M1 e' piu' corto del periodo richiesto." : "") + SprTopText() +
