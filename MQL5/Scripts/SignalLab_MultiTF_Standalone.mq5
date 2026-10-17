@@ -4675,7 +4675,7 @@ void BuildConclusions(const int sIdx)
             (InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : ("spread M1 mediano " + F0(g_medSpr) + " pt")) +
             (InpExtraCostPts > 0.0 ? (" + extra " + F1(InpExtraCostPts) + " pt") : "") +
             (g_commPts > 0.0 ? (" + commissione " + F1(g_commPts) + " pt (" + F2(InpCommissionPerLotSide) + " " + g_ccy + " per lato e per lotto)") : "") +
-            (!g_money ? (" ATTENZIONE: valore del punto non disponibile (" + g_pvInfo + "): la commissione NON e' inclusa nel costo e mancano i valori in denaro. Imposta InpPointValueSymbol con il nome di un simbolo reale del broker oppure InpPointValuePerLot.") : "") +
+            (!g_money ? (". ATTENZIONE: valore del punto non disponibile (" + g_pvInfo + "): la commissione NON e' inclusa nel costo e mancano i valori in denaro. Imposta InpPointValueSymbol con il nome di un simbolo reale del broker oppure InpPointValuePerLot") : "") +
             (g_money ? (". Posizione ipotetica " + LotTxt() + " lotti: 1 punto = " + DoubleToString(MnyV(1.0), 4) + " " + g_ccy + string(g_pvInfo != "" ? (" (" + g_pvInfo + ")") : "")) : "") +
             ". Tutti i valori sono in punti (1 punto = " + DoubleToString(g_pt, _Digits) + ")." +
             (g_histWarn ? " ATTENZIONE: lo storico M1 e' piu' corto del periodo richiesto." : "") + SprTopText() +
