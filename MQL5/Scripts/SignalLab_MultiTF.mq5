@@ -121,6 +121,7 @@ input group "=== PROVE DI STRESS ==="
 input bool     InpStress            = true;   // tabella di stress: rifa' le regole migliori della tabella A con ingresso ritardato e costi piu' alti
 input string   InpStressLags        = "0,1,2,3,5,10,15,30"; // ritardi d'ingresso in minuti dopo la chiusura del segnale (massimo 10 valori, lo zero e' sempre il riferimento)
 input string   InpStressExtra       = "0,5,10,20";          // costo extra in punti da sommare allo spread e alla commissione (massimo 6 valori)
+input string   InpFixedRule         = "";     // regola fissa da mettere sempre in testa alle prove di stress e alla scheda: TF,inizio fascia,SEGUI o INVERTI,tenuta in minuti,target in punti (0 = nessuno); es. M15,21:00,SEGUI,1440,300. Serve a verificare una regola gia' trovata su un altro simbolo o periodo senza selezione (per i dati nuovi usa InpSplitPct = 5)
 input int      InpStressRules       = 6;      // quante regole mettere sotto stress (1-12): prima quelle che reggono fuori campione, poi le migliori in-sample
 
 input group "=== TABELLE ==="
@@ -258,6 +259,7 @@ int      g_slag[];
 double   g_sext[];
 int      g_nSlag = 0, g_nSext = 0;
 string   g_cStress = "";
+string   g_fixedNote = "";   // problema nella regola fissa (vuoto se va bene)
 
 //--- denaro: valore di 1 punto per 1.00 lotto nella valuta del conto, commissione in punti, costo extra totale in punti
 double   g_pv = 0.0, g_commPts = 0.0, g_extraPts = 0.0;
@@ -2513,10 +2515,10 @@ string StressCell(const double mean, const double n, const double t)
    return "<td style='color:" + ColSign(mean) + "'" + tip + ">" + F1(mean) + string(g_money ? (" (" + Mny(mean) + ")") : "") + "</td>";
   }
 
-void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &rD[], bool &rS[])
+void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &rD[], int &rS[])
   {
    g_cStress = "";
-   if(!InpStress || nr < 1 || g_nSlag < 1) return;
+   if(!InpStress || g_nSlag < 1) return;
    const int OKLAG = 5;
    const int nLag = g_nSlag, nExt = g_nSext;
    const int blk  = (g_nL + 1) * 4 * RKN;
@@ -2526,6 +2528,7 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
    W("<div class='note'>Le stesse posizioni ipotetiche della classifica, rifatte con <b>ingresso ritardato</b> di N minuti dopo la chiusura del segnale e con un <b>costo extra</b> in punti "
      "(sommato a spread e commissione). Se un risultato positivo sparisce con pochi minuti di ritardo o con pochi punti di costo era una dislocazione del prezzo d'ingresso o un'illusione di costo: non regge in un conto reale. "
      "Il ritardo non cambia l'insieme dei segnali (la fascia resta quella dell'ingresso senza ritardo). Valori in punti" + string(g_money ? (" e, fra parentesi, in " + g_ccy + " per posizione con " + LotTxt() + " lotti") : "") + ".</div>");
+   if(g_fixedNote != "") W("<div class='note ko'>" + g_fixedNote + "</div>");
 
    //--- 1. tutti i segnali di ogni TF, alla tenuta di riferimento
    ComputeForward(g_hor[g_refH]);
@@ -2561,6 +2564,7 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
       W(StressCell(wm, wN[li], 0.0));
      }
    W("</tr></table>");
+   if(nr < 1) return;
    //--- media pesata al ritardo di riferimento (il massimo ritardo non oltre OKLAG minuti)
    int liRef = 0;
    for(int li = 0; li < nLag; li++) if(g_slag[li] <= OKLAG) liRef = li;
@@ -2621,7 +2625,7 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
    ArrayResize(vCost, nr);
    for(int b = 0; b < nr; b++)
      {
-      if(rS[b]) nSurv++;
+      if(rS[b] == 1) nSurv++;
       vLag[b] = 0; vCost[b] = 0;
       if(lagN[b * nLag] < minOos) { vLag[b] = -1; vCost[b] = -1; continue; }
       nUse++;
@@ -2644,7 +2648,7 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
    for(int b = 0; b < nr; b++)
      {
       W("<tr>" + Td(IS(b + 1)) + "<td>" + g_tfName[rTf[b]] + "</td><td>" + RBktLabel(rB[b]) + "</td>" + Td(rD[b] == 0 ? "SEGUI" : "INVERTI") +
-        Td(IS(g_hor[rH[b]])) + Td(KLabel(rK[b])) + Td(rS[b] ? "regge fuori campione" : "migliore in-sample") + Td(F0(lagN[b * nLag])));
+        Td(IS(g_hor[rH[b]])) + Td(KLabel(rK[b])) + Td(rS[b] == 2 ? "regola fissa (nessuna selezione)" : (rS[b] == 1 ? "regge fuori campione" : "migliore in-sample")) + Td(F0(lagN[b * nLag])));
       for(int li = 0; li < nLag; li++)
         {
          W(StressCell(lagM[b * nLag + li], lagN[b * nLag + li], lagT[b * nLag + li]));
@@ -2704,7 +2708,8 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
      }
 
    //--- testo per il riepilogo
-   string tx = "Sulle prime " + IS(nr) + " regole della tabella A (fuori campione): " +
+   string tx = string(rS[0] == 2 ? "La prima e' la regola fissa impostata (nessuna selezione sui dati: un solo test). " : "") +
+               "Sulle " + IS(nr) + " regole in prova (fuori campione): " +
                string(nSurv > 1 ? (IS(nSurv) + " sono regole che reggono fuori campione, le altre sono fra le migliori in-sample")
                       : (nSurv == 1 ? "una regge fuori campione, le altre sono fra le migliori in-sample" : "nessuna regge fuori campione, sono le migliori in-sample")) + ". ";
    if(nUse == 0)
@@ -2724,6 +2729,73 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
          string(g_money ? (" (" + MnyU(popMRef) + " a posizione con " + LotTxt() + " lotti)") : "") + ". ";
    tx += "Una regola che non regge a pochi minuti di ritardo o a pochi punti di costo non e' operabile in un conto reale. " + cardTxt;
    g_cStress = tx;
+  }
+
+//--- regola fissa dell'utente (InpFixedRule): TF, inizio fascia, verso, tenuta, target; false (con nota) se non valida o non presente nelle griglie
+bool ParseFixedRule(int &t, int &rb, int &h, int &kk, int &dd)
+  {
+   g_fixedNote = "";
+   string src = InpFixedRule;
+   StringTrimLeft(src); StringTrimRight(src);
+   if(src == "") return false;
+   string pr[];
+   if(StringSplit(src, ',', pr) != 5)
+     { g_fixedNote = "InpFixedRule non valida: servono 5 campi TF,inizio fascia,SEGUI o INVERTI,tenuta,target (es. M15,21:00,SEGUI,1440,300)."; return false; }
+   for(int i = 0; i < 5; i++) { StringTrimLeft(pr[i]); StringTrimRight(pr[i]); }
+   string tfn = pr[0];
+   StringToUpper(tfn);
+   t = -1;
+   for(int q = 0; q < g_nT; q++) if(g_tfName[q] == tfn) t = q;
+   if(t < 0) { g_fixedNote = "Regola fissa: il TF " + pr[0] + " non e' fra quelli analizzati (InpTFs)."; return false; }
+   const int mn = ClockToMin(pr[1]);
+   if(mn < 0) { g_fixedNote = "Regola fissa: orario " + pr[1] + " non valido (HH:MM)."; return false; }
+   rb = mn / g_rbMin;
+   if(rb >= g_nRB) rb = g_nRB - 1;
+   string sd = pr[2];
+   StringToUpper(sd);
+   if(sd == "SEGUI") dd = 0;
+   else if(sd == "INVERTI") dd = 1;
+   else { g_fixedNote = "Regola fissa: il verso deve essere SEGUI o INVERTI."; return false; }
+   const int hold = (int)StringToInteger(pr[3]);
+   h = -1;
+   for(int q = 0; q < g_nH; q++) if(g_hor[q] == hold) h = q;
+   if(h < 0) { g_fixedNote = "Regola fissa: la tenuta " + pr[3] + " min non e' fra gli orizzonti (InpHorizons)."; return false; }
+   const double tp = StringToDouble(pr[4]);
+   kk = -1;
+   if(tp <= 0.0) kk = 0;
+   else for(int q = 0; q < g_nL; q++) if(MathAbs(g_lev[q] - tp) < 1.0e-9) kk = q + 1;
+   if(kk < 0) { g_fixedNote = "Regola fissa: il target " + pr[4] + " pt non e' fra i livelli (InpLevels)."; return false; }
+   return true;
+  }
+
+//--- prepara le regole da mettere sotto stress: la regola fissa (se c'e'), poi quelle che reggono fuori campione, poi le migliori in-sample (senza doppioni di TF, fascia, verso e tenuta)
+void StressRun(const int &pTf[], const int &pB[], const int &pH[], const int &pK[], const int &pD[], const int pn, const int &sv[], const int ns)
+  {
+   if(!InpStress) return;
+   const int maxR = MathMin(12, MathMax(1, InpStressRules));
+   int rTf[12], rB[12], rH[12], rK[12], rD[12], rO[12];
+   int nr = 0;
+   int fT = 0, fB = 0, fH = 0, fK = 0, fD = 0;
+   if(ParseFixedRule(fT, fB, fH, fK, fD))
+     {
+      rTf[0] = fT; rB[0] = fB; rH[0] = fH; rK[0] = fK; rD[0] = fD; rO[0] = 2;
+      nr = 1;
+     }
+   for(int pass = 0; pass < 2 && nr < maxR; pass++)
+     {
+      const int lim = (pass == 0) ? ns : pn;
+      for(int ii = 0; ii < lim && nr < maxR; ii++)
+        {
+         const int ix = (pass == 0) ? sv[ii] : ii;
+         bool dupR = false;
+         for(int q2 = 0; q2 < nr; q2++)
+            if(rTf[q2] == pTf[ix] && rB[q2] == pB[ix] && rD[q2] == pD[ix] && rH[q2] == pH[ix]) { dupR = true; break; }
+         if(dupR) continue;
+         rTf[nr] = pTf[ix]; rB[nr] = pB[ix]; rH[nr] = pH[ix]; rK[nr] = pK[ix]; rD[nr] = pD[ix]; rO[nr] = (pass == 0) ? 1 : 0;
+         nr++;
+        }
+     }
+   RepStress(nr, rTf, rB, rH, rK, rD, rO);
   }
 
 //--- classifica congiunta: TF x fascia x tenuta x target x verso
@@ -2769,7 +2841,12 @@ void RepRank()
 
    W("<h2>A2 &mdash; Classifica: quando osservare il segnale e come gestire la posizione (scelta in-sample)</h2>");
    if(pn < 1 || m < 1)
-     { W("<div class='note ko'>Nessuna combinazione con almeno " + IS((long)g_minN) + " posizioni in-sample. Riduci <b>InpRankMinN</b> o allarga il periodo.</div>"); return; }
+     {
+      W("<div class='note ko'>Nessuna combinazione con almeno " + IS((long)g_minN) + " posizioni in-sample. Riduci <b>InpRankMinN</b> o allarga il periodo.</div>");
+      int svNone[];
+      StressRun(pTf, pB, pH, pK, pD, 0, svNone, 0);
+      return;
+     }
 
    //--- diagnostica sull'insieme dei migliori in-sample
    int posOOS = 0, strong = 0, usable = 0, strongN = 0, strongOne = 0;
@@ -2876,29 +2953,7 @@ void RepRank()
       W("</table>");
      }
 
-   //--- prove di stress: prima le regole che reggono fuori campione, poi le migliori in-sample (senza doppioni di TF, fascia, verso e tenuta)
-   if(InpStress)
-     {
-      const int maxR = MathMin(12, MathMax(1, InpStressRules));
-      int rTf[12], rB[12], rH[12], rK[12], rD[12];
-      bool rS[12];
-      int nr = 0;
-      for(int pass = 0; pass < 2 && nr < maxR; pass++)
-        {
-         const int lim = (pass == 0) ? ns : pn;
-         for(int ii = 0; ii < lim && nr < maxR; ii++)
-           {
-            const int ix = (pass == 0) ? sv[ii] : ii;
-            bool dupR = false;
-            for(int q2 = 0; q2 < nr; q2++)
-               if(rTf[q2] == pTf[ix] && rB[q2] == pB[ix] && rD[q2] == pD[ix] && rH[q2] == pH[ix]) { dupR = true; break; }
-            if(dupR) continue;
-            rTf[nr] = pTf[ix]; rB[nr] = pB[ix]; rH[nr] = pH[ix]; rK[nr] = pK[ix]; rD[nr] = pD[ix]; rS[nr] = (pass == 0);
-            nr++;
-           }
-        }
-      RepStress(nr, rTf, rB, rH, rK, rD, rS);
-     }
+   StressRun(pTf, pB, pH, pK, pD, pn, sv, ns);
   }
 
 //+------------------------------------------------------------------+
@@ -4844,7 +4899,7 @@ string BuildDigestHeader()
         "|exp|" + F2(InpVsExpTh) + "|comp|" + F2(InpVsCompTh) + "|low|" + IS(InpVsLowTh) + "|high|" + IS(InpVsHighTh) + "|extreme|" + IS(InpVsExtremeTh) + "\n";
    d += "RUN|costfix|" + F1(InpCostPoints) + "|extra|" + F1(InpExtraCostPts) + "|commpts|" + F1(g_commPts) + "|lot|" + LotTxt() + "|pv|" + DoubleToString(g_pv, 4) + "|ccy|" + g_ccy + "|pvinfo|" + g_pvInfo +
         "|side|" + string(InpRankSide == RS_FOLLOW ? "follow" : (InpRankSide == RS_FADE ? "fade" : "both")) + "|maxgap|" + IS(InpMaxGapMin) +
-        "|entrygap|" + IS(InpMaxEntryGapMin) + "|entrylag|" + IS(InpEntryLagMin) + "|skipwin|" + InpSkipEntryWin + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +
+        "|entrygap|" + IS(InpMaxEntryGapMin) + "|entrylag|" + IS(InpEntryLagMin) + "|skipwin|" + InpSkipEntryWin + "|fixedrule|" + InpFixedRule + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +
         "|ref|" + IS(g_hor[g_refH]) + "|sets|" + IS(g_nSets) + "\n";
    d += "DATA|m1bars|" + IS(g_n1) + "|days|" + IS(g_nDays) + "|medrange|" + F0(g_medRange) + "|medspr|" + F0(g_medSpr) +
         "|zerospr|" + F1(g_zeroSprPct) + "\n";
