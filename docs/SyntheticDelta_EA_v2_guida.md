@@ -109,6 +109,8 @@ e il numero di prove vere è diverso dal numero di ID.
 - *Avanti*: **Personalizzato, data 2022.01.01** (in-sample 2010–2021, fuori campione 2022–2026). Nella scheda *Risultati dell'ottimizzazione*
   leggi sia *Backtest* sia *Forward*.
 - Le classi senza nessun trade restituiscono −1000 e finiscono in fondo; una classe che perde ha un t negativo.
+- Sotto `Inp_FitMinTrades` (default **100**) la parte positiva del t viene ridotta quadraticamente: con poche decine di trade la soglia vera di significatività è più alta di quella stampata.
+- Usa `SDE_FIT_T_R` (default). `SDE_FIT_RECOVERY_PF` è in denaro e con *profitto in pips* su un simbolo custom non è affidabile: non classificare classi con quella.
 - Se in uno stesso run i filtri manuali (`Inp_SrcSel`, `Inp_DirSel`, `Inp_BurstMin/Max`, `Inp_Hours`) contraddicono la classe, l'EA rifiuta la passata invece di restituire zero.
 
 **Fase 2 — scansione fine** solo se la fase 1 ha lasciato qualcosa: start 0, step 1, stop 314, stesso periodo.
@@ -163,5 +165,8 @@ Giorni: 0 = domenica … 6 = sabato. Qualunque altro carattere (`Mon-Fri`, `7;9`
 - Il regime di volatilità (percentile ATR%+Parkinson) non è ancora un'etichetta; l'intensità TR/ATR sì.
 - Il t usa una dispersione minima di 0.25R: una classe i cui trade chiudono tutti esattamente a TP o a SL non può avere un t enorme per pura mancanza di varianza.
 - R usa la distanza SL nominale (dal prezzo richiesto): lo slippage reale di riempimento è un costo, non entra nel denominatore.
+- Il report per verso (`sig-BUY` / `sig-SELL`) è per verso del **segnale**: con `Inp_Invert = true` i trade eseguiti sono l'opposto (l'EA lo ricorda nel Journal).
+- Se un ordine risulta eseguito ma segnalato come fallito (timeout, solo live), la posizione viene riallineata e gestita, ma non entra nelle statistiche di R.
+- Il valore `moneyProfit` nel CSV dei trade include la commissione d'ingresso; R non dipende dal denaro.
 - Dopo un riavvio live lo stato della raffica si ricostruisce rielaborando le ultime 1000 barre; una raffica più lunga di 1000 barre non è riproducibile.
-- In live, se il terminale salta delle barre, l'EA le rielabora solo per lo stato (non opera su barre passate).
+- In live, se il terminale salta delle barre, l'EA le rielabora solo per lo stato (non opera su barre passate); oltre 900 barre perse ricostruisce lo stato da capo.

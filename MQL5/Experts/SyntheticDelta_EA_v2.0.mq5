@@ -144,7 +144,7 @@ input int    Inp_E_MaxBars      = 0;      // chiudi dopo N barre (0 = off)
 
 input group "=== OTTIMIZZAZIONE / MISURA ==="
 input ENUM_SD_FIT Inp_FitMode   = SDE_FIT_T_R;    // metrica restituita a OnTester
-input int    Inp_FitMinTrades   = 30;     // sotto questo numero di trade la metrica positiva viene ridotta (quadraticamente)
+input int    Inp_FitMinTrades   = 100;    // sotto questo numero di trade la metrica positiva viene ridotta (quadraticamente). Con poche decine di trade la soglia di significativita' vera e' piu' alta di quella stampata
 input double Inp_ExtraCostPts   = 0.0;    // costo extra per trade in PUNTI (commissione + slippage) sottratto da R. Lo spread e' gia' nei prezzi
 
 input group "=== LOG / REPORT (solo test singolo, mai in ottimizzazione) ==="
@@ -207,6 +207,7 @@ int      g_runDirO = 0, g_runCntO = 0, g_gapO = 0;   // raffica del flusso Delta
 datetime g_lastBar = 0;    // ultima barra (in formazione) consumata: le barre chiuse precedenti sono state valutate
 datetime g_barDone = 0;    // ultima barra per cui e' stato eseguito il passo 'una volta per barra' sulla posizione
 bool     g_primed = false; // stato ricostruito da PrimeState
+bool     g_prepFailed = false; // PrepareData e' fallita su una barra: al successo si ricontano le barre non valutate
 
 //--- profili di esecuzione: indice 0 = DELTA, 1 = EXP_ADDED
 double g_pSL[2], g_pTP[2], g_pTrS[2], g_pTrD[2];
@@ -309,6 +310,7 @@ bool ParseMask(const string src, bool &mask[], const int lo, const int hi)
       StringTrimLeft(sb);
       StringTrimRight(sb);
       if(!IsDigits(sa) || !IsDigits(sb)) { ok = false; continue; }
+      if(StringLen(sa) > 3 || StringLen(sb) > 3) { ok = false; continue; }   // evita il troncamento a 32 bit di valori enormi
       const int a = (int)StringToInteger(sa);
       const int b = (int)StringToInteger(sb);
       if(a < lo || a > hi || b < lo || b > hi) { ok = false; continue; }
@@ -437,8 +439,13 @@ int OnInit()
       Inp_D_MaxBars < 0 || Inp_E_MaxBars < 0 ||
       (Inp_D_TrailOn && Inp_D_TrailDist <= 0.0) || (Inp_E_TrailOn && Inp_E_TrailDist <= 0.0))
      { Print("Input non validi: TrailStep, TP, TrailStart, MaxBars >= 0 e TrailDist > 0 (con TrailOn)."); return INIT_PARAMETERS_INCORRECT; }
-   if(Inp_ExpConfirmOffset < 0 || Inp_RunGapBars < 0 || Inp_BurstMin > Inp_BurstMax || Inp_IntensityMin > Inp_IntensityMax)
-     { Print("Input non validi: ExpConfirmOffset/RunGapBars >= 0, BurstMin <= BurstMax, IntensityMin <= IntensityMax."); return INIT_PARAMETERS_INCORRECT; }
+   if(Inp_ExpConfirmOffset < 0 || Inp_RunGapBars < 0 || Inp_BurstMin > Inp_BurstMax || Inp_IntensityMin > Inp_IntensityMax ||
+      Inp_BurstMin > 255 || Inp_BurstMax < 1 || Inp_IntensityMin > 5 || Inp_IntensityMax < 0)
+     {
+      Print("Input non validi: ExpConfirmOffset/RunGapBars >= 0; BurstMin <= BurstMax con intervallo che interseca 1..255; ",
+            "IntensityMin <= IntensityMax con intervallo che interseca 0..5.");
+      return INIT_PARAMETERS_INCORRECT;
+     }
    if(Inp_ClassID >= 0) DecodeClass(Inp_ClassID, g_cSrc, g_cDir, g_cBurst, g_cHour);
    else { g_cSrc = 0; g_cDir = 0; g_cBurst = 0; g_cHour = 0; }
 
@@ -524,7 +531,7 @@ int OnInit()
    g_hasPos = false; g_posAtr = 0.0; g_posProf = 0; g_posBars = 0; g_posOpenBar = 0;
    g_stopDue = false; g_stopTry = 0; g_nRej = 0;
    g_nRec = 0;
-   g_lastBar = 0; g_barDone = 0; g_primed = false;
+   g_lastBar = 0; g_barDone = 0; g_primed = false; g_prepFailed = false;
    g_tvN = 0.0; g_tvS = 0.0; g_tvS2 = 0.0;
    g_isHedging = ((ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING);
 
@@ -608,14 +615,24 @@ void OnTick()
       if(g_hasPos) OnNewBarPosition();
      }
 
-   //--- barre chiuse non ancora valutate: sempre 1 nel tester; in live piu' di 1 se il terminale ha saltato barre
+   //--- barre chiuse non ancora valutate: normalmente 1. Di piu' se il terminale ha saltato barre (live) o se PrepareData
+   //--- e' fallita per un'intera barra (anche nel tester). Nel percorso normale del tester iBarShift non viene chiamata.
    int nNew = 1;
-   if(!g_isTester && g_lastBar != 0)
+   if((!g_isTester || g_prepFailed) && g_lastBar != 0)
      {
       const int sh = iBarShift(_Symbol, PERIOD_CURRENT, g_lastBar, false);
-      if(sh > 1) nNew = MathMin(sh, 100);
+      if(sh > 900)   // troppe barre perse per rielaborarle: azzera lo stato e ricostruiscilo con PrimeState al prossimo tick
+        {
+         g_expPending = false; g_expAge = 0;
+         g_runDirD = 0; g_runCntD = 0; g_gapD = 0;
+         g_runDirO = 0; g_runCntO = 0; g_gapO = 0;
+         g_primed = false;
+         return;
+        }
+      if(sh > 1) nNew = sh;
      }
-   if(!PrepareData(g_reach + 7 + nNew, 4 + nNew)) return;   // dati non pronti: g_lastBar invariato, si riprova al prossimo tick
+   if(!PrepareData(g_reach + 7 + nNew, 4 + nNew)) { g_prepFailed = true; return; }   // dati non pronti: g_lastBar invariato, si riprova
+   g_prepFailed = false;
    g_lastBar = cur;
 
    if(g_isTester && !g_isOptim)
@@ -674,7 +691,9 @@ bool WaitIndicators(const int minBars, const uint timeoutMs)
 datetime PrimeState()
   {
    const int primeBars = 1000;
-   if(!PrepareData(primeBars + g_reach + 5, primeBars + 5)) return 0;
+   const int avail = Bars(_Symbol, PERIOD_CURRENT);          // non chiedere piu' barre di quelle che esistono
+   if(avail < 8) return 0;
+   if(!PrepareData(MathMin(primeBars + g_reach + 5, avail), MathMin(primeBars + 5, avail))) return 0;
    const datetime bar0 = g_rates[0].time;
    SigTag tmp;
    for(int s = primeBars; s >= 1; s--)
@@ -904,8 +923,9 @@ bool SymbolBusy()
 void ClosePosition()
   {
    const ulong t = FindOurPosition();
-   if(t == 0) { g_hasPos = false; return; }
-   if(!trade.PositionClose(t) && !g_isOptim)
+   if(t == 0) { g_hasPos = false; g_stopDue = false; return; }
+   if(trade.PositionClose(t)) { g_hasPos = false; g_stopDue = false; return; }   // chiusa: niente da ripetere
+   if(!g_isOptim)
       Print("Errore chiusura posizione: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
   }
 
@@ -942,6 +962,7 @@ void OnNewBarPosition()
    const int mb = g_pMax[g_posProf];
    if(mb > 0 && g_posBars >= mb)
      {
+      if(g_stopDue) return;           // ManagePosition ripete gia' la chiusura, al massimo una volta al secondo
       g_stopDue = true;
       g_stopTry = TimeCurrent();
       ClosePosition();
@@ -1040,6 +1061,12 @@ int TryEnter(const SigTag &tag)
       g_nRej++;
       if(!g_isOptim && Inp_Debug)
          Print("Errore apertura: ", rc, " - ", trade.ResultRetcodeDescription());
+      if(HavePosition())   // eseguito ma segnalato come fallito (es. timeout): riallinea subito lo stato
+        {
+         g_hasPos = false;
+         AdoptPosition();
+         g_posAtr = atr;
+        }
       return 6;
      }
 
@@ -1185,10 +1212,13 @@ void CollectResults(const bool detail)
    int      hintIn = 0, hintOut = 0;
    double   ePx[];
    datetime eTm[];
+   double   eCm[];
    ArrayResize(ePx, g_nRec);
    ArrayResize(eTm, g_nRec);
-   for(int i = 0; i < g_nRec; i++) { ePx[i] = 0.0; eTm[i] = 0; }
+   ArrayResize(eCm, g_nRec);
+   for(int i = 0; i < g_nRec; i++) { ePx[i] = 0.0; eTm[i] = 0; eCm[i] = 0.0; }
 
+   for(int pass = 0; pass < 2; pass++)   // 0 = ingressi, 1 = uscite: l'ordine dei deal con lo stesso timestamp non e' garantito
    for(int i = 0; i < total; i++)
      {
       const ulong dt = HistoryDealGetTicket(i);
@@ -1200,15 +1230,18 @@ void CollectResults(const bool detail)
 
       if(en == DEAL_ENTRY_IN)
         {
+         if(pass != 0) continue;
          const int ri = FindRec(pid, hintIn);
          if(ri >= 0)
            {
             ePx[ri] = HistoryDealGetDouble(dt, DEAL_PRICE);
             eTm[ri] = (datetime)HistoryDealGetInteger(dt, DEAL_TIME);
+            eCm[ri] = HistoryDealGetDouble(dt, DEAL_COMMISSION);
            }
         }
       else if(en == DEAL_ENTRY_OUT || en == DEAL_ENTRY_OUT_BY)
         {
+         if(pass != 1) continue;
          const int cur = FindRec(pid, hintOut);
          if(cur < 0 || ePx[cur] <= 0.0) continue;          // uscita senza ingresso abbinato, o seconda uscita parziale
          const double   entryPx   = ePx[cur];
@@ -1230,7 +1263,7 @@ void CollectResults(const bool detail)
          if(fh != INVALID_HANDLE)
            {
             const double money = HistoryDealGetDouble(dt, DEAL_PROFIT) + HistoryDealGetDouble(dt, DEAL_SWAP)
-                               + HistoryDealGetDouble(dt, DEAL_COMMISSION);
+                               + HistoryDealGetDouble(dt, DEAL_COMMISSION) + eCm[cur];   // commissione d'ingresso inclusa
             FileWrite(fh, TimeToString(entryTime, TIME_DATE | TIME_MINUTES),
                       TimeToString((datetime)HistoryDealGetInteger(dt, DEAL_TIME), TIME_DATE | TIME_MINUTES),
                       SrcName(g_rSrc[cur]), g_rDir[cur], g_rTdir[cur], g_rBurst[cur], BucketLabel(g_rBucket[cur]),
@@ -1269,10 +1302,13 @@ void PrintReport(const double &bN[], const double &bS[], const double &sdN[], co
          DoubleToString(Inp_ExtraCostPts, 1), " pt");
    if(avgSpr <= 0.0 && Inp_ExtraCostPts <= 0.0)
       Print("ATTENZIONE: spread = 0 e costo extra = 0: R senza costi di transazione, risultati ottimistici.");
-   Print("Soglia di Bonferroni su ", g_nClasses, " classi (alpha 5% unilaterale): t > ", DoubleToString(BonferroniT(g_nClasses, 0.05), 2),
-         ". Classi annidate e prove aggiuntive la alzano: conferma sempre fuori campione.");
+   Print("Soglia di Bonferroni su ", g_nClasses, " classi (alpha 5% unilaterale, approssimazione NORMALE): t > ",
+         DoubleToString(BonferroniT(g_nClasses, 0.05), 2),
+         ". Con pochi trade la soglia vera e' piu' alta (t di Student: circa 4.1 a n=30, 3.7 a n=100 per 315 classi). Le classi annidate sono correlate",
+         " (soglia prudente), ma bucket, profili, Invert e filtri provati in piu' la alzano. Conferma sempre fuori campione.");
 
-   string names[4] = {"DELTA  BUY ", "DELTA  SELL", "EXP_AD BUY ", "EXP_AD SELL"};
+   if(Inp_Invert) Print("Inp_Invert = true: le righe seguenti sono per verso del SEGNALE; i trade eseguiti sono l'opposto.");
+   string names[4] = {"DELTA  sig-BUY ", "DELTA  sig-SELL", "EXP_AD sig-BUY ", "EXP_AD sig-SELL"};
    for(int q = 0; q < 4; q++)
       if(sdN[q] > 0.0)
          Print(names[q], " | n=", (int)sdN[q], " | media ", DoubleToString(sdS[q] / sdN[q], 4), " R | somma ", DoubleToString(sdS[q], 1), " R");
@@ -1293,7 +1329,8 @@ void PrintReport(const double &bN[], const double &bS[], const double &sdN[], co
 //|   Inp_FitMinTrades la parte positiva e' ridotta. Nessun trade =   |
 //|   -1000 (in fondo alla classifica).                               |
 //| SDE_FIT_EXPECT_R: media di R per radice di n.                      |
-//| SDE_FIT_RECOVERY_PF: RecoveryFactor * min(PF,3) (in denaro).       |
+//| SDE_FIT_RECOVERY_PF: RecoveryFactor * min(PF,3), in DENARO: non per|
+//|   classificare classi con 'profitto in pips'.                      |
 //+------------------------------------------------------------------+
 double OnTester()
   {
@@ -1314,12 +1351,14 @@ double OnTester()
         }
       case SDE_FIT_RECOVERY_PF:
         {
+         // in denaro, quindi inaffidabile con "profitto in pips" su un simbolo custom: da non usare per classificare classi
          const double profit = TesterStatistics(STAT_PROFIT);
-         double maxDD = TesterStatistics(STAT_BALANCE_DD);
-         const double pf = TesterStatistics(STAT_PROFIT_FACTOR);
-         if(maxDD <= 0.0) maxDD = 1.0;
+         const double maxDD  = TesterStatistics(STAT_BALANCE_DD);
+         const double pf     = TesterStatistics(STAT_PROFIT_FACTOR);
          if(profit <= 0.0) return profit / 1.0e9;
-         return (profit / maxDD) * MathMin((pf > 0.0) ? pf : 1.0, 3.0) * pen;
+         if(maxDD <= 0.0) return 0.0;   // nessun drawdown: campione senza perdite, non classificabile
+         const double pen2 = MathMin(1.0, g_stN / (5.0 * minT));
+         return (profit / maxDD) * MathMin((pf > 0.0) ? pf : 1.0, 3.0) * pen2 * pen2;
         }
       case SDE_FIT_T_R:
       default:
