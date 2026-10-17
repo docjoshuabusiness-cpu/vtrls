@@ -847,6 +847,7 @@ string LotTxt()
   {
    string t = DoubleToString(InpLotSize, 3);
    while(StringLen(t) > 4 && StringSubstr(t, StringLen(t) - 1, 1) == "0") t = StringSubstr(t, 0, StringLen(t) - 1);
+   if(StringSubstr(t, StringLen(t) - 1, 1) == ".") t = StringSubstr(t, 0, StringLen(t) - 1);
    return t;
   }
 
@@ -889,7 +890,7 @@ void SetupMoney()
    if(g_pv > 0.0 && InpCommissionPerLotSide > 0.0) g_commPts = 2.0 * InpCommissionPerLotSide / g_pv;
    g_extraPts = InpExtraCostPts + g_commPts;
    if(g_money)
-      Print("Denaro: lotto ", DoubleToString(InpLotSize, 2), " | 1 punto per 1.00 lotto = ", DoubleToString(g_pv, 4), " ", g_ccy, " (", g_pvInfo, ")",
+      Print("Denaro: lotto ", LotTxt(), " | 1 punto per 1.00 lotto = ", DoubleToString(g_pv, 4), " ", g_ccy, " (", g_pvInfo, ")",
             " | commissione ", DoubleToString(InpCommissionPerLotSide, 2), " per lato e per lotto = ", DoubleToString(g_commPts, 2), " pt a/r");
    else
       Print("!!! Valore del punto non disponibile per ", _Symbol, ": colonne in denaro e commissione non calcolabili. Imposta InpPointValuePerLot.");
@@ -2642,7 +2643,16 @@ double StressT(const double n, const double sum, const double sum2)
    return (var > 0.0) ? mean / (MathSqrt(var) / MathSqrt(n)) : 0.0;
   }
 
-//--- indici dei segnali del TF la cui fascia d'ingresso (senza ritardo) e' rb
+//--- indice M1 d'ingresso con il ritardo globale InpEntryLagMin, come la classifica (-1 se attraversa un buco di dati)
+int StressBase(const int k)
+  {
+   const int j0 = g_ent[k];
+   const int jb = j0 + InpEntryLagMin;
+   if(InpEntryLagMin > 0 && (jb >= g_n1 || (long)(g_m1Time[jb] - g_m1Time[j0]) != (long)InpEntryLagMin * 60L)) return -1;
+   return jb;
+  }
+
+//--- indici dei segnali del TF la cui fascia d'ingresso (con il ritardo globale, senza quello di stress) e' rb
 int StressCollect(const int t, const int rb, int &idx[])
   {
    const long rbSec = (long)g_rbMin * 60L;
@@ -2653,7 +2663,8 @@ int StressCollect(const int t, const int rb, int &idx[])
    for(int k = k0; k < k1; k++)
      {
       if(g_dir[k] == 0) continue;
-      const int j0 = g_ent[k];
+      const int j0 = StressBase(k);
+      if(j0 < 0) continue;
       if((int)(((((long)g_m1Time[j0] + g_off) % 86400L) + 86400L) % 86400L / rbSec) != rb) continue;
       cnt++;
       ArrayResize(idx, cnt, 4096);
@@ -2675,7 +2686,8 @@ void StressSim(const int &idx[], const int nIdx, const int h, const int kk, cons
      {
       const int k  = idx[a];
       const int d  = (int)g_dir[k];
-      const int j0 = g_ent[k];
+      const int j0 = StressBase(k);
+      if(j0 < 0) continue;
       const int j  = j0 + lag;
       if(lag > 0 && (j >= g_n1 || (long)(g_m1Time[j] - g_m1Time[j0]) != (long)lag * 60L)) continue;
       if(g_ok[j] == 0) continue;
@@ -2720,7 +2732,8 @@ void StressPop(const int t, const int lag, double &dayS[], double &dayN[], doubl
      {
       const int d = (int)g_dir[k];
       if(d == 0) continue;
-      const int j0 = g_ent[k];
+      const int j0 = StressBase(k);
+      if(j0 < 0) continue;
       const int j  = j0 + lag;
       if(lag > 0 && (j >= g_n1 || (long)(g_m1Time[j] - g_m1Time[j0]) != (long)lag * 60L)) continue;
       if(g_ok[j] == 0) continue;
@@ -2741,6 +2754,9 @@ void StressPop(const int t, const int lag, double &dayS[], double &dayN[], doubl
       if(dayN[dI] > 0.0) { const double e = dayS[dI] - meanOut * dayN[dI]; ss += e * e; }
    tclOut = (n > 1.0 && ss > 0.0) ? meanOut / (MathSqrt(ss) / n) : 0.0;
   }
+
+//--- punti senza decimali se interi (5), con un decimale altrimenti (2.5)
+string PtLbl(const double v) { return (v == MathFloor(v)) ? F0(v) : F1(v); }
 
 //--- anno di un giorno (giorni dal 1970.01.01)
 int YearOfDay(const long z0)
@@ -2833,7 +2849,7 @@ string RepCard(const int rank, const int t, const int rb, const int h, const int
 string StressCell(const double mean, const double n, const double t)
   {
    if(n < 1.0) return "<td>-</td>";
-   const string tip = " title='posizioni " + F0(n) + ", t " + F2(t) + "'";
+   const string tip = (t > 1.0e8) ? (" title='posizioni " + F0(n) + "'") : (" title='posizioni " + F0(n) + ", t " + F2(t) + "'");
    return "<td style='color:" + ColSign(mean) + "'" + tip + ">" + F1(mean) + string(g_money ? (" (" + Mny(mean) + ")") : "") + "</td>";
   }
 
@@ -2883,7 +2899,7 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
    for(int li = 0; li < nLag; li++)
      {
       const double wm = (wN[li] > 0.0) ? wS[li] / wN[li] : 0.0;
-      W(StressCell(wm, wN[li], 0.0));
+      W(StressCell(wm, wN[li], 1.0e9));
      }
    W("</tr></table>");
    if(nr < 1) return;
@@ -2985,8 +3001,8 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
    //--- tabella costi
    W("<h3>3. Le stesse regole con costi pi&ugrave; alti, senza ritardo (fuori campione, netto per posizione)</h3>");
    W("<table><tr><th>#</th><th>TF</th><th>Fascia</th><th>Verso</th><th>Tieni (min)</th><th>Target (pt)</th>");
-   for(int ci = 0; ci < nExt; ci++) W("<th>" + string(g_sext[ci] == 0.0 ? "costo attuale" : ("+" + F0(g_sext[ci]) + " pt")) + "</th>");
-   W("<th>Spread x2</th><th>Extra che azzera il netto</th><th>Esito (REGGE = netto positivo con +" + F0(g_sext[ciRef]) + " pt e t &ge; 2 senza extra)</th></tr>");
+   for(int ci = 0; ci < nExt; ci++) W("<th>" + string(g_sext[ci] == 0.0 ? "costo attuale" : ("+" + PtLbl(g_sext[ci]) + " pt")) + "</th>");
+   W("<th>Spread x2</th><th>Extra che azzera il netto</th><th>Esito (REGGE = netto positivo con +" + PtLbl(g_sext[ciRef]) + " pt e t &ge; 2 senza extra)</th></tr>");
    for(int b = 0; b < nr; b++)
      {
       W("<tr>" + Td(IS(b + 1)) + "<td>" + g_tfName[rTf[b]] + "</td><td>" + RBktLabel(rB[b]) + "</td>" + Td(rD[b] == 0 ? "SEGUI" : "INVERTI") +
@@ -2995,7 +3011,7 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
         {
          W(StressCell(cM[b * nCost + ci], cN[b * nCost + ci], cT[b * nCost + ci]));
          g_dg += "STRESSCOST|" + IS(b + 1) + "|" + g_tfName[rTf[b]] + "|" + RBktLabel(rB[b]) + "|" + string(rD[b] == 0 ? "SEGUI" : "INVERTI") + "|hold|" + IS(g_hor[rH[b]]) +
-                 "|tp|" + KLabel(rK[b]) + "|extra|" + string(ci < nExt ? F0(g_sext[ci]) : "spreadx2") + "|oosn|" + F0(cN[b * nCost + ci]) + "|oosmean|" + F1(cM[b * nCost + ci]) + "|oost|" + F2(cT[b * nCost + ci]) + "\n";
+                 "|tp|" + KLabel(rK[b]) + "|extra|" + string(ci < nExt ? PtLbl(g_sext[ci]) : "spreadx2") + "|oosn|" + F0(cN[b * nCost + ci]) + "|oosmean|" + F1(cM[b * nCost + ci]) + "|oost|" + F2(cT[b * nCost + ci]) + "\n";
         }
       //--- extra che azzera il netto: interpolazione lineare fra i costi provati
       string be = "-";
@@ -3004,7 +3020,7 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
          if(cM[b * nCost] <= 0.0) be = "nessuno";
          else
            {
-            be = "oltre " + F0(g_sext[nExt - 1]) + " pt";
+            be = "oltre " + PtLbl(g_sext[nExt - 1]) + " pt";
             for(int ci = 1; ci < nExt; ci++)
                if(cM[b * nCost + ci] <= 0.0)
                  {
@@ -3030,25 +3046,27 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
      }
 
    //--- testo per il riepilogo
+   string sOrig;
+   if(nSurv == 0)       sOrig = "nessuna regge fuori campione, sono le migliori in-sample";
+   else if(nSurv >= nr) sOrig = (nr == 1) ? "la regola regge fuori campione" : "tutte reggono fuori campione";
+   else                 sOrig = string(nSurv == 1 ? "una regge" : (IS(nSurv) + " reggono")) + " fuori campione, le altre sono fra le migliori in-sample";
    string tx = string(rS[0] == 2 ? "La prima e' la regola fissa impostata (nessuna selezione sui dati: un solo test). " : "") +
-               "Sulle " + IS(nr) + " regole in prova (fuori campione): " +
-               string(nSurv > 1 ? (IS(nSurv) + " sono regole che reggono fuori campione, le altre sono fra le migliori in-sample")
-                      : (nSurv == 1 ? "una regge fuori campione, le altre sono fra le migliori in-sample" : "nessuna regge fuori campione, sono le migliori in-sample")) + ". ";
+               "Regole in prova: " + IS(nr) + " (fuori campione): " + sOrig + ". ";
    if(nUse == 0)
       tx += "Campione fuori campione troppo scarso per valutarle. ";
    else
-      tx += "Con ingresso ritardato fino a " + IS(OKLAG) + " min il netto fuori campione resta positivo e significativo (t >= 2 senza ritardo) in " + IS(nLagOk) + " su " + IS(nUse) + " regole; con " + F0(g_sext[ciRef]) +
-            " pt di costo in piu' in " + IS(nCostOk) + "; reggono a entrambe le prove " + IS(nBoth) + ". ";
+      tx += "Con ingresso ritardato fino a " + IS(OKLAG) + " min il netto fuori campione resta positivo e significativo (t >= 2 senza ritardo) in " + IS(nLagOk) + " su " + IS(nUse) + string(nUse == 1 ? " regola" : " regole") + "; con " + PtLbl(g_sext[ciRef]) +
+            " pt di costo in piu' in " + IS(nCostOk) + "; superano entrambe le prove: " + IS(nBoth) + ". ";
    {
     string ds = g_tfName[rTf[0]] + " " + RBktLabel(rB[0]) + " " + string(rD[0] == 0 ? "SEGUI" : "INVERTI") + ", tieni " + IS(g_hor[rH[0]]) + " min, target " + KLabel(rK[0]);
     tx += "La prima (" + ds + "): netto fuori campione";
     for(int li = 0; li < nLag; li++)
        if(g_slag[li] == 0 || g_slag[li] == OKLAG || li == nLag - 1)
           tx += string(g_slag[li] == 0 ? " subito " : (" con " + IS(g_slag[li]) + " min di ritardo ")) + Sg(lagM[li]) + " pt" + string(g_money ? (" (" + MnyU(lagM[li]) + ")") : "") + ",";
-    tx += " con " + F0(g_sext[ciRef]) + " pt di costo in piu' " + Sg(cM[ciRef]) + " pt. ";
+    tx += " con " + PtLbl(g_sext[ciRef]) + " pt di costo in piu' " + Sg(cM[ciRef]) + " pt. ";
    }
-   tx += "Seguendo ogni segnale (media pesata dei TF, uscita dopo " + IS(g_hor[g_refH]) + " min) il netto medio e' " + Sg(popM0) + " pt subito e " + Sg(popMRef) + " pt con " + IS(g_slag[liRef]) + " min di ritardo" +
-         string(g_money ? (" (" + MnyU(popMRef) + " a posizione con " + LotTxt() + " lotti)") : "") + ". ";
+   tx += "Seguendo ogni segnale (media pesata dei TF, uscita dopo " + IS(g_hor[g_refH]) + " min) il netto medio e' " + Sg(popM0) + " pt subito" +
+         string(g_slag[liRef] > 0 ? (" e " + Sg(popMRef) + " pt con " + IS(g_slag[liRef]) + " min di ritardo" + string(g_money ? (" (" + MnyU(popMRef) + " a posizione con " + LotTxt() + " lotti)") : "")) : "") + ". ";
    tx += "Una regola che non regge a pochi minuti di ritardo o a pochi punti di costo non e' operabile in un conto reale. " + cardTxt;
    g_cStress = tx;
   }
