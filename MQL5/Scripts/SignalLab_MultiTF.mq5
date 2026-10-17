@@ -605,11 +605,13 @@ void SetupMoney()
       else if(cs > 0.0 && pc != "" && pc != g_ccy)
         {
          //--- il valore del tick non e' leggibile: lo si ricava dal cambio fra la valuta del conto e quella di profitto (es. EURJPY)
-         const string sfx = (StringLen(src) > 6) ? StringSubstr(src, 6) : "";
-         string crs[2];
-         crs[0] = g_ccy + pc + sfx;
+         string clean = src;
+         if(StringLen(clean) > 4 && StringSubstr(clean, StringLen(clean) - 4) == "_QDM") clean = StringSubstr(clean, 0, StringLen(clean) - 4);
+         string crs[3];
+         crs[0] = g_ccy + pc + string(StringLen(clean) > 6 ? StringSubstr(clean, 6) : "");      // stesso suffisso del broker (es. EURJPY.r)
          crs[1] = g_ccy + pc;
-         for(int q = 0; q < 2 && g_pv <= 0.0; q++)
+         crs[2] = g_ccy + pc + string(StringLen(src) > 6 ? StringSubstr(src, 6) : "");           // eventuale copia personalizzata
+         for(int q = 0; q < 3 && g_pv <= 0.0; q++)
            {
             if(!SymbolSelect(crs[q], true)) continue;
             double bid = 0.0;
