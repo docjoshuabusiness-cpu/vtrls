@@ -117,6 +117,14 @@ input double   InpPointValuePerLot  = 0;      // valore di 1 punto per 1.00 lott
 input string   InpPointValueSymbol  = "";     // simbolo REALE del broker da cui leggere il valore del tick (es. AUDJPY): serve se il simbolo analizzato e' personalizzato (QDM) e il valore letto non e' corretto
 input ENUM_RANK_SIDE InpRankSide    = RS_FOLLOW; // verso studiato nelle classifiche A/B: solo il verso del segnale (come un EA che apre dove dice il segnale), oppure anche l'inverso
 
+input group "=== GESTIONE SIMULATA (stop ATR, trailing, durata massima) ==="
+input bool     InpMgmt              = true;   // simula la gestione di un EA su ogni segnale: stop iniziale e trailing in multipli dell'ATR, uscita alla durata massima; misura i punti presi per segnale e la durata consigliata
+input string   InpMgmtTFs           = "ALL";  // TF da simulare: ALL oppure elenco (es. M5,M15,H1); i TF con molti segnali sono campionati
+input int      InpMgmtAtrLen        = 14;     // periodo dell'ATR del TF del segnale
+input string   InpMgmtSlAtr         = "1,1.5,2"; // stop iniziale in multipli dell'ATR (massimo 6 valori)
+input string   InpMgmtTrailAtr      = "0,1";  // trailing: distanza in multipli dell'ATR (0 = nessun trailing, massimo 5 valori)
+input int      InpMgmtMaxSignals    = 60000;  // massimo di segnali simulati per TF (campionamento uniforme)
+
 input group "=== PROVE DI STRESS ==="
 input bool     InpStress            = true;   // tabella di stress: rifa' le regole migliori della tabella A con ingresso ritardato e costi piu' alti
 input string   InpStressLags        = "0,1,2,3,5,10,15,30"; // ritardi d'ingresso in minuti dopo la chiusura del segnale (massimo 10 valori, lo zero e' sempre il riferimento)
@@ -259,6 +267,8 @@ int      g_slag[];
 double   g_sext[];
 int      g_nSlag = 0, g_nSext = 0;
 string   g_cStress = "";
+string   g_cMgmt = "";
+double   g_atr[];            // ATR (punti) del TF del segnale, sulla barra del segnale, parallelo a g_ent
 string   g_fixedNote = "";   // problema nella regola fissa (vuoto se va bene)
 
 //--- denaro: valore di 1 punto per 1.00 lotto nella valuta del conto, commissione in punti, costo extra totale in punti
@@ -308,6 +318,7 @@ double   g_cbSum[];              // [t][NCAT][b] somma MFE medio (buy+sell)/2
 //    kk: 0 = uscita a solo tempo, 1..nL = target; dd: 0 = segui, 1 = inverti; smp: 0 = IS, 1 = OOS
 double   g_plcQ[];           // placebo: quota di acquisti dei segnali per [t][fascia][IS/OOS]
 void     BuildPlcQ();
+void     MgmtSetup();
 double   g_rkP[], g_rgP[];   // placebo: stesse regole e stessi istanti, direzione di ogni segnale sostituita da una casuale
 bool     g_plc = false;
 bool     g_cPok = false;
@@ -965,6 +976,7 @@ bool SetupInputs()
     g_nSlag = ArraySize(g_slag);
     g_nSext = ParseNonNegList(InpStressExtra, g_sext, 6, 1000.0);
    }
+   MgmtSetup();
    return true;
   }
 
@@ -1269,6 +1281,8 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
      }
    uchar ibn[];
    SD_IntensityBins(r, n, g_vpar.atrLen, g_ibEdge, ibn);      // intensita' della candela del segnale (TR/ATR), anche senza stato di volatilita'
+   double atrM[];
+   if(InpMgmt) SD_Atr(r, n, MathMax(2, InpMgmtAtrLen), atrM);
 
    const long   xs      = g_tfSec[t];
    const long   maxGap  = (long)InpMaxEntryGapMin * 60L;
@@ -1281,6 +1295,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    ArrayResize(g_bur,  need, 2000000);
    ArrayResize(g_slot, need, 2000000);
    ArrayResize(g_vs,   need, 2000000);
+   ArrayResize(g_atr,  need, 2000000);
    if(g_nSets > 1) { ArrayResize(g_dirAlt, need, 2000000); ArrayResize(g_burAlt, need, 2000000); }
 
    int u = g_used, p = 0;
@@ -1302,6 +1317,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
       if(g_nSets > 1) { g_dirAlt[u] = dir2[i]; g_burAlt[u] = bur2[i]; if(dir2[i] != 0) ev2++; }
       g_vs[u]   = InpUseVolState ? ((i >= g_volWarm) ? vsc[i] : (uchar)255) : (uchar)10;   // 255 = finestra del percentile incompleta
       g_slot[u] = (ushort)(slotOK ? (int)(((long)r[i].time % g_parentSec) / xs) : 0);
+      g_atr[u]  = (InpMgmt && i < ArraySize(atrM)) ? atrM[i] / g_pt : 0.0;
       if(dir[i] != 0) ev++;
       NxBar(t, r, n, i, p, xs, (xs < 86400L), (long)InpMaxGapMin * 60L, (int)ibn[i], g_vs[u], (int)dir[i],
             (g_nSets > 1) ? (int)dir2[i] : 0);
@@ -1320,6 +1336,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    ArrayResize(g_bur,  g_used);
    ArrayResize(g_slot, g_used);
    ArrayResize(g_vs,   g_used);
+   ArrayResize(g_atr,  g_used);
    if(g_nSets > 1) { ArrayResize(g_dirAlt, g_used); ArrayResize(g_burAlt, g_used); }
    Print("TF ", g_tfName[t], ": barre ", n, " | in periodo ", bars, " | segnali ", ev, (g_nSets > 1 ? (" / " + IntegerToString(ev2) + " (EXP_ADDED)") : ""),
          " | scartate gap sessione ", rejGap, " | senza M1 ", rejM1);
@@ -2826,6 +2843,439 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
          string(g_slag[liRef] > 0 ? (" e " + Sg(popMRef) + " pt con " + IS(g_slag[liRef]) + " min di ritardo" + string(g_money ? (" (" + MnyU(popMRef) + " a posizione con " + LotTxt() + " lotti)") : "")) : "") + ". ";
    tx += "Una regola che non regge a pochi minuti di ritardo o a pochi punti di costo non e' operabile in un conto reale. " + cardTxt;
    g_cStress = tx;
+  }
+
+//+------------------------------------------------------------------+
+//| GESTIONE SIMULATA                                                 |
+//| Per ogni segnale simula una posizione aperta all'open d'ingresso  |
+//| con stop iniziale e trailing in multipli dell'ATR del TF del      |
+//| segnale e con una durata massima (tutti gli orizzonti insieme):   |
+//| misura i punti presi in media per segnale, lordi e netti dei      |
+//| costi. Percorso sulle barre M1; dentro la barra lo stop usa il    |
+//| massimo delle barre precedenti (ordine intrabarra sconosciuto).   |
+//+------------------------------------------------------------------+
+#define MGF 5            // campi per cella: n, netto, netto^2, lordo, uscite per stop
+int     g_mgTf[];        // TF simulati (indici in g_tfName)
+double  g_mgSl[], g_mgTr[];
+int     g_mgNtf = 0, g_mgNsl = 0, g_mgNtr = 0, g_mgR = 0;
+double  g_mgAcc[];       // [TF simulato][fascia][regola][orizzonte][IS/OOS][MGF]
+double  g_mgCl[];        // somme per il t raggruppato per giorno: [TF simulato][regola][orizzonte][IS/OOS][3]
+int     g_mgUsed[];      // segnali simulati per TF
+int     g_mgSeen[];      // segnali del TF con ATR valido e finestra completa (prima del campionamento)
+
+//--- TF da simulare (InpMgmtTFs: ALL oppure elenco) e griglie di stop e trailing
+void MgmtSetup()
+  {
+   ArrayResize(g_mgTf, 0);
+   string src = InpMgmtTFs;
+   StringTrimLeft(src); StringTrimRight(src); StringToUpper(src);
+   if(src == "ALL" || src == "")
+     {
+      ArrayResize(g_mgTf, g_nT);
+      for(int t = 0; t < g_nT; t++) g_mgTf[t] = t;
+     }
+   else
+     {
+      string parts[];
+      const int np = StringSplit(src, ',', parts);
+      for(int q = 0; q < np; q++)
+        {
+         string pp = parts[q];
+         StringTrimLeft(pp); StringTrimRight(pp);
+         for(int t = 0; t < g_nT; t++)
+            if(g_tfName[t] == pp)
+              {
+               const int k = ArraySize(g_mgTf);
+               ArrayResize(g_mgTf, k + 1);
+               g_mgTf[k] = t;
+              }
+        }
+     }
+   g_mgNtf = ArraySize(g_mgTf);
+   g_mgNsl = ParseDoubleList(InpMgmtSlAtr, g_mgSl);
+   if(g_mgNsl > 6) { ArrayResize(g_mgSl, 6); g_mgNsl = 6; }
+   g_mgNtr = ParseNonNegList(InpMgmtTrailAtr, g_mgTr, 5, 50.0);
+   g_mgR   = g_mgNsl * g_mgNtr;
+  }
+
+//--- primo indice >= from con tempo >= tEnd (g_n1 se non esiste)
+int MgLower(const long tEnd, const int from)
+  {
+   int lo = from, hi = g_n1;
+   while(lo < hi)
+     {
+      const int mid = (lo + hi) / 2;
+      if((long)g_m1Time[mid] < tEnd) lo = mid + 1; else hi = mid;
+     }
+   return lo;
+  }
+
+//--- svuota la somma giornaliera di una cella nelle somme per il t raggruppato
+void MgFlush(const int m, const int r, const int c, const int idx, const int &curSmp[], double &curS[], double &curN[])
+  {
+   if(curN[idx] <= 0.0) return;
+   const int p = ((((m * g_mgR + r) * g_nH + c) * 2 + curSmp[idx]) * 3);
+   g_mgCl[p]     += curS[idx] * curS[idx];
+   g_mgCl[p + 1] += curS[idx] * curN[idx];
+   g_mgCl[p + 2] += curN[idx] * curN[idx];
+   curS[idx] = 0.0;
+   curN[idx] = 0.0;
+  }
+
+void MgmtCompute()
+  {
+   const int nM = g_mgNtf, nC = g_nH, R = g_mgR;
+   const double pt = g_pt;
+   ArrayResize(g_mgAcc, nM * g_nRB * R * nC * 2 * MGF);
+   ArrayInitialize(g_mgAcc, 0.0);
+   ArrayResize(g_mgCl, nM * R * nC * 2 * 3);
+   ArrayInitialize(g_mgCl, 0.0);
+   ArrayResize(g_mgUsed, nM);
+   ArrayInitialize(g_mgUsed, 0);
+   ArrayResize(g_mgSeen, nM);
+   ArrayInitialize(g_mgSeen, 0);
+   double slp[], trd[], S[], HW[], exitP[];
+   bool opn[], okc[];
+   int recBar[];
+   ArrayResize(slp, R); ArrayResize(trd, R); ArrayResize(S, R); ArrayResize(HW, R); ArrayResize(exitP, R);
+   ArrayResize(opn, R); ArrayResize(okc, nC); ArrayResize(recBar, nC);
+   for(int isl = 0; isl < g_mgNsl; isl++)
+      for(int it = 0; it < g_mgNtr; it++)
+        {
+         slp[isl * g_mgNtr + it] = g_mgSl[isl];
+         trd[isl * g_mgNtr + it] = g_mgTr[it];
+        }
+   int curSmp[];
+   double curS[], curN[];
+   int curDay[];
+   ArrayResize(curSmp, R * nC); ArrayResize(curS, R * nC); ArrayResize(curN, R * nC); ArrayResize(curDay, R * nC);
+   const long rbSec = (long)g_rbMin * 60L;
+   for(int m = 0; m < nM; m++)
+     {
+      const int t = g_mgTf[m];
+      ArrayInitialize(curS, 0.0); ArrayInitialize(curN, 0.0); ArrayInitialize(curDay, -1); ArrayInitialize(curSmp, 0);
+      int nSig = 0;
+      for(int k = g_tfOff[t]; k < g_tfOff[t] + g_tfCnt[t]; k++) if(g_dir[k] != 0) nSig++;
+      const int stride = MathMax(1, (nSig + MathMax(1, InpMgmtMaxSignals) - 1) / MathMax(1, InpMgmtMaxSignals));
+      int seen = 0, used = 0;
+      for(int k = g_tfOff[t]; k < g_tfOff[t] + g_tfCnt[t]; k++)
+        {
+         const int d = (int)g_dir[k];
+         if(d == 0) continue;
+         seen++;
+         if(((seen - 1) % stride) != 0) continue;
+         const double atr = g_atr[k];
+         if(atr <= 0.0) continue;
+         const int j = StressBase(k);
+         if(j < 0) continue;
+         const long t0 = (long)g_m1Time[j];
+         int eLast = -1;
+         for(int c = 0; c < nC; c++)
+           {
+            const long tEnd = t0 + (long)g_hor[c] * 60L;
+            const int e = MgLower(tEnd, j);
+            okc[c] = (e < g_n1 && e > j && (g_nextBrk[j] >= e || (g_nextBrk[j] == e - 1 && (long)g_m1Time[e - 1] + 60L >= tEnd)));
+            recBar[c] = e - 1;
+            if(okc[c] && e > eLast) eLast = e;
+           }
+         if(eLast < 0) continue;
+         used++;
+         const double o = g_m1Open[j];
+         const double cost = ((InpCostPoints > 0.0) ? InpCostPoints : (double)g_m1Spr[j]) + g_extraPts;
+         const int smp = (g_m1Day[j] >= g_splitDay) ? 1 : 0;
+         const int day = g_m1Day[j];
+         const int rb = (int)(((((long)g_m1Time[j] + g_off) % 86400L) + 86400L) % 86400L / rbSec);
+         const int base = ((m * g_nRB + rb) * R);
+         int nOpen = R;
+         for(int r = 0; r < R; r++) { S[r] = -slp[r] * atr; HW[r] = 0.0; opn[r] = true; exitP[r] = 0.0; }
+         int nc = 0;
+         double fc = 0.0;
+         for(int b = j; b < eLast; b++)
+           {
+            const double hi = g_m1High[b], lo = g_m1Low[b], op = g_m1Open[b], cl = g_m1Close[b];
+            double fh, fl, fo;
+            if(d > 0) { fh = (hi - o) / pt; fl = (lo - o) / pt; fo = (op - o) / pt; fc = (cl - o) / pt; }
+            else      { fh = (o - lo) / pt; fl = (o - hi) / pt; fo = (o - op) / pt; fc = (o - cl) / pt; }
+            for(int r = 0; r < R; r++)
+              {
+               if(!opn[r]) continue;
+               if(fl <= S[r])
+                 {
+                  exitP[r] = (fo <= S[r]) ? fo : S[r];
+                  opn[r] = false;
+                  nOpen--;
+                 }
+               else
+                 {
+                  if(fh > HW[r]) HW[r] = fh;
+                  const double tr = trd[r] * atr;
+                  if(tr > 0.0 && HW[r] >= tr)
+                    {
+                     const double ns = HW[r] - tr;
+                     if(ns > S[r]) S[r] = ns;
+                    }
+                 }
+              }
+            while(nc < nC)
+              {
+               if(!okc[nc]) { nc++; continue; }
+               if(recBar[nc] > b) break;
+               for(int r = 0; r < R; r++)
+                 {
+                  const double gr = opn[r] ? fc : exitP[r];
+                  const double nt = gr - cost;
+                  const int p = ((((base + r) * nC + nc) * 2 + smp) * MGF);
+                  g_mgAcc[p]     += 1.0;
+                  g_mgAcc[p + 1] += nt;
+                  g_mgAcc[p + 2] += nt * nt;
+                  g_mgAcc[p + 3] += gr;
+                  if(!opn[r]) g_mgAcc[p + 4] += 1.0;
+                  const int ix = r * nC + nc;
+                  if(curDay[ix] != day) { MgFlush(m, r, nc, ix, curSmp, curS, curN); curDay[ix] = day; curSmp[ix] = smp; }
+                  curS[ix] += nt;
+                  curN[ix] += 1.0;
+                 }
+               nc++;
+              }
+            if(nOpen == 0) break;
+           }
+         //--- tutte le posizioni chiuse prima della fine: gli orizzonti restanti hanno il risultato dell'uscita
+         while(nc < nC)
+           {
+            if(okc[nc])
+              {
+               for(int r = 0; r < R; r++)
+                 {
+                  const double gr = exitP[r];
+                  const double nt = gr - cost;
+                  const int p = ((((base + r) * nC + nc) * 2 + smp) * MGF);
+                  g_mgAcc[p]     += 1.0;
+                  g_mgAcc[p + 1] += nt;
+                  g_mgAcc[p + 2] += nt * nt;
+                  g_mgAcc[p + 3] += gr;
+                  g_mgAcc[p + 4] += 1.0;
+                  const int ix = r * nC + nc;
+                  if(curDay[ix] != day) { MgFlush(m, r, nc, ix, curSmp, curS, curN); curDay[ix] = day; curSmp[ix] = smp; }
+                  curS[ix] += nt;
+                  curN[ix] += 1.0;
+                 }
+              }
+            nc++;
+           }
+        }
+      for(int r = 0; r < R; r++)
+         for(int c = 0; c < nC; c++) MgFlush(m, r, c, r * nC + c, curSmp, curS, curN);
+      g_mgUsed[m] = used;
+      g_mgSeen[m] = nSig;
+     }
+  }
+
+//--- somme di una cella (TF simulato, regola, orizzonte) sulle fasce; smpSel -1 = tutto, 0 = in-sample, 1 = fuori campione
+void MgSum(const int m, const int r, const int c, const int smpSel, double &n, double &sn, double &sn2, double &sg, double &ss)
+  {
+   n = 0.0; sn = 0.0; sn2 = 0.0; sg = 0.0; ss = 0.0;
+   for(int rb = 0; rb < g_nRB; rb++)
+      for(int s = 0; s < 2; s++)
+        {
+         if(smpSel >= 0 && s != smpSel) continue;
+         const int p = ((((m * g_nRB + rb) * g_mgR + r) * g_nH + c) * 2 + s) * MGF;
+         n += g_mgAcc[p]; sn += g_mgAcc[p + 1]; sn2 += g_mgAcc[p + 2]; sg += g_mgAcc[p + 3]; ss += g_mgAcc[p + 4];
+        }
+  }
+
+//--- t del netto medio con errore standard raggruppato per giorno (i segnali dello stesso giorno condividono il percorso del prezzo)
+double MgClT(const int m, const int r, const int c, const int smpSel)
+  {
+   double n, sn, sn2, sg, ss;
+   MgSum(m, r, c, smpSel, n, sn, sn2, sg, ss);
+   if(n < 2.0) return 0.0;
+   const double mu = sn / n;
+   double a = 0.0, b = 0.0, cc = 0.0;
+   for(int s = 0; s < 2; s++)
+     {
+      if(smpSel >= 0 && s != smpSel) continue;
+      const int p = ((((m * g_mgR + r) * g_nH + c) * 2 + s) * 3);
+      a += g_mgCl[p]; b += g_mgCl[p + 1]; cc += g_mgCl[p + 2];
+     }
+   const double v = a - 2.0 * mu * b + mu * mu * cc;
+   return (v > 0.0) ? mu / (MathSqrt(v) / n) : 0.0;
+  }
+
+string MgRuleLbl(const int r)
+  {
+   const int isl = r / g_mgNtr, itr = r % g_mgNtr;
+   return "SL " + PtLbl(g_mgSl[isl]) + " ATR, " + string(g_mgTr[itr] > 0.0 ? ("trailing " + PtLbl(g_mgTr[itr]) + " ATR") : "senza trailing");
+  }
+
+string MgCapLbl(const int c, const int t)
+  {
+   return IS(g_hor[c]) + " min (" + F1((double)g_hor[c] / MathMax(1.0, (double)g_tfSec[t] / 60.0)) + " candele)";
+  }
+
+void RepMgmt()
+  {
+   g_cMgmt = "";
+   if(!InpMgmt || g_mgNtf < 1 || g_mgR < 1) return;
+   MgmtCompute();
+   const int nM = g_mgNtf, nC = g_nH, R = g_mgR;
+   const double minIs = 50.0;
+   W("<h2>Gestione simulata: punti presi in media per segnale con stop ATR, trailing e durata massima</h2>");
+   W("<div class='note'>Ogni segnale apre una posizione nel suo verso all'open della barra M1 d'ingresso. <b>Stop iniziale</b> e <b>trailing</b> sono in multipli dell'ATR(" + IS(InpMgmtAtrLen) +
+     ") del TF del segnale (calcolato sulla barra del segnale); il trailing parte quando il profitto raggiunge la sua distanza e porta lo stop a (massimo favorevole &minus; distanza), senza mai allontanarlo. "
+     "La posizione esce allo stop oppure alla <b>durata massima</b> (colonne = orizzonti). Dentro la barra M1 lo stop usa il massimo delle barre precedenti (ordine sconosciuto: scelta prudente). "
+     "<b>Lordo</b> = punti presi prima dei costi; <b>netto</b> = dopo spread, commissione e costo extra. Per i TF con molti segnali si simula un campione uniforme (massimo " + IS(InpMgmtMaxSignals) + " per TF). "
+     "La miglior combinazione per TF e' scelta sul primo periodo (in-sample) e verificata sul resto: <b>solo il fuori campione conta</b>. Il t e' raggruppato per giorno.</div>");
+
+   //--- scelta per TF
+   int bR[], bC[], pC[];
+   double bIs[], bOos[], bOosT[], bGross[], bOosN[], bStop[];
+   ArrayResize(bR, nM); ArrayResize(bC, nM); ArrayResize(pC, nM);
+   ArrayResize(bIs, nM); ArrayResize(bOos, nM); ArrayResize(bOosT, nM); ArrayResize(bGross, nM); ArrayResize(bOosN, nM); ArrayResize(bStop, nM);
+   int nPos = 0, nTested = 0;
+   for(int m = 0; m < nM; m++)
+     {
+      bR[m] = -1; bC[m] = -1; pC[m] = -1;
+      double best = -1.0e18;
+      for(int r = 0; r < R; r++)
+         for(int c = 0; c < nC; c++)
+           {
+            double n, sn, sn2, sg, ss;
+            MgSum(m, r, c, 0, n, sn, sn2, sg, ss);
+            if(n < minIs) continue;
+            if(sn / n > best) { best = sn / n; bR[m] = r; bC[m] = c; }
+           }
+      if(bR[m] < 0) continue;
+      nTested++;
+      //--- durata consigliata: la piu' breve che raggiunge almeno il 90% del miglior netto in-sample (se positivo)
+      pC[m] = bC[m];
+      if(best > 0.0)
+         for(int c = 0; c < nC; c++)
+           {
+            double n, sn, sn2, sg, ss;
+            MgSum(m, bR[m], c, 0, n, sn, sn2, sg, ss);
+            if(n >= minIs && sn / n >= 0.9 * best) { pC[m] = c; break; }
+           }
+      double n0, a0, b0, g0, s0;
+      MgSum(m, bR[m], pC[m], 0, n0, a0, b0, g0, s0);
+      bIs[m] = (n0 > 0.0) ? a0 / n0 : 0.0;
+      double n1, a1, b1, g1, s1;
+      MgSum(m, bR[m], pC[m], 1, n1, a1, b1, g1, s1);
+      bOosN[m] = n1;
+      bOos[m] = (n1 > 0.0) ? a1 / n1 : 0.0;
+      bOosT[m] = MgClT(m, bR[m], pC[m], 1);
+      double na, aa, ba, ga, sa;
+      MgSum(m, bR[m], pC[m], -1, na, aa, ba, ga, sa);
+      bGross[m] = (na > 0.0) ? ga / na : 0.0;
+      bStop[m] = (na > 0.0) ? 100.0 * sa / na : 0.0;
+      if(bOosN[m] >= MathMax(10.0, minIs / 3.0) && bOos[m] > 0.0 && bOosT[m] >= 2.0) nPos++;
+     }
+
+   //--- confronto fra time frame
+   W("<h3>Confronto fra time frame (miglior gestione scelta in-sample, risultato fuori campione)</h3>");
+   W("<table><tr><th>TF</th><th>Segnali simulati</th><th>Miglior gestione in-sample</th><th>Durata consigliata</th><th>Lordo medio (pt)</th><th>Netto in-sample (pt)</th>"
+     "<th>Netto fuori campione (pt)</th><th>Netto fuori campione (" + g_ccy + ")</th><th>t fuori campione</th><th>Uscite per stop</th><th>Esito</th></tr>");
+   for(int m = 0; m < nM; m++)
+     {
+      const int t = g_mgTf[m];
+      if(bR[m] < 0)
+        { W("<tr class='thin'><td>" + g_tfName[t] + "</td><td colspan='10'>campione insufficiente (" + IS(g_mgUsed[m]) + " segnali simulati)</td></tr>"); continue; }
+      string es;
+      if(bOosN[m] < MathMax(10.0, minIs / 3.0)) es = Td("OOS scarso", "#4c566a");
+      else if(bOos[m] > 0.0 && bOosT[m] >= 2.0) es = Td("<b>POSITIVO</b>", "#a3be8c");
+      else if(bOos[m] > 0.0) es = Td("debole", "#ebcb8b");
+      else es = Td("NO", "#bf616a");
+      W("<tr><td>" + g_tfName[t] + "</td>" + Td(F0(g_mgUsed[m]) + " su " + F0(g_mgSeen[m])) + Td(MgRuleLbl(bR[m])) + Td(MgCapLbl(pC[m], t)) +
+        Td(F1(bGross[m]), ColSign(bGross[m])) + Td(F1(bIs[m]), ColSign(bIs[m])) + Td("<b>" + F1(bOos[m]) + "</b>", ColSign(bOos[m])) +
+        Td(Mny(bOos[m]), ColSign(bOos[m])) + Td(F2(bOosT[m]), ColT(bOosT[m])) + Td(F0(bStop[m]) + "%") + es + "</tr>");
+      g_dg += "MGMTBEST|" + g_tfName[t] + "|sl|" + PtLbl(g_mgSl[bR[m] / g_mgNtr]) + "|trail|" + PtLbl(g_mgTr[bR[m] % g_mgNtr]) + "|hold|" + IS(g_hor[pC[m]]) +
+              "|signals|" + F0(g_mgUsed[m]) + "|gross|" + F1(bGross[m]) + "|netis|" + F1(bIs[m]) + "|netoos|" + F1(bOos[m]) + "|oosn|" + F0(bOosN[m]) + "|oost|" + F2(bOosT[m]) +
+              "|stoppct|" + F0(bStop[m]) + "\n";
+     }
+   W("</table>");
+   const double expPos = 0.0228 * (double)nTested;
+   W("<div class='note'>TF con netto fuori campione positivo e t &ge; 2: <b>" + IS(nPos) + "</b> su " + IS(nTested) + " (per puro caso, con una scelta per TF, se ne attendono circa " + F1(expPos) +
+     "). Il lordo &egrave; ci&ograve; che la sola direzione del segnale porta con quella gestione, senza costi: se &egrave; vicino a zero in tutte le combinazioni la gestione non crea un vantaggio, ridistribuisce soltanto vincite e perdite.</div>");
+
+   //--- dettaglio per TF
+   for(int m = 0; m < nM; m++)
+     {
+      const int t = g_mgTf[m];
+      if(bR[m] < 0) continue;
+      W("<details><summary><b>" + g_tfName[t] + "</b> &mdash; dettaglio per gestione e durata, e per orario</summary>");
+      W("<h3>" + g_tfName[t] + ": netto medio per segnale (pt) per gestione e durata massima &mdash; lordo fra parentesi</h3>");
+      W("<table><tr><th>Gestione</th>");
+      for(int c = 0; c < nC; c++) W("<th>" + IS(g_hor[c]) + " min</th>");
+      W("</tr>");
+      for(int r = 0; r < R; r++)
+        {
+         W("<tr><td>" + MgRuleLbl(r) + "</td>");
+         for(int c = 0; c < nC; c++)
+           {
+            double n, sn, sn2, sg, ss, n0, a0, b0, g0, s0, n1, a1, b1, g1, s1;
+            MgSum(m, r, c, -1, n, sn, sn2, sg, ss);
+            MgSum(m, r, c, 0, n0, a0, b0, g0, s0);
+            MgSum(m, r, c, 1, n1, a1, b1, g1, s1);
+            if(n < 1.0) { W("<td>-</td>"); continue; }
+            const string tip = " title='segnali " + F0(n) + ", in-sample " + F1(n0 > 0.0 ? a0 / n0 : 0.0) + ", fuori campione " + F1(n1 > 0.0 ? a1 / n1 : 0.0) + ", uscite per stop " + F0(100.0 * ss / n) + "%'";
+            const bool isBest = (r == bR[m] && c == pC[m]);
+            W("<td style='color:" + ColSign(sn / n) + string(isBest ? ";font-weight:bold;border:1px solid #88c0d0" : "") + "'" + tip + ">" + F1(sn / n) + " (" + F1(sg / n) + ")</td>");
+            g_dg += "MGMT|" + g_tfName[t] + "|sl|" + PtLbl(g_mgSl[r / g_mgNtr]) + "|trail|" + PtLbl(g_mgTr[r % g_mgNtr]) + "|hold|" + IS(g_hor[c]) + "|n|" + F0(n) + "|gross|" + F1(sg / n) +
+                    "|net|" + F1(sn / n) + "|netis|" + F1(n0 > 0.0 ? a0 / n0 : 0.0) + "|netoos|" + F1(n1 > 0.0 ? a1 / n1 : 0.0) + "|stoppct|" + F0(100.0 * ss / n) + "\n";
+           }
+         W("</tr>");
+        }
+      W("</table>");
+      //--- per orario, con la gestione scelta
+      W("<h3>" + g_tfName[t] + ": per orario d'ingresso con " + MgRuleLbl(bR[m]) + ", durata massima " + MgCapLbl(pC[m], t) + "</h3>");
+      W("<table><tr><th>Fascia (server + offset)</th><th>Segnali</th><th>Lordo medio (pt)</th><th>Netto medio (pt)</th><th>Netto in-sample</th><th>Netto fuori campione</th><th>Fra le due parti</th></tr>");
+      for(int rb = 0; rb < g_nRB; rb++)
+        {
+         double n[2], sn[2], sg[2];
+         for(int s = 0; s < 2; s++)
+           {
+            const int p = ((((m * g_nRB + rb) * R + bR[m]) * nC + pC[m]) * 2 + s) * MGF;
+            n[s] = g_mgAcc[p]; sn[s] = g_mgAcc[p + 1]; sg[s] = g_mgAcc[p + 3];
+           }
+         const double nt = n[0] + n[1];
+         if(nt < 1.0) continue;
+         const bool thin = (nt < (double)InpMinPerBucket);
+         string cons;
+         if(n[0] < 10.0 || n[1] < 5.0) cons = "campione scarso";
+         else if(sn[0] / n[0] > 0.0 && sn[1] / n[1] > 0.0) cons = "coerente +";
+         else if(sn[0] / n[0] < 0.0 && sn[1] / n[1] < 0.0) cons = "coerente -";
+         else cons = "INCOERENTE";
+         W("<tr" + string(thin ? " class='thin'" : "") + "><td>" + RBktLabel(rb) + "</td>" + Td(F0(nt)) + Td(F1((sg[0] + sg[1]) / nt)) + Td(F1((sn[0] + sn[1]) / nt), ColSign(sn[0] + sn[1])) +
+           Td(n[0] > 0.0 ? F1(sn[0] / n[0]) : "-") + Td(n[1] > 0.0 ? F1(sn[1] / n[1]) : "-") + Td(cons) + "</tr>");
+         g_dg += "MGMTH|" + g_tfName[t] + "|" + RBktLabel(rb) + "|n|" + F0(nt) + "|gross|" + F1((sg[0] + sg[1]) / nt) + "|net|" + F1((sn[0] + sn[1]) / nt) +
+                 "|netis|" + (n[0] > 0.0 ? F1(sn[0] / n[0]) : string("-")) + "|netoos|" + (n[1] > 0.0 ? F1(sn[1] / n[1]) : string("-")) + "\n";
+        }
+      W("</table></details>");
+     }
+
+   //--- testo per il riepilogo
+   string tx = "Gestione simulata con stop e trailing in multipli dell'ATR e durata massima, su " + IS(nM) + " TF (campione fino a " + IS(InpMgmtMaxSignals) + " segnali per TF): ";
+   int bestM = -1;
+   for(int m = 0; m < nM; m++)
+      if(bR[m] >= 0 && bOosN[m] >= MathMax(10.0, minIs / 3.0) && (bestM < 0 || bOos[m] > bOos[bestM])) bestM = m;
+   if(bestM < 0)
+      tx += "campione insufficiente per valutare i TF. ";
+   else
+     {
+      tx += "TF con netto fuori campione positivo e t >= 2: " + IS(nPos) + " su " + IS(nTested) + " (per caso se ne attendono circa " + F1(expPos) + "). ";
+      const int tb = g_mgTf[bestM];
+      tx += "Il migliore fuori campione e' " + g_tfName[tb] + " con " + MgRuleLbl(bR[bestM]) + " e durata massima " + MgCapLbl(pC[bestM], tb) + ": lordo medio " + Sg(bGross[bestM]) + " pt per segnale, netto in-sample " + Sg(bIs[bestM]) +
+            " pt, netto fuori campione " + Sg(bOos[bestM]) + " pt" + string(g_money ? (" (" + MnyU(bOos[bestM]) + " a segnale con " + LotTxt() + " lotti)") : "") + " (t " + F2(bOosT[bestM]) + "). ";
+      double sumG = 0.0, sumN = 0.0;
+      int cnt = 0;
+      for(int m = 0; m < nM; m++) if(bR[m] >= 0) { sumG += bGross[m]; sumN += bOos[m]; cnt++; }
+      if(cnt > 0)
+         tx += "Sulla media dei TF la miglior gestione di ciascuno prende " + Sg(sumG / cnt) + " pt lordi e " + Sg(sumN / cnt) + " pt netti fuori campione per segnale. ";
+      if(nPos == 0)
+         tx += "Nessun TF mostra un netto positivo e significativo fuori campione: con questi segnali una gestione a stop ATR e trailing non porta punti oltre i costi, in nessun time frame.";
+      else
+         tx += "I TF positivi sono candidati da confermare su altri simboli e periodi, non conferme: la scelta della miglior gestione per TF e' ottimizzata sul primo periodo.";
+     }
+   g_cMgmt = tx;
   }
 
 //--- regola fissa dell'utente (InpFixedRule): TF, inizio fascia, verso, tenuta, target; false (con nota) se non valida o non presente nelle griglie
@@ -4797,6 +5247,7 @@ void BuildConclusions(const int sIdx)
               " cambiano segno. La distanza fra il profitto promesso qui e quello della tabella A e' la misura del rumore di selezione.");
      }
 
+   if(g_cMgmt != "") AddConc(sIdx, "Gestione simulata", g_cMgmt);
    if(g_cStress != "") AddConc(sIdx, "Prove di stress", g_cStress);
 
    //--- fattibilita' di un EA che apre nel verso del segnale (lotto ipotetico, costi inclusi)
@@ -5109,7 +5560,7 @@ void ReportSet(const int sIdx)
    g_zB = ZCrit(MathMax(1, m));
 
    g_dg = "";
-   g_cAok = false; g_cBok = false; g_cPok = false; g_cPstrong = 0; g_cPstrongN = 0; g_cAstrongN = 0; g_cAone = 0; g_cPusable = 0; g_cPpos = 0; g_cPbest = 0.0; g_cAns = 0; g_cAsurv = ""; g_cAsurvMean = 0.0; g_cAsurvN = 0.0; g_cBdesc = ""; g_cBsumAll = 0.0; g_cStress = "";
+   g_cAok = false; g_cBok = false; g_cPok = false; g_cPstrong = 0; g_cPstrongN = 0; g_cAstrongN = 0; g_cAone = 0; g_cPusable = 0; g_cPpos = 0; g_cPbest = 0.0; g_cAns = 0; g_cAsurv = ""; g_cAsurvMean = 0.0; g_cAsurvN = 0.0; g_cBdesc = ""; g_cBsumAll = 0.0; g_cStress = ""; g_cMgmt = "";
    W("<div class='sec' style='order:" + IS(3 + sIdx) + "'>");
    W("<h1 class='setH'>Serie " + IS(sIdx + 1) + " di " + IS(g_nSets) + " &mdash; " + g_setName[sIdx] + "</h1>");
    W("<div class='note'>" + g_setNote[sIdx] + " Soglia di Bonferroni su " + IS(m) + " celle TF x orizzonte: |t| &ge; <b>" + F2(g_zB) + "</b>.</div>");
@@ -5122,6 +5573,7 @@ void ReportSet(const int sIdx)
    RepNoiseIntro();
    RepBestTF();
    RepRank();
+   RepMgmt();
    RepBestTFNoise();
    RepRankNoise();
    RepVolState();
