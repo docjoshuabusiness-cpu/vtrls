@@ -591,7 +591,9 @@ void SetupMoney()
       const double ts = SymbolInfoDouble(src, SYMBOL_TRADE_TICK_SIZE);
       const double cs = SymbolInfoDouble(src, SYMBOL_TRADE_CONTRACT_SIZE);
       const string pc = SymbolInfoString(src, SYMBOL_CURRENCY_PROFIT);
-      if(tv > 0.0 && ts > 0.0)
+      //--- un simbolo personalizzato (QDM) riporta spesso un valore del tick di default: lo si usa solo se non c'e' alternativa
+      const bool untrusted = (src == _Symbol && SymbolInfoInteger(_Symbol, SYMBOL_CUSTOM) != 0 && cs > 0.0 && pc != "" && pc != g_ccy);
+      if(tv > 0.0 && ts > 0.0 && !untrusted)
         {
          g_pv = tv / ts * g_pt;
          g_pvInfo = "valore letto da " + src;
@@ -622,6 +624,11 @@ void SetupMoney()
                g_pvInfo = "valore calcolato dal cambio " + crs[q] + " = " + DoubleToString(bid, 3) + " (contratto " + F0(cs) + " x " + DoubleToString(g_pt, _Digits) + " " + pc + " per punto e per lotto)";
               }
            }
+        }
+      if(g_pv <= 0.0 && tv > 0.0 && ts > 0.0)
+        {
+         g_pv = tv / ts * g_pt;
+         g_pvInfo = "ATTENZIONE: simbolo personalizzato, valore del tick non verificabile (" + F2(cs * g_pt / g_pv) + " " + pc + " = 1 " + g_ccy + "): imposta InpPointValueSymbol o InpPointValuePerLot";
         }
       if(g_pv <= 0.0)
          g_pvInfo += string(g_pvInfo != "" ? "; " : "") + "il valore del tick non e' leggibile da '" + src + "'";
