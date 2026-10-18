@@ -4,7 +4,8 @@
 //|  ordinati dal piu' vecchio al piu' recente (non-series), cosi'   |
 //|  puo' essere riusata da script di ricerca su storico completo.   |
 //|                                                                  |
-//|  Replica fedelmente (senza filtri ADX / S/R / regime vol):       |
+//|  Replica fedelmente (i filtri ADX e regime vol sono applicati    |
+//|  dallo script a valle; SD_Adx / SD_VolState li calcolano):       |
 //|   - Synthetic Delta  (GetDeltaDirection)                          |
 //|   - Expansion Candle (GetExpansionDirection, con stato pending)   |
 //|   - CombineDirections (DELTA / EXP / AND / OR)                    |
@@ -71,6 +72,46 @@ void SD_Atr(const MqlRates &r[], const int n, const int period, double &atr[])
    atr[period] = s / period;
    for(int i = period + 1; i < n; i++)
       atr[i] = atr[i-1] + (trv[i] - trv[i-period]) / period;
+  }
+
+//+------------------------------------------------------------------+
+//| ADX come l'esempio ADX.mq5 di MetaQuotes (iADX): +DM e -DM in     |
+//| percentuale del TR, lisciati con una EMA di periodo 'period'      |
+//| (alpha = 2/(period+1)), DX = 100*|+DI-(-DI)|/(+DI+(-DI)), ADX =   |
+//| EMA del DX. Ricostruzione dall'esempio: piccole differenze dal    |
+//| valore dell'indicatore del terminale sono possibili, quindi il    |
+//| numero di segnali filtrati puo' non coincidere al 100% con l'EA.  |
+//| Le EMA partono dalla barra 'period' con seme zero (l'esempio le    |
+//| fa partire prima): la differenza svanisce in circa 10 periodi e   |
+//| lo script precarica 300 barre prima del periodo analizzato.       |
+//+------------------------------------------------------------------+
+void SD_Adx(const MqlRates &r[], const int n, const int period, double &adx[])
+  {
+   ArrayResize(adx, n);
+   ArrayInitialize(adx, 0.0);
+   if(period < 1 || n <= period + 1) return;
+   const double a = 2.0 / (period + 1.0);
+   double pdi = 0.0, ndi = 0.0, ax = 0.0;
+   for(int i = 1; i < n; i++)
+     {
+      double pos = r[i].high - r[i-1].high;
+      double neg = r[i-1].low - r[i].low;
+      if(pos < 0.0) pos = 0.0;
+      if(neg < 0.0) neg = 0.0;
+      if(pos > neg) neg = 0.0;
+      else if(pos < neg) pos = 0.0;
+      else { pos = 0.0; neg = 0.0; }
+      const double tr = MathMax(MathMax(MathAbs(r[i].high - r[i].low), MathAbs(r[i].high - r[i-1].close)), MathAbs(r[i].low - r[i-1].close));
+      const double pd = (tr != 0.0) ? 100.0 * pos / tr : 0.0;
+      const double nd = (tr != 0.0) ? 100.0 * neg / tr : 0.0;
+      if(i < period) continue;                       // come l'esempio: le prime 'period' barre restano a zero
+      pdi = pd * a + pdi * (1.0 - a);
+      ndi = nd * a + ndi * (1.0 - a);
+      const double s  = pdi + ndi;
+      const double dx = (s != 0.0) ? 100.0 * MathAbs((pdi - ndi) / s) : 0.0;
+      ax = dx * a + ax * (1.0 - a);
+      adx[i] = ax;
+     }
   }
 
 //+------------------------------------------------------------------+

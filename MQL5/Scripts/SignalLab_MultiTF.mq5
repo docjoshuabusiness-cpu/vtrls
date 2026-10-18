@@ -24,6 +24,19 @@
 //|      classifica sul primo 70% del periodo e si verifica sul      |
 //|      resto. Con segnali senza informazione il netto medio e'     |
 //|      -costo per qualunque tenuta e target.                       |
+//|   7. GESTIONE SIMULATA: su ogni TF simula stop, trailing e take  |
+//|      profit (in ATR o in punti) con durata massima, provando     |
+//|      tutte le griglie e tutti i ritardi d'ingresso insieme;      |
+//|      misura i punti presi per segnale, consiglia la durata,      |
+//|      confronta i TF, sceglie orari e giorni sul primo periodo    |
+//|      e li verifica sul resto (con la curva cumulata).            |
+//|   8. FILTRI DELL'EA (ADX, regime di volatilita') applicabili ai  |
+//|      segnali per replicare la configurazione dell'EA.            |
+//|   9. SCANSIONE DEI PARAMETRI: tutte le combinazioni di           |
+//|      EmaPeriod x VolAvgPeriod x SignalThreshold del Delta con    |
+//|      una gestione fissa, scelta in-sample e verifica fuori       |
+//|      campione, effetto di ogni parametro e mappe soglia x EMA.   |
+//|  Tutto finisce anche nel riepilogo copiabile e nel digest.       |
 //|                                                                  |
 //|  Metrica principale: NETTO MEDIO = rendimento a fine orizzonte   |
 //|  nella direzione del segnale meno il costo. MFE/MAE crescono con |
@@ -83,7 +96,7 @@ input int      InpExpConfirmOffset  = 0;      // Inp_ExpConfirmOffset
 input int      InpRunGapBars        = 0;      // Inp_RunGapBars (0 = raffica chiusa solo da segnale opposto)
 
 input group "=== STATO DI VOLATILITA' (indicatore Ferro: TR/ATR e percentile) ==="
-input bool     InpUseVolState       = true;   // classifica ogni segnale per intensita' e regime di volatilita' (non filtra)
+input bool     InpUseVolState       = true;   // classifica ogni segnale per intensita' e regime di volatilita' (da solo non toglie segnali: il filtro dei regimi e' InpRegimeAllow e usa lo stesso calcolo anche se questo e' spento)
 input int      InpVsAtrLen          = 14;     // ATR Length
 input int      InpVsLookback        = 100;    // Percentile Lookback (barre)
 input int      InpVsEmaSmooth       = 3;      // Smoothing EMA
@@ -92,6 +105,12 @@ input double   InpVsCompTh          = 0.5;    // Soglia Compressione (TR/ATR)
 input int      InpVsLowTh           = 30;     // Soglia LOW percentile
 input int      InpVsHighTh          = 70;     // Soglia HIGH percentile
 input int      InpVsExtremeTh       = 90;     // Soglia EXTREME percentile
+
+input group "=== FILTRI DELL'EA (replica di ADX e regime di volatilita': tolgono i segnali da TUTTE le tabelle) ==="
+input int      InpAdxPeriod         = 14;     // ADX_Period
+input double   InpAdxMin            = 0;      // ADX_MinLevel: scarta i segnali con ADX sotto questo livello (0 = filtro spento; l'EA del backtest EURUSD M30 usava 17). ADX ricostruito dall'esempio ADX.mq5: piccole differenze dall'iADX del terminale sono possibili
+input string   InpRegimeAllow       = "ALL";  // regimi di volatilita' ammessi, come Inp_AllowTrade*: ALL oppure elenco di LOW,NORMAL,HIGH,EXTREME (l'EA del backtest escludeva HIGH: LOW,NORMAL,EXTREME); usa lo stato di volatilita' qui sopra
+input bool     InpRequireVolRising  = false;  // Inp_RequireVolIncreasing: ammette solo i segnali con percentile di volatilita' in salita
 
 input group "=== DATI ==="
 input datetime InpFrom              = D'2015.01.01 00:00';
@@ -117,14 +136,32 @@ input double   InpPointValuePerLot  = 0;      // valore di 1 punto per 1.00 lott
 input string   InpPointValueSymbol  = "";     // simbolo REALE del broker da cui leggere il valore del tick (es. AUDJPY): serve se il simbolo analizzato e' personalizzato (QDM) e il valore letto non e' corretto
 input ENUM_RANK_SIDE InpRankSide    = RS_FOLLOW; // verso studiato nelle classifiche A/B: solo il verso del segnale (come un EA che apre dove dice il segnale), oppure anche l'inverso
 
-input group "=== GESTIONE SIMULATA (stop ATR, trailing, durata massima) ==="
-input bool     InpMgmt              = true;   // simula la gestione di un EA su ogni segnale: stop iniziale e trailing in multipli dell'ATR, uscita alla durata massima; misura i punti presi per segnale e la durata consigliata
+input group "=== GESTIONE SIMULATA (stop, trailing, take profit, durata massima, ritardo d'ingresso) ==="
+input bool     InpMgmt              = true;   // simula la gestione di un EA su ogni segnale: stop iniziale, trailing e take profit, uscita alla durata massima; misura i punti presi per segnale e la durata consigliata
 input string   InpMgmtTFs           = "ALL";  // TF da simulare: ALL oppure elenco (es. M5,M15,H1); i TF con molti segnali sono campionati
 input int      InpMgmtAtrLen        = 14;     // periodo dell'ATR del TF del segnale
-input string   InpMgmtSlAtr         = "1,1.5,2"; // stop iniziale in multipli dell'ATR (massimo 6 valori)
-input string   InpMgmtTrailAtr      = "0,1";  // trailing: distanza in multipli dell'ATR (0 = nessun trailing, massimo 5 valori)
-input int      InpMgmtMaxSignals    = 60000;  // massimo di segnali simulati per TF (campionamento uniforme; 0 o meno = tutti, molto lento)
-input bool     InpMgmtHighFirst     = false;  // ordine dentro la barra M1: false = prima il minimo (neutro su un percorso casuale), true = prima il massimo (limite pessimistico: il trailing si stringe prima del test dello stop)
+input bool     InpMgmtPoints        = false;  // false = stop, trailing e take profit in multipli dell'ATR; true = in PUNTI fissi (per replicare un EA a SL/TP fissi, es. SL 120, TP 210)
+input string   InpMgmtSlAtr         = "1,1.5,2,3"; // stop iniziale (multipli dell'ATR o punti, vedi InpMgmtPoints): fino a 8 valori, provati tutti insieme
+input string   InpMgmtTrailAtr      = "0,1,2";     // trailing: distanza (lo zero = nessun trailing e' sempre incluso e conta nel limite di 6 valori); con distanza D parte quando il profitto raggiunge D e porta lo stop a (massimo favorevole - D)
+input string   InpMgmtTpAtr         = "0";         // take profit (lo zero = nessuno e' sempre incluso e conta nel limite di 4 valori): per esempio 0,2,3 prova senza target e con target a 2 e 3 ATR
+input string   InpMgmtLags          = "0,2,5,15";  // ritardi d'ingresso in minuti provati TUTTI insieme (fino a 8 valori compreso lo zero, sempre incluso come riferimento; aggiungi almeno un valore fra 1 e 5 per il giudizio "regge fino a 5 min"): mostrano se il risultato regge entrando piu' tardi
+input int      InpMgmtMaxSignals    = 20000;  // massimo di segnali simulati per TF (campionamento uniforme; 0 o meno = tutti, molto lento): il tempo cresce con segnali x gestioni x ritardi
+input bool     InpMgmtHighFirst     = false;  // ordine dentro la barra M1: false = prima il minimo (neutro su un percorso casuale), true = prima il massimo (limite pessimistico per il trailing; con il take profit favorisce il target)
+input bool     InpMgmtSelect        = true;   // seleziona gli orari (ora x giorno della settimana) migliori sul primo periodo e li verifica sul resto, con la curva cumulata
+input int      InpSelMinCell        = 15;     // segnali minimi in-sample perche' una cella ora x giorno possa essere scelta
+input double   InpSelMinT           = 1.0;    // t in-sample minimo (non raggruppato) perche' una cella sia scelta, oltre al netto positivo
+
+input group "=== SCANSIONE DEI PARAMETRI DEL SEGNALE (EmaPeriod x VolAvgPeriod x SignalThreshold, solo Synthetic Delta) ==="
+input bool     InpSweep             = true;   // prova tutte le combinazioni dei tre parametri del Delta con una gestione fissa, scelta in-sample e verifica fuori campione
+input string   InpSweepTFs          = "M15,M30,H1,H4"; // TF della scansione (ALL = tutti tranne M1: lento)
+input string   InpSweepEma          = "5,8,10,13,14,18,21,34";  // livelli di EmaPeriod (massimo 16)
+input string   InpSweepVol          = "10,14,20,30,50";          // livelli di VolAvgPeriod (massimo 12)
+input string   InpSweepThr          = "0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.50"; // livelli di SignalThreshold (massimo 16; in tutto al massimo 1500 combinazioni)
+input double   InpSweepSl           = 1.5;    // stop iniziale della gestione che valuta ogni combinazione (multipli dell'ATR o punti, come InpMgmtPoints)
+input double   InpSweepTrail        = 1.0;    // trailing della stessa gestione (0 = nessuno)
+input double   InpSweepTp           = 0;      // take profit della stessa gestione (0 = nessuno)
+input int      InpSweepHold         = 240;    // durata massima in minuti della stessa gestione
+input int      InpSweepMaxSignals   = 15000;  // massimo di segnali valutati per combinazione e TF (campionamento uniforme; 0 o meno = tutti)
 
 input group "=== PROVE DI STRESS ==="
 input bool     InpStress            = true;   // tabella di stress: rifa' le regole migliori della tabella A con ingresso ritardato e costi piu' alti
@@ -268,7 +305,9 @@ int      g_slag[];
 double   g_sext[];
 int      g_nSlag = 0, g_nSext = 0;
 string   g_cStress = "";
-string   g_cMgmt = "", g_cMgmt2 = "", g_cMgmt3 = "";
+string   g_cMgmt = "", g_cMgmt2 = "", g_cMgmt3 = "", g_cMgmt4 = "", g_cMgmt5 = "";
+int      g_mgPosTf = 0, g_mgTestedTf = 0, g_mgEvalTf = 0, g_mgRobTf = 0, g_mgRobTested = 0, g_mgSelPosTf = 0, g_mgSelEvalTf = 0;   // esiti della gestione simulata per il paragrafo di fattibilita'
+bool     g_mgOn = false;
 double   g_atr[];            // ATR (punti) del TF del segnale, sulla barra del segnale, parallelo a g_ent
 string   g_fixedNote = "";   // problema nella regola fissa (vuoto se va bene)
 
@@ -289,6 +328,10 @@ int      g_dqH[], g_dqL[];
 
 //--- barre di ogni TF con ingresso valido (appese in sequenza)
 int      g_tfOff[], g_tfCnt[], g_tfBars[], g_tfEv[], g_tfRejGap[], g_tfRejM1[], g_tfRejWin[];
+int      g_tfRejAdx[], g_tfRejReg[];       // segnali tolti dai filtri dell'EA (ADX, regime di volatilita')
+int      g_regMask = 15;                   // regimi ammessi: bit 0 LOW, 1 NORMAL, 2 HIGH, 3 EXTREME
+bool     g_regFilt = false, g_adxFilt = false;
+string   g_filtTxt = "";                   // descrizione dei filtri dell'EA per il report e il riepilogo
 int      g_skN = 0;                 // finestre d'ingresso escluse (InpSkipEntryWin)
 int      g_skA[], g_skB[];          // minuto di inizio e fine (del giorno, ora server + offset)
 int      g_ent[];
@@ -320,6 +363,7 @@ double   g_cbSum[];              // [t][NCAT][b] somma MFE medio (buy+sell)/2
 double   g_plcQ[];           // placebo: quota di acquisti dei segnali per [t][fascia][IS/OOS]
 void     BuildPlcQ();
 void     MgmtSetup();
+void     AddConc(const int s, const string topic, const string text);
 double   g_rkP[], g_rgP[];   // placebo: stesse regole e stessi istanti, direzione di ogni segnale sostituita da una casuale
 bool     g_plc = false;
 bool     g_cPok = false;
@@ -764,7 +808,7 @@ int ParseNonNegList(const string src, double &out[], const int maxN, const doubl
       const double v = StringToDouble(pp);
       if(v <= 0.0 || v > maxV) continue;
       const int k = ArraySize(out);
-      if(k >= maxN) break;
+      if(k >= maxN) { Print("Lista '", src, "' troncata a ", maxN, " valori (lo zero e' sempre incluso e conta nel limite)."); break; }
       bool dup = false;
       for(int q = 0; q < k; q++) if(MathAbs(out[q] - v) < 1.0e-9) { dup = true; break; }
       if(dup) continue;
@@ -931,6 +975,49 @@ bool SetupInputs()
    g_vpar.highTh    = InpVsHighTh;
    g_vpar.extremeTh = InpVsExtremeTh;
    g_volWarm        = g_vpar.atrLen + g_vpar.lookback + g_vpar.emaSmooth + 10;
+
+   //--- filtri dell'EA
+   g_adxFilt = (InpAdxMin > 0.0);
+   g_regMask = 15;
+   g_regFilt = false;
+   {
+    string rg = InpRegimeAllow;
+    StringTrimLeft(rg); StringTrimRight(rg); StringToUpper(rg);
+    if(rg != "" && rg != "ALL")
+      {
+       string parts[];
+       const int np = StringSplit(rg, ',', parts);
+       int mk = 0;
+       for(int q = 0; q < np; q++)
+         {
+          string pp = parts[q];
+          StringTrimLeft(pp); StringTrimRight(pp);
+          if(pp == "LOW" || pp == "L") mk |= 1;
+          else if(pp == "NORMAL" || pp == "N") mk |= 2;
+          else if(pp == "HIGH" || pp == "H") mk |= 4;
+          else if(pp == "EXTREME" || pp == "X" || pp == "E") mk |= 8;
+          else if(pp != "") Print("InpRegimeAllow: regime sconosciuto '", pp, "' (ignorato).");
+         }
+       if(mk == 0) { Print("InpRegimeAllow non contiene regimi validi: filtro dei regimi spento."); mk = 15; }
+       g_regMask = mk;
+      }
+    g_regFilt = (g_regMask != 15 || InpRequireVolRising);
+    if(g_regFilt && !InpUseVolState)
+      {
+       Print("Filtro dei regimi richiesto ma InpUseVolState e' spento: lo stato di volatilita' viene calcolato lo stesso per il filtro.");
+      }
+    g_filtTxt = "";
+    if(g_adxFilt) g_filtTxt += "ADX(" + IntegerToString(MathMax(1, InpAdxPeriod)) + ") >= " + DoubleToString(InpAdxMin, 1);
+    if(g_regFilt)
+      {
+       string ra = "";
+       if((g_regMask & 1) != 0) ra += string(ra == "" ? "" : ",") + "LOW";
+       if((g_regMask & 2) != 0) ra += string(ra == "" ? "" : ",") + "NORMAL";
+       if((g_regMask & 4) != 0) ra += string(ra == "" ? "" : ",") + "HIGH";
+       if((g_regMask & 8) != 0) ra += string(ra == "" ? "" : ",") + "EXTREME";
+       g_filtTxt += string(g_filtTxt != "" ? "; " : "") + "regimi ammessi " + ra + string(InpRequireVolRising ? " con volatilita' in salita" : "");
+      }
+   }
 
    if(InpMode == SDM_DELTA_ADDED)
      {
@@ -1256,6 +1343,24 @@ void NxBar(const int t, const MqlRates &r[], const int n, const int i, const int
   }
 
 //+------------------------------------------------------------------+
+//| Filtri dell'EA sulla barra i: 0 = superati, 1 = tolto dall'ADX,   |
+//| 2 = tolto dal regime di volatilita' (adxv e vsc servono solo se   |
+//| il rispettivo filtro e' attivo)                                   |
+//+------------------------------------------------------------------+
+int FiltCode(const double &adxv[], const uchar &vsc[], const int i)
+  {
+   if(g_adxFilt && !(adxv[i] >= InpAdxMin)) return 1;
+   if(g_regFilt)
+     {
+      const int vcf = (i >= g_volWarm) ? (int)vsc[i] : 255;
+      if(vcf == 255) return 2;
+      if(((g_regMask >> ((vcf >> 1) & 3)) & 1) == 0) return 2;
+      if(InpRequireVolRising && (vcf & 1) == 0) return 2;
+     }
+   return 0;
+  }
+
+//+------------------------------------------------------------------+
 //| Per un TF: segnali + mappa verso l'ingresso M1                    |
 //+------------------------------------------------------------------+
 void ProcessTF(const int t, const MqlRates &r[], const int n)
@@ -1276,7 +1381,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
       SD_BuildSignals(r, n, p2, dir2, bur2);
      }
    uchar vsc[];
-   if(InpUseVolState)
+   if(InpUseVolState || g_regFilt)
      {
       SD_VolState(r, n, g_vpar, g_pt, vsc);       // il warm-up dei segnali resta quello del segnale: lo stato ha il suo (g_volWarm)
      }
@@ -1284,6 +1389,9 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    SD_IntensityBins(r, n, g_vpar.atrLen, g_ibEdge, ibn);      // intensita' della candela del segnale (TR/ATR), anche senza stato di volatilita'
    double atrM[];
    if(InpMgmt) SD_Atr(r, n, MathMax(2, InpMgmtAtrLen), atrM);
+   double adxv[];
+   if(g_adxFilt) SD_Adx(r, n, MathMax(1, InpAdxPeriod), adxv);
+   int rejAdx = 0, rejReg = 0;
 
    const long   xs      = g_tfSec[t];
    const long   maxGap  = (long)InpMaxEntryGapMin * 60L;
@@ -1312,6 +1420,17 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
       if(p >= g_n1) break;
       if((long)(g_m1Time[p] - tNext) > maxGap) { rejM1++; continue; }
       if(InSkipWin((long)g_m1Time[p])) { rejWin++; continue; }
+      //--- filtri dell'EA: un segnale che non li supera e' come se l'EA non lo avesse visto (vale per tutte le tabelle)
+      if((g_adxFilt || g_regFilt) && (dir[i] != 0 || (g_nSets > 1 && dir2[i] != 0)))
+        {
+         const int fc = FiltCode(adxv, vsc, i);
+         if(fc != 0)
+           {
+            if(fc == 1) rejAdx++; else rejReg++;
+            dir[i] = 0;
+            if(g_nSets > 1) dir2[i] = 0;
+           }
+        }
       g_ent[u]  = p;
       g_dir[u]  = dir[i];
       g_bur[u]  = bur[i];
@@ -1332,6 +1451,8 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    g_tfRejGap[t] = rejGap;
    g_tfRejM1[t]  = rejM1;
    g_tfRejWin[t] = rejWin;
+   g_tfRejAdx[t] = rejAdx;
+   g_tfRejReg[t] = rejReg;
    ArrayResize(g_ent,  g_used);
    ArrayResize(g_dir,  g_used);
    ArrayResize(g_bur,  g_used);
@@ -1953,6 +2074,13 @@ void RepIntro()
       W("<div class='note'>Nessuna commissione inclusa. Su conti Raw (FP Markets, IC Markets) imposta "
         "<b>InpCommissionPerLotSide</b> (e il valore del punto se non viene letto dal simbolo).</div>");
 
+   if(g_filtTxt != "")
+     {
+      int tAdx = 0, tReg = 0;
+      for(int t = 0; t < g_nT; t++) { tAdx += g_tfRejAdx[t]; tReg += g_tfRejReg[t]; }
+      W("<div class='note'><b>Filtri dell'EA attivi:</b> " + g_filtTxt + ". I segnali che non li superano sono tolti da <b>tutte</b> le tabelle (come se l'EA non li avesse visti): " +
+        "tolti dall'ADX " + IS(tAdx) + " e dal regime di volatilit&agrave; " + IS(tReg) + " (somma dei TF, barre con segnale in almeno una serie; l'ADX ha la precedenza sul regime). L'ADX &egrave; ricostruito dall'esempio ADX.mq5: il numero di segnali filtrati pu&ograve; non coincidere al 100% con quello dell'iADX dell'EA. La posizione nella raffica (Sequence Filter) &egrave; calcolata prima dei filtri.</div>");
+     }
    W("<h2>Come leggere</h2>");
    W("<div class='note'><b>Netto medio</b> = rendimento a fine orizzonte nella direzione del segnale meno il costo, in punti. "
      "&Egrave; la metrica principale: senza informazione vale circa <b>&minus;costo</b> e non dipende dalla volatilit&agrave; (in media). "
@@ -1977,13 +2105,13 @@ void RepCoverage()
    W("<div class='note'>Un segnale viene scartato se tra la chiusura della barra e la barra successiva c'&egrave; una pausa di sessione "
      "oltre <b>" + IS(InpMaxEntryGapMin) + "</b> min (weekend, chiusura giornaliera): l'ingresso non sarebbe quello del segnale. "
      "Per D1, W1 e MN1 la pausa di sessione o il weekend pu&ograve; scartare una quota alta dei segnali (vedi le colonne sopra): aumenta <b>InpMaxEntryGapMin</b> se vuoi entrare comunque all'apertura successiva.</div>");
-   W("<table><tr><th>TF</th><th>Barre in periodo</th><th>Scartate gap sessione</th><th>Senza M1</th><th>Escluse (finestre)</th><th>Barre base</th>"
+   W("<table><tr><th>TF</th><th>Barre in periodo</th><th>Scartate gap sessione</th><th>Senza M1</th><th>Escluse (finestre)</th><th>Tolti da ADX</th><th>Tolti da regime</th><th>Barre base</th>"
      "<th>Segnali</th><th>Misurati @" + IS(g_hor[g_refH]) + "m</th><th>% misurati</th></tr>");
    for(int t = 0; t < g_nT; t++)
      {
       double nref = g_accTH[(t * g_nH + g_refH) * ACCN];
       double pc = (g_tfEv[t] > 0) ? 100.0 * nref / g_tfEv[t] : 0.0;
-      W("<tr><td>" + g_tfName[t] + "</td>" + Td(IS(g_tfBars[t])) + Td(IS(g_tfRejGap[t])) + Td(IS(g_tfRejM1[t])) + Td(IS(g_tfRejWin[t])) +
+      W("<tr><td>" + g_tfName[t] + "</td>" + Td(IS(g_tfBars[t])) + Td(IS(g_tfRejGap[t])) + Td(IS(g_tfRejM1[t])) + Td(IS(g_tfRejWin[t])) + Td(IS(g_tfRejAdx[t])) + Td(IS(g_tfRejReg[t])) +
         Td(IS(g_tfCnt[t])) + Td(IS(g_tfEv[t])) + Td(F0(nref)) + Td(F1(pc)) + "</tr>");
      }
    W("</table>");
@@ -2849,23 +2977,41 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
 //+------------------------------------------------------------------+
 //| GESTIONE SIMULATA                                                 |
 //| Per ogni segnale simula una posizione aperta all'open d'ingresso  |
-//| con stop iniziale e trailing in multipli dell'ATR del TF del      |
-//| segnale e con una durata massima (tutti gli orizzonti insieme):   |
-//| misura i punti presi in media per segnale, lordi e netti dei      |
-//| costi. Percorso sulle barre M1; dentro la barra lo stop usa il    |
-//| minimo prima del massimo (ordine intrabarra sconosciuto: neutro, |
-//| con InpMgmtHighFirst il limite pessimistico).                     |
+//| con stop iniziale, trailing e take profit (in multipli dell'ATR   |
+//| del TF del segnale oppure in punti fissi) e con una durata        |
+//| massima (tutti gli orizzonti insieme), rifatta anche entrando N   |
+//| minuti piu' tardi (tutti i ritardi insieme): misura i punti presi |
+//| in media per segnale, lordi e netti dei costi. Percorso sulle     |
+//| barre M1; dentro la barra, se non e' scelto altro, lo stop usa il |
+//| minimo prima del massimo (ordine intrabarra sconosciuto: neutro;  |
+//| con InpMgmtHighFirst il limite pessimistico per il trailing).     |
 //+------------------------------------------------------------------+
-#define MGF 5            // campi per cella: n, netto, netto^2, lordo, uscite per stop
+#define MGF 5            // campi per cella: n, netto, netto^2, lordo, uscite prima della durata (stop o target)
 int     g_mgTf[];        // TF simulati (indici in g_tfName)
-double  g_mgSl[], g_mgTr[];
-int     g_mgNtf = 0, g_mgNsl = 0, g_mgNtr = 0, g_mgR = 0;
-double  g_mgAcc[];       // [TF simulato][fascia][regola][orizzonte][IS/OOS][MGF]
-double  g_mgCl[];        // somme per il t raggruppato per giorno: [TF simulato][regola][orizzonte][IS/OOS][3]
-int     g_mgUsed[];      // segnali simulati per TF
+double  g_mgSl[], g_mgTr[], g_mgTp[];
+int     g_mgLag[];       // ritardi d'ingresso in minuti (il primo e' sempre 0)
+int     g_mgNtf = 0, g_mgNsl = 0, g_mgNtr = 0, g_mgNtp = 0, g_mgR = 0, g_mgNlag = 0;
+double  g_mgAcc[];       // [TF simulato][fascia][regola][orizzonte][IS/OOS][MGF], solo ritardo 0
+double  g_mgLg[];        // [ritardo][TF simulato][regola][orizzonte][IS/OOS][MGF], senza fascia
+double  g_mgCl[];        // somme per il t raggruppato per giorno: [ritardo][TF simulato][regola][orizzonte][IS/OOS][3]
+int     g_mgUsed[];      // segnali simulati per TF (ritardo 0)
 int     g_mgSeen[];      // segnali del TF prima del campionamento
+string  g_mgSvg[];       // curva cumulata per TF simulato (SVG), vuota se non calcolata
+string  g_mgSelTab[];    // tabella HTML delle celle scelte per TF simulato
+string  g_mgSelTop[];    // le prime celle scelte per TF simulato, in testo per il riepilogo
 
-//--- TF da simulare (InpMgmtTFs: ALL oppure elenco) e griglie di stop e trailing
+struct MgSelRes
+  {
+   bool   ok;
+   int    nElig, nSel;
+   double isN, isMean;             // in-sample, celle scelte (il netto e' gonfiato dalla scelta)
+   double allN, allMean, allT;     // fuori campione, tutti i segnali
+   double selN, selMean, selT;     // fuori campione, celle scelte
+   int    selDays;                 // giorni distinti fuori campione con almeno un segnale nelle celle scelte
+   double pct;                     // % delle scelte casuali (stesso numero di celle) battute dalla scelta; -1 se non calcolabile
+  };
+
+//--- TF da simulare (InpMgmtTFs: ALL oppure elenco), griglie di stop, trailing e take profit, ritardi
 void MgmtSetup()
   {
    ArrayResize(g_mgTf, 0);
@@ -2897,10 +3043,26 @@ void MgmtSetup()
         }
      }
    g_mgNtf = ArraySize(g_mgTf);
+   const double mx = InpMgmtPoints ? 100000.0 : 50.0;
    g_mgNsl = ParseDoubleList(InpMgmtSlAtr, g_mgSl);
-   if(g_mgNsl > 6) { ArrayResize(g_mgSl, 6); g_mgNsl = 6; }
-   g_mgNtr = ParseNonNegList(InpMgmtTrailAtr, g_mgTr, 5, 50.0);
-   g_mgR   = g_mgNsl * g_mgNtr;
+   if(g_mgNsl > 8) { ArrayResize(g_mgSl, 8); g_mgNsl = 8; }
+   g_mgNtr = ParseNonNegList(InpMgmtTrailAtr, g_mgTr, 6, mx);
+   g_mgNtp = ParseNonNegList(InpMgmtTpAtr, g_mgTp, 4, mx);
+   g_mgR   = g_mgNsl * g_mgNtr * g_mgNtp;
+   double lt[];
+   const int nl = ParseNonNegList(InpMgmtLags, lt, 8, 240.0);
+   ArrayResize(g_mgLag, 0);
+   for(int q = 0; q < nl; q++)
+     {
+      const int lv = (int)MathRound(lt[q]);
+      bool dupL = false;
+      for(int w = 0; w < ArraySize(g_mgLag); w++) if(g_mgLag[w] == lv) dupL = true;
+      if(dupL) continue;
+      const int kk = ArraySize(g_mgLag);
+      ArrayResize(g_mgLag, kk + 1);
+      g_mgLag[kk] = lv;
+     }
+   g_mgNlag = ArraySize(g_mgLag);
   }
 
 //--- primo indice >= from con tempo >= tEnd (g_n1 se non esiste)
@@ -2915,50 +3077,189 @@ int MgLower(const long tEnd, const int from)
    return lo;
   }
 
-//--- svuota la somma giornaliera di una cella nelle somme per il t raggruppato
-void MgFlush(const int m, const int r, const int c, const int idx, const int &curSmp[], double &curS[], double &curN[])
+//--- indici nelle somme per ritardo e per il t raggruppato
+int MgLgIx(const int l, const int m, const int r, const int c, const int s)
   {
-   if(curN[idx] <= 0.0) return;
-   const int p = ((((m * g_mgR + r) * g_nH + c) * 2 + curSmp[idx]) * 3);
-   g_mgCl[p]     += curS[idx] * curS[idx];
-   g_mgCl[p + 1] += curS[idx] * curN[idx];
-   g_mgCl[p + 2] += curN[idx] * curN[idx];
-   curS[idx] = 0.0;
-   curN[idx] = 0.0;
+   return ((((l * g_mgNtf + m) * g_mgR + r) * g_nH + c) * 2 + s) * MGF;
+  }
+
+int MgClIx(const int l, const int m, const int r, const int c, const int s)
+  {
+   return ((((l * g_mgNtf + m) * g_mgR + r) * g_nH + c) * 2 + s) * 3;
+  }
+
+//--- svuota la somma giornaliera di una cella nelle somme per il t raggruppato
+void MgFlush(const int l, const int m, const int r, const int c, const int cx, const int &curSmp[], double &curS[], double &curN[])
+  {
+   if(curN[cx] <= 0.0) return;
+   const int p = MgClIx(l, m, r, c, curSmp[cx]);
+   g_mgCl[p]     += curS[cx] * curS[cx];
+   g_mgCl[p + 1] += curS[cx] * curN[cx];
+   g_mgCl[p + 2] += curN[cx] * curN[cx];
+   curS[cx] = 0.0;
+   curN[cx] = 0.0;
+  }
+
+//+------------------------------------------------------------------+
+//| Percorso di una posizione per ognuna delle nR regole, dalla barra |
+//| M1 j nel verso d. 'unit' = ATR in punti (modo ATR) oppure 1       |
+//| (modo punti). Riempie gr[r*nC+c] = punti lordi alla durata c e    |
+//| ex[r*nC+c] = 1 se la posizione e' uscita prima della durata (solo |
+//| per le durate valide okc[c]). Ordine dentro la barra M1: vedi     |
+//| InpMgmtHighFirst; se stop e target cadono nella stessa barra vale |
+//| l'ordine scelto (di default prima il minimo, cioe' lo stop).      |
+//+------------------------------------------------------------------+
+void MgSim(const int j, const int d, const double unit, const int eLast, const int nR, const int nC,
+           const bool &okc[], const int &recBar[], const double &slp[], const double &trd[], const double &tpd[],
+           double &S[], double &HW[], double &exitP[], bool &opn[], double &gr[], uchar &ex[])
+  {
+   const double pt = g_pt;
+   const double o = g_m1Open[j];
+   int nOpen = nR;
+   for(int r = 0; r < nR; r++) { S[r] = -slp[r] * unit; HW[r] = 0.0; opn[r] = true; exitP[r] = 0.0; }
+   int nc = 0;
+   double fc = 0.0;
+   for(int b = j; b < eLast; b++)
+     {
+      const double hi = g_m1High[b], lo = g_m1Low[b], op = g_m1Open[b], cl = g_m1Close[b];
+      double fh, fl, fo;
+      if(d > 0) { fh = (hi - o) / pt; fl = (lo - o) / pt; fo = (op - o) / pt; fc = (cl - o) / pt; }
+      else      { fh = (o - lo) / pt; fl = (o - hi) / pt; fo = (o - op) / pt; fc = (o - cl) / pt; }
+      for(int r = 0; r < nR; r++)
+        {
+         if(!opn[r]) continue;
+         const double tr = trd[r] * unit;
+         const double tp = tpd[r] * unit;
+         const double sOpen = S[r];                       // stop in vigore all'apertura della barra
+         //--- apertura gia' oltre lo stop o il target in vigore: si esce all'open, qualunque sia l'ordine intrabarra
+         if(fo <= sOpen) { exitP[r] = fo; opn[r] = false; nOpen--; continue; }
+         if(tp > 0.0 && fo >= tp) { exitP[r] = fo; opn[r] = false; nOpen--; continue; }
+         if(InpMgmtHighFirst)
+           {
+            //--- prima il massimo: il target e il trailing vedono il massimo, poi lo stop (eventualmente alzato) vede il minimo
+            if(tp > 0.0 && fh >= tp) { exitP[r] = tp; opn[r] = false; nOpen--; continue; }
+            if(fh > HW[r]) HW[r] = fh;
+            if(tr > 0.0 && HW[r] >= tr && HW[r] - tr > S[r]) S[r] = HW[r] - tr;
+            if(fl <= S[r])
+              {
+               exitP[r] = S[r];                           // colpito scendendo dal massimo: eseguito allo stop, non all'open
+               opn[r] = false;
+               nOpen--;
+              }
+           }
+         else
+           {
+            //--- prima il minimo: lo stop in vigore all'apertura e' testato per primo
+            if(fl <= sOpen)
+              {
+               exitP[r] = sOpen;
+               opn[r] = false;
+               nOpen--;
+              }
+            else
+              {
+               if(fh > HW[r]) HW[r] = fh;
+               if(tr > 0.0 && HW[r] >= tr && HW[r] - tr > S[r]) S[r] = HW[r] - tr;
+               if(tp > 0.0 && fh >= tp) { exitP[r] = tp; opn[r] = false; nOpen--; }
+              }
+           }
+        }
+      while(nc < nC)
+        {
+         if(!okc[nc]) { nc++; continue; }
+         if(recBar[nc] > b) break;
+         for(int r = 0; r < nR; r++)
+           {
+            gr[r * nC + nc] = opn[r] ? fc : exitP[r];
+            ex[r * nC + nc] = opn[r] ? (uchar)0 : (uchar)1;
+           }
+         nc++;
+        }
+      if(nOpen == 0) break;
+     }
+   //--- tutte le posizioni chiuse prima della fine: gli orizzonti restanti hanno il risultato dell'uscita
+   while(nc < nC)
+     {
+      if(okc[nc])
+         for(int r = 0; r < nR; r++)
+           {
+            gr[r * nC + nc] = exitP[r];
+            ex[r * nC + nc] = (uchar)1;
+           }
+      nc++;
+     }
+  }
+
+//--- orizzonti validi (okc), barra di registrazione (recBar) e ultima barra da percorrere per un ingresso alla barra M1 j; -1 se nessuno e' valido
+int MgHorizons(const int j, const int nC, bool &okc[], int &recBar[])
+  {
+   const long t0 = (long)g_m1Time[j];
+   int eLast = -1;
+   for(int c = 0; c < nC; c++)
+     {
+      const long tEnd = t0 + (long)g_hor[c] * 60L;
+      const int e = MgLower(tEnd, j);
+      okc[c] = (e < g_n1 && e > j && (g_nextBrk[j] >= e || (g_nextBrk[j] == e - 1 && (long)g_m1Time[e - 1] + 60L >= tEnd)));
+      recBar[c] = e - 1;
+      if(okc[c] && e > eLast) eLast = e;
+     }
+   return eLast;
+  }
+
+//--- ingresso ritardato di 'lg' minuti rispetto alla barra jb; -1 se attraversa un buco di dati o la fine dello storico
+int MgLagBar(const int jb, const int lg)
+  {
+   if(lg <= 0) return jb;
+   const int j = jb + lg;
+   if(j >= g_n1 || (long)(g_m1Time[j] - g_m1Time[jb]) != (long)lg * 60L) return -1;
+   return j;
   }
 
 bool MgmtCompute()
   {
-   const int nM = g_mgNtf, nC = g_nH, R = g_mgR;
-   const double pt = g_pt;
-   const int szAcc = nM * g_nRB * R * nC * 2 * MGF;
-   const int szCl  = nM * R * nC * 2 * 3;
-   if(ArrayResize(g_mgAcc, szAcc) != szAcc || ArrayResize(g_mgCl, szCl) != szCl)
+   const int nM = g_mgNtf, nC = g_nH, R = g_mgR, nLag = g_mgNlag;
+   const long szAccL = (long)nM * g_nRB * R * nC * 2 * MGF;
+   const long szLgL  = (long)nLag * nM * R * nC * 2 * MGF;
+   const long szClL  = (long)nLag * nM * R * nC * 2 * 3;
+   bool okMem = (szAccL < 1500000000L && szLgL < 1500000000L && szClL < 1500000000L);
+   if(okMem) okMem = (ArrayResize(g_mgAcc, (int)szAccL) == (int)szAccL && ArrayResize(g_mgLg, (int)szLgL) == (int)szLgL && ArrayResize(g_mgCl, (int)szClL) == (int)szClL);
+   if(!okMem)
      {
-      Print("!!! Gestione simulata: memoria insufficiente per ", szAcc, " celle. Riduci i TF (InpMgmtTFs) o le griglie (InpMgmtSlAtr, InpMgmtTrailAtr).");
+      Print("!!! Gestione simulata: memoria insufficiente per ", szAccL, " + ", szLgL, " celle. Riduci i TF (InpMgmtTFs), le griglie (InpMgmtSlAtr, InpMgmtTrailAtr, InpMgmtTpAtr), gli orizzonti o i ritardi (InpMgmtLags).");
       return false;
      }
    ArrayInitialize(g_mgAcc, 0.0);
+   ArrayInitialize(g_mgLg, 0.0);
    ArrayInitialize(g_mgCl, 0.0);
    ArrayResize(g_mgUsed, nM);
    ArrayInitialize(g_mgUsed, 0);
    ArrayResize(g_mgSeen, nM);
    ArrayInitialize(g_mgSeen, 0);
-   double slp[], trd[], S[], HW[], exitP[];
+   ArrayResize(g_mgSvg, nM);
+   ArrayResize(g_mgSelTab, nM);
+   ArrayResize(g_mgSelTop, nM);
+   for(int q = 0; q < nM; q++) { g_mgSvg[q] = ""; g_mgSelTab[q] = ""; g_mgSelTop[q] = ""; }
+   double slp[], trd[], tpd[], S[], HW[], exitP[], gr[];
    bool opn[], okc[];
    int recBar[];
-   ArrayResize(slp, R); ArrayResize(trd, R); ArrayResize(S, R); ArrayResize(HW, R); ArrayResize(exitP, R);
+   uchar ex[];
+   ArrayResize(slp, R); ArrayResize(trd, R); ArrayResize(tpd, R); ArrayResize(S, R); ArrayResize(HW, R); ArrayResize(exitP, R);
    ArrayResize(opn, R); ArrayResize(okc, nC); ArrayResize(recBar, nC);
+   ArrayResize(gr, R * nC); ArrayResize(ex, R * nC);
    for(int isl = 0; isl < g_mgNsl; isl++)
       for(int it = 0; it < g_mgNtr; it++)
-        {
-         slp[isl * g_mgNtr + it] = g_mgSl[isl];
-         trd[isl * g_mgNtr + it] = g_mgTr[it];
-        }
+         for(int ip = 0; ip < g_mgNtp; ip++)
+           {
+            const int rr = (isl * g_mgNtr + it) * g_mgNtp + ip;
+            slp[rr] = g_mgSl[isl];
+            trd[rr] = g_mgTr[it];
+            tpd[rr] = g_mgTp[ip];
+           }
    int curSmp[];
    double curS[], curN[];
    int curDay[];
-   ArrayResize(curSmp, R * nC); ArrayResize(curS, R * nC); ArrayResize(curN, R * nC); ArrayResize(curDay, R * nC);
+   const int nCur = nLag * R * nC;
+   ArrayResize(curSmp, nCur); ArrayResize(curS, nCur); ArrayResize(curN, nCur); ArrayResize(curDay, nCur);
    const long rbSec = (long)g_rbMin * 60L;
    for(int m = 0; m < nM; m++)
      {
@@ -2979,106 +3280,56 @@ bool MgmtCompute()
          if(((seen - 1) % stride) != 0) continue;
          const double atr = g_atr[k];
          if(atr <= 0.0) continue;
-         const int j = StressBase(k);
-         if(j < 0) continue;
-         const long t0 = (long)g_m1Time[j];
-         int eLast = -1;
-         for(int c = 0; c < nC; c++)
-           {
-            const long tEnd = t0 + (long)g_hor[c] * 60L;
-            const int e = MgLower(tEnd, j);
-            okc[c] = (e < g_n1 && e > j && (g_nextBrk[j] >= e || (g_nextBrk[j] == e - 1 && (long)g_m1Time[e - 1] + 60L >= tEnd)));
-            recBar[c] = e - 1;
-            if(okc[c] && e > eLast) eLast = e;
-           }
-         if(eLast < 0) continue;
-         used++;
-         const double o = g_m1Open[j];
-         const double cost = ((InpCostPoints > 0.0) ? InpCostPoints : (double)g_m1Spr[j]) + g_extraPts;
-         const int smp = (g_m1Day[j] >= g_splitDay) ? 1 : 0;
-         const int day = g_m1Day[j];
-         const int rb = (int)(((((long)g_m1Time[j] + g_off) % 86400L) + 86400L) % 86400L / rbSec);
+         const int jb = StressBase(k);
+         if(jb < 0) continue;
+         const double unit = InpMgmtPoints ? 1.0 : atr;
+         const int smp = (g_m1Day[jb] >= g_splitDay) ? 1 : 0;
+         const int day = g_m1Day[jb];
+         const int rb = (int)(((((long)g_m1Time[jb] + g_off) % 86400L) + 86400L) % 86400L / rbSec);
          const int base = ((m * g_nRB + rb) * R);
-         int nOpen = R;
-         for(int r = 0; r < R; r++) { S[r] = -slp[r] * atr; HW[r] = 0.0; opn[r] = true; exitP[r] = 0.0; }
-         int nc = 0;
-         double fc = 0.0;
-         for(int b = j; b < eLast; b++)
+         for(int l = 0; l < nLag; l++)
            {
-            const double hi = g_m1High[b], lo = g_m1Low[b], op = g_m1Open[b], cl = g_m1Close[b];
-            double fh, fl, fo;
-            if(d > 0) { fh = (hi - o) / pt; fl = (lo - o) / pt; fo = (op - o) / pt; fc = (cl - o) / pt; }
-            else      { fh = (o - lo) / pt; fl = (o - hi) / pt; fo = (o - op) / pt; fc = (o - cl) / pt; }
-            for(int r = 0; r < R; r++)
+            const int j = MgLagBar(jb, g_mgLag[l]);
+            if(j < 0) continue;
+            const int eLast = MgHorizons(j, nC, okc, recBar);
+            if(eLast < 0) continue;
+            if(l == 0) used++;
+            const double cost = ((InpCostPoints > 0.0) ? InpCostPoints : (double)g_m1Spr[j]) + g_extraPts;
+            MgSim(j, d, unit, eLast, R, nC, okc, recBar, slp, trd, tpd, S, HW, exitP, opn, gr, ex);
+            for(int nc = 0; nc < nC; nc++)
               {
-               if(!opn[r]) continue;
-               const double tr = trd[r] * atr;
-               if(InpMgmtHighFirst)
-                 {
-                  if(fh > HW[r]) HW[r] = fh;
-                  if(tr > 0.0 && HW[r] >= tr && HW[r] - tr > S[r]) S[r] = HW[r] - tr;
-                 }
-               if(fl <= S[r])
-                 {
-                  exitP[r] = (fo <= S[r]) ? fo : S[r];
-                  opn[r] = false;
-                  nOpen--;
-                 }
-               else if(!InpMgmtHighFirst)
-                 {
-                  if(fh > HW[r]) HW[r] = fh;
-                  if(tr > 0.0 && HW[r] >= tr && HW[r] - tr > S[r]) S[r] = HW[r] - tr;
-                 }
-              }
-            while(nc < nC)
-              {
-               if(!okc[nc]) { nc++; continue; }
-               if(recBar[nc] > b) break;
+               if(!okc[nc]) continue;
                for(int r = 0; r < R; r++)
                  {
-                  const double gr = opn[r] ? fc : exitP[r];
-                  const double nt = gr - cost;
-                  const int p = ((((base + r) * nC + nc) * 2 + smp) * MGF);
-                  g_mgAcc[p]     += 1.0;
-                  g_mgAcc[p + 1] += nt;
-                  g_mgAcc[p + 2] += nt * nt;
-                  g_mgAcc[p + 3] += gr;
-                  if(!opn[r]) g_mgAcc[p + 4] += 1.0;
                   const int ix = r * nC + nc;
-                  if(curDay[ix] != day) { MgFlush(m, r, nc, ix, curSmp, curS, curN); curDay[ix] = day; curSmp[ix] = smp; }
-                  curS[ix] += nt;
-                  curN[ix] += 1.0;
-                 }
-               nc++;
-              }
-            if(nOpen == 0) break;
-           }
-         //--- tutte le posizioni chiuse prima della fine: gli orizzonti restanti hanno il risultato dell'uscita
-         while(nc < nC)
-           {
-            if(okc[nc])
-              {
-               for(int r = 0; r < R; r++)
-                 {
-                  const double gr = exitP[r];
-                  const double nt = gr - cost;
-                  const int p = ((((base + r) * nC + nc) * 2 + smp) * MGF);
-                  g_mgAcc[p]     += 1.0;
-                  g_mgAcc[p + 1] += nt;
-                  g_mgAcc[p + 2] += nt * nt;
-                  g_mgAcc[p + 3] += gr;
-                  g_mgAcc[p + 4] += 1.0;
-                  const int ix = r * nC + nc;
-                  if(curDay[ix] != day) { MgFlush(m, r, nc, ix, curSmp, curS, curN); curDay[ix] = day; curSmp[ix] = smp; }
-                  curS[ix] += nt;
-                  curN[ix] += 1.0;
+                  const double gv = gr[ix];
+                  const double nt = gv - cost;
+                  const int pl = MgLgIx(l, m, r, nc, smp);
+                  g_mgLg[pl]     += 1.0;
+                  g_mgLg[pl + 1] += nt;
+                  g_mgLg[pl + 2] += nt * nt;
+                  g_mgLg[pl + 3] += gv;
+                  if(ex[ix] != 0) g_mgLg[pl + 4] += 1.0;
+                  if(l == 0)
+                    {
+                     const int p = (((base + r) * nC + nc) * 2 + smp) * MGF;
+                     g_mgAcc[p]     += 1.0;
+                     g_mgAcc[p + 1] += nt;
+                     g_mgAcc[p + 2] += nt * nt;
+                     g_mgAcc[p + 3] += gv;
+                     if(ex[ix] != 0) g_mgAcc[p + 4] += 1.0;
+                    }
+                  const int cx = (l * R + r) * nC + nc;
+                  if(curDay[cx] != day) { MgFlush(l, m, r, nc, cx, curSmp, curS, curN); curDay[cx] = day; curSmp[cx] = smp; }
+                  curS[cx] += nt;
+                  curN[cx] += 1.0;
                  }
               }
-            nc++;
            }
         }
-      for(int r = 0; r < R; r++)
-         for(int c = 0; c < nC; c++) MgFlush(m, r, c, r * nC + c, curSmp, curS, curN);
+      for(int l = 0; l < nLag; l++)
+         for(int r = 0; r < R; r++)
+            for(int c = 0; c < nC; c++) MgFlush(l, m, r, c, (l * R + r) * nC + c, curSmp, curS, curN);
       g_mgUsed[m] = used;
       g_mgSeen[m] = nSig;
      }
@@ -3086,41 +3337,70 @@ bool MgmtCompute()
    return true;
   }
 
-//--- somme di una cella (TF simulato, regola, orizzonte) sulle fasce; smpSel -1 = tutto, 0 = in-sample, 1 = fuori campione
-void MgSum(const int m, const int r, const int c, const int smpSel, double &n, double &sn, double &sn2, double &sg, double &ss)
+//--- somme di una cella (ritardo, TF simulato, regola, orizzonte); smpSel -1 = tutto, 0 = in-sample, 1 = fuori campione
+void MgSum(const int l, const int m, const int r, const int c, const int smpSel, double &n, double &sn, double &sn2, double &sg, double &ss)
   {
    n = 0.0; sn = 0.0; sn2 = 0.0; sg = 0.0; ss = 0.0;
-   for(int rb = 0; rb < g_nRB; rb++)
-      for(int s = 0; s < 2; s++)
-        {
-         if(smpSel >= 0 && s != smpSel) continue;
-         const int p = ((((m * g_nRB + rb) * g_mgR + r) * g_nH + c) * 2 + s) * MGF;
-         n += g_mgAcc[p]; sn += g_mgAcc[p + 1]; sn2 += g_mgAcc[p + 2]; sg += g_mgAcc[p + 3]; ss += g_mgAcc[p + 4];
-        }
+   for(int s = 0; s < 2; s++)
+     {
+      if(smpSel >= 0 && s != smpSel) continue;
+      const int p = MgLgIx(l, m, r, c, s);
+      n += g_mgLg[p]; sn += g_mgLg[p + 1]; sn2 += g_mgLg[p + 2]; sg += g_mgLg[p + 3]; ss += g_mgLg[p + 4];
+     }
   }
 
 //--- t del netto medio con errore standard raggruppato per giorno (i segnali dello stesso giorno condividono il percorso del prezzo)
-double MgClT(const int m, const int r, const int c, const int smpSel)
+double MgClT(const int l, const int m, const int r, const int c, const int smpSel)
   {
    double n, sn, sn2, sg, ss;
-   MgSum(m, r, c, smpSel, n, sn, sn2, sg, ss);
+   MgSum(l, m, r, c, smpSel, n, sn, sn2, sg, ss);
    if(n < 2.0) return 0.0;
    const double mu = sn / n;
    double a = 0.0, b = 0.0, cc = 0.0;
    for(int s = 0; s < 2; s++)
      {
       if(smpSel >= 0 && s != smpSel) continue;
-      const int p = ((((m * g_mgR + r) * g_nH + c) * 2 + s) * 3);
+      const int p = MgClIx(l, m, r, c, s);
       a += g_mgCl[p]; b += g_mgCl[p + 1]; cc += g_mgCl[p + 2];
      }
    const double v = a - 2.0 * mu * b + mu * mu * cc;
    return (v > 0.0) ? mu / (MathSqrt(v) / n) : 0.0;
   }
 
+//--- numero di una griglia con al massimo due decimali, senza zeri finali (0.25, 1.5, 120)
+string GridLbl(const double v)
+  {
+   if(v == MathFloor(v)) return F0(v);
+   string tx = DoubleToString(v, 2);
+   if(StringSubstr(tx, StringLen(tx) - 1, 1) == "0") tx = StringSubstr(tx, 0, StringLen(tx) - 1);
+   return tx;
+  }
+
+//--- "1 cella" / "3 celle"
+string Pl(const long n, const string one, const string many)
+  {
+   return IS(n) + " " + string(n == 1 ? one : many);
+  }
+
+//--- regola r = (stop, trailing, take profit): indici delle tre griglie
 string MgRuleLbl(const int r)
   {
-   const int isl = r / g_mgNtr, itr = r % g_mgNtr;
-   return "SL " + PtLbl(g_mgSl[isl]) + " ATR, " + string(g_mgTr[itr] > 0.0 ? ("trailing " + PtLbl(g_mgTr[itr]) + " ATR") : "senza trailing");
+   const int itp = r % g_mgNtp;
+   const int itr = (r / g_mgNtp) % g_mgNtr;
+   const int isl = r / (g_mgNtp * g_mgNtr);
+   const string u = InpMgmtPoints ? " pt" : " ATR";
+   string tx = "SL " + GridLbl(g_mgSl[isl]) + u + ", ";
+   tx += (g_mgTr[itr] > 0.0) ? ("trailing " + GridLbl(g_mgTr[itr]) + u) : string("senza trailing");
+   tx += (g_mgTp[itp] > 0.0) ? (", TP " + GridLbl(g_mgTp[itp]) + u) : string(", senza target");
+   return tx;
+  }
+
+string MgRuleDg(const int r)
+  {
+   const int itp = r % g_mgNtp;
+   const int itr = (r / g_mgNtp) % g_mgNtr;
+   const int isl = r / (g_mgNtp * g_mgNtr);
+   return "sl|" + GridLbl(g_mgSl[isl]) + "|trail|" + GridLbl(g_mgTr[itr]) + "|tp|" + GridLbl(g_mgTp[itp]);
   }
 
 string MgCapLbl(const int c, const int t)
@@ -3129,45 +3409,317 @@ string MgCapLbl(const int c, const int t)
    return IS(g_hor[c]) + " min (" + string(cn < 1.0 ? "meno di 1 candela" : (F1(cn) + " candele")) + ")";
   }
 
+string MgLagTotList()
+  {
+   string tx = "";
+   for(int q = 0; q < g_mgNlag; q++) tx += string(q > 0 ? ", " : "") + IS(InpEntryLagMin + g_mgLag[q]);
+   return tx;
+  }
+
+string MgLagList()
+  {
+   string tx = "";
+   for(int q = 0; q < g_mgNlag; q++) tx += string(q > 0 ? ", " : "") + IS(g_mgLag[q]);
+   return tx;
+  }
+
+//--- giorno della settimana (0 = domenica) e ora (0-23) di un istante, in ora server + offset
+int MgDow(const long tsec)
+  {
+   return (int)((((tsec + g_off) / 86400L) + 4L) % 7L);
+  }
+
+int MgHour(const long tsec)
+  {
+   return (int)(((((tsec + g_off) % 86400L) + 86400L) % 86400L) / 3600L);
+  }
+
+string MgCellLbl(const int cell)
+  {
+   const int dw = cell / 24, hr = cell % 24;
+   return StringSubstr("DomLunMarMerGioVenSab", dw * 3, 3) + " " + string(hr < 10 ? "0" : "") + IS(hr) + ":00";
+  }
+
+//--- curva cumulata (SVG): tutti i segnali contro le celle scelte in-sample; la linea tratteggiata separa in-sample e fuori campione
+string MgSvgCurve(const double &ya[], const double &ys[], const int np, const int splitPt)
+  {
+   if(np < 2) return "";
+   double lo = 0.0, hi = 0.0;
+   for(int i = 0; i < np; i++)
+     {
+      lo = MathMin(lo, MathMin(ya[i], ys[i]));
+      hi = MathMax(hi, MathMax(ya[i], ys[i]));
+     }
+   if(hi - lo < 1.0e-9) hi = lo + 1.0;
+   const double pl = 56.0, pr = 8.0, pt0 = 8.0, pb = 22.0;
+   const double pw = 640.0 - pl - pr, ph = 220.0 - pt0 - pb;
+   string pa = "", ps = "";
+   for(int i = 0; i < np; i++)
+     {
+      const double x = pl + pw * (double)i / (double)(np - 1);
+      pa += DoubleToString(x, 1) + "," + DoubleToString(pt0 + ph * (hi - ya[i]) / (hi - lo), 1) + " ";
+      ps += DoubleToString(x, 1) + "," + DoubleToString(pt0 + ph * (hi - ys[i]) / (hi - lo), 1) + " ";
+     }
+   const double y0 = pt0 + ph * hi / (hi - lo);
+   string sv = "<svg viewBox='0 0 640 220' width='100%' style='max-width:700px;background:#2e3440;border-radius:6px'>";
+   sv += "<line x1='" + DoubleToString(pl, 0) + "' y1='" + DoubleToString(y0, 1) + "' x2='" + DoubleToString(pl + pw, 0) + "' y2='" + DoubleToString(y0, 1) + "' stroke='#4c566a'/>";
+   if(splitPt > 0 && splitPt < np - 1)
+     {
+      const double xs = pl + pw * (double)splitPt / (double)(np - 1);
+      sv += "<line x1='" + DoubleToString(xs, 1) + "' y1='" + DoubleToString(pt0, 0) + "' x2='" + DoubleToString(xs, 1) + "' y2='" + DoubleToString(pt0 + ph, 0) + "' stroke='#ebcb8b' stroke-dasharray='4 3'/>";
+      sv += "<text x='" + DoubleToString(xs + 4.0, 1) + "' y='" + DoubleToString(pt0 + 10.0, 0) + "' fill='#ebcb8b' font-size='10'>fuori campione</text>";
+     }
+   sv += "<polyline fill='none' stroke='#88c0d0' stroke-width='1.5' points='" + pa + "'/>";
+   sv += "<polyline fill='none' stroke='#a3be8c' stroke-width='1.5' points='" + ps + "'/>";
+   sv += "<text x='2' y='" + DoubleToString(pt0 + 8.0, 0) + "' fill='#d8dee9' font-size='10'>" + F0(hi) + " pt</text>";
+   sv += "<text x='2' y='" + DoubleToString(pt0 + ph, 0) + "' fill='#d8dee9' font-size='10'>" + F0(lo) + " pt</text>";
+   sv += "<text x='60' y='216' fill='#88c0d0' font-size='10'>tutti i segnali</text><text x='170' y='216' fill='#a3be8c' font-size='10'>solo le celle scelte in-sample</text>";
+   sv += "</svg>";
+   return sv;
+  }
+
+//+------------------------------------------------------------------+
+//| SELEZIONE DI ORARI E GIORNI                                       |
+//| Per la gestione e la durata scelte per un TF rifa' il percorso di  |
+//| ogni segnale (ritardo 0), divide i risultati in celle ora x giorno |
+//| della settimana (ora server + offset dell'ingresso), sceglie sul   |
+//| primo periodo le celle con netto positivo e t sufficiente e misura |
+//| sul resto il risultato della sola selezione. Confronto: tutti i    |
+//| segnali e scelte casuali dello stesso numero di celle.             |
+//+------------------------------------------------------------------+
+bool MgSelect(const int m, const int bRule, const int bCap, MgSelRes &res)
+  {
+   res.ok = false; res.nElig = 0; res.nSel = 0; res.isN = 0.0; res.isMean = 0.0;
+   res.allN = 0.0; res.allMean = 0.0; res.allT = 0.0; res.selN = 0.0; res.selMean = 0.0; res.selT = 0.0; res.pct = -1.0; res.selDays = 0;
+   const int t = g_mgTf[m];
+   const int itp = bRule % g_mgNtp;
+   const int itr = (bRule / g_mgNtp) % g_mgNtr;
+   const int isl = bRule / (g_mgNtp * g_mgNtr);
+   double slp[], trd[], tpd[], S[], HW[], exitP[], gr[];
+   bool opn[], okc[];
+   int recBar[];
+   uchar ex[];
+   ArrayResize(slp, 1); ArrayResize(trd, 1); ArrayResize(tpd, 1); ArrayResize(S, 1); ArrayResize(HW, 1); ArrayResize(exitP, 1);
+   ArrayResize(opn, 1); ArrayResize(okc, 1); ArrayResize(recBar, 1); ArrayResize(gr, 1); ArrayResize(ex, 1);
+   slp[0] = g_mgSl[isl]; trd[0] = g_mgTr[itr]; tpd[0] = g_mgTp[itp];
+   double rNet[];
+   int rDay[];
+   uchar rCell[], rSmp[];
+   ArrayResize(rNet, 0, 4096); ArrayResize(rDay, 0, 4096); ArrayResize(rCell, 0, 4096); ArrayResize(rSmp, 0, 4096);
+   //--- stesso campione della passata principale
+   int nSig = 0;
+   for(int k = g_tfOff[t]; k < g_tfOff[t] + g_tfCnt[t]; k++) if(g_dir[k] != 0) nSig++;
+   const long capSig = (InpMgmtMaxSignals > 0) ? (long)InpMgmtMaxSignals : 2147483647L;
+   const int stride = MathMax(1, (int)(((long)nSig + capSig - 1L) / capSig));
+   int seen = 0;
+   int nRec = 0;
+   for(int k = g_tfOff[t]; k < g_tfOff[t] + g_tfCnt[t]; k++)
+     {
+      const int d = (int)g_dir[k];
+      if(d == 0) continue;
+      seen++;
+      if(((seen - 1) % stride) != 0) continue;
+      const double atr = g_atr[k];
+      if(atr <= 0.0) continue;
+      const int j = StressBase(k);
+      if(j < 0) continue;
+      const long tEnd = (long)g_m1Time[j] + (long)g_hor[bCap] * 60L;
+      const int e = MgLower(tEnd, j);
+      okc[0] = (e < g_n1 && e > j && (g_nextBrk[j] >= e || (g_nextBrk[j] == e - 1 && (long)g_m1Time[e - 1] + 60L >= tEnd)));
+      recBar[0] = e - 1;
+      if(!okc[0]) continue;
+      const double cost = ((InpCostPoints > 0.0) ? InpCostPoints : (double)g_m1Spr[j]) + g_extraPts;
+      MgSim(j, d, InpMgmtPoints ? 1.0 : atr, e, 1, 1, okc, recBar, slp, trd, tpd, S, HW, exitP, opn, gr, ex);
+      ArrayResize(rNet, nRec + 1, 4096); ArrayResize(rDay, nRec + 1, 4096); ArrayResize(rCell, nRec + 1, 4096); ArrayResize(rSmp, nRec + 1, 4096);
+      rNet[nRec]  = gr[0] - cost;
+      rDay[nRec]  = g_m1Day[j];
+      rCell[nRec] = (uchar)(MgDow((long)g_m1Time[j]) * 24 + MgHour((long)g_m1Time[j]));
+      rSmp[nRec]  = (uchar)((g_m1Day[j] >= g_splitDay) ? 1 : 0);
+      nRec++;
+     }
+   if(nRec < 60) return false;
+   //--- statistiche per cella
+   double cN[168], cS[168], cS2[168], cNo[168], cSo[168];
+   bool selc[168];
+   for(int q = 0; q < 168; q++) { cN[q] = 0.0; cS[q] = 0.0; cS2[q] = 0.0; cNo[q] = 0.0; cSo[q] = 0.0; selc[q] = false; }
+   for(int i = 0; i < nRec; i++)
+     {
+      const int ci = (int)rCell[i];
+      if(rSmp[i] == 0) { cN[ci] += 1.0; cS[ci] += rNet[i]; cS2[ci] += rNet[i] * rNet[i]; }
+      else             { cNo[ci] += 1.0; cSo[ci] += rNet[i]; }
+     }
+   int nElig = 0, nSel = 0;
+   double isN = 0.0, isS = 0.0;
+   for(int q = 0; q < 168; q++)
+     {
+      if(cN[q] < (double)MathMax(3, InpSelMinCell)) continue;
+      nElig++;
+      const double mu = cS[q] / cN[q];
+      const double var = (cS2[q] - cN[q] * mu * mu) / (cN[q] - 1.0);
+      const double ti = (var > 0.0) ? mu / (MathSqrt(var) / MathSqrt(cN[q])) : 0.0;
+      if(mu > 0.0 && ti >= InpSelMinT) { selc[q] = true; nSel++; isN += cN[q]; isS += cS[q]; }
+     }
+   //--- fuori campione: tutti i segnali e solo le celle scelte, con il t raggruppato per giorno; curve cumulate
+   double allN = 0.0, allS = 0.0, selN = 0.0, selS = 0.0;
+   double aA = 0.0, bA = 0.0, cA = 0.0, aS = 0.0, bS = 0.0, cSs = 0.0;
+   int dayA = -1, dayS = -1, selDays = 0;
+   double dsA = 0.0, dnA = 0.0, dsS = 0.0, dnS = 0.0;
+   const int step = MathMax(1, nRec / 300);
+   double ya[], ys[];
+   ArrayResize(ya, 0, 400); ArrayResize(ys, 0, 400);
+   double cumA = 0.0, cumS = 0.0;
+   int firstOos = -1;
+   for(int i = 0; i < nRec; i++)
+     {
+      const bool isSel = selc[(int)rCell[i]];
+      cumA += rNet[i];
+      if(isSel) cumS += rNet[i];
+      if((i % step) == 0)
+        {
+         const int np = ArraySize(ya);
+         ArrayResize(ya, np + 1, 400); ArrayResize(ys, np + 1, 400);
+         ya[np] = cumA; ys[np] = cumS;
+        }
+      if(rSmp[i] == 0) continue;
+      if(firstOos < 0) firstOos = i;
+      allN += 1.0; allS += rNet[i];
+      if(rDay[i] != dayA) { aA += dsA * dsA; bA += dsA * dnA; cA += dnA * dnA; dsA = 0.0; dnA = 0.0; dayA = rDay[i]; }
+      dsA += rNet[i]; dnA += 1.0;
+      if(isSel)
+        {
+         selN += 1.0; selS += rNet[i];
+         if(rDay[i] != dayS) { aS += dsS * dsS; bS += dsS * dnS; cSs += dnS * dnS; dsS = 0.0; dnS = 0.0; dayS = rDay[i]; selDays++; }
+         dsS += rNet[i]; dnS += 1.0;
+        }
+     }
+   aA += dsA * dsA; bA += dsA * dnA; cA += dnA * dnA;
+   aS += dsS * dsS; bS += dsS * dnS; cSs += dnS * dnS;
+   res.nElig = nElig; res.nSel = nSel; res.selDays = selDays;
+   res.isN = isN; res.isMean = (isN > 0.0) ? isS / isN : 0.0;
+   res.allN = allN; res.allMean = (allN > 0.0) ? allS / allN : 0.0;
+   res.selN = selN; res.selMean = (selN > 0.0) ? selS / selN : 0.0;
+   if(allN >= 2.0)
+     {
+      const double v = aA - 2.0 * res.allMean * bA + res.allMean * res.allMean * cA;
+      res.allT = (v > 0.0) ? res.allMean / (MathSqrt(v) / allN) : 0.0;
+     }
+   if(selN >= 2.0)
+     {
+      const double v = aS - 2.0 * res.selMean * bS + res.selMean * res.selMean * cSs;
+      res.selT = (v > 0.0) ? res.selMean / (MathSqrt(v) / selN) : 0.0;
+     }
+   //--- scelte casuali dello stesso numero di celle fra quelle ammissibili (generatore xorshift fisso, riproducibile)
+   if(nSel >= 1 && nElig > nSel && selN > 0.0)
+     {
+      int pool[];
+      ArrayResize(pool, nElig);
+      int pk = 0;
+      for(int q = 0; q < 168; q++) if(cN[q] >= (double)MathMax(3, InpSelMinCell)) { pool[pk] = q; pk++; }
+      ulong x = 88172645463325252;
+      int below = 0, ties = 0, draws = 0;
+      for(int dr = 0; dr < 500; dr++)
+        {
+         double so = 0.0, no = 0.0;
+         for(int z = 0; z < nSel; z++)
+           {
+            x ^= (x << 13); x ^= (x >> 7); x ^= (x << 17);
+            const int jx = z + (int)(x % (ulong)(nElig - z));
+            const int tmp = pool[z]; pool[z] = pool[jx]; pool[jx] = tmp;
+            so += cSo[pool[z]]; no += cNo[pool[z]];
+           }
+         if(no <= 0.0) continue;
+         draws++;
+         const double mr = so / no;
+         if(mr < res.selMean) below++;
+         else if(mr == res.selMean) ties++;
+        }
+      if(draws >= 50) res.pct = 100.0 * ((double)below + 0.5 * (double)ties) / (double)draws;
+     }
+   //--- curva
+   g_mgSvg[m] = MgSvgCurve(ya, ys, ArraySize(ya), (firstOos >= 0) ? (firstOos / step) : -1);
+   //--- celle scelte con le loro misure (le prime 14 per netto in-sample)
+   string tb = "", top = "";
+   bool used[168];
+   for(int q = 0; q < 168; q++) used[q] = false;
+   //--- digest: tutte le celle scelte (giorno, ora, segnali e netto in-sample e fuori campione)
+   for(int q = 0; q < 168; q++)
+     {
+      if(!selc[q]) continue;
+      g_dg += "MGMTSELCELL|" + g_tfName[t] + "|" + MgCellLbl(q) + "|isn|" + F0(cN[q]) + "|isnet|" + F1(cS[q] / cN[q]) + "|oosn|" + F0(cNo[q]) + "|oosnet|" + string(cNo[q] > 0.0 ? F1(cSo[q] / cNo[q]) : string("-")) + "\n";
+     }
+   for(int z = 0; z < 14; z++)
+     {
+      int bq = -1;
+      double bv = -1.0e18;
+      for(int q = 0; q < 168; q++)
+        {
+         if(!selc[q] || used[q]) continue;
+         const double mu = cS[q] / cN[q];
+         if(mu > bv) { bv = mu; bq = q; }
+        }
+      if(bq < 0) break;
+      used[bq] = true;
+      const double mo = (cNo[bq] > 0.0) ? cSo[bq] / cNo[bq] : 0.0;
+      if(z < 5) top += string(z > 0 ? ", " : "") + MgCellLbl(bq) + " (in-sample " + Sg(cS[bq] / cN[bq]) + " su " + F0(cN[bq]) + ", fuori campione " + string(cNo[bq] > 0.0 ? (Sg(mo) + " su " + F0(cNo[bq])) : string("n.d.")) + ")";
+      tb += "<tr><td>" + MgCellLbl(bq) + "</td>" + Td(F0(cN[bq])) + Td(F1(cS[bq] / cN[bq]), ColSign(cS[bq])) + Td(F0(cNo[bq])) +
+            Td(cNo[bq] > 0.0 ? F1(mo) : string("-"), ColSign(mo)) + "</tr>";
+     }
+   g_mgSelTop[m] = top;
+   if(tb != "")
+      g_mgSelTab[m] = "<table><tr><th>Cella (giorno e ora d'ingresso)</th><th>Segnali in-sample</th><th>Netto in-sample (pt)</th><th>Segnali fuori campione</th><th>Netto fuori campione (pt)</th></tr>" + tb + "</table>";
+   res.ok = true;
+   return true;
+  }
+
 void RepMgmt()
   {
-   g_cMgmt = ""; g_cMgmt2 = ""; g_cMgmt3 = "";
+   g_cMgmt = ""; g_cMgmt2 = ""; g_cMgmt3 = ""; g_cMgmt4 = ""; g_cMgmt5 = "";
+   g_mgOn = false; g_mgPosTf = 0; g_mgTestedTf = 0; g_mgEvalTf = 0; g_mgRobTf = 0; g_mgRobTested = 0; g_mgSelPosTf = 0; g_mgSelEvalTf = 0;
    if(!InpMgmt) return;
-   if(g_mgNtf < 1 || g_mgR < 1)
+   if(g_mgNtf < 1 || g_mgR < 1 || g_mgNlag < 1)
      {
       Print("Gestione simulata non eseguita: InpMgmtTFs o InpMgmtSlAtr non validi (nessun TF o nessuna gestione).");
+      W("<div class='note ko'><b>Gestione simulata non eseguita</b>: InpMgmtTFs, InpMgmtSlAtr o InpMgmtLags non contengono valori validi (nessun TF o nessuna gestione).</div>");
+      g_cMgmt = "Gestione simulata richiesta ma non eseguita: InpMgmtTFs, InpMgmtSlAtr o InpMgmtLags non contengono valori validi (nessun TF o nessuna gestione).";
       return;
      }
    if(!MgmtCompute())
      {
-      W("<div class='note ko'><b>Gestione simulata non eseguita</b> (memoria insufficiente o interruzione). Riduci i TF o le griglie.</div>");
+      W("<div class='note ko'><b>Gestione simulata non eseguita</b> (memoria insufficiente o interruzione). Riduci i TF, le griglie, gli orizzonti o i ritardi.</div>");
+      g_cMgmt = "Gestione simulata richiesta ma non eseguita (memoria insufficiente o interruzione): riduci i TF, le griglie, gli orizzonti o i ritardi.";
       return;
      }
-   const int nM = g_mgNtf, nC = g_nH, R = g_mgR;
+   const int nM = g_mgNtf, nC = g_nH, R = g_mgR, nLag = g_mgNlag;
    const double minIs = MathMax(30.0, g_minN / 2.0);
-   W("<h2>Gestione simulata: punti presi in media per segnale con stop ATR, trailing e durata massima</h2>");
-   W("<div class='note'>Ogni segnale apre una posizione nel suo verso all'open della barra M1 d'ingresso. <b>Stop iniziale</b> e <b>trailing</b> sono in multipli dell'ATR(" + IS(InpMgmtAtrLen) +
-     ") del TF del segnale (calcolato sulla barra del segnale); il trailing parte quando il profitto raggiunge la sua distanza e porta lo stop a (massimo favorevole &minus; distanza), senza mai allontanarlo. "
-     "La posizione esce allo stop oppure alla <b>durata massima</b> (colonne = orizzonti). Dentro la barra M1 l'ordine fra minimo e massimo e' sconosciuto: " + string(InpMgmtHighFirst ? "si assume prima il massimo (limite pessimistico)" : "si assume prima il minimo (neutro su un percorso casuale, non e' un limite prudente)") + ". "
+   const double minOos = MathMax(10.0, minIs / 3.0);
+   const string uTxt = InpMgmtPoints ? string("punti fissi") : ("multipli dell'ATR(" + IS(InpMgmtAtrLen) + ") del TF del segnale, calcolato sulla barra del segnale");
+   const string uTxtS = InpMgmtPoints ? string("in punti fissi") : string("in multipli dell'ATR");
+   W("<h2>Gestione simulata: punti presi in media per segnale con stop, trailing, take profit, durata massima e ritardo d'ingresso</h2>");
+   W("<div class='note'>Ogni segnale apre una posizione nel suo verso all'open della barra M1 d'ingresso. <b>Stop iniziale</b>, <b>trailing</b> e <b>take profit</b> sono in " + uTxt +
+     " (griglie provate tutte insieme: " + IS(g_mgNsl) + " stop x " + IS(g_mgNtr) + " trailing x " + IS(g_mgNtp) + " target = " + IS(R) + " gestioni); il trailing parte quando il profitto raggiunge la sua distanza e porta lo stop a (massimo favorevole &minus; distanza), senza mai allontanarlo. "
+     "La posizione esce allo stop, al target oppure alla <b>durata massima</b> (colonne = orizzonti). Dentro la barra M1 l'ordine fra minimo e massimo e' sconosciuto: " +
+     string(InpMgmtHighFirst ? "si assume prima il massimo (limite pessimistico per il trailing; se la stessa barra tocca stop e target vince il target)" : "si assume prima il minimo (neutro su un percorso casuale; se la stessa barra tocca stop e target vince lo stop)") + ". "
+     "<b>Ritardo</b>: ogni segnale e' rifatto anche aprendo N minuti piu' tardi (" + MgLagList() + " min, tutti insieme); fascia oraria e periodo in-sample/fuori campione restano quelli dell'ingresso senza ritardo, la durata si conta dall'ingresso ritardato. "
      "<b>Lordo</b> = punti presi prima dei costi; <b>netto</b> = dopo spread, commissione e costo extra. Per i TF con molti segnali si simula un campione uniforme (" + string(InpMgmtMaxSignals > 0 ? ("massimo " + IS(InpMgmtMaxSignals) + " per TF") : "nessun limite") + "). "
      "Le posizioni non sono una per volta: si sovrappongono, e con la durata di un giorno attraversano piu' giorni (il t raggruppato per giorno e' allora ottimista). "
-     "La miglior combinazione per TF e' scelta sul primo periodo (in-sample) e verificata sul resto: <b>solo il fuori campione conta</b>. Il t e' raggruppato per giorno.</div>");
+     "La miglior combinazione per TF e' scelta sul primo periodo (in-sample, a ritardo 0) e verificata sul resto: <b>solo il fuori campione conta</b>. Il t e' raggruppato per giorno.</div>");
 
-   //--- scelta per TF
+   //--- scelta per TF (ritardo 0)
    int bR[], bC[], pC[];
    double bIs[], bOos[], bOosT[], bGross[], bOosN[], bStop[];
    ArrayResize(bR, nM); ArrayResize(bC, nM); ArrayResize(pC, nM);
    ArrayResize(bIs, nM); ArrayResize(bOos, nM); ArrayResize(bOosT, nM); ArrayResize(bGross, nM); ArrayResize(bOosN, nM); ArrayResize(bStop, nM);
-   int nPos = 0, nTested = 0;
+   int nPos = 0, nTested = 0, nEval = 0;
    for(int m = 0; m < nM; m++)
      {
       bR[m] = -1; bC[m] = -1; pC[m] = -1;
+      bIs[m] = 0.0; bOos[m] = 0.0; bOosT[m] = 0.0; bGross[m] = 0.0; bOosN[m] = 0.0; bStop[m] = 0.0;
       double best = -1.0e18;
       for(int r = 0; r < R; r++)
          for(int c = 0; c < nC; c++)
            {
             double n, sn, sn2, sg, ss;
-            MgSum(m, r, c, 0, n, sn, sn2, sg, ss);
+            MgSum(0, m, r, c, 0, n, sn, sn2, sg, ss);
             if(n < minIs) continue;
             if(sn / n > best) { best = sn / n; bR[m] = r; bC[m] = c; }
            }
@@ -3179,40 +3731,41 @@ void RepMgmt()
          for(int c = 0; c < nC; c++)
            {
             double n, sn, sn2, sg, ss;
-            MgSum(m, bR[m], c, 0, n, sn, sn2, sg, ss);
+            MgSum(0, m, bR[m], c, 0, n, sn, sn2, sg, ss);
             if(n >= minIs && sn / n >= 0.9 * best) { pC[m] = c; break; }
            }
       double n0, a0, b0, g0, s0;
-      MgSum(m, bR[m], pC[m], 0, n0, a0, b0, g0, s0);
+      MgSum(0, m, bR[m], pC[m], 0, n0, a0, b0, g0, s0);
       bIs[m] = (n0 > 0.0) ? a0 / n0 : 0.0;
       double n1, a1, b1, g1, s1;
-      MgSum(m, bR[m], pC[m], 1, n1, a1, b1, g1, s1);
+      MgSum(0, m, bR[m], pC[m], 1, n1, a1, b1, g1, s1);
       bOosN[m] = n1;
       bOos[m] = (n1 > 0.0) ? a1 / n1 : 0.0;
-      bOosT[m] = MgClT(m, bR[m], pC[m], 1);
+      bOosT[m] = MgClT(0, m, bR[m], pC[m], 1);
       bGross[m] = (n1 > 0.0) ? g1 / n1 : 0.0;
       bStop[m] = (n1 > 0.0) ? 100.0 * s1 / n1 : 0.0;
-      if(bOosN[m] >= MathMax(10.0, minIs / 3.0) && bOos[m] > 0.0 && bOosT[m] >= 2.0) nPos++;
+      if(bOosN[m] >= minOos) nEval++;
+      if(bOosN[m] >= minOos && bOos[m] > 0.0 && bOosT[m] >= 2.0) nPos++;
      }
 
    //--- confronto fra time frame
    W("<h3>Confronto fra time frame (miglior gestione scelta in-sample, risultato fuori campione)</h3>");
    W("<table><tr><th>TF</th><th>Segnali simulati</th><th>Miglior gestione in-sample</th><th>Durata consigliata</th><th>Lordo fuori campione (pt)</th><th>Netto in-sample (pt)</th>"
-     "<th>Netto fuori campione (pt)</th><th>Netto fuori campione (" + g_ccy + ")</th><th>t fuori campione</th><th>Uscite per stop (fuori campione)</th><th>Esito</th></tr>");
+     "<th>Netto fuori campione (pt)</th><th>Netto fuori campione (" + g_ccy + ")</th><th>t fuori campione</th><th>Uscite per stop o target (fuori campione)</th><th>Esito</th></tr>");
    for(int m = 0; m < nM; m++)
      {
       const int t = g_mgTf[m];
       if(bR[m] < 0)
         { W("<tr class='thin'><td>" + g_tfName[t] + "</td><td colspan='10'>campione insufficiente (" + IS(g_mgUsed[m]) + " segnali simulati)</td></tr>"); continue; }
       string es;
-      if(bOosN[m] < MathMax(10.0, minIs / 3.0)) es = Td("OOS scarso", "#4c566a");
+      if(bOosN[m] < minOos) es = Td("OOS scarso", "#4c566a");
       else if(bOos[m] > 0.0 && bOosT[m] >= 2.0) es = Td("<b>t &ge; 2 (da confermare)</b>", "#a3be8c");
       else if(bOos[m] > 0.0) es = Td("debole", "#ebcb8b");
       else es = Td("NO", "#bf616a");
       W("<tr><td>" + g_tfName[t] + "</td>" + Td(F0(g_mgUsed[m]) + " su " + F0(g_mgSeen[m])) + Td(MgRuleLbl(bR[m])) + Td(bIs[m] > 0.0 ? MgCapLbl(pC[m], t) : string("nessuna (netto non positivo)")) +
         Td(F1(bGross[m]), ColSign(bGross[m])) + Td(F1(bIs[m]), ColSign(bIs[m])) + Td("<b>" + F1(bOos[m]) + "</b>", ColSign(bOos[m])) +
         Td(Mny(bOos[m]), ColSign(bOos[m])) + Td(F2(bOosT[m]), ColT(bOosT[m])) + Td(F0(bStop[m]) + "%") + es + "</tr>");
-      g_dg += "MGMTBEST|" + g_tfName[t] + "|sl|" + PtLbl(g_mgSl[bR[m] / g_mgNtr]) + "|trail|" + PtLbl(g_mgTr[bR[m] % g_mgNtr]) + "|hold|" + IS(g_hor[pC[m]]) +
+      g_dg += "MGMTBEST|" + g_tfName[t] + "|" + MgRuleDg(bR[m]) + "|hold|" + IS(g_hor[pC[m]]) +
               "|signals|" + F0(g_mgUsed[m]) + "|gross|" + F1(bGross[m]) + "|netis|" + F1(bIs[m]) + "|netoos|" + F1(bOos[m]) + "|oosn|" + F0(bOosN[m]) + "|oost|" + F2(bOosT[m]) +
               "|stoppct|" + F0(bStop[m]) + "\n";
      }
@@ -3221,12 +3774,143 @@ void RepMgmt()
    W("<div class='note'>TF con netto fuori campione positivo e t &ge; 2: <b>" + IS(nPos) + "</b> su " + IS(nTested) + " (per puro caso, con una scelta per TF, se ne attendono circa " + F1(expPos) +
      "). Il lordo &egrave; ci&ograve; che la sola direzione del segnale porta con quella gestione, senza costi: se &egrave; vicino a zero in tutte le combinazioni la gestione non crea un vantaggio, ridistribuisce soltanto vincite e perdite.</div>");
 
+   //--- ritardo d'ingresso: la gestione scelta a ritardo 0 rifatta con tutti i ritardi
+   int nRob = 0, nRobTested = 0, nLag0Pos = 0, nLag0Eval = 0;
+   string lagTx = "";
+   bool hasShort = false;
+   for(int l = 0; l < nLag; l++) if(g_mgLag[l] >= 1 && g_mgLag[l] <= 5) hasShort = true;
+   if(nLag > 1)
+     {
+      W("<h3>Ritardo d'ingresso: gestione e durata scelte in-sample a ritardo 0, rifatte entrando piu' tardi (netto medio fuori campione per segnale, pt)</h3>");
+      W("<div class='note'>Se il netto crolla con pochi minuti di ritardo il vantaggio era una dislocazione del prezzo d'ingresso (lo scatto che segue la chiusura del segnale), non operabile da un EA che entra qualche secondo o minuto dopo. "
+        "Colonna finale: <b>SI</b> se il netto fuori campione e' positivo a ritardo 0 e a tutti i ritardi provati da 1 a 5 min (serve almeno un ritardo fra 1 e 5 in InpMgmtLags: " + string(hasShort ? "presente" : "<b>assente, la colonna non e' valutabile</b>") + "), <b>NO</b> se almeno uno di questi e' negativo, n.d. se manca il campione. " +
+        string(InpEntryLagMin > 0 ? ("Il ritardo di base InpEntryLagMin = " + IS(InpEntryLagMin) + " min e' gia' compreso: le colonne mostrano il ritardo totale dalla chiusura del segnale. ") : "") +
+        "I segnali senza barre M1 contigue fino all'ingresso ritardato sono esclusi da quel ritardo: il numero di segnali per ritardo e' nel suggerimento della cella e nel digest (oosn).</div>");
+      W("<table><tr><th>TF</th><th>Gestione</th><th>Durata</th>");
+      for(int l = 0; l < nLag; l++) W("<th>+" + IS(InpEntryLagMin + g_mgLag[l]) + " min</th>");
+      W("<th>Regge fino a 5 min?</th></tr>");
+      for(int m = 0; m < nM; m++)
+        {
+         if(bR[m] < 0) continue;
+         const int t = g_mgTf[m];
+         string cells = "";
+         bool anyNeg = false, anyUnk = false;
+         string lt = g_tfName[t] + ": ";
+         for(int l = 0; l < nLag; l++)
+           {
+            double n0, a0, b0, g0, s0, n1, a1, b1, g1, s1;
+            MgSum(l, m, bR[m], pC[m], 0, n0, a0, b0, g0, s0);
+            MgSum(l, m, bR[m], pC[m], 1, n1, a1, b1, g1, s1);
+            const double mo = (n1 > 0.0) ? a1 / n1 : 0.0;
+            const double tt = MgClT(l, m, bR[m], pC[m], 1);
+            if(n1 < minOos) { cells += Td("OOS scarso", "#4c566a"); if(g_mgLag[l] <= 5) anyUnk = true; }
+            else
+              {
+               cells += "<td style='color:" + ColSign(mo) + "' title='segnali fuori campione " + F0(n1) + ", lordo " + F1(g1 / n1) + ", netto in-sample " + F1(n0 > 0.0 ? a0 / n0 : 0.0) + ", t " + F2(tt) + "'>" + F1(mo) + "</td>";
+               if(g_mgLag[l] <= 5 && mo <= 0.0) anyNeg = true;
+               if(l == 0) { nLag0Eval++; if(mo > 0.0) nLag0Pos++; }
+              }
+            lt += string(l > 0 ? ", " : "") + "+" + IS(InpEntryLagMin + g_mgLag[l]) + " min " + string(n1 >= minOos ? Sg(mo) : string("n.d."));
+            g_dg += "MGMTLAG|" + g_tfName[t] + "|lag|" + IS(g_mgLag[l]) + "|total|" + IS(InpEntryLagMin + g_mgLag[l]) + "|" + MgRuleDg(bR[m]) + "|hold|" + IS(g_hor[pC[m]]) + "|oosn|" + F0(n1) + "|gross|" + string(n1 > 0.0 ? F1(g1 / n1) : string("-")) +
+                    "|netis|" + string(n0 > 0.0 ? F1(a0 / n0) : string("-")) + "|netoos|" + string(n1 > 0.0 ? F1(mo) : string("-")) + "|oost|" + F2(tt) + "\n";
+           }
+         string rbTxt;
+         if(anyNeg) { rbTxt = Td("NO", "#bf616a"); nRobTested++; }
+         else if(anyUnk || !hasShort) rbTxt = Td("n.d.", "#4c566a");
+         else { rbTxt = Td("<b>SI</b>", "#a3be8c"); nRob++; nRobTested++; }
+         W("<tr><td>" + g_tfName[t] + "</td>" + Td(MgRuleLbl(bR[m])) + Td(MgCapLbl(pC[m], t)) + cells + rbTxt + "</tr>");
+         lagTx += lt + "; ";
+        }
+      W("</table>");
+      string verd;
+      if(!hasShort) verd = "InpMgmtLags non contiene ritardi fra 1 e 5 min: la tenuta dell'ingresso ritardato non e' valutabile.";
+      else if(nLag0Eval == 0) verd = "Nessun TF ha un campione fuori campione sufficiente: ritardo non valutabile.";
+      else if(nLag0Pos == 0) verd = "Nessun TF ha un netto fuori campione positivo gia' a ritardo 0 (" + IS(nLag0Eval) + " valutabili): il ritardo non e' la causa, manca il vantaggio da perdere.";
+      else if(nRob == 0) verd = string(nLag0Pos == 1 ? "L'unico TF con netto positivo a ritardo 0 non regge" : ("Dei " + IS(nLag0Pos) + " TF con netto positivo a ritardo 0 nessuno regge")) + " fino a 5 min: il vantaggio, dove c'era, e' una dislocazione del prezzo d'ingresso e non e' operabile.";
+      else verd = "I TF che reggono sono candidati, non conferme: la gestione e' scelta sul primo periodo e il criterio e' il solo segno del netto medio (senza t).";
+      g_cMgmt4 = "Ritardo d'ingresso (minuti dalla chiusura del segnale" + string(InpEntryLagMin > 0 ? (", compreso il ritardo di base " + IS(InpEntryLagMin)) : "") + ", tutti provati insieme: " + MgLagTotList() + "), con la gestione e la durata scelte in-sample a ritardo 0: netto medio fuori campione per segnale in punti. " + lagTx +
+                 "TF con netto fuori campione positivo a ritardo 0: " + IS(nLag0Pos) + " su " + IS(nLag0Eval) + " valutabili" +
+                 string(hasShort ? ("; positivo anche a tutti i " + string(InpEntryLagMin > 0 ? "ritardi aggiuntivi" : "ritardi") + " da 1 a 5 min: " + IS(nRob)) : "") + ". " + verd;
+     }
+
+   //--- selezione di orari e giorni
+   MgSelRes sres[];
+   ArrayResize(sres, nM);
+   for(int m = 0; m < nM; m++) sres[m].ok = false;
+   int nSelTf = 0, nSelEval = 0, nBetter = 0, nSelPos = 0;
+   const double selPct = 90.0;                 // un indizio solo se la selezione batte almeno questa quota di scelte casuali
+   if(InpMgmtSelect)
+     {
+      W("<h3>Selezione di orari e giorni: scelti sul primo periodo, verificati sul resto</h3>");
+      W("<div class='note'>Per la gestione e la durata scelte di ogni TF i risultati dei segnali sono divisi in celle <b>ora x giorno della settimana</b> (ora d'ingresso server + offset, ritardo 0). "
+        "Sul primo periodo si scelgono le celle con almeno " + IS(InpSelMinCell) + " segnali, netto positivo e t &ge; " + F1(InpSelMinT) + "; la colonna <b>fuori campione</b> misura la sola selezione sul resto del periodo. "
+        "Sul periodo di scelta la curva migliora per costruzione (la selezione e' fatta guardando quei dati): conta solo se migliora anche dopo. "
+        "<b>Batte</b> = quota di scelte casuali dello stesso numero di celle (500 estrazioni fra le celle ammissibili) che fanno peggio della selezione sul fuori campione: senza alcuna informazione questa quota e' sparsa fra 0% e 100% e supera il " + F0(selPct) + "% in circa 1 TF su 10 per puro caso. "
+        "Una selezione e' valutabile solo con almeno una cella scelta, 30 segnali e 15 giorni distinti fuori campione. "
+        "La curva cumulata (tutti i segnali contro le sole celle scelte) e' nel dettaglio di ogni TF.</div>");
+      W("<table><tr><th>TF</th><th>Celle scelte / ammissibili</th><th>Fuori campione: tutti i segnali (n, netto pt)</th><th>Fuori campione: solo celle scelte (n, giorni, netto pt)</th><th>t</th><th>Batte le scelte casuali</th><th>Esito</th></tr>");
+      string selTx = "";
+      for(int m = 0; m < nM; m++)
+        {
+         sres[m].ok = false;
+         if(bR[m] < 0) continue;
+         const int t = g_mgTf[m];
+         if(IsStopped()) break;
+         if(!MgSelect(m, bR[m], pC[m], sres[m]))
+           {
+            W("<tr class='thin'><td>" + g_tfName[t] + "</td><td colspan='6'>campione insufficiente</td></tr>");
+            selTx += g_tfName[t] + ": campione insufficiente; ";
+            continue;
+           }
+         nSelTf++;
+         const MgSelRes q = sres[m];
+         const bool evalOk = (q.nSel >= 1 && q.selN >= MathMax(30.0, minOos) && q.selDays >= 15);
+         if(evalOk) nSelEval++;
+         string es;
+         if(q.nSel < 1) es = Td("nessuna cella scelta", "#4c566a");
+         else if(!evalOk) es = Td("OOS scarso", "#4c566a");
+         else if(q.selMean > 0.0 && q.selT >= 2.0 && q.pct >= selPct) { es = Td("<b>positivo, t &ge; 2 (da confermare)</b>", "#a3be8c"); nSelPos++; }
+         else if(q.selMean > q.allMean) es = Td("migliora ma non basta", "#ebcb8b");
+         else es = Td("NO", "#bf616a");
+         if(evalOk && q.selMean > q.allMean) nBetter++;
+         W("<tr><td>" + g_tfName[t] + "</td>" + Td(IS(q.nSel) + " / " + IS(q.nElig)) + Td(F0(q.allN) + ", " + F1(q.allMean), ColSign(q.allMean)) +
+           Td(q.nSel > 0 ? (F0(q.selN) + ", " + IS(q.selDays) + " gg, <b>" + F1(q.selMean) + "</b>") : string("-"), ColSign(q.selMean)) + Td(q.nSel > 0 ? F2(q.selT) : string("-"), ColT(q.selT)) +
+           Td(q.pct >= 0.0 ? (F0(q.pct) + "%") : string("-")) + es + "</tr>");
+         g_dg += "MGMTSEL|" + g_tfName[t] + "|" + MgRuleDg(bR[m]) + "|hold|" + IS(g_hor[pC[m]]) + "|cells|" + IS(q.nSel) + "|elig|" + IS(q.nElig) + "|isn|" + F0(q.isN) + "|isnet|" + F1(q.isMean) +
+                 "|alln|" + F0(q.allN) + "|allnet|" + F1(q.allMean) + "|allt|" + F2(q.allT) + "|seln|" + F0(q.selN) + "|seldays|" + IS(q.selDays) + "|selnet|" + F1(q.selMean) + "|selt|" + F2(q.selT) +
+                 "|beats|" + string(q.pct >= 0.0 ? F0(q.pct) : string("na")) + "|eval|" + IS(evalOk ? 1 : 0) + "\n";
+         string one;
+         if(q.nSel < 1) one = "nessuna cella scelta su " + IS(q.nElig);
+         else
+           {
+            one = Pl(q.nSel, "cella scelta", "celle scelte") + " su " + IS(q.nElig) + " (" + g_mgSelTop[m] + "); ";
+            if(q.selN < 1.0) one += "nessun segnale fuori campione nelle celle scelte";
+            else
+               one += "fuori campione " + Sg(q.selMean) + " pt su " + F0(q.selN) + " segnali e " + IS(q.selDays) + " giorni (t " + F2(q.selT) + ", " +
+                      string(q.pct >= 0.0 ? ("batte il " + F0(q.pct) + "% delle scelte casuali") : string("confronto con le scelte casuali non calcolabile")) + ") contro " + Sg(q.allMean) + " pt di tutti i " + F0(q.allN) + " segnali" +
+                      string(evalOk ? "" : " (campione scarso: non valutabile)");
+           }
+         selTx += g_tfName[t] + ": " + one + "; ";
+        }
+      W("</table>");
+      if(nSelTf > 0)
+        {
+         g_cMgmt5 = "Selezione di orari e giorni: celle ora x giorno della settimana scelte sul primo periodo (almeno " + IS(InpSelMinCell) + " segnali, netto positivo, t >= " + F1(InpSelMinT) + ") con la gestione scelta per ogni TF, poi misurate sul resto. " + selTx +
+                    string(nSelEval == 0 ?
+                    "Nessun TF e' valutabile (serve almeno una cella scelta, 30 segnali e 15 giorni fuori campione): non emerge evidenza ne' a favore ne' contro la selezione. " :
+                    ("Su " + IS(nSelEval) + " TF valutabili la selezione ha battuto tutti i segnali fuori campione in " + IS(nBetter) + " (senza informazione ci si attende circa la meta', e i TF condividono gran parte dei segnali: non sono prove indipendenti) e ha dato un netto positivo con t >= 2 e sopra il " + F0(selPct) + "% delle scelte casuali in " + IS(nSelPos) + ". " +
+                     string(nSelPos == 0 ? "Nessun TF mostra un miglioramento significativo sul periodo di verifica: non emerge evidenza che scegliere orari e giorni guardando lo storico aiuti. " :
+                            "I TF positivi sono candidati da confermare su altri simboli e periodi (con 168 celle per TF qualche risultato positivo e' atteso per caso). "))) +
+                    "La curva cumulata e' nel report HTML, nel dettaglio di ogni TF; tutte le celle scelte sono nel digest (MGMTSELCELL).";
+        }
+     }
+
    //--- dettaglio per TF
    for(int m = 0; m < nM; m++)
      {
       const int t = g_mgTf[m];
       if(bR[m] < 0) continue;
-      W("<details><summary><b>" + g_tfName[t] + "</b> &mdash; dettaglio per gestione e durata, e per orario</summary>");
+      W("<details><summary><b>" + g_tfName[t] + "</b> &mdash; dettaglio per gestione e durata, per orario e per cella ora x giorno</summary>");
       W("<h3>" + g_tfName[t] + ": netto medio per segnale (pt) per gestione e durata massima &mdash; lordo fra parentesi</h3>");
       W("<table><tr><th>Gestione</th>");
       for(int c = 0; c < nC; c++) W("<th>" + IS(g_hor[c]) + " min</th>");
@@ -3237,14 +3921,14 @@ void RepMgmt()
          for(int c = 0; c < nC; c++)
            {
             double n, sn, sn2, sg, ss, n0, a0, b0, g0, s0, n1, a1, b1, g1, s1;
-            MgSum(m, r, c, -1, n, sn, sn2, sg, ss);
-            MgSum(m, r, c, 0, n0, a0, b0, g0, s0);
-            MgSum(m, r, c, 1, n1, a1, b1, g1, s1);
+            MgSum(0, m, r, c, -1, n, sn, sn2, sg, ss);
+            MgSum(0, m, r, c, 0, n0, a0, b0, g0, s0);
+            MgSum(0, m, r, c, 1, n1, a1, b1, g1, s1);
             if(n < 1.0) { W("<td>-</td>"); continue; }
-            const string tip = " title='segnali " + F0(n) + ", in-sample " + F1(n0 > 0.0 ? a0 / n0 : 0.0) + ", fuori campione " + F1(n1 > 0.0 ? a1 / n1 : 0.0) + ", uscite per stop " + F0(100.0 * ss / n) + "%'";
+            const string tip = " title='segnali " + F0(n) + ", in-sample " + F1(n0 > 0.0 ? a0 / n0 : 0.0) + ", fuori campione " + F1(n1 > 0.0 ? a1 / n1 : 0.0) + ", uscite per stop o target " + F0(100.0 * ss / n) + "%'";
             const bool isBest = (r == bR[m] && c == pC[m]);
             W("<td style='color:" + ColSign(sn / n) + string(isBest ? ";font-weight:bold;border:1px solid #88c0d0" : "") + "'" + tip + ">" + F1(sn / n) + " (" + F1(sg / n) + ")</td>");
-            g_dg += "MGMT|" + g_tfName[t] + "|sl|" + PtLbl(g_mgSl[r / g_mgNtr]) + "|trail|" + PtLbl(g_mgTr[r % g_mgNtr]) + "|hold|" + IS(g_hor[c]) + "|n|" + F0(n) + "|gross|" + F1(sg / n) +
+            g_dg += "MGMT|" + g_tfName[t] + "|" + MgRuleDg(r) + "|hold|" + IS(g_hor[c]) + "|n|" + F0(n) + "|gross|" + F1(sg / n) +
                     "|net|" + F1(sn / n) + "|netis|" + F1(n0 > 0.0 ? a0 / n0 : 0.0) + "|netoos|" + F1(n1 > 0.0 ? a1 / n1 : 0.0) + "|stoppct|" + F0(100.0 * ss / n) + "\n";
            }
          W("</tr>");
@@ -3274,7 +3958,15 @@ void RepMgmt()
          g_dg += "MGMTH|" + g_tfName[t] + "|" + RBktLabel(rb) + "|n|" + F0(nt) + "|gross|" + F1((sg[0] + sg[1]) / nt) + "|net|" + F1((sn[0] + sn[1]) / nt) +
                  "|netis|" + (n[0] > 0.0 ? F1(sn[0] / n[0]) : string("-")) + "|netoos|" + (n[1] > 0.0 ? F1(sn[1] / n[1]) : string("-")) + "\n";
         }
-      W("</table></details>");
+      W("</table>");
+      if(InpMgmtSelect && sres[m].ok)
+        {
+         W("<h3>" + g_tfName[t] + ": curva cumulata del netto per segnale (pt) &mdash; tutti i segnali contro le sole celle ora x giorno scelte in-sample</h3>");
+         if(g_mgSvg[m] != "") W(g_mgSvg[m]);
+         W("<div class='note'>Somma dei netti dei segnali in ordine di tempo (una posizione per segnale, lotto fisso, senza reinvestire e senza limiti di margine: le posizioni si sovrappongono). A sinistra della linea tratteggiata e' il periodo in cui le celle sono state scelte, a destra il periodo di verifica.</div>");
+         if(g_mgSelTab[m] != "") { W("<h3>" + g_tfName[t] + ": celle scelte (le prime 14 per netto in-sample)</h3>"); W(g_mgSelTab[m]); }
+        }
+      W("</details>");
      }
 
    //--- elenco completo per TF (per il riepilogo copiabile)
@@ -3285,16 +3977,16 @@ void RepMgmt()
        const int t = g_mgTf[m];
        if(bR[m] < 0) { lst += g_tfName[t] + ": campione insufficiente; "; continue; }
        string es2;
-       if(bOosN[m] < MathMax(10.0, minIs / 3.0)) es2 = "fuori campione scarso";
+       if(bOosN[m] < minOos) es2 = "fuori campione scarso";
        else if(bOos[m] > 0.0 && bOosT[m] >= 2.0) es2 = "t >= 2 da confermare";
        else if(bOos[m] > 0.0) es2 = "debole";
        else es2 = "no";
        lst += g_tfName[t] + ": " + MgRuleLbl(bR[m]) + ", " +
               string(bIs[m] > 0.0 ? ("durata massima consigliata " + MgCapLbl(pC[m], t)) : ("nessuna durata ha netto in-sample positivo (la meno negativa: " + IS(g_hor[bC[m]]) + " min)")) +
               ", lordo fuori campione " + Sg(bGross[m]) + " pt, netto in-sample " + Sg(bIs[m]) + " pt, netto fuori campione " + Sg(bOos[m]) + " pt" +
-              string(g_money ? (" (" + MnyU(bOos[m]) + ")") : "") + ", t " + F2(bOosT[m]) + ", uscite per stop " + F0(bStop[m]) + "%, esito " + es2 + "; ";
+              string(g_money ? (" (" + MnyU(bOos[m]) + ")") : "") + ", t " + F2(bOosT[m]) + ", uscite per stop o target " + F0(bStop[m]) + "%, esito " + es2 + "; ";
       }
-    g_cMgmt2 = "Per ogni time frame, miglior gestione scelta in-sample (stop e trailing in ATR) con la durata massima consigliata e il risultato per segnale: " + lst;
+    g_cMgmt2 = "Per ogni time frame, miglior gestione scelta in-sample (stop, trailing e take profit " + uTxtS + ") con la durata massima consigliata e il risultato per segnale: " + lst;
     //--- orari migliori (in-sample) dei cinque TF con il miglior netto fuori campione
     bool usedM[];
     ArrayResize(usedM, nM);
@@ -3304,7 +3996,7 @@ void RepMgmt()
       {
        int mm = -1;
        for(int m = 0; m < nM; m++)
-          if(!usedM[m] && bR[m] >= 0 && bOosN[m] >= MathMax(10.0, minIs / 3.0) && (mm < 0 || bOos[m] > bOos[mm])) mm = m;
+          if(!usedM[m] && bR[m] >= 0 && bOosN[m] >= minOos && (mm < 0 || bOos[m] > bOos[mm])) mm = m;
        if(mm < 0) break;
        usedM[mm] = true;
        bool usedB[];
@@ -3336,10 +4028,10 @@ void RepMgmt()
    }
 
    //--- testo per il riepilogo
-   string tx = "Stop e trailing in multipli dell'ATR con durata massima, su " + IS(nM) + " TF" + string(InpMgmtMaxSignals > 0 ? (" (campione fino a " + IS(InpMgmtMaxSignals) + " segnali per TF)") : "") + ": ";
+   string tx = "Stop, trailing e take profit " + uTxtS + " con durata massima, su " + IS(nM) + " TF, " + IS(R) + " gestioni x " + IS(nC) + " durate" + string(InpMgmtMaxSignals > 0 ? (" (campione fino a " + IS(InpMgmtMaxSignals) + " segnali per TF)") : "") + ": ";
    int bestM = -1;
    for(int m = 0; m < nM; m++)
-      if(bR[m] >= 0 && bOosN[m] >= MathMax(10.0, minIs / 3.0) && (bestM < 0 || bOos[m] > bOos[bestM])) bestM = m;
+      if(bR[m] >= 0 && bOosN[m] >= minOos && (bestM < 0 || bOos[m] > bOos[bestM])) bestM = m;
    if(bestM < 0)
       tx += "campione insufficiente per valutare i TF. ";
    else
@@ -3354,11 +4046,502 @@ void RepMgmt()
       if(cnt > 0)
          tx += "Sulla media dei TF la miglior gestione di ciascuno prende " + Sg(sumG / cnt) + " pt lordi e " + Sg(sumN / cnt) + " pt netti per segnale, entrambi fuori campione. ";
       if(nPos == 0)
-         tx += "Nessun TF valutabile (" + IS(nTested) + " su " + IS(nM) + ") mostra un netto positivo e significativo fuori campione: con queste gestioni a stop ATR e trailing i segnali non portano punti oltre i costi.";
+         tx += "Nessun TF valutabile (" + IS(nTested) + " su " + IS(nM) + ") mostra un netto positivo e significativo fuori campione: con queste gestioni i segnali non portano punti oltre i costi.";
       else
          tx += "I TF positivi sono candidati da confermare su altri simboli e periodi, non conferme: la scelta della miglior gestione per TF e' ottimizzata sul primo periodo.";
      }
    g_cMgmt = tx;
+   g_mgOn = true;
+   g_mgPosTf = nPos; g_mgTestedTf = nTested; g_mgEvalTf = nEval; g_mgRobTf = nRob; g_mgRobTested = nRobTested; g_mgSelPosTf = nSelPos; g_mgSelEvalTf = nSelEval;
+  }
+
+//--- frase sulla gestione simulata per il paragrafo di fattibilita' dell'EA; 'closing' aggiunge la conclusione (solo dove non contraddice il resto del paragrafo)
+string MgFeasTxt(const bool closing)
+  {
+   if(!g_mgOn) return "";
+   if(g_mgEvalTf < 1) return " Gestione simulata: campione fuori campione insufficiente in tutti i TF, non valutabile.";
+   string tx = " Gestione simulata (stop, trailing, take profit e durata massima, tutte le griglie provate): TF con netto fuori campione positivo e t >= 2: " + IS(g_mgPosTf) + " su " + IS(g_mgEvalTf) + " valutabili; ";
+   if(g_mgNlag > 1 && g_mgRobTested > 0) tx += "fra quelli con ritardo valutabile, positivi anche a tutti i ritardi da 1 a 5 min: " + IS(g_mgRobTf) + " su " + IS(g_mgRobTested) + "; ";
+   if(InpMgmtSelect && g_mgSelEvalTf > 0) tx += "TF con la selezione di orari e giorni positiva e significativa fuori campione: " + IS(g_mgSelPosTf) + " su " + IS(g_mgSelEvalTf) + " valutabili; ";
+   if(closing)
+      tx += string((g_mgPosTf == 0 && g_mgRobTf == 0 && g_mgSelPosTf == 0) ?
+                   "dai dati non emerge evidenza di fattibilita' nemmeno con la gestione, i ritardi e la selezione di orari e giorni." :
+                   "i TF positivi sono candidati da confermare su altri simboli e periodi, non conferme.");
+   return tx;
+  }
+
+//+------------------------------------------------------------------+
+//| SCANSIONE DEI PARAMETRI DEL SEGNALE DELTA                         |
+//| Prova tutte le combinazioni di EmaPeriod, VolAvgPeriod e          |
+//| SignalThreshold (liste InpSweepEma, InpSweepVol, InpSweepThr) su  |
+//| ogni TF scelto: ricalcola i segnali Delta per ogni combinazione e |
+//| li valuta con UNA gestione fissa (InpSweepSl/Trail/Tp/Hold, nelle |
+//| stesse unita' della gestione simulata), con gli stessi costi,     |
+//| ritardo, filtri dell'EA e divisione in-sample / fuori campione    |
+//| del resto dello script. La combinazione migliore e' scelta sul    |
+//| primo periodo e verificata sul resto; il massimo atteso per caso  |
+//| cresce con il numero di combinazioni provate (sqrt(2 ln m)).      |
+//+------------------------------------------------------------------+
+#define SWF 9   // campi per combinazione: 0 n in-sample, 1 netto medio IS, 2 t IS, 3 n fuori campione, 4 netto medio OOS, 5 t OOS, 6 lordo medio OOS, 7 segnali validi (prima del campionamento), 8 segnali valutati
+
+//--- elenco di TF (ALL = tutti tranne M1, oppure nomi separati da virgola) come indici in g_tfName
+int ParseTfSel(const string src0, int &out[])
+  {
+   ArrayResize(out, 0);
+   string src = src0;
+   StringTrimLeft(src); StringTrimRight(src); StringToUpper(src);
+   if(src == "ALL" || src == "")
+     {
+      for(int t = 0; t < g_nT; t++)
+        {
+         if(g_tf[t] == PERIOD_M1) continue;
+         const int k = ArraySize(out);
+         ArrayResize(out, k + 1);
+         out[k] = t;
+        }
+      return ArraySize(out);
+     }
+   string parts[];
+   const int np = StringSplit(src, ',', parts);
+   for(int q = 0; q < np; q++)
+     {
+      string pp = parts[q];
+      StringTrimLeft(pp); StringTrimRight(pp);
+      for(int t = 0; t < g_nT; t++)
+         if(g_tfName[t] == pp)
+           {
+            if(g_tf[t] == PERIOD_M1) { Print("Scansione: M1 non supportato (troppe barre), ignorato."); continue; }
+            bool dup = false;
+            for(int w = 0; w < ArraySize(out); w++) if(out[w] == t) dup = true;
+            if(dup) continue;
+            const int k = ArraySize(out);
+            ArrayResize(out, k + 1);
+            out[k] = t;
+           }
+     }
+   return ArraySize(out);
+  }
+
+//--- indice M1 d'ingresso di ogni barra del TF (-1 se scartata): stesse regole di ProcessTF
+void SweepEntries(const int t, const MqlRates &r[], const int n, int &ent[])
+  {
+   ArrayResize(ent, n);
+   ArrayInitialize(ent, -1);
+   const long xs = g_tfSec[t];
+   const long maxGap = (long)InpMaxEntryGapMin * 60L;
+   const bool isMN = (g_tf[t] == PERIOD_MN1);
+   int p = 0;
+   for(int i = 0; i < n - 1; i++)
+     {
+      const datetime tNext = r[i+1].time;
+      if(tNext < InpFrom || tNext > InpTo) continue;
+      const long spacing = (long)(tNext - r[i].time);
+      if(!isMN && (spacing - xs) > maxGap) continue;
+      while(p < g_n1 && g_m1Time[p] < tNext) p++;
+      if(p >= g_n1) break;
+      if((long)(g_m1Time[p] - tNext) > maxGap) continue;
+      if(InSkipWin((long)g_m1Time[p])) continue;
+      ent[i] = p;
+     }
+  }
+
+//--- una combinazione di parametri su un TF: segnali Delta ricalcolati e valutati con la gestione fissa; scrive SWF campi in out[ob..]
+void SweepEval(const MqlRates &r[], const int n, const SDParams &p, const double &atrP[], const int &entM[], const bool &passF[], double &out[], const int ob)
+  {
+   char dir[];
+   uchar bur[];
+   const int warm = SD_BuildSignals(r, n, p, dir, bur);
+   for(int f = 0; f < SWF; f++) out[ob + f] = 0.0;
+   int nSig = 0;
+   for(int i = warm; i < n - 1; i++) if(dir[i] != 0 && entM[i] >= 0 && passF[i]) nSig++;
+   out[ob + 7] = (double)nSig;
+   if(nSig < 1) return;
+   const long capSig = (InpSweepMaxSignals > 0) ? (long)InpSweepMaxSignals : 2147483647L;
+   const int stride = MathMax(1, (int)(((long)nSig + capSig - 1L) / capSig));
+   double slp[], trd[], tpd[], S[], HW[], exitP[], gr[];
+   bool opn[], okc[];
+   int recBar[];
+   uchar ex[];
+   ArrayResize(slp, 1); ArrayResize(trd, 1); ArrayResize(tpd, 1); ArrayResize(S, 1); ArrayResize(HW, 1); ArrayResize(exitP, 1);
+   ArrayResize(opn, 1); ArrayResize(okc, 1); ArrayResize(recBar, 1); ArrayResize(gr, 1); ArrayResize(ex, 1);
+   slp[0] = InpSweepSl; trd[0] = InpSweepTrail; tpd[0] = InpSweepTp;
+   double cn[2], cs[2], cs2[2], cg[2], ca[2], cb[2], cc[2];
+   for(int q = 0; q < 2; q++) { cn[q] = 0.0; cs[q] = 0.0; cs2[q] = 0.0; cg[q] = 0.0; ca[q] = 0.0; cb[q] = 0.0; cc[q] = 0.0; }
+   int curDay = -1, curSmp = 0, seen = 0, used = 0;
+   double dS = 0.0, dN = 0.0;
+   for(int i = warm; i < n - 1; i++)
+     {
+      if(dir[i] == 0 || entM[i] < 0 || !passF[i]) continue;
+      seen++;
+      if(((seen - 1) % stride) != 0) continue;
+      const double atr = atrP[i];
+      if(atr <= 0.0) continue;
+      int jb = entM[i];
+      if(InpEntryLagMin > 0)
+        {
+         const int jl = jb + InpEntryLagMin;
+         if(jl >= g_n1 || (long)(g_m1Time[jl] - g_m1Time[jb]) != (long)InpEntryLagMin * 60L) continue;
+         jb = jl;
+        }
+      const long tEnd = (long)g_m1Time[jb] + (long)InpSweepHold * 60L;
+      const int e = MgLower(tEnd, jb);
+      okc[0] = (e < g_n1 && e > jb && (g_nextBrk[jb] >= e || (g_nextBrk[jb] == e - 1 && (long)g_m1Time[e - 1] + 60L >= tEnd)));
+      if(!okc[0]) continue;
+      recBar[0] = e - 1;
+      const double cost = ((InpCostPoints > 0.0) ? InpCostPoints : (double)g_m1Spr[jb]) + g_extraPts;
+      MgSim(jb, (int)dir[i], InpMgmtPoints ? 1.0 : atr, e, 1, 1, okc, recBar, slp, trd, tpd, S, HW, exitP, opn, gr, ex);
+      const double nt = gr[0] - cost;
+      const int smp = (g_m1Day[jb] >= g_splitDay) ? 1 : 0;
+      const int day = g_m1Day[jb];
+      if(day != curDay)
+        {
+         if(dN > 0.0) { ca[curSmp] += dS * dS; cb[curSmp] += dS * dN; cc[curSmp] += dN * dN; }
+         dS = 0.0; dN = 0.0; curDay = day; curSmp = smp;
+        }
+      dS += nt; dN += 1.0;
+      cn[smp] += 1.0; cs[smp] += nt; cs2[smp] += nt * nt; cg[smp] += gr[0];
+      used++;
+     }
+   if(dN > 0.0) { ca[curSmp] += dS * dS; cb[curSmp] += dS * dN; cc[curSmp] += dN * dN; }
+   out[ob + 8] = (double)used;
+   for(int s = 0; s < 2; s++)
+     {
+      if(cn[s] < 1.0) continue;
+      const double mu = cs[s] / cn[s];
+      double tt = 0.0;
+      if(cn[s] >= 2.0)
+        {
+         const double v = ca[s] - 2.0 * mu * cb[s] + mu * mu * cc[s];
+         tt = (v > 0.0) ? mu / (MathSqrt(v) / cn[s]) : 0.0;
+        }
+      if(s == 0) { out[ob] = cn[0]; out[ob + 1] = mu; out[ob + 2] = tt; }
+      else       { out[ob + 3] = cn[1]; out[ob + 4] = mu; out[ob + 5] = tt; out[ob + 6] = cg[1] / cn[1]; }
+     }
+  }
+
+string MgIntList(const int &a[], const int n)
+  {
+   string tx = "";
+   for(int i = 0; i < n; i++) tx += string(i > 0 ? ", " : "") + IS(a[i]);
+   return tx;
+  }
+
+string MgDblList(const double &a[], const int n)
+  {
+   string tx = "";
+   for(int i = 0; i < n; i++) tx += string(i > 0 ? ", " : "") + DoubleToString(a[i], 2);
+   return tx;
+  }
+
+string SweepCombLbl(const int e, const int v, const double th)
+  {
+   return "EMA " + IS(e) + ", volume medio " + IS(v) + ", soglia " + DoubleToString(th, 2);
+  }
+
+//--- scansione richiesta ma non eseguita: traccia nel log, nel report e nel riepilogo
+void SweepSkip(const string why)
+  {
+   Print("Scansione dei parametri non eseguita: ", why);
+   W("<div class='sec' style='order:7'><h1 class='setH'>Scansione dei parametri del segnale Delta</h1><div class='note ko'><b>Scansione non eseguita</b>: " + why + "</div></div>");
+   AddConc(-2, "Scansione dei parametri del segnale (EMA, volume medio, soglia)", "Scansione richiesta ma non eseguita: " + why);
+  }
+
+void RepSweep()
+  {
+   if(!InpSweep) return;
+   int ema[], vol[], sTf[];
+   double thr[];
+   int nE = ParseIntList(InpSweepEma, ema);
+   int nV = ParseIntList(InpSweepVol, vol);
+   int nH = ParseDoubleList(InpSweepThr, thr);
+   if(nE < 1 || nV < 1 || nH < 1)
+     {
+      SweepSkip("InpSweepEma, InpSweepVol o InpSweepThr non contengono valori validi.");
+      return;
+     }
+   if(nE > 16) { nE = 16; Print("Scansione: InpSweepEma limitato ai primi 16 valori."); }
+   if(nV > 12) { nV = 12; Print("Scansione: InpSweepVol limitato ai primi 12 valori."); }
+   if(nH > 16) { nH = 16; Print("Scansione: InpSweepThr limitato ai primi 16 valori."); }
+   const int nQ = nE * nV * nH;
+   if(nQ > 1500)
+     {
+      SweepSkip(IS(nQ) + " combinazioni sono troppe (massimo 1500): riduci le liste InpSweepEma, InpSweepVol, InpSweepThr.");
+      return;
+     }
+   const int nS = ParseTfSel(InpSweepTFs, sTf);
+   if(nS < 1)
+     {
+      SweepSkip("nessun TF valido in InpSweepTFs (devono essere fra quelli analizzati in InpTFs, M1 escluso).");
+      return;
+     }
+   if(InpSweepSl <= 0.0 || InpSweepTrail < 0.0 || InpSweepTp < 0.0 || InpSweepHold < 1)
+     {
+      SweepSkip("InpSweepSl deve essere positivo, InpSweepTrail e InpSweepTp non negativi, InpSweepHold almeno 1 minuto.");
+      return;
+     }
+   const double minIs = MathMax(30.0, g_minN / 2.0);
+   const double minOos = MathMax(10.0, minIs / 3.0);
+   double res[];
+   ArrayResize(res, nS * nQ * SWF);
+   ArrayInitialize(res, 0.0);
+   bool okS[];
+   ArrayResize(okS, nS);
+   string skipTx = "";
+   for(int s = 0; s < nS; s++)
+     {
+      okS[s] = false;
+      if(IsStopped()) return;
+      const int t = sTf[s];
+      MqlRates r[];
+      const int n = LoadTF(t, r);
+      if(n < 120) { Print("Scansione: TF ", g_tfName[t], " senza storico sufficiente (", n, ")."); skipTx += string(skipTx != "" ? ", " : "") + g_tfName[t]; continue; }
+      int entM[];
+      SweepEntries(t, r, n, entM);
+      double adxv[];
+      if(g_adxFilt) SD_Adx(r, n, MathMax(1, InpAdxPeriod), adxv);
+      uchar vsc[];
+      if(g_regFilt) SD_VolState(r, n, g_vpar, g_pt, vsc);
+      double atrM[], atrP[];
+      SD_Atr(r, n, MathMax(2, InpMgmtAtrLen), atrM);
+      ArrayResize(atrP, n);
+      for(int i = 0; i < n; i++) atrP[i] = (i < ArraySize(atrM)) ? atrM[i] / g_pt : 0.0;
+      bool passF[];
+      ArrayResize(passF, n);
+      for(int i = 0; i < n; i++) passF[i] = (g_adxFilt || g_regFilt) ? (FiltCode(adxv, vsc, i) == 0) : true;
+      SDParams pr = g_par;
+      pr.mode = SD_MODE_DELTA;
+      for(int ie = 0; ie < nE; ie++)
+         for(int iv = 0; iv < nV; iv++)
+            for(int ih = 0; ih < nH; ih++)
+              {
+               if(IsStopped()) { ArrayFree(r); return; }
+               const int q = (ie * nV + iv) * nH + ih;
+               pr.emaPeriod = MathMax(1, ema[ie]);
+               pr.volAvgPeriod = MathMax(1, vol[iv]);
+               pr.threshold = thr[ih];
+               SweepEval(r, n, pr, atrP, entM, passF, res, (s * nQ + q) * SWF);
+              }
+      ArrayFree(r);
+      okS[s] = true;
+      Comment("SignalLab MultiTF: scansione dei parametri ", g_tfName[t], " completata (", s + 1, "/", nS, ")");
+      Print("Scansione dei parametri: TF ", g_tfName[t], " completato, ", nQ, " combinazioni.");
+     }
+   Comment("");
+
+   //--- riepilogo e report
+   const string uTxt = InpMgmtPoints ? string(" punti") : string(" ATR");
+   const string ruleTxt = "stop " + GridLbl(InpSweepSl) + uTxt + ", " + string(InpSweepTrail > 0.0 ? ("trailing " + GridLbl(InpSweepTrail) + uTxt) : string("senza trailing")) + ", " +
+                          string(InpSweepTp > 0.0 ? ("target " + GridLbl(InpSweepTp) + uTxt) : string("senza target")) + ", durata massima " + IS(InpSweepHold) + " min";
+   g_dgSets += "### SWEEP\n";
+   g_dgSets += "SWEEPCFG|serie|DELTA|ema|" + MgIntList(ema, nE) + "|vol|" + MgIntList(vol, nV) + "|thr|" + MgDblList(thr, nH) + "|unit|" + string(InpMgmtPoints ? "pt" : "atr") + "|sl|" + GridLbl(InpSweepSl) + "|trail|" + GridLbl(InpSweepTrail) +
+               "|tp|" + GridLbl(InpSweepTp) + "|hold|" + IS(InpSweepHold) + "|atrlen|" + IS(InpMgmtAtrLen) + "|highfirst|" + IS(InpMgmtHighFirst ? 1 : 0) + "|maxsignals|" + IS(InpSweepMaxSignals) + "|minis|" + F0(minIs) + "|minoos|" + F0(minOos) +
+               "|entrylag|" + IS(InpEntryLagMin) + "|filters|" + string(g_filtTxt != "" ? g_filtTxt : string("none")) + "\n";
+   W("<div class='sec' style='order:7'>");
+   W("<h1 class='setH'>Scansione dei parametri del segnale Delta: EmaPeriod x VolAvgPeriod x SignalThreshold</h1>");
+   W("<div class='note'>Per ogni TF e per ognuna delle <b>" + IS(nQ) + "</b> combinazioni (" + IS(nE) + " livelli di EmaPeriod x " + IS(nV) + " di VolAvgPeriod x " + IS(nH) + " di SignalThreshold) i segnali del solo Synthetic Delta sono ricalcolati e valutati con la <b>stessa gestione fissa</b>: " + ruleTxt +
+     " (unit&agrave; come la gestione simulata), con costi, ritardo d'ingresso, filtri dell'EA e divisione in-sample / fuori campione del resto del report. "
+     "La combinazione migliore e' scelta <b>sul primo periodo</b> e il suo risultato sul resto &egrave; l'unico che conta. Provando " + IS(nQ) + " combinazioni il miglior t in-sample cresce per puro caso (circa &radic;(2 ln m)): "
+     "ci&ograve; che interessa &egrave; se le combinazioni vicine fanno lo stesso (un altopiano) o se il migliore &egrave; un picco isolato. Si valuta un campione uniforme fino a " + IS(InpSweepMaxSignals) + " segnali per combinazione e TF. "
+     "Livelli: EmaPeriod " + MgIntList(ema, nE) + "; VolAvgPeriod " + MgIntList(vol, nV) + "; SignalThreshold " + MgDblList(thr, nH) + ".</div>");
+   string sumTf = "";
+   int tfLoaded = 0, tfEval = 0, tfOos = 0, tfStrong = 0, tfPosOos = 0;
+   for(int s = 0; s < nS; s++)
+     {
+      if(!okS[s]) continue;
+      const int t = sTf[s];
+      tfLoaded++;
+      const int ob0 = s * nQ * SWF;
+      //--- combinazioni valide e conteggi
+      int m = 0, nBoth = 0, nStrong = 0, nOosPos = 0, nIsPos = 0;
+      for(int q = 0; q < nQ; q++)
+        {
+         const int ob = ob0 + q * SWF;
+         if(res[ob] < minIs) continue;
+         m++;
+         const bool isPos = (res[ob + 1] > 0.0);
+         if(isPos) nIsPos++;
+         if(res[ob + 3] < minOos) continue;
+         if(res[ob + 4] > 0.0) nOosPos++;
+         if(isPos && res[ob + 4] > 0.0) nBoth++;
+         if(isPos && res[ob + 4] > 0.0 && res[ob + 5] >= 2.0) nStrong++;
+        }
+      W("<h2>" + g_tfName[t] + ": " + IS(m) + " combinazioni con almeno " + F0(minIs) + " segnali in-sample</h2>");
+      if(m < 1)
+        {
+         W("<div class='note ko'>Nessuna combinazione con campione sufficiente su questo TF.</div>");
+         sumTf += g_tfName[t] + ": campione insufficiente (nessuna combinazione con almeno " + F0(minIs) + " segnali in-sample); ";
+         continue;
+        }
+      tfEval++;
+      //--- migliori in-sample
+      bool usedQ[];
+      ArrayResize(usedQ, nQ);
+      ArrayInitialize(usedQ, false);
+      int bestQ = -1;
+      W("<h3>Le 12 combinazioni migliori scelte sul primo periodo (netto medio per segnale, pt)</h3>");
+      W("<table><tr><th>Combinazione</th><th>Segnali in-sample</th><th>Netto in-sample</th><th>t in-sample</th><th>Segnali fuori campione</th><th>Lordo fuori campione</th><th>Netto fuori campione</th><th>t fuori campione</th><th>Esito</th></tr>");
+      for(int z = 0; z < 12; z++)
+        {
+         int bq = -1;
+         double bv = -1.0e18;
+         for(int q = 0; q < nQ; q++)
+           {
+            if(usedQ[q] || res[ob0 + q * SWF] < minIs) continue;
+            if(res[ob0 + q * SWF + 1] > bv) { bv = res[ob0 + q * SWF + 1]; bq = q; }
+           }
+         if(bq < 0) break;
+         usedQ[bq] = true;
+         if(z == 0) bestQ = bq;
+         const int ob = ob0 + bq * SWF;
+         const int ih = bq % nH, iv = (bq / nH) % nV, ie = bq / (nH * nV);
+         string es;
+         if(res[ob + 3] < minOos) es = Td("OOS scarso", "#4c566a");
+         else if(res[ob + 4] > 0.0 && res[ob + 5] >= 2.0) es = Td("<b>t &ge; 2 (da confermare)</b>", "#a3be8c");
+         else if(res[ob + 4] > 0.0) es = Td("debole", "#ebcb8b");
+         else es = Td("NO", "#bf616a");
+         W("<tr><td>" + SweepCombLbl(ema[ie], vol[iv], thr[ih]) + "</td>" + Td(F0(res[ob])) + Td(F1(res[ob + 1]), ColSign(res[ob + 1])) + Td(F2(res[ob + 2])) + Td(F0(res[ob + 3])) +
+           Td(F1(res[ob + 6]), ColSign(res[ob + 6])) + Td("<b>" + F1(res[ob + 4]) + "</b>", ColSign(res[ob + 4])) + Td(F2(res[ob + 5]), ColT(res[ob + 5])) + es + "</tr>");
+        }
+      W("</table>");
+      const int bo = ob0 + bestQ * SWF;
+      const int bih = bestQ % nH, biv = (bestQ / nH) % nV, bie = bestQ / (nH * nV);
+      const double chanceT = (m > 1) ? MathSqrt(2.0 * MathLog((double)m)) : 0.0;
+      //--- vicini del migliore (un livello in piu' o in meno su ogni parametro): altopiano o picco
+      double nbS = 0.0, nbN = 0.0, nbPos = 0.0;
+      for(int de = -1; de <= 1; de++)
+         for(int dv = -1; dv <= 1; dv++)
+            for(int dh = -1; dh <= 1; dh++)
+              {
+               if(de == 0 && dv == 0 && dh == 0) continue;
+               const int ne = bie + de, nv = biv + dv, nh = bih + dh;
+               if(ne < 0 || ne >= nE || nv < 0 || nv >= nV || nh < 0 || nh >= nH) continue;
+               const int nq = (ne * nV + nv) * nH + nh;
+               const int nb = ob0 + nq * SWF;
+               if(res[nb + 3] < minOos) continue;
+               nbS += res[nb + 4]; nbN += 1.0;
+               if(res[nb + 4] > 0.0) nbPos += 1.0;
+              }
+      const double nbMean = (nbN > 0.0) ? nbS / nbN : 0.0;
+      string nbTx;
+      if(nbN < 1.0) nbTx = "Nessuna combinazione vicina valutabile (un livello in piu' o in meno su ogni parametro)";
+      else nbTx = "Le " + Pl((long)nbN, "combinazione vicina valutabile", "combinazioni vicine valutabili") + " (un livello in piu' o in meno) fanno in media " + Sg(nbMean) + " pt fuori campione, positive " + F0(nbPos) + ": " +
+                  string(res[bo + 3] >= minOos && res[bo + 4] > 0.0 && nbMean > 0.0 && nbPos >= 0.6 * nbN ? "altopiano (il vantaggio non dipende da un livello preciso)" :
+                         "picco isolato o negativo (il risultato dipende dal livello esatto)");
+      string bestEs;
+      if(res[bo + 3] < minOos) bestEs = "fuori campione scarso";
+      else if(res[bo + 4] > 0.0 && res[bo + 5] >= 2.0) bestEs = "t >= 2 da confermare";
+      else if(res[bo + 4] > 0.0) bestEs = "debole";
+      else bestEs = "no";
+      if(res[bo + 3] >= minOos) tfOos++;
+      if(res[bo + 3] >= minOos && res[bo + 4] > 0.0) tfPosOos++;
+      if(res[bo + 3] >= minOos && res[bo + 4] > 0.0 && res[bo + 5] >= 2.0) tfStrong++;
+      //--- combinazione attuale (parametri dell'EA impostati sopra)
+      int curQ = -1;
+      for(int ie = 0; ie < nE; ie++)
+         for(int iv = 0; iv < nV; iv++)
+            for(int ih = 0; ih < nH; ih++)
+               if(ema[ie] == InpEmaPeriod && vol[iv] == InpVolAvgPeriod && MathAbs(thr[ih] - InpThreshold) < 1.0e-9) curQ = (ie * nV + iv) * nH + ih;
+      string curTx;
+      if(curQ < 0) curTx = "la combinazione impostata (EMA " + IS(InpEmaPeriod) + ", volume medio " + IS(InpVolAvgPeriod) + ", soglia " + DoubleToString(InpThreshold, 2) + ") non e' nella griglia";
+      else
+        {
+         const int co = ob0 + curQ * SWF;
+         curTx = "la combinazione impostata (EMA " + IS(InpEmaPeriod) + ", volume medio " + IS(InpVolAvgPeriod) + ", soglia " + DoubleToString(InpThreshold, 2) + ") ha netto in-sample " + Sg(res[co + 1]) +
+                 " pt e fuori campione " + Sg(res[co + 4]) + " pt (t " + F2(res[co + 5]) + ", " + F0(res[co + 3]) + " segnali)";
+        }
+      W("<div class='note'>Provate <b>" + Pl(m, "combinazione", "combinazioni") + "</b>: in-sample il netto &egrave; positivo in " + IS(nIsPos) + ", fuori campione in " + IS(nOosPos) + ", positivo in entrambi i periodi in <b>" + IS(nBoth) + "</b>, con t fuori campione &ge; 2 in <b>" + IS(nStrong) + "</b> (per puro caso, fra quelle con netto in-sample positivo, circa il 2.3%). "
+        "La migliore in-sample (" + SweepCombLbl(ema[bie], vol[biv], thr[bih]) + ") ha t in-sample <b>" + F2(res[bo + 2]) + "</b>" + string(m > 1 ? (" contro un massimo atteso per caso di circa " + F2(chanceT)) : "") + ", e fuori campione " + Sg(res[bo + 4]) + " pt (t " + F2(res[bo + 5]) + "). " +
+        nbTx + ". Inoltre " + curTx + ".</div>");
+      //--- effetto di ogni parametro, media sulle altre combinazioni
+      W("<details><summary>Effetto di ciascun parametro (media sulle altre combinazioni) e mappe soglia x EMA</summary>");
+      string effTx = "";
+      for(int pi = 0; pi < 3; pi++)
+        {
+         string effP = "";
+         const int nL = (pi == 0) ? nE : ((pi == 1) ? nV : nH);
+         W("<h3>" + g_tfName[t] + ": " + string(pi == 0 ? "EmaPeriod" : (pi == 1 ? "VolAvgPeriod" : "SignalThreshold")) + "</h3>");
+         W("<table><tr><th>Livello</th><th>Combinazioni valide</th><th>Segnali medi in-sample</th><th>Netto in-sample medio</th><th>Netto fuori campione medio</th><th>Positive in entrambi</th></tr>");
+         for(int lv = 0; lv < nL; lv++)
+           {
+            double cnt = 0.0, sIs = 0.0, sOo = 0.0, nIsS = 0.0, cOo = 0.0, both = 0.0;
+            for(int q = 0; q < nQ; q++)
+              {
+               const int ih = q % nH, iv = (q / nH) % nV, ie = q / (nH * nV);
+               const int idx = (pi == 0) ? ie : ((pi == 1) ? iv : ih);
+               if(idx != lv) continue;
+               const int ob = ob0 + q * SWF;
+               if(res[ob] < minIs) continue;
+               cnt += 1.0; sIs += res[ob + 1]; nIsS += res[ob];
+               if(res[ob + 3] >= minOos) { sOo += res[ob + 4]; cOo += 1.0; if(res[ob + 1] > 0.0 && res[ob + 4] > 0.0) both += 1.0; }
+              }
+            const string lvl = (pi == 0) ? IS(ema[lv]) : ((pi == 1) ? IS(vol[lv]) : DoubleToString(thr[lv], 2));
+            effP += string(lv > 0 ? ", " : "") + lvl + " " + string(cOo > 0.0 ? Sg(sOo / cOo) : string("n.d."));
+            if(cnt < 1.0) { W("<tr class='thin'><td>" + lvl + "</td><td colspan='5'>campione insufficiente</td></tr>"); continue; }
+            W("<tr><td>" + lvl + "</td>" + Td(F0(cnt)) + Td(F0(nIsS / cnt)) + Td(F1(sIs / cnt), ColSign(sIs / cnt)) + Td(cOo > 0.0 ? F1(sOo / cOo) : string("-"), ColSign(cOo > 0.0 ? sOo / cOo : 0.0)) + Td(F0(both)) + "</tr>");
+            g_dgSets += "SWEEPLV|" + g_tfName[t] + "|param|" + string(pi == 0 ? "ema" : (pi == 1 ? "vol" : "thr")) + "|level|" + lvl + "|combos|" + F0(cnt) + "|netis|" + F1(sIs / cnt) + "|netoos|" + string(cOo > 0.0 ? F1(sOo / cOo) : string("-")) + "|both|" + F0(both) + "\n";
+           }
+         W("</table>");
+         effTx += string(pi == 0 ? "EmaPeriod" : (pi == 1 ? "VolAvgPeriod" : "SignalThreshold")) + " (" + effP + ")" + string(pi < 2 ? ", " : "");
+        }
+      for(int smpSel = 0; smpSel < 2; smpSel++)
+        {
+         W("<h3>" + g_tfName[t] + ": netto medio " + string(smpSel == 0 ? "in-sample" : "fuori campione") + " (pt), righe = soglia, colonne = EmaPeriod, media sui livelli di VolAvgPeriod</h3>");
+         W("<table><tr><th>Soglia \\ EMA</th>");
+         for(int ie = 0; ie < nE; ie++) W("<th>" + IS(ema[ie]) + "</th>");
+         W("</tr>");
+         for(int ih = 0; ih < nH; ih++)
+           {
+            W("<tr><td>" + DoubleToString(thr[ih], 2) + "</td>");
+            for(int ie = 0; ie < nE; ie++)
+              {
+               double cnt = 0.0, sm = 0.0;
+               for(int iv = 0; iv < nV; iv++)
+                 {
+                  const int ob = ob0 + ((ie * nV + iv) * nH + ih) * SWF;
+                  if(smpSel == 0) { if(res[ob] < minIs) continue; sm += res[ob + 1]; cnt += 1.0; }
+                  else { if(res[ob] < minIs || res[ob + 3] < minOos) continue; sm += res[ob + 4]; cnt += 1.0; }
+                 }
+               if(cnt < 1.0) W("<td>-</td>");
+               else W("<td style='color:" + ColSign(sm / cnt) + "'>" + F1(sm / cnt) + "</td>");
+              }
+            W("</tr>");
+           }
+         W("</table>");
+        }
+      W("</details>");
+      //--- digest
+      for(int q = 0; q < nQ; q++)
+        {
+         const int ob = ob0 + q * SWF;
+         if(res[ob + 7] < 1.0) continue;
+         const int ih = q % nH, iv = (q / nH) % nV, ie = q / (nH * nV);
+         g_dgSets += "SWEEP|" + g_tfName[t] + "|ema|" + IS(ema[ie]) + "|vol|" + IS(vol[iv]) + "|thr|" + DoubleToString(thr[ih], 2) + "|sig|" + F0(res[ob + 7]) + "|nis|" + F0(res[ob]) + "|netis|" + F1(res[ob + 1]) +
+                     "|tis|" + F2(res[ob + 2]) + "|noos|" + F0(res[ob + 3]) + "|netoos|" + F1(res[ob + 4]) + "|toos|" + F2(res[ob + 5]) + "|grossoos|" + F1(res[ob + 6]) + "\n";
+        }
+      g_dgSets += "SWEEPBEST|" + g_tfName[t] + "|ema|" + IS(ema[bie]) + "|vol|" + IS(vol[biv]) + "|thr|" + DoubleToString(thr[bih], 2) + "|combos|" + IS(m) + "|netis|" + F1(res[bo + 1]) + "|tis|" + F2(res[bo + 2]) +
+                  "|chance|" + F2(chanceT) + "|noos|" + F0(res[bo + 3]) + "|netoos|" + F1(res[bo + 4]) + "|toos|" + F2(res[bo + 5]) + "|neighbors|" + F0(nbN) + "|nbmean|" + F1(nbMean) + "|nbpos|" + F0(nbPos) +
+                  "|both|" + IS(nBoth) + "|strong|" + IS(nStrong) + "\n";
+      sumTf += g_tfName[t] + ": su " + Pl(m, "combinazione valutabile", "combinazioni valutabili") + " la migliore in-sample e' " + SweepCombLbl(ema[bie], vol[biv], thr[bih]) + " (netto in-sample " + Sg(res[bo + 1]) + " pt, t " + F2(res[bo + 2]) +
+               string(m > 1 ? (" contro un massimo atteso per caso di " + F2(chanceT)) : "") + "), fuori campione " + Sg(res[bo + 4]) + " pt su " + F0(res[bo + 3]) + " segnali (t " + F2(res[bo + 5]) + ", " + bestEs + "). " + nbTx +
+               ". Positive in entrambi i periodi: " + IS(nBoth) + " su " + IS(m) + "; con t fuori campione >= 2: " + IS(nStrong) + " (per puro caso, fra le " + IS(nIsPos) + " con netto in-sample positivo, circa " + F1(0.0228 * (double)nIsPos) + "). " +
+               "Netto fuori campione medio per livello, sulle altre combinazioni: " + effTx + ". Inoltre " + curTx + "; ";
+     }
+   if(skipTx != "")
+      W("<div class='note ko'>TF saltati per storico insufficiente: " + skipTx + ".</div>");
+   W("</div>");
+   if(tfLoaded > 0)
+     {
+      string verd;
+      if(tfEval == 0) verd = "Nessun TF ha un campione sufficiente per la scansione (nessuna combinazione con abbastanza segnali in-sample): non valutabile.";
+      else if(tfOos == 0) verd = "Nessun TF ha un campione fuori campione sufficiente per la migliore combinazione: non valutabile.";
+      else if(tfStrong == 0) verd = "Nessuna combinazione scelta in-sample dei tre parametri porta un netto positivo e significativo fuori campione: non emerge un vantaggio oltre i costi cambiando EMA, volume medio o soglia.";
+      else verd = "I TF positivi sono candidati da confermare su altri simboli e periodi: con tante combinazioni provate il massimo in-sample e' gonfiato, conta l'altopiano delle combinazioni vicine e il fuori campione.";
+      AddConc(-2, "Scansione dei parametri del segnale (EMA, volume medio, soglia)", "Provate " + Pl(nQ, "combinazione", "combinazioni") + " di EmaPeriod (" + MgIntList(ema, nE) + "), VolAvgPeriod (" + MgIntList(vol, nV) + ") e SignalThreshold (" + MgDblList(thr, nH) + ") del solo Synthetic Delta su " + Pl(tfLoaded, "TF", "TF") +
+              ", ognuna valutata con la stessa gestione fissa (" + ruleTxt + ", costi e filtri come il resto della corsa), scelta della migliore sul primo periodo e verifica sul resto. " + sumTf +
+              string(skipTx != "" ? ("TF saltati per storico insufficiente: " + skipTx + ". ") : "") +
+              "TF valutabili: " + IS(tfEval) + "; con un campione fuori campione sufficiente per la migliore: " + IS(tfOos) + "; migliore in-sample con netto fuori campione positivo: " + IS(tfPosOos) + "; con t >= 2: " + IS(tfStrong) + ". " + verd +
+              " Le mappe soglia x EMA sono nel report HTML; tutte le combinazioni e i livelli sono nel digest (SWEEP, SWEEPBEST, SWEEPLV).");
+     }
   }
 
 //--- regola fissa dell'utente (InpFixedRule): TF, inizio fascia, verso, tenuta, target; false (con nota) se non valida o non presente nelle griglie
@@ -4889,6 +6072,18 @@ void BuildConclusions(const int sIdx)
        top += (top == "" ? "" : ", ") + g_tfName[bi0] + " " + F0(bn);
       }
     datetime tEnd = (datetime)MathMin((long)InpTo, (long)g_m1Time[g_n1 - 1]);
+    string fzTxt = "";
+    if(g_filtTxt != "")
+      {
+       int fAdx = 0, fReg = 0;
+       for(int t = 0; t < g_nT; t++) { fAdx += g_tfRejAdx[t]; fReg += g_tfRejReg[t]; }
+       string tolte = "";
+       if(g_adxFilt) tolte += IS(fAdx) + " dall'ADX";
+       if(g_regFilt) tolte += string(tolte != "" ? ", " : "") + IS(fReg) + " dal regime di volatilita'";
+       fzTxt = " Filtri dell'EA attivi su tutti i segnali: " + g_filtTxt + " (barre con segnale tolte, somma dei TF e delle serie, in ordine ADX poi regime: " + tolte + ")." +
+               string(g_adxFilt ? " L'ADX e' ricostruito dall'esempio ADX.mq5, quindi il conteggio puo' differire un poco da quello dell'EA." : "") +
+               " La posizione nella raffica (Sequence Filter) e' calcolata prima dei filtri.";
+      }
     AddConc(sIdx, "Dati", "Simbolo " + _Symbol + ", periodo " + TimeToString(g_tStart, TIME_DATE) + " - " + TimeToString(tEnd, TIME_DATE) +
             ", " + IS(g_nT) + " TF analizzati. Segnali misurati a " + hs + " min: " + F0(tot) + " in totale (somma dei TF: non sono indipendenti)" +
             (top != "" ? " (TF con piu' segnali: " + top + ")" : "") + ". Costo: " +
@@ -4898,6 +6093,7 @@ void BuildConclusions(const int sIdx)
             (!g_money ? (". ATTENZIONE: valore del punto non disponibile (" + g_pvInfo + "): la commissione NON e' inclusa nel costo e mancano i valori in denaro. Imposta InpPointValueSymbol con il nome di un simbolo reale del broker oppure InpPointValuePerLot") : "") +
             (g_money ? (". Posizione ipotetica " + LotTxt() + " lotti: 1 punto = " + DoubleToString(MnyV(1.0), 4) + " " + g_ccy + string(g_pvInfo != "" ? (" (" + g_pvInfo + ")") : "")) : "") +
             ". Tutti i valori sono in punti (1 punto = " + DoubleToString(g_pt, _Digits) + ")." +
+            fzTxt +
             (g_histWarn ? " ATTENZIONE: lo storico M1 e' piu' corto del periodo richiesto." : "") + SprTopText() +
             (g_skN > 0 ? (" ATTENZIONE: escluse le finestre d'ingresso " + InpSkipEntryWin + " (ora server + offset): i risultati non sono quelli dell'EA su quelle fasce.") : "") +
             (InpEntryLagMin > 0 ? (" ATTENZIONE: corsa con ingresso ritardato di " + IS(InpEntryLagMin) + " min dopo la chiusura del segnale (prova di stress): i risultati non sono quelli dell'EA.") : ""));
@@ -5333,6 +6529,8 @@ void BuildConclusions(const int sIdx)
    if(g_cMgmt != "") AddConc(sIdx, "Gestione simulata", g_cMgmt);
    if(g_cMgmt2 != "") AddConc(sIdx, "Gestione simulata per time frame", g_cMgmt2);
    if(g_cMgmt3 != "") AddConc(sIdx, "Gestione simulata per orario", g_cMgmt3);
+   if(g_cMgmt4 != "") AddConc(sIdx, "Gestione simulata e ritardo d'ingresso", g_cMgmt4);
+   if(g_cMgmt5 != "") AddConc(sIdx, "Gestione simulata: selezione di orari e giorni", g_cMgmt5);
    if(g_cStress != "") AddConc(sIdx, "Prove di stress", g_cStress);
 
    //--- fattibilita' di un EA che apre nel verso del segnale (lotto ipotetico, costi inclusi)
@@ -5361,9 +6559,10 @@ void BuildConclusions(const int sIdx)
             fz += "Esempio sul TF " + g_tfName[rt] + " con uscita dopo " + hs + " min: " + F0(cr.n) + " segnali in " + F1(years) + " anni (circa " + F0(cr.n / years) + " all'anno), netto medio " + MnyU(cr.ret) +
                   " a posizione, circa " + MnyTU(cr.ret * cr.n / years) + " all'anno se si aprisse ogni segnale (le posizioni si sovrappongono: e' un ordine di grandezza, non il risultato di un conto). ";
          if(gapPts > 0.0)
-            fz += "Un EA con questa entrata non puo' guadagnare dalla direzione: potrebbe farlo solo con una gestione (uscite, dimensionamento) che crea un profilo diverso e che questo studio non misura.";
+            fz += "Un EA con questa entrata non puo' guadagnare dalla sola direzione: potrebbe farlo solo con una gestione (uscite, trailing, target) che crea un profilo diverso" +
+                  string(g_mgOn ? ", ed e' quello che misura la gestione simulata (paragrafi dedicati)." : ", che questo studio non misura (gestione simulata spenta o non eseguita).") + MgFeasTxt(true);
          else
-            fz += "Un netto positivo ma non significativo non basta: serve una conferma su dati mai visti e su altri simboli prima di scrivere un EA.";
+            fz += "Un netto positivo ma non significativo non basta: serve una conferma su dati mai visti e su altri simboli prima di scrivere un EA." + MgFeasTxt(true);
         }
       else
         {
@@ -5375,7 +6574,7 @@ void BuildConclusions(const int sIdx)
             fz += "la prima candidata vale " + MnyU(g_cAsurvMean) + " a posizione con " + LotTxt() + " lotti, " + F0(g_cAsurvN) + " posizioni fuori campione in " + F1(oosYears) + " anni, cioe' circa " +
                   MnyTU(g_cAsurvMean * g_cAsurvN / oosYears) + " all'anno al lordo di slippage e swap; ";
          fz += "prima di scrivere un EA servono tutte queste conferme: netto OOS positivo con spread e commissione reali; risultato che regge con InpEntryLagMin = 5 e con spread doppio nelle ore di news; "
-               "non concentrato in pochi giorni di eventi (tabella dei giorni piu' lunghi); ripetuto su un periodo successivo e su un altro simbolo.";
+               "non concentrato in pochi giorni di eventi (tabella dei giorni piu' lunghi); ripetuto su un periodo successivo e su un altro simbolo." + MgFeasTxt(false);
         }
       AddConc(sIdx, "Fattibilita' EA", fz);
      }
@@ -5388,7 +6587,7 @@ void BuildConclusions(const int sIdx)
        c = "Campione insufficiente: nessuna conclusione.";
     else if(netSig == 0 && !oosEdge)
       {
-       c = "Nessuna evidenza di vantaggio operabile al netto dei costi in questa serie. ";
+       c = "Nessuna evidenza di vantaggio operabile al netto dei costi in questa serie con l'entrata nel verso del segnale e l'uscita a tempo (tabelle A e B). ";
        if(posS > 0)
           c += "Il segnale ha contenuto direzionale lordo in " + IS(posS) + " TF, ma i costi lo assorbono. ";
        else if(negS > 0)
@@ -5413,6 +6612,10 @@ void BuildConclusions(const int sIdx)
           c += "Il range delle candele successive e' inferiore a quello di una barra con la stessa intensita' e le stesse ore (vedi 'Candele successive'): nessun uso operativo dimostrato. ";
        else if(ampKnown)
           c += "A pari intensita' della candela e stesse ore l'ampiezza delle candele successive non si discosta da quella di una barra qualunque: sapere che la candela era ampia basta, il segnale non aggiunge nulla e non c'e' un uso operativo dimostrato. ";
+       if(g_mgOn && g_mgEvalTf > 0)
+          c += string((g_mgPosTf > 0 || g_mgRobTf > 0 || g_mgSelPosTf > 0) ?
+                ("La gestione simulata (stop, trailing, target, ritardo, selezione di orari e giorni) mostra pero' dei candidati: TF con netto fuori campione positivo e t >= 2 " + IS(g_mgPosTf) + " su " + IS(g_mgEvalTf) + " valutabili (vedi i paragrafi 'Gestione simulata'), da confermare. ") :
+                string("Anche la gestione simulata (stop, trailing, target, ritardo, selezione di orari e giorni) non mostra TF positivi e significativi fuori campione. "));
        c += "Prima di qualunque uso operativo: ripeti lo studio su altri simboli e su un periodo successivo.";
       }
     else
@@ -5485,11 +6688,18 @@ void BuildCrossConclusions()
    AddConc(-1, "Conclusione del confronto", c);
   }
 
+string SetLbl(const int s)
+  {
+   if(s == -2) return "SCANSIONE";
+   if(s < 0) return "CONFRONTO";
+   return g_setTag[s];
+  }
+
 string SummaryPlain()
   {
    string out = "SignalLab MultiTF - riepilogo e conclusioni - " + _Symbol + " - " + ModeName() + "\n";
    for(int k = 0; k < ArraySize(g_cSet); k++)
-      out += "\n[" + string(g_cSet[k] < 0 ? "CONFRONTO" : g_setTag[g_cSet[k]]) + "] " + g_cTopic[k] + ": " + g_cText[k] + "\n";
+      out += "\n[" + SetLbl(g_cSet[k]) + "] " + g_cTopic[k] + ": " + g_cText[k] + "\n";
    return out;
   }
 
@@ -5504,7 +6714,7 @@ void RepSummary()
      "I numeri di dettaglio sono nelle serie pi&ugrave; in basso.</div>");
    W("<table class='sum'><tr><th>Serie</th><th>Tema</th><th>Cosa dicono i dati</th></tr>");
    for(int k = 0; k < nc; k++)
-      W("<tr><td>" + HtmlEsc(g_cSet[k] < 0 ? string("CONFRONTO") : g_setTag[g_cSet[k]]) + "</td><td>" + HtmlEsc(g_cTopic[k]) + "</td><td>" + HtmlEsc(g_cText[k]) + "</td></tr>");
+      W("<tr><td>" + HtmlEsc(SetLbl(g_cSet[k])) + "</td><td>" + HtmlEsc(g_cTopic[k]) + "</td><td>" + HtmlEsc(g_cText[k]) + "</td></tr>");
    W("</table>");
    W("<h2>Testo da copiare</h2>");
    W("<button onclick=\"var t=document.getElementById('sumTxt');t.select();document.execCommand('copy');\">Copia il riepilogo</button>");
@@ -5535,6 +6745,10 @@ string BuildDigestHeader()
         "|side|" + string(InpRankSide == RS_FOLLOW ? "follow" : (InpRankSide == RS_FADE ? "fade" : "both")) + "|maxgap|" + IS(InpMaxGapMin) +
         "|entrygap|" + IS(InpMaxEntryGapMin) + "|entrylag|" + IS(InpEntryLagMin) + "|skipwin|" + InpSkipEntryWin + "|fixedrule|" + InpFixedRule + "|bucket|" + IS(g_bMin) + "|parent|" + ParentName() +
         "|ref|" + IS(g_hor[g_refH]) + "|sets|" + IS(g_nSets) + "\n";
+   d += "FILTCFG|adx|" + string(g_adxFilt ? ("on|period|" + IS(MathMax(1, InpAdxPeriod)) + "|min|" + DoubleToString(InpAdxMin, 1)) : string("off")) + "|regime|" + string(g_regFilt ? ("on|mask|" + IS(g_regMask) + "|rising|" + IS(InpRequireVolRising ? 1 : 0)) : string("off")) + "\n";
+   d += "# MGMT/MGMTBEST/MGMTLAG/MGMTSEL/MGMTH: gestione simulata; sl/trail/tp in unita' 'unit' (atr = multipli dell'ATR del TF del segnale, pt = punti), hold = durata massima in minuti, tutto in punti per segnale; la gestione e la durata di MGMTBEST/MGMTLAG/MGMTSEL sono scelte in-sample a ritardo 0\n";
+   d += "MGMTCFG|on|" + IS(InpMgmt ? 1 : 0) + "|unit|" + string(InpMgmtPoints ? "pt" : "atr") + "|atrlen|" + IS(InpMgmtAtrLen) + "|highfirst|" + IS(InpMgmtHighFirst ? 1 : 0) + "|maxsignals|" + IS(InpMgmtMaxSignals) + "|sl|" + InpMgmtSlAtr + "|trail|" + InpMgmtTrailAtr + "|tp|" + InpMgmtTpAtr +
+        "|lags|" + InpMgmtLags + "|entrylagbase|" + IS(InpEntryLagMin) + "|select|" + IS(InpMgmtSelect ? 1 : 0) + "|selmincell|" + IS(InpSelMinCell) + "|selmint|" + F1(InpSelMinT) + "\n";
    d += "DATA|m1bars|" + IS(g_n1) + "|days|" + IS(g_nDays) + "|medrange|" + F0(g_medRange) + "|medspr|" + F0(g_medSpr) +
         "|zerospr|" + F1(g_zeroSprPct) + "\n";
    d += "# CARD/CARDYEAR: scheda delle prime regole (posizioni, vincenti, peggiore, drawdown, anni). # STRESSPOP/STRESSLAG/STRESSCOST: prove di stress (ritardo d'ingresso in minuti, costo extra in punti), netto medio in punti; POP = ogni segnale del TF, LAG/COST = regole della tabella A fuori campione\n";
@@ -5551,7 +6765,7 @@ string BuildDigestSet()
    string d = "SETINFO|name|" + g_setTag[g_curSet] + "|zbonf|" + F2(g_zB) + "\n";
    for(int t = 0; t < g_nT; t++)
       d += "TF|" + g_tfName[t] + "|bars|" + IS(g_tfBars[t]) + "|base|" + IS(g_tfCnt[t]) + "|signals|" + IS(g_tfEv[t]) +
-           "|rejgap|" + IS(g_tfRejGap[t]) + "|rejm1|" + IS(g_tfRejM1[t]) + "|rejwin|" + IS(g_tfRejWin[t]) + "\n";
+           "|rejgap|" + IS(g_tfRejGap[t]) + "|rejm1|" + IS(g_tfRejM1[t]) + "|rejwin|" + IS(g_tfRejWin[t]) + "|rejadx|" + IS(g_tfRejAdx[t]) + "|rejreg|" + IS(g_tfRejReg[t]) + "\n";
    for(int t = 0; t < g_nT; t++)
       for(int h = 0; h < g_nH; h++)
         {
@@ -5755,7 +6969,7 @@ void ReportEnd()
      {
       g_dgSets += "### CONCL\n";
       for(int k = 0; k < ArraySize(g_cSet); k++)
-         g_dgSets += "CONCL|" + string(g_cSet[k] < 0 ? "CONFRONTO" : g_setTag[g_cSet[k]]) + "|" + g_cTopic[k] + "|" + g_cText[k] + "\n";
+         g_dgSets += "CONCL|" + SetLbl(g_cSet[k]) + "|" + g_cTopic[k] + "|" + g_cText[k] + "\n";
      }
    g_dg = BuildDigestHeader() + g_dgSets;
    string esc = g_dg;
@@ -5834,6 +7048,8 @@ void OnStart()
    ArrayResize(g_tfRejGap, g_nT); ArrayInitialize(g_tfRejGap, 0);
    ArrayResize(g_tfRejM1, g_nT);  ArrayInitialize(g_tfRejM1, 0);
    ArrayResize(g_tfRejWin, g_nT); ArrayInitialize(g_tfRejWin, 0);
+   ArrayResize(g_tfRejAdx, g_nT); ArrayInitialize(g_tfRejAdx, 0);
+   ArrayResize(g_tfRejReg, g_nT); ArrayInitialize(g_tfRejReg, 0);
    {
     //--- candele successive: accumulatori di entrambe le serie (riempiti durante il calcolo dei segnali)
     const long cells = (long)g_nSets * g_nT * g_nMem * g_nM;
@@ -5904,6 +7120,8 @@ void OnStart()
       ComputeEventReach();
       ReportSet(sIdx);
      }
+   RepSweep();
+   if(IsStopped()) { Print("Interrotto dall'utente."); Comment(""); ReportAbort(); return; }
    ReportEnd();
    Comment("");
    Print("Fatto in ", (GetTickCount() - t0) / 1000.0, " s");
