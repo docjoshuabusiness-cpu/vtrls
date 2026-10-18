@@ -590,7 +590,7 @@ int      g_slag[];
 double   g_sext[];
 int      g_nSlag = 0, g_nSext = 0;
 string   g_cStress = "";
-string   g_cMgmt = "";
+string   g_cMgmt = "", g_cMgmt2 = "", g_cMgmt3 = "";
 double   g_atr[];            // ATR (punti) del TF del segnale, sulla barra del segnale, parallelo a g_ent
 string   g_fixedNote = "";   // problema nella regola fissa (vuoto se va bene)
 
@@ -3453,7 +3453,7 @@ string MgCapLbl(const int c, const int t)
 
 void RepMgmt()
   {
-   g_cMgmt = "";
+   g_cMgmt = ""; g_cMgmt2 = ""; g_cMgmt3 = "";
    if(!InpMgmt) return;
    if(g_mgNtf < 1 || g_mgR < 1)
      {
@@ -3598,6 +3598,64 @@ void RepMgmt()
         }
       W("</table></details>");
      }
+
+   //--- elenco completo per TF (per il riepilogo copiabile)
+   {
+    string lst = "";
+    for(int m = 0; m < nM; m++)
+      {
+       const int t = g_mgTf[m];
+       if(bR[m] < 0) { lst += g_tfName[t] + ": campione insufficiente; "; continue; }
+       string es2;
+       if(bOosN[m] < MathMax(10.0, minIs / 3.0)) es2 = "fuori campione scarso";
+       else if(bOos[m] > 0.0 && bOosT[m] >= 2.0) es2 = "t >= 2 da confermare";
+       else if(bOos[m] > 0.0) es2 = "debole";
+       else es2 = "no";
+       lst += g_tfName[t] + ": " + MgRuleLbl(bR[m]) + ", durata massima " +
+              string(bIs[m] > 0.0 ? MgCapLbl(pC[m], t) : ("nessuna con netto in-sample positivo, la meno negativa " + IS(g_hor[bC[m]]) + " min")) +
+              ", lordo fuori campione " + Sg(bGross[m]) + " pt, netto in-sample " + Sg(bIs[m]) + " pt, netto fuori campione " + Sg(bOos[m]) + " pt" +
+              string(g_money ? (" (" + MnyU(bOos[m]) + ")") : "") + ", t " + F2(bOosT[m]) + ", uscite per stop " + F0(bStop[m]) + "%, esito " + es2 + "; ";
+      }
+    g_cMgmt2 = "Per ogni time frame, miglior gestione scelta in-sample (stop e trailing in ATR) con la durata massima consigliata e il risultato per segnale: " + lst;
+    //--- orari migliori (in-sample) dei cinque TF con il miglior netto fuori campione
+    bool usedM[];
+    ArrayResize(usedM, nM);
+    ArrayInitialize(usedM, false);
+    string hrs = "";
+    for(int q = 0; q < 5; q++)
+      {
+       int mm = -1;
+       for(int m = 0; m < nM; m++)
+          if(!usedM[m] && bR[m] >= 0 && bOosN[m] >= MathMax(10.0, minIs / 3.0) && (mm < 0 || bOos[m] > bOos[mm])) mm = m;
+       if(mm < 0) break;
+       usedM[mm] = true;
+       bool usedB[];
+       ArrayResize(usedB, g_nRB);
+       ArrayInitialize(usedB, false);
+       string h3 = "";
+       for(int z = 0; z < 3; z++)
+         {
+          int bb = -1;
+          double bv = -1.0e18;
+          for(int rb = 0; rb < g_nRB; rb++)
+            {
+             if(usedB[rb]) continue;
+             const int pa = ((((mm * g_nRB + rb) * R + bR[mm]) * nC + pC[mm]) * 2) * MGF;
+             if(g_mgAcc[pa] < 20.0 || g_mgAcc[pa + MGF] < 8.0) continue;
+             const double v = g_mgAcc[pa + 1] / g_mgAcc[pa];
+             if(v > bv) { bv = v; bb = rb; }
+            }
+          if(bb < 0) break;
+          usedB[bb] = true;
+          const int pb = ((((mm * g_nRB + bb) * R + bR[mm]) * nC + pC[mm]) * 2) * MGF;
+          h3 += string(z > 0 ? ", " : "") + RBktLabel(bb) + " (in-sample " + Sg(g_mgAcc[pb + 1] / g_mgAcc[pb]) + ", fuori campione " + Sg(g_mgAcc[pb + MGF + 1] / g_mgAcc[pb + MGF]) + ")";
+         }
+       if(h3 != "") hrs += g_tfName[g_mgTf[mm]] + ": " + h3 + "; ";
+      }
+    if(hrs != "")
+       g_cMgmt3 = "Orari d'ingresso (server + offset) con il miglior netto in-sample per segnale, con la gestione scelta, per i cinque TF migliori fuori campione, con il netto fuori campione dello stesso orario (tre orari scelti fra " + IS(g_nRB) +
+                  ", una parte e' rumore: conta solo se il fuori campione e' coerente e positivo; la tabella completa per orario e' nel report HTML e nel digest MGMTH): " + hrs;
+   }
 
    //--- testo per il riepilogo
    string tx = "Stop e trailing in multipli dell'ATR con durata massima, su " + IS(nM) + " TF" + string(InpMgmtMaxSignals > 0 ? (" (campione fino a " + IS(InpMgmtMaxSignals) + " segnali per TF)") : "") + ": ";
@@ -5595,6 +5653,8 @@ void BuildConclusions(const int sIdx)
      }
 
    if(g_cMgmt != "") AddConc(sIdx, "Gestione simulata", g_cMgmt);
+   if(g_cMgmt2 != "") AddConc(sIdx, "Gestione simulata per time frame", g_cMgmt2);
+   if(g_cMgmt3 != "") AddConc(sIdx, "Gestione simulata per orario", g_cMgmt3);
    if(g_cStress != "") AddConc(sIdx, "Prove di stress", g_cStress);
 
    //--- fattibilita' di un EA che apre nel verso del segnale (lotto ipotetico, costi inclusi)
@@ -5907,7 +5967,7 @@ void ReportSet(const int sIdx)
    g_zB = ZCrit(MathMax(1, m));
 
    g_dg = "";
-   g_cAok = false; g_cBok = false; g_cPok = false; g_cPstrong = 0; g_cPstrongN = 0; g_cAstrongN = 0; g_cAone = 0; g_cPusable = 0; g_cPpos = 0; g_cPbest = 0.0; g_cAns = 0; g_cAsurv = ""; g_cAsurvMean = 0.0; g_cAsurvN = 0.0; g_cBdesc = ""; g_cBsumAll = 0.0; g_cStress = ""; g_cMgmt = "";
+   g_cAok = false; g_cBok = false; g_cPok = false; g_cPstrong = 0; g_cPstrongN = 0; g_cAstrongN = 0; g_cAone = 0; g_cPusable = 0; g_cPpos = 0; g_cPbest = 0.0; g_cAns = 0; g_cAsurv = ""; g_cAsurvMean = 0.0; g_cAsurvN = 0.0; g_cBdesc = ""; g_cBsumAll = 0.0; g_cStress = ""; g_cMgmt = ""; g_cMgmt2 = ""; g_cMgmt3 = "";
    W("<div class='sec' style='order:" + IS(3 + sIdx) + "'>");
    W("<h1 class='setH'>Serie " + IS(sIdx + 1) + " di " + IS(g_nSets) + " &mdash; " + g_setName[sIdx] + "</h1>");
    W("<div class='note'>" + g_setNote[sIdx] + " Soglia di Bonferroni su " + IS(m) + " celle TF x orizzonte: |t| &ge; <b>" + F2(g_zB) + "</b>.</div>");
