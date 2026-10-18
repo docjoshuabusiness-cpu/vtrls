@@ -3611,8 +3611,8 @@ void RepMgmt()
        else if(bOos[m] > 0.0 && bOosT[m] >= 2.0) es2 = "t >= 2 da confermare";
        else if(bOos[m] > 0.0) es2 = "debole";
        else es2 = "no";
-       lst += g_tfName[t] + ": " + MgRuleLbl(bR[m]) + ", durata massima " +
-              string(bIs[m] > 0.0 ? MgCapLbl(pC[m], t) : ("nessuna con netto in-sample positivo, la meno negativa " + IS(g_hor[bC[m]]) + " min")) +
+       lst += g_tfName[t] + ": " + MgRuleLbl(bR[m]) + ", " +
+              string(bIs[m] > 0.0 ? ("durata massima consigliata " + MgCapLbl(pC[m], t)) : ("nessuna durata ha netto in-sample positivo (la meno negativa: " + IS(g_hor[bC[m]]) + " min)")) +
               ", lordo fuori campione " + Sg(bGross[m]) + " pt, netto in-sample " + Sg(bIs[m]) + " pt, netto fuori campione " + Sg(bOos[m]) + " pt" +
               string(g_money ? (" (" + MnyU(bOos[m]) + ")") : "") + ", t " + F2(bOosT[m]) + ", uscite per stop " + F0(bStop[m]) + "%, esito " + es2 + "; ";
       }
