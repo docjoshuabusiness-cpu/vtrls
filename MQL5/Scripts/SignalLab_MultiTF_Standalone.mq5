@@ -670,7 +670,7 @@ int      g_nSlag = 0, g_nSext = 0;
 string   g_cStress = "";
 string   g_cMgmt = "", g_cMgmt2 = "", g_cMgmt3 = "", g_cMgmt4 = "", g_cMgmt5 = "";
 int      g_mgPosTf = 0, g_mgTestedTf = 0, g_mgEvalTf = 0, g_mgRobTf = 0, g_mgRobTested = 0, g_mgSelPosTf = 0, g_mgSelEvalTf = 0;   // esiti della gestione simulata per il paragrafo di fattibilita'
-bool     g_mgOn = false;
+bool     g_mgOn = false, g_mgHasShort = false;
 double   g_atr[];            // ATR (punti) del TF del segnale, sulla barra del segnale, parallelo a g_ent
 string   g_fixedNote = "";   // problema nella regola fissa (vuoto se va bene)
 
@@ -4037,7 +4037,7 @@ bool MgSelect(const int m, const int bRule, const int bCap, MgSelRes &res)
 void RepMgmt()
   {
    g_cMgmt = ""; g_cMgmt2 = ""; g_cMgmt3 = ""; g_cMgmt4 = ""; g_cMgmt5 = "";
-   g_mgOn = false; g_mgPosTf = 0; g_mgTestedTf = 0; g_mgEvalTf = 0; g_mgRobTf = 0; g_mgRobTested = 0; g_mgSelPosTf = 0; g_mgSelEvalTf = 0;
+   g_mgOn = false; g_mgHasShort = false; g_mgPosTf = 0; g_mgTestedTf = 0; g_mgEvalTf = 0; g_mgRobTf = 0; g_mgRobTested = 0; g_mgSelPosTf = 0; g_mgSelEvalTf = 0;
    if(!InpMgmt) return;
    if(g_mgNtf < 1 || g_mgR < 1 || g_mgNlag < 1)
      {
@@ -4133,8 +4133,8 @@ void RepMgmt()
               "|stoppct|" + F0(bStop[m]) + "\n";
      }
    W("</table>");
-   const double expPos = 0.0228 * (double)nTested;
-   W("<div class='note'>TF con netto fuori campione positivo e t &ge; 2: <b>" + IS(nPos) + "</b> su " + IS(nTested) + " (per puro caso, con una scelta per TF, se ne attendono circa " + F1(expPos) +
+   const double expPos = 0.0228 * (double)nEval;
+   W("<div class='note'>TF con netto fuori campione positivo e t &ge; 2: <b>" + IS(nPos) + "</b> su " + IS(nEval) + " valutabili (per puro caso, con una scelta per TF, se ne attendono circa " + F1(expPos) +
      "). Il lordo &egrave; ci&ograve; che la sola direzione del segnale porta con quella gestione, senza costi: se &egrave; vicino a zero in tutte le combinazioni la gestione non crea un vantaggio, ridistribuisce soltanto vincite e perdite.</div>");
 
    //--- ritardo d'ingresso: la gestione scelta a ritardo 0 rifatta con tutti i ritardi
@@ -4142,6 +4142,8 @@ void RepMgmt()
    string lagTx = "";
    bool hasShort = false;
    for(int l = 0; l < nLag; l++) if(g_mgLag[l] >= 1 && g_mgLag[l] <= 5) hasShort = true;
+   g_mgHasShort = hasShort;
+   int nLag0PosNo = 0, nLag0PosUnk = 0;
    if(nLag > 1)
      {
       W("<h3>Ritardo d'ingresso: gestione e durata scelte in-sample a ritardo 0, rifatte entrando piu' tardi (netto medio fuori campione per segnale, pt)</h3>");
@@ -4178,8 +4180,11 @@ void RepMgmt()
                     "|netis|" + string(n0 > 0.0 ? F1(a0 / n0) : string("-")) + "|netoos|" + string(n1 > 0.0 ? F1(mo) : string("-")) + "|oost|" + F2(tt) + "\n";
            }
          string rbTxt;
-         if(anyNeg) { rbTxt = Td("NO", "#bf616a"); nRobTested++; }
-         else if(anyUnk || !hasShort) rbTxt = Td("n.d.", "#4c566a");
+         double l0n, l0a, l0b, l0g, l0s;
+         MgSum(0, m, bR[m], pC[m], 1, l0n, l0a, l0b, l0g, l0s);
+         const bool lag0Pos = (l0n >= minOos && l0a > 0.0);
+         if(anyNeg) { rbTxt = Td("NO", "#bf616a"); if(hasShort) nRobTested++; if(lag0Pos) nLag0PosNo++; }
+         else if(anyUnk || !hasShort) { rbTxt = Td("n.d.", "#4c566a"); if(lag0Pos) nLag0PosUnk++; }
          else { rbTxt = Td("<b>SI</b>", "#a3be8c"); nRob++; nRobTested++; }
          W("<tr><td>" + g_tfName[t] + "</td>" + Td(MgRuleLbl(bR[m])) + Td(MgCapLbl(pC[m], t)) + cells + rbTxt + "</tr>");
          lagTx += lt + "; ";
@@ -4189,7 +4194,9 @@ void RepMgmt()
       if(!hasShort) verd = "InpMgmtLags non contiene ritardi fra 1 e 5 min: la tenuta dell'ingresso ritardato non e' valutabile.";
       else if(nLag0Eval == 0) verd = "Nessun TF ha un campione fuori campione sufficiente: ritardo non valutabile.";
       else if(nLag0Pos == 0) verd = "Nessun TF ha un netto fuori campione positivo gia' a ritardo 0 (" + IS(nLag0Eval) + " valutabili): il ritardo non e' la causa, manca il vantaggio da perdere.";
-      else if(nRob == 0) verd = string(nLag0Pos == 1 ? "L'unico TF con netto positivo a ritardo 0 non regge" : ("Dei " + IS(nLag0Pos) + " TF con netto positivo a ritardo 0 nessuno regge")) + " fino a 5 min: il vantaggio, dove c'era, e' una dislocazione del prezzo d'ingresso e non e' operabile.";
+      else if(nRob == 0)
+         verd = string(nLag0Pos == 1 ? "L'unico TF con netto positivo a ritardo 0 non risulta positivo" : ("Dei " + IS(nLag0Pos) + " TF con netto positivo a ritardo 0 nessuno risulta positivo")) + " a tutti i ritardi fino a 5 min (" + IS(nLag0PosNo) + " con almeno un ritardo negativo, " + IS(nLag0PosUnk) + " non valutabili per campione scarso): " +
+                "puo' essere rumore o una dislocazione del prezzo d'ingresso, e con questi dati non sono distinguibili; in nessun caso il risultato e' operabile.";
       else verd = "I TF che reggono sono candidati, non conferme: la gestione e' scelta sul primo periodo e il criterio e' il solo segno del netto medio (senza t).";
       g_cMgmt4 = "Ritardo d'ingresso (minuti dalla chiusura del segnale" + string(InpEntryLagMin > 0 ? (", compreso il ritardo di base " + IS(InpEntryLagMin)) : "") + ", tutti provati insieme: " + MgLagTotList() + "), con la gestione e la durata scelte in-sample a ritardo 0: netto medio fuori campione per segnale in punti. " + lagTx +
                  "TF con netto fuori campione positivo a ritardo 0: " + IS(nLag0Pos) + " su " + IS(nLag0Eval) + " valutabili" +
@@ -4256,6 +4263,8 @@ void RepMgmt()
          selTx += g_tfName[t] + ": " + one + "; ";
         }
       W("</table>");
+      if(nSelTf == 0 && selTx != "")
+         g_cMgmt5 = "Selezione di orari e giorni richiesta ma non valutabile: " + selTx;
       if(nSelTf > 0)
         {
          g_cMgmt5 = "Selezione di orari e giorni: celle ora x giorno della settimana scelte sul primo periodo (almeno " + IS(InpSelMinCell) + " segnali, netto positivo, t >= " + F1(InpSelMinT) + ") con la gestione scelta per ogni TF, poi misurate sul resto. " + selTx +
@@ -4349,7 +4358,7 @@ void RepMgmt()
               ", lordo fuori campione " + Sg(bGross[m]) + " pt, netto in-sample " + Sg(bIs[m]) + " pt, netto fuori campione " + Sg(bOos[m]) + " pt" +
               string(g_money ? (" (" + MnyU(bOos[m]) + ")") : "") + ", t " + F2(bOosT[m]) + ", uscite per stop o target " + F0(bStop[m]) + "%, esito " + es2 + "; ";
       }
-    g_cMgmt2 = "Per ogni time frame, miglior gestione scelta in-sample (stop, trailing e take profit " + uTxtS + ") con la durata massima consigliata e il risultato per segnale: " + lst;
+    g_cMgmt2 = "Per ogni time frame, miglior gestione scelta in-sample (stop e trailing" + string(g_mgNtp > 1 ? " e take profit" : "") + " " + uTxtS + ") con la durata massima consigliata e il risultato per segnale: " + lst;
     //--- orari migliori (in-sample) dei cinque TF con il miglior netto fuori campione
     bool usedM[];
     ArrayResize(usedM, nM);
@@ -4391,7 +4400,7 @@ void RepMgmt()
    }
 
    //--- testo per il riepilogo
-   string tx = "Stop, trailing e take profit " + uTxtS + " con durata massima, su " + IS(nM) + " TF, " + IS(R) + " gestioni x " + IS(nC) + " durate" + string(InpMgmtMaxSignals > 0 ? (" (campione fino a " + IS(InpMgmtMaxSignals) + " segnali per TF)") : "") + ": ";
+   string tx = string(g_mgNtp > 1 ? "Stop, trailing e take profit " : "Stop e trailing ") + uTxtS + " con durata massima, su " + IS(nM) + " TF, " + IS(R) + " gestioni x " + IS(nC) + " durate" + string(InpMgmtMaxSignals > 0 ? (" (campione fino a " + IS(InpMgmtMaxSignals) + " segnali per TF)") : "") + ": ";
    int bestM = -1;
    for(int m = 0; m < nM; m++)
       if(bR[m] >= 0 && bOosN[m] >= minOos && (bestM < 0 || bOos[m] > bOos[bestM])) bestM = m;
@@ -4399,17 +4408,17 @@ void RepMgmt()
       tx += "campione insufficiente per valutare i TF. ";
    else
      {
-      tx += "TF con netto fuori campione positivo e t >= 2: " + IS(nPos) + " su " + IS(nTested) + " (per caso se ne attendono circa " + F1(expPos) + "). ";
+      tx += "TF con netto fuori campione positivo e t >= 2: " + IS(nPos) + " su " + IS(nEval) + " valutabili (per caso se ne attendono circa " + F1(expPos) + "). ";
       const int tb = g_mgTf[bestM];
-      tx += "Il migliore fuori campione (massimo fra " + IS(nTested) + " TF, quindi sovrastimato) e' " + g_tfName[tb] + " con " + MgRuleLbl(bR[bestM]) + " e durata massima " + MgCapLbl(pC[bestM], tb) + ": lordo medio fuori campione " + Sg(bGross[bestM]) + " pt per segnale, netto in-sample " + Sg(bIs[bestM]) +
+      tx += "Il migliore fuori campione (" + string(nEval > 1 ? ("massimo fra " + IS(nEval) + " TF, quindi sovrastimato") : string("unico TF valutabile")) + ") e' " + g_tfName[tb] + " con " + MgRuleLbl(bR[bestM]) + " e durata massima " + MgCapLbl(pC[bestM], tb) + ": lordo medio fuori campione " + Sg(bGross[bestM]) + " pt per segnale, netto in-sample " + Sg(bIs[bestM]) +
             " pt, netto fuori campione " + Sg(bOos[bestM]) + " pt" + string(g_money ? (" (" + MnyU(bOos[bestM]) + " a segnale con " + LotTxt() + " lotti)") : "") + " (t " + F2(bOosT[bestM]) + "). ";
       double sumG = 0.0, sumN = 0.0;
       int cnt = 0;
-      for(int m = 0; m < nM; m++) if(bR[m] >= 0) { sumG += bGross[m]; sumN += bOos[m]; cnt++; }
+      for(int m = 0; m < nM; m++) if(bR[m] >= 0 && bOosN[m] >= minOos) { sumG += bGross[m]; sumN += bOos[m]; cnt++; }
       if(cnt > 0)
-         tx += "Sulla media dei TF la miglior gestione di ciascuno prende " + Sg(sumG / cnt) + " pt lordi e " + Sg(sumN / cnt) + " pt netti per segnale, entrambi fuori campione. ";
+         tx += "Sulla media dei " + IS(cnt) + " TF valutabili la miglior gestione di ciascuno prende " + Sg(sumG / cnt) + " pt lordi e " + Sg(sumN / cnt) + " pt netti per segnale, entrambi fuori campione. ";
       if(nPos == 0)
-         tx += "Nessun TF valutabile (" + IS(nTested) + " su " + IS(nM) + ") mostra un netto positivo e significativo fuori campione: con queste gestioni i segnali non portano punti oltre i costi.";
+         tx += "Nessuno dei " + IS(nEval) + " TF valutabili mostra un netto positivo e significativo fuori campione" + string(bOos[bestM] <= 0.0 ? ": anche il migliore ha netto non positivo, con queste gestioni i segnali non portano punti oltre i costi." : ": il migliore e' positivo ma senza t >= 2, non distinguibile dal caso.");
       else
          tx += "I TF positivi sono candidati da confermare su altri simboli e periodi, non conferme: la scelta della miglior gestione per TF e' ottimizzata sul primo periodo.";
      }
@@ -4418,17 +4427,28 @@ void RepMgmt()
    g_mgPosTf = nPos; g_mgTestedTf = nTested; g_mgEvalTf = nEval; g_mgRobTf = nRob; g_mgRobTested = nRobTested; g_mgSelPosTf = nSelPos; g_mgSelEvalTf = nSelEval;
   }
 
+//--- componenti della gestione simulata effettivamente provati in questa corsa, per i testi del riepilogo
+string MgComps()
+  {
+   string tx = "stop, trailing";
+   if(g_mgNtp > 1) tx += ", take profit";
+   if(g_mgNlag > 1 && g_mgHasShort) tx += ", ritardo d'ingresso";
+   if(InpMgmtSelect && g_mgSelEvalTf > 0) tx += ", selezione di orari e giorni";
+   return tx;
+  }
+
 //--- frase sulla gestione simulata per il paragrafo di fattibilita' dell'EA; 'closing' aggiunge la conclusione (solo dove non contraddice il resto del paragrafo)
 string MgFeasTxt(const bool closing)
   {
    if(!g_mgOn) return "";
    if(g_mgEvalTf < 1) return " Gestione simulata: campione fuori campione insufficiente in tutti i TF, non valutabile.";
-   string tx = " Gestione simulata (stop, trailing, take profit e durata massima, tutte le griglie provate): TF con netto fuori campione positivo e t >= 2: " + IS(g_mgPosTf) + " su " + IS(g_mgEvalTf) + " valutabili; ";
-   if(g_mgNlag > 1 && g_mgRobTested > 0) tx += "fra quelli con ritardo valutabile, positivi anche a tutti i ritardi da 1 a 5 min: " + IS(g_mgRobTf) + " su " + IS(g_mgRobTested) + "; ";
+   string tx = " Gestione simulata (" + MgComps() + " e durata massima, tutte le griglie provate): TF con netto fuori campione positivo e t >= 2: " + IS(g_mgPosTf) + " su " + IS(g_mgEvalTf) + " valutabili; ";
+   if(g_mgNlag > 1 && g_mgHasShort && g_mgRobTested > 0)
+      tx += "fra quelli con ritardo valutabile, positivi per segno (senza t) a tutti i " + string(InpEntryLagMin > 0 ? "ritardi aggiuntivi" : "ritardi") + " da 1 a 5 min: " + IS(g_mgRobTf) + " su " + IS(g_mgRobTested) + "; ";
    if(InpMgmtSelect && g_mgSelEvalTf > 0) tx += "TF con la selezione di orari e giorni positiva e significativa fuori campione: " + IS(g_mgSelPosTf) + " su " + IS(g_mgSelEvalTf) + " valutabili; ";
    if(closing)
-      tx += string((g_mgPosTf == 0 && g_mgRobTf == 0 && g_mgSelPosTf == 0) ?
-                   "dai dati non emerge evidenza di fattibilita' nemmeno con la gestione, i ritardi e la selezione di orari e giorni." :
+      tx += string((g_mgPosTf == 0 && g_mgSelPosTf == 0) ?
+                   "dai dati non emerge evidenza significativa di fattibilita' con la gestione provata." :
                    "i TF positivi sono candidati da confermare su altri simboli e periodi, non conferme.");
    return tx;
   }
@@ -4448,9 +4468,10 @@ string MgFeasTxt(const bool closing)
 #define SWF 9   // campi per combinazione: 0 n in-sample, 1 netto medio IS, 2 t IS, 3 n fuori campione, 4 netto medio OOS, 5 t OOS, 6 lordo medio OOS, 7 segnali validi (prima del campionamento), 8 segnali valutati
 
 //--- elenco di TF (ALL = tutti tranne M1, oppure nomi separati da virgola) come indici in g_tfName
-int ParseTfSel(const string src0, int &out[])
+int ParseTfSel(const string src0, int &out[], string &ignored)
   {
    ArrayResize(out, 0);
+   ignored = "";
    string src = src0;
    StringTrimLeft(src); StringTrimRight(src); StringToUpper(src);
    if(src == "ALL" || src == "")
@@ -4470,10 +4491,14 @@ int ParseTfSel(const string src0, int &out[])
      {
       string pp = parts[q];
       StringTrimLeft(pp); StringTrimRight(pp);
+      if(pp == "") continue;
+      bool found = false;
+      for(int t = 0; t < g_nT; t++) if(g_tfName[t] == pp) found = true;
+      if(!found) ignored += string(ignored != "" ? ", " : "") + pp;
       for(int t = 0; t < g_nT; t++)
          if(g_tfName[t] == pp)
            {
-            if(g_tf[t] == PERIOD_M1) { Print("Scansione: M1 non supportato (troppe barre), ignorato."); continue; }
+            if(g_tf[t] == PERIOD_M1) { ignored += string(ignored != "" ? ", " : "") + "M1 (non supportato)"; continue; }
             bool dup = false;
             for(int w = 0; w < ArraySize(out); w++) if(out[w] == t) dup = true;
             if(dup) continue;
@@ -4582,6 +4607,14 @@ void SweepEval(const MqlRates &r[], const int n, const SDParams &p, const double
      }
   }
 
+//--- soglia con 2-3 decimali senza zeri finali inutili (0.15, 0.125)
+string ThrLbl(const double v)
+  {
+   string tx = DoubleToString(v, 3);
+   if(StringSubstr(tx, StringLen(tx) - 1, 1) == "0") tx = StringSubstr(tx, 0, StringLen(tx) - 1);
+   return tx;
+  }
+
 string MgIntList(const int &a[], const int n)
   {
    string tx = "";
@@ -4592,13 +4625,13 @@ string MgIntList(const int &a[], const int n)
 string MgDblList(const double &a[], const int n)
   {
    string tx = "";
-   for(int i = 0; i < n; i++) tx += string(i > 0 ? ", " : "") + DoubleToString(a[i], 2);
+   for(int i = 0; i < n; i++) tx += string(i > 0 ? ", " : "") + ThrLbl(a[i]);
    return tx;
   }
 
 string SweepCombLbl(const int e, const int v, const double th)
   {
-   return "EMA " + IS(e) + ", volume medio " + IS(v) + ", soglia " + DoubleToString(th, 2);
+   return "EMA " + IS(e) + ", volume medio " + IS(v) + ", soglia " + ThrLbl(th);
   }
 
 //--- scansione richiesta ma non eseguita: traccia nel log, nel report e nel riepilogo
@@ -4631,12 +4664,14 @@ void RepSweep()
       SweepSkip(IS(nQ) + " combinazioni sono troppe (massimo 1500): riduci le liste InpSweepEma, InpSweepVol, InpSweepThr.");
       return;
      }
-   const int nS = ParseTfSel(InpSweepTFs, sTf);
+   string ignTf = "";
+   const int nS = ParseTfSel(InpSweepTFs, sTf, ignTf);
    if(nS < 1)
      {
-      SweepSkip("nessun TF valido in InpSweepTFs (devono essere fra quelli analizzati in InpTFs, M1 escluso).");
+      SweepSkip("nessun TF valido in InpSweepTFs (devono essere fra quelli analizzati in InpTFs, M1 escluso)" + string(ignTf != "" ? (": ignorati " + ignTf) : "") + ".");
       return;
      }
+   if(ignTf != "") Print("Scansione: TF ignorati in InpSweepTFs: ", ignTf);
    if(InpSweepSl <= 0.0 || InpSweepTrail < 0.0 || InpSweepTp < 0.0 || InpSweepHold < 1)
      {
       SweepSkip("InpSweepSl deve essere positivo, InpSweepTrail e InpSweepTp non negativi, InpSweepHold almeno 1 minuto.");
@@ -4704,7 +4739,7 @@ void RepSweep()
    W("<div class='note'>Per ogni TF e per ognuna delle <b>" + IS(nQ) + "</b> combinazioni (" + IS(nE) + " livelli di EmaPeriod x " + IS(nV) + " di VolAvgPeriod x " + IS(nH) + " di SignalThreshold) i segnali del solo Synthetic Delta sono ricalcolati e valutati con la <b>stessa gestione fissa</b>: " + ruleTxt +
      " (unit&agrave; come la gestione simulata), con costi, ritardo d'ingresso, filtri dell'EA e divisione in-sample / fuori campione del resto del report. "
      "La combinazione migliore e' scelta <b>sul primo periodo</b> e il suo risultato sul resto &egrave; l'unico che conta. Provando " + IS(nQ) + " combinazioni il miglior t in-sample cresce per puro caso (circa &radic;(2 ln m)): "
-     "ci&ograve; che interessa &egrave; se le combinazioni vicine fanno lo stesso (un altopiano) o se il migliore &egrave; un picco isolato. Si valuta un campione uniforme fino a " + IS(InpSweepMaxSignals) + " segnali per combinazione e TF. "
+     "ci&ograve; che interessa &egrave; se le combinazioni vicine fanno lo stesso (un altopiano) o se il migliore &egrave; un picco isolato. " + string(InpSweepMaxSignals > 0 ? ("Si valuta un campione uniforme fino a " + IS(InpSweepMaxSignals) + " segnali per combinazione e TF. ") : "Nessun limite al campione di segnali per combinazione. ") +
      "Livelli: EmaPeriod " + MgIntList(ema, nE) + "; VolAvgPeriod " + MgIntList(vol, nV) + "; SignalThreshold " + MgDblList(thr, nH) + ".</div>");
    string sumTf = "";
    int tfLoaded = 0, tfEval = 0, tfOos = 0, tfStrong = 0, tfPosOos = 0;
@@ -4787,9 +4822,17 @@ void RepSweep()
       const double nbMean = (nbN > 0.0) ? nbS / nbN : 0.0;
       string nbTx;
       if(nbN < 1.0) nbTx = "Nessuna combinazione vicina valutabile (un livello in piu' o in meno su ogni parametro)";
-      else nbTx = "Le " + Pl((long)nbN, "combinazione vicina valutabile", "combinazioni vicine valutabili") + " (un livello in piu' o in meno) fanno in media " + Sg(nbMean) + " pt fuori campione, positive " + F0(nbPos) + ": " +
-                  string(res[bo + 3] >= minOos && res[bo + 4] > 0.0 && nbMean > 0.0 && nbPos >= 0.6 * nbN ? "altopiano (il vantaggio non dipende da un livello preciso)" :
-                         "picco isolato o negativo (il risultato dipende dal livello esatto)");
+      else
+        {
+         string vd;
+         const bool zonaPos = (nbMean > 0.0 && nbPos >= 0.6 * nbN);
+         if(res[bo + 3] < minOos) vd = "migliore non valutabile fuori campione";
+         else if(res[bo + 4] <= 0.0) vd = string(nbMean <= 0.0 ? "nessun vantaggio fuori campione ne' nel migliore ne' nella zona" : "il migliore e' negativo fuori campione ma la zona e' in media positiva: nessun picco da confermare");
+         else if(zonaPos && res[bo + 5] >= 2.0) vd = "altopiano: il migliore e' significativo e la zona lo conferma";
+         else if(zonaPos) vd = "zona in media positiva ma il migliore non e' significativo: altopiano debole";
+         else vd = "picco isolato: il vicinato non conferma il migliore";
+         nbTx = "Le " + Pl((long)nbN, "combinazione vicina valutabile", "combinazioni vicine valutabili") + " (un livello in piu' o in meno) fanno in media " + Sg(nbMean) + " pt fuori campione, positive " + F0(nbPos) + ": " + vd;
+        }
       string bestEs;
       if(res[bo + 3] < minOos) bestEs = "fuori campione scarso";
       else if(res[bo + 4] > 0.0 && res[bo + 5] >= 2.0) bestEs = "t >= 2 da confermare";
@@ -4805,12 +4848,15 @@ void RepSweep()
             for(int ih = 0; ih < nH; ih++)
                if(ema[ie] == InpEmaPeriod && vol[iv] == InpVolAvgPeriod && MathAbs(thr[ih] - InpThreshold) < 1.0e-9) curQ = (ie * nV + iv) * nH + ih;
       string curTx;
-      if(curQ < 0) curTx = "la combinazione impostata (EMA " + IS(InpEmaPeriod) + ", volume medio " + IS(InpVolAvgPeriod) + ", soglia " + DoubleToString(InpThreshold, 2) + ") non e' nella griglia";
+      if(curQ < 0) curTx = "la combinazione impostata (EMA " + IS(InpEmaPeriod) + ", volume medio " + IS(InpVolAvgPeriod) + ", soglia " + ThrLbl(InpThreshold) + ") non e' nella griglia";
       else
         {
          const int co = ob0 + curQ * SWF;
-         curTx = "la combinazione impostata (EMA " + IS(InpEmaPeriod) + ", volume medio " + IS(InpVolAvgPeriod) + ", soglia " + DoubleToString(InpThreshold, 2) + ") ha netto in-sample " + Sg(res[co + 1]) +
-                 " pt e fuori campione " + Sg(res[co + 4]) + " pt (t " + F2(res[co + 5]) + ", " + F0(res[co + 3]) + " segnali)";
+         if(res[co] < minIs || res[co + 3] < minOos)
+            curTx = "la combinazione impostata (EMA " + IS(InpEmaPeriod) + ", volume medio " + IS(InpVolAvgPeriod) + ", soglia " + ThrLbl(InpThreshold) + ") non e' valutabile (" + F0(res[co]) + " segnali in-sample, " + F0(res[co + 3]) + " fuori campione)";
+         else
+            curTx = "la combinazione impostata (EMA " + IS(InpEmaPeriod) + ", volume medio " + IS(InpVolAvgPeriod) + ", soglia " + ThrLbl(InpThreshold) + ") ha netto in-sample " + Sg(res[co + 1]) +
+                    " pt e fuori campione " + Sg(res[co + 4]) + " pt (t " + F2(res[co + 5]) + ", " + F0(res[co + 3]) + " segnali)";
         }
       W("<div class='note'>Provate <b>" + Pl(m, "combinazione", "combinazioni") + "</b>: in-sample il netto &egrave; positivo in " + IS(nIsPos) + ", fuori campione in " + IS(nOosPos) + ", positivo in entrambi i periodi in <b>" + IS(nBoth) + "</b>, con t fuori campione &ge; 2 in <b>" + IS(nStrong) + "</b> (per puro caso, fra quelle con netto in-sample positivo, circa il 2.3%). "
         "La migliore in-sample (" + SweepCombLbl(ema[bie], vol[biv], thr[bih]) + ") ha t in-sample <b>" + F2(res[bo + 2]) + "</b>" + string(m > 1 ? (" contro un massimo atteso per caso di circa " + F2(chanceT)) : "") + ", e fuori campione " + Sg(res[bo + 4]) + " pt (t " + F2(res[bo + 5]) + "). " +
@@ -4837,7 +4883,7 @@ void RepSweep()
                cnt += 1.0; sIs += res[ob + 1]; nIsS += res[ob];
                if(res[ob + 3] >= minOos) { sOo += res[ob + 4]; cOo += 1.0; if(res[ob + 1] > 0.0 && res[ob + 4] > 0.0) both += 1.0; }
               }
-            const string lvl = (pi == 0) ? IS(ema[lv]) : ((pi == 1) ? IS(vol[lv]) : DoubleToString(thr[lv], 2));
+            const string lvl = (pi == 0) ? IS(ema[lv]) : ((pi == 1) ? IS(vol[lv]) : ThrLbl(thr[lv]));
             effP += string(lv > 0 ? ", " : "") + lvl + " " + string(cOo > 0.0 ? Sg(sOo / cOo) : string("n.d."));
             if(cnt < 1.0) { W("<tr class='thin'><td>" + lvl + "</td><td colspan='5'>campione insufficiente</td></tr>"); continue; }
             W("<tr><td>" + lvl + "</td>" + Td(F0(cnt)) + Td(F0(nIsS / cnt)) + Td(F1(sIs / cnt), ColSign(sIs / cnt)) + Td(cOo > 0.0 ? F1(sOo / cOo) : string("-"), ColSign(cOo > 0.0 ? sOo / cOo : 0.0)) + Td(F0(both)) + "</tr>");
@@ -4854,7 +4900,7 @@ void RepSweep()
          W("</tr>");
          for(int ih = 0; ih < nH; ih++)
            {
-            W("<tr><td>" + DoubleToString(thr[ih], 2) + "</td>");
+            W("<tr><td>" + ThrLbl(thr[ih]) + "</td>");
             for(int ie = 0; ie < nE; ie++)
               {
                double cnt = 0.0, sm = 0.0;
@@ -4878,10 +4924,10 @@ void RepSweep()
          const int ob = ob0 + q * SWF;
          if(res[ob + 7] < 1.0) continue;
          const int ih = q % nH, iv = (q / nH) % nV, ie = q / (nH * nV);
-         g_dgSets += "SWEEP|" + g_tfName[t] + "|ema|" + IS(ema[ie]) + "|vol|" + IS(vol[iv]) + "|thr|" + DoubleToString(thr[ih], 2) + "|sig|" + F0(res[ob + 7]) + "|nis|" + F0(res[ob]) + "|netis|" + F1(res[ob + 1]) +
+         g_dgSets += "SWEEP|" + g_tfName[t] + "|ema|" + IS(ema[ie]) + "|vol|" + IS(vol[iv]) + "|thr|" + ThrLbl(thr[ih]) + "|sig|" + F0(res[ob + 7]) + "|nis|" + F0(res[ob]) + "|netis|" + F1(res[ob + 1]) +
                      "|tis|" + F2(res[ob + 2]) + "|noos|" + F0(res[ob + 3]) + "|netoos|" + F1(res[ob + 4]) + "|toos|" + F2(res[ob + 5]) + "|grossoos|" + F1(res[ob + 6]) + "\n";
         }
-      g_dgSets += "SWEEPBEST|" + g_tfName[t] + "|ema|" + IS(ema[bie]) + "|vol|" + IS(vol[biv]) + "|thr|" + DoubleToString(thr[bih], 2) + "|combos|" + IS(m) + "|netis|" + F1(res[bo + 1]) + "|tis|" + F2(res[bo + 2]) +
+      g_dgSets += "SWEEPBEST|" + g_tfName[t] + "|ema|" + IS(ema[bie]) + "|vol|" + IS(vol[biv]) + "|thr|" + ThrLbl(thr[bih]) + "|combos|" + IS(m) + "|netis|" + F1(res[bo + 1]) + "|tis|" + F2(res[bo + 2]) +
                   "|chance|" + F2(chanceT) + "|noos|" + F0(res[bo + 3]) + "|netoos|" + F1(res[bo + 4]) + "|toos|" + F2(res[bo + 5]) + "|neighbors|" + F0(nbN) + "|nbmean|" + F1(nbMean) + "|nbpos|" + F0(nbPos) +
                   "|both|" + IS(nBoth) + "|strong|" + IS(nStrong) + "\n";
       sumTf += g_tfName[t] + ": su " + Pl(m, "combinazione valutabile", "combinazioni valutabili") + " la migliore in-sample e' " + SweepCombLbl(ema[bie], vol[biv], thr[bih]) + " (netto in-sample " + Sg(res[bo + 1]) + " pt, t " + F2(res[bo + 2]) +
@@ -4891,7 +4937,11 @@ void RepSweep()
      }
    if(skipTx != "")
       W("<div class='note ko'>TF saltati per storico insufficiente: " + skipTx + ".</div>");
+   if(ignTf != "")
+      W("<div class='note ko'>TF di InpSweepTFs ignorati perche' non analizzati in InpTFs o non supportati: " + ignTf + ".</div>");
    W("</div>");
+   if(tfLoaded == 0)
+      AddConc(-2, "Scansione dei parametri del segnale (EMA, volume medio, soglia)", "Scansione richiesta ma non eseguita: nessun TF con storico sufficiente" + string(skipTx != "" ? (" (" + skipTx + ")") : "") + ".");
    if(tfLoaded > 0)
      {
       string verd;
@@ -4901,7 +4951,7 @@ void RepSweep()
       else verd = "I TF positivi sono candidati da confermare su altri simboli e periodi: con tante combinazioni provate il massimo in-sample e' gonfiato, conta l'altopiano delle combinazioni vicine e il fuori campione.";
       AddConc(-2, "Scansione dei parametri del segnale (EMA, volume medio, soglia)", "Provate " + Pl(nQ, "combinazione", "combinazioni") + " di EmaPeriod (" + MgIntList(ema, nE) + "), VolAvgPeriod (" + MgIntList(vol, nV) + ") e SignalThreshold (" + MgDblList(thr, nH) + ") del solo Synthetic Delta su " + Pl(tfLoaded, "TF", "TF") +
               ", ognuna valutata con la stessa gestione fissa (" + ruleTxt + ", costi e filtri come il resto della corsa), scelta della migliore sul primo periodo e verifica sul resto. " + sumTf +
-              string(skipTx != "" ? ("TF saltati per storico insufficiente: " + skipTx + ". ") : "") +
+              string(skipTx != "" ? ("TF saltati per storico insufficiente: " + skipTx + ". ") : "") + string(ignTf != "" ? ("TF ignorati in InpSweepTFs: " + ignTf + ". ") : "") +
               "TF valutabili: " + IS(tfEval) + "; con un campione fuori campione sufficiente per la migliore: " + IS(tfOos) + "; migliore in-sample con netto fuori campione positivo: " + IS(tfPosOos) + "; con t >= 2: " + IS(tfStrong) + ". " + verd +
               " Le mappe soglia x EMA sono nel report HTML; tutte le combinazioni e i livelli sono nel digest (SWEEP, SWEEPBEST, SWEEPLV).");
      }
@@ -6976,9 +7026,9 @@ void BuildConclusions(const int sIdx)
        else if(ampKnown)
           c += "A pari intensita' della candela e stesse ore l'ampiezza delle candele successive non si discosta da quella di una barra qualunque: sapere che la candela era ampia basta, il segnale non aggiunge nulla e non c'e' un uso operativo dimostrato. ";
        if(g_mgOn && g_mgEvalTf > 0)
-          c += string((g_mgPosTf > 0 || g_mgRobTf > 0 || g_mgSelPosTf > 0) ?
-                ("La gestione simulata (stop, trailing, target, ritardo, selezione di orari e giorni) mostra pero' dei candidati: TF con netto fuori campione positivo e t >= 2 " + IS(g_mgPosTf) + " su " + IS(g_mgEvalTf) + " valutabili (vedi i paragrafi 'Gestione simulata'), da confermare. ") :
-                string("Anche la gestione simulata (stop, trailing, target, ritardo, selezione di orari e giorni) non mostra TF positivi e significativi fuori campione. "));
+          c += string((g_mgPosTf > 0 || g_mgSelPosTf > 0) ?
+                ("La gestione simulata (" + MgComps() + ") mostra pero' dei candidati: TF con netto fuori campione positivo e t >= 2 in " + IS(g_mgPosTf) + " su " + IS(g_mgEvalTf) + " valutabili" + string(InpMgmtSelect && g_mgSelEvalTf > 0 ? (", con la selezione di orari e giorni positiva e significativa in " + IS(g_mgSelPosTf) + " su " + IS(g_mgSelEvalTf)) : "") + " (vedi i paragrafi 'Gestione simulata'), da confermare. ") :
+                ("Anche la gestione simulata (" + MgComps() + ") non mostra TF positivi e significativi fuori campione. "));
        c += "Prima di qualunque uso operativo: ripeti lo studio su altri simboli e su un periodo successivo.";
       }
     else
