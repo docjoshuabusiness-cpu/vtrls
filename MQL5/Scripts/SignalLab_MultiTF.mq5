@@ -3790,7 +3790,7 @@ void RepMgmt()
         "I segnali senza barre M1 contigue fino all'ingresso ritardato sono esclusi da quel ritardo: il numero di segnali per ritardo e' nel suggerimento della cella e nel digest (oosn).</div>");
       W("<table><tr><th>TF</th><th>Gestione</th><th>Durata</th>");
       for(int l = 0; l < nLag; l++) W("<th>+" + IS(InpEntryLagMin + g_mgLag[l]) + " min</th>");
-      W("<th>Regge fino a 5 min?</th></tr>");
+      W("<th>" + string(InpEntryLagMin > 0 ? "Regge fino a +5 min oltre il ritardo di base?" : "Regge fino a 5 min?") + "</th></tr>");
       for(int m = 0; m < nM; m++)
         {
          if(bR[m] < 0) continue;
