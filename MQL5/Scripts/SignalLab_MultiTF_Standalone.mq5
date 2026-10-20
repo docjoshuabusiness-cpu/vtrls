@@ -3510,6 +3510,10 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
      }
 
    //--- testo per il riepilogo
+   string bothTx = "";                                // regole che superano sia la prova del ritardo sia quella del costo
+   for(int b = 0; b < nr; b++)
+      if(vLag[b] == 1 && vCost[b] == 1)
+         bothTx += string(bothTx != "" ? "; " : "") + g_tfName[rTf[b]] + " " + RBktLabel(rB[b]) + " " + string(rD[b] == 0 ? "SEGUI" : "INVERTI") + ", tieni " + IS(g_hor[rH[b]]) + " min, target " + KLabel(rK[b]);
    string sOrig;
    if(nSurv == 0)       sOrig = (rS[0] == 2 && nr == 1) ? string("solo la regola fissa, nessuna selezione") :
                                 (string(rS[0] == 2 ? "oltre alla regola fissa " : "") + "nessuna regge fuori campione, sono le migliori in-sample");
@@ -3523,7 +3527,7 @@ void RepStress(const int nr, int &rTf[], int &rB[], int &rH[], int &rK[], int &r
       tx += "La prova del ritardo non e' valutabile: InpStressLags non contiene ritardi da 1 a " + IS(OKLAG) + " min; con " + PtLbl(g_sext[ciRef]) + " pt di costo in piu' il netto fuori campione resta positivo e significativo (t >= 2 senza ritardo) in " + IS(nCostOk) + " su " + IS(nUse) + string(nUse == 1 ? " regola" : " regole") + ". ";
    else
       tx += "Con ingresso ritardato fino a " + IS(OKLAG) + " min il netto fuori campione resta positivo e significativo (t >= 2 senza ritardo) in " + IS(nLagOk) + " su " + IS(nUse) + string(nUse == 1 ? " regola" : " regole") + "; con " + PtLbl(g_sext[ciRef]) +
-            " pt di costo in piu' in " + IS(nCostOk) + "; superano entrambe le prove: " + IS(nBoth) + ". ";
+            " pt di costo in piu' in " + IS(nCostOk) + "; superano entrambe le prove: " + IS(nBoth) + string(nBoth > 0 ? (" (" + bothTx + "; candidate da confermare, non conferme: la regola e' stata scelta guardando i dati)") : "") + ". ";
    {
     string ds = g_tfName[rTf[0]] + " " + RBktLabel(rB[0]) + " " + string(rD[0] == 0 ? "SEGUI" : "INVERTI") + ", tieni " + IS(g_hor[rH[0]]) + " min, target " + KLabel(rK[0]);
     tx += "La prima (" + ds + "): netto fuori campione";
@@ -7534,7 +7538,7 @@ void BuildConclusions(const int sIdx)
          ta += "Molte combinazioni sembrano reggere fuori campione, ma per la maggior parte (" + IS(g_cAone) + " su " + IS(g_cAstrong) + ") sono fasce in cui il segnale va quasi sempre nello stesso verso: li' l'abilita' della direzione "
                "non e' misurabile e il guadagno puo' essere deriva oppure direzione. Servono un altro simbolo, un altro periodo o la prova con InpEntryLagMin = 5. ";
       else if(g_cAstrong >= 3 && 2 * g_cAstrongN < g_cAstrong)
-         ta += "Molte combinazioni sembrano reggere fuori campione, ma quasi nessuna ha abilita' della direzione: il guadagno e' dell'istante (chi sceglie il verso a caso negli stessi istanti guadagna lo stesso, valore M) "
+         ta += "Molte combinazioni (" + IS(g_cAstrong) + ") sembrano reggere fuori campione, ma solo " + IS(g_cAstrongN) + " hanno abilita' della direzione significativa (circa " + F1(expAn) + " se ne attendono per caso): per le altre il guadagno e' dell'istante (chi sceglie il verso a caso negli stessi istanti guadagna lo stesso, valore M) "
                "o della deriva sfruttata da una quota sbilanciata di acquisti o vendite, non della direzione del segnale. Un valore M positivo in una fascia e' tipicamente un artefatto dei dati (rollover, spread, code di prezzo). "
                "Prova di stress: ripeti con InpEntryLagMin = 5 oppure escludi la fascia con InpSkipEntryWin. ";
       else
