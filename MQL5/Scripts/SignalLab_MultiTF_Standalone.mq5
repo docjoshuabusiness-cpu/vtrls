@@ -686,7 +686,7 @@ int      g_nSlag = 0, g_nSext = 0;
 string   g_cStress = "";
 string   g_cMgmt = "", g_cMgmt3 = "", g_cMgmt4 = "", g_cMgmt5 = "";
 //--- schede per time frame del riepilogo: una stringa per serie e TF (indice = serie * g_nT + t); la scansione dei parametri e' per TF (solo Delta)
-string   g_cdMg[], g_cdLag[], g_cdSel[], g_cdFilt[], g_cdSw[];
+string   g_cdPts[], g_cdMg[], g_cdLag[], g_cdSel[], g_cdFilt[], g_cdSw[];
 int      g_cdPos[];            // test positivi e significativi fuori campione per serie e TF
 string   g_cdWin = "";         // elenco dei test positivi (serie, TF, test) per la riga finale del riepilogo
 int      g_cdEval[];           // test valutabili per serie e TF
@@ -7079,6 +7079,59 @@ bool CndStat(const int t, const int cat, double &n, double &mean, double &var)
    return true;
   }
 
+//--- punti medi per segnale all'orizzonte di riferimento, per TF e per fascia oraria d'ingresso (tutto il periodo, senza divisione in-sample / fuori campione):
+//--- una riga di sintesi con tutti i TF e, per la scheda di ogni TF, il lordo, il netto e le fasce con il netto migliore e peggiore
+void BuildPoints(const int sIdx)
+  {
+   string all = "";
+   const string hs = IS(g_hor[g_refH]);
+   bool usedB[];
+   ArrayResize(usedB, g_nB);
+   for(int t = 0; t < g_nT; t++)
+     {
+      g_cdPts[sIdx * g_nT + t] = "";
+      CellStat c;
+      if(!GetCell(t, g_refH, c) || c.n < 1.0) continue;
+      const string one = "lordo " + Sg(c.gross) + " pt, netto " + Sg(c.ret) + " pt" + string(g_money ? (" (" + MnyU(c.ret) + " a posizione con " + LotTxt() + " lotti)") : "") +
+                         " su " + F0(c.n) + " segnali (t del netto " + F2(c.tCl) + ")";
+      int nOk = 0;
+      for(int b = 0; b < g_nB; b++) if(g_accBkt[(t * g_nB + b) * ACCN] >= (double)InpMinPerBucket) nOk++;
+      string bestTx = "", worstTx = "";
+      for(int side = 0; side < 2; side++)
+        {
+         ArrayInitialize(usedB, false);
+         for(int z = 0; z < 3; z++)
+           {
+            int bb = -1;
+            double bv = 0.0;
+            for(int b = 0; b < g_nB; b++)
+              {
+               const int p = (t * g_nB + b) * ACCN;
+               const double nn = g_accBkt[p];
+               if(nn < (double)InpMinPerBucket || usedB[b]) continue;
+               const double v = g_accBkt[p + 3] / nn;
+               if(bb < 0 || (side == 0 ? v > bv : v < bv)) { bv = v; bb = b; }
+              }
+            if(bb < 0) break;
+            usedB[bb] = true;
+            const int pb = (t * g_nB + bb) * ACCN;
+            const string it = BktLabel(bb) + " netto " + Sg(bv) + " pt (lordo " + Sg(bv + g_accBkt[pb + 5] / g_accBkt[pb]) + ", " + F0(g_accBkt[pb]) + " segnali)";
+            if(side == 0) bestTx += string(z > 0 ? "; " : "") + it;
+            else          worstTx += string(z > 0 ? "; " : "") + it;
+           }
+        }
+      string tx = "orizzonte " + hs + " min: " + one + ".";
+      if(bestTx != "")
+         tx += " Fasce d'ingresso (server + offset) con il netto migliore: " + bestTx + "; con il peggiore: " + worstTx + ". Sono il massimo e il minimo di " + IS(nOk) +
+               " fasce misurate sull'intero periodo, senza verifica fuori campione: una parte e' rumore (le celle ora x giorno scelte sul primo periodo e verificate sul resto sono in ORARI E GIORNI)";
+      g_cdPts[sIdx * g_nT + t] = tx;
+      all += g_tfName[t] + " lordo " + Sg(c.gross) + " netto " + Sg(c.ret) + " (" + F0(c.n) + " segnali); ";
+     }
+   if(all != "")
+      AddConc(sIdx, "Punti medi per segnale per time frame", "Orizzonte di riferimento " + hs + " min (uscita a tempo, ingresso all'open dopo la chiusura del segnale, costi inclusi: spread M1 e commissione), intero periodo, in punti per segnale: " + all +
+              "Il lordo e' cio' che la sola direzione del segnale porta prima dei costi, il netto cio' che resta. Il dettaglio per fascia oraria e' nella scheda di ogni time frame; le altre tenute (da 1 a 1440 min) sono nelle tabelle TF x tenuta del report HTML e nel digest (TFH).");
+  }
+
 void BuildConclusions(const int sIdx)
   {
    const int    rt   = RefTFIndex();
@@ -7135,6 +7188,8 @@ void BuildConclusions(const int sIdx)
             (g_skN > 0 ? (" ATTENZIONE: escluse le finestre d'ingresso " + InpSkipEntryWin + " (ora server + offset): i risultati non sono quelli dell'EA su quelle fasce.") : "") +
             (InpEntryLagMin > 0 ? (" ATTENZIONE: corsa con ingresso ritardato di " + IS(InpEntryLagMin) + " min dopo la chiusura del segnale (prova di stress): i risultati non sono quelli dell'EA.") : ""));
    }
+
+   BuildPoints(sIdx);
 
    //--- direzione prima dei costi e netto dopo i costi, per TF all'orizzonte di riferimento
    int    K = 0, posN = 0, posS = 0, negS = 0, netPos = 0, netSig = 0;
@@ -7802,10 +7857,11 @@ void BuildCards()
       for(int t = 0; t < g_nT; t++)
         {
          const int ix = s * g_nT + t;
-         const bool anyMg = (g_cdMg[ix] != "" || g_cdLag[ix] != "" || g_cdSel[ix] != "" || g_cdFilt[ix] != "");
+         const bool anyMg = (g_cdPts[ix] != "" || g_cdMg[ix] != "" || g_cdLag[ix] != "" || g_cdSel[ix] != "" || g_cdFilt[ix] != "");
          const bool anySw = (s == 0 && g_setMode[0] == SD_MODE_DELTA && g_cdSw[t] != "");
          if(!anyMg && !anySw) continue;
-         string tx = "GESTIONE: " + string(g_cdMg[ix] != "" ? g_cdMg[ix] : (g_mgOn ? "non eseguita su questo TF" : "spenta o non eseguita")) + ". ";
+         string tx = "PUNTI MEDI PER SEGNALE (uscita a tempo, tutto il periodo): " + string(g_cdPts[ix] != "" ? g_cdPts[ix] : "non disponibili") + ". ";
+         tx += "GESTIONE: " + string(g_cdMg[ix] != "" ? g_cdMg[ix] : (g_mgOn ? "non eseguita su questo TF" : "spenta o non eseguita")) + ". ";
          tx += "RITARDO: " + string(g_cdLag[ix] != "" ? g_cdLag[ix] : "non valutato") + ". ";
          tx += "ORARI E GIORNI: " + string(g_cdSel[ix] != "" ? g_cdSel[ix] : "non valutati") + ". ";
          tx += "FILTRI: " + string(g_cdFilt[ix] != "" ? g_cdFilt[ix] : "non valutati") + ". ";
@@ -8194,10 +8250,10 @@ void OnStart()
    }
    {
     const int nCd = g_nSets * g_nT;
-    ArrayResize(g_cdMg, nCd); ArrayResize(g_cdLag, nCd); ArrayResize(g_cdSel, nCd); ArrayResize(g_cdFilt, nCd); ArrayResize(g_cdSw, g_nT);
+    ArrayResize(g_cdPts, nCd); ArrayResize(g_cdMg, nCd); ArrayResize(g_cdLag, nCd); ArrayResize(g_cdSel, nCd); ArrayResize(g_cdFilt, nCd); ArrayResize(g_cdSw, g_nT);
     ArrayResize(g_cdPos, nCd); ArrayInitialize(g_cdPos, 0);
     ArrayResize(g_cdEval, nCd); ArrayInitialize(g_cdEval, 0);
-    for(int q = 0; q < nCd; q++) { g_cdMg[q] = ""; g_cdLag[q] = ""; g_cdSel[q] = ""; g_cdFilt[q] = ""; }
+    for(int q = 0; q < nCd; q++) { g_cdPts[q] = ""; g_cdMg[q] = ""; g_cdLag[q] = ""; g_cdSel[q] = ""; g_cdFilt[q] = ""; }
     for(int q = 0; q < g_nT; q++) g_cdSw[q] = "";
    }
    ArrayResize(g_tfRejGap, g_nT); ArrayInitialize(g_tfRejGap, 0);
