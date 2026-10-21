@@ -7183,6 +7183,7 @@ char    g_prDir[];
 double  g_prAtr[], g_prCost[], g_prProg[], g_prMa[], g_prRe[], g_prPv[], g_prPm[], g_prFm[];
 //--- esiti per TF raccolti da PkAnalyze
 string  g_pkSumRow = "", g_pkDet = "", g_pkCard = "";
+double  g_pkBase[10];                            // come g_pkRef per le entrate casuali (stessa regola di finestra); [8] e [9]: % che raggiunge il target del segnale buono e % buoni
 double  g_pkRef[8];                              // ritiro di riferimento: picco mediano e 90% (pt), mediano e 90% (ATR), minuti al picco mediano, contro prima del picco (pt e ATR), candele mediane
 int     g_pkP0v = -1, g_pkP0j = 0, g_pkP0s = 0;  // gestione scelta in-sample: variante (0 ATR del momento, 1 punti fissi), target, stop
 double  g_pkP0[10];                              // n IS, media IS, t IS, n OOS, media OOS, t OOS, % target, % stop, % tempo, minuti medi al target (fuori campione)
@@ -7328,8 +7329,51 @@ void PkWalk(const int i, const int j, const int d, const double atr, const int e
    g_prRe[i] = early ? 0.0 : ((d > 0) ? (pEnd - o) / pt : (o - pEnd) / pt);
   }
 
-//--- raccoglie i record del TF t (serie corrente); restituisce il numero di record
-int PkCollect(const int t)
+int     g_pkWin[], g_pkKey[];     // finestra (barre M1) e chiave (ora x intensita') di ciascun segnale misurato: servono ad abbinare le entrate casuali
+
+//--- registra il record n (segnale o barra casuale k, ingresso M1 jb, verso d, ATR atr, finestra [jb, e) chiusa per 'cause', prezzo di chiusura pEnd) e percorre la finestra
+void PkFill(const int n, const int k, const int jb, const int d, const double atr, const int e, const int cause, const double pEnd, const double runOpen)
+  {
+   const long ts = (long)g_m1Time[jb];
+   const int hr = (int)(((((ts + g_off) % 86400L) + 86400L) % 86400L) / 3600L);
+   g_prK[n] = k; g_prJ[n] = jb; g_prDir[n] = (char)d; g_prDay[n] = g_m1Day[jb];
+   g_prSmp[n] = (g_m1Day[jb] >= g_splitDay) ? (uchar)1 : (uchar)0;
+   g_prHr[n] = (uchar)hr;
+   g_prBur[n] = g_bur[k];
+   g_prIb[n] = (g_ib[k] < 6) ? g_ib[k] : (uchar)255;
+   g_prVr[n] = (uchar)PkVolClass(jb, hr);
+   const bool haveX = (ArraySize(g_adxq) > k && ArraySize(g_reg) > k);
+   g_prRg[n] = (haveX && g_reg[k] != 255) ? (uchar)((g_reg[k] >> 1) & 3) : (uchar)255;
+   const int a2 = haveX ? (int)g_adxq[k] / 2 : -1;
+   g_prAx[n] = (a2 < 0) ? (uchar)255 : ((a2 < 15) ? (uchar)0 : ((a2 < 20) ? (uchar)1 : ((a2 < 30) ? (uchar)2 : (uchar)3)));
+   g_prAtr[n] = atr;
+   g_prCost[n] = ((InpCostPoints > 0.0) ? InpCostPoints : (double)g_m1Spr[jb]) + g_extraPts;
+   g_prProg[n] = (g_bur[k] > 1) ? (double)d * (g_m1Open[jb] - runOpen) / g_pt : 0.0;
+   PkWalk(n, jb, d, atr, e, cause, pEnd);
+  }
+
+//--- ora d'ingresso (0-23) di una barra M1
+int PkHour(const int jb)
+  {
+   return (int)(((((long)g_m1Time[jb] + g_off) % 86400L) + 86400L) % 86400L / 3600L);
+  }
+
+//--- fine della finestra di un'entrata alla barra M1 jb: durata massima, buco di dati o fine dello storico, segnale opposto jo (-1 = nessuno)
+int PkWindowEnd(const int jb, const long capMin, const int jo, int &cause)
+  {
+   int e = MgLower((long)g_m1Time[jb] + capMin * 60L, jb);
+   cause = 2;
+   const int eb = g_nextBrk[jb] + 1;
+   if(eb <= e) { e = eb; cause = 3; }
+   if(!InpPeakCross && jo > jb && jo < e) { e = jo; cause = 1; }
+   return e;
+  }
+
+//--- raccoglie i record del TF t (serie corrente) e restituisce il loro numero.
+//--- mode 0 = segnali, percorsi per intero. mode 1 = segnali, ma solo la finestra e la chiave ora x intensita' (riempie g_pkWin e g_pkKey, nessun percorso).
+//--- mode 2 = ENTRATE CASUALI abbinate ai segnali di mode 1: per ciascuno una barra qualunque (segnale o no) della stessa ora e della stessa intensita' (se non c'e', della stessa ora),
+//--- direzione alternata, finestra della stessa durata: e' il confronto che dice se i picchi dei segnali sono diversi da quelli di un'entrata qualunque nelle stesse condizioni.
+int PkCollect(const int t, const int mode)
   {
    const int k0 = g_tfOff[t], k1 = k0 + g_tfCnt[t];
    const int nK = g_pkNk, nJ = g_pkNj;
@@ -7338,12 +7382,67 @@ int PkCollect(const int t)
    const long capSig = (InpPeakMaxSignals > 0) ? (long)InpPeakMaxSignals : 2147483647L;
    const int stride = MathMax(1, (int)(((long)nSig + capSig - 1L) / capSig));
    const int cap = nSig / stride + 2;
-   g_pkNsig = nSig; g_pkStride = stride; g_pkNruns = 0;
-   ArrayResize(g_prK, cap); ArrayResize(g_prJ, cap); ArrayResize(g_prDay, cap); ArrayResize(g_prSmp, cap); ArrayResize(g_prHr, cap);
-   ArrayResize(g_prBur, cap); ArrayResize(g_prIb, cap); ArrayResize(g_prVr, cap); ArrayResize(g_prRg, cap); ArrayResize(g_prAx, cap);
-   ArrayResize(g_prDir, cap); ArrayResize(g_prAtr, cap); ArrayResize(g_prCost, cap); ArrayResize(g_prProg, cap); ArrayResize(g_prMa, cap); ArrayResize(g_prRe, cap);
-   ArrayResize(g_prPv, cap * nK); ArrayResize(g_prPm, cap * nK); ArrayResize(g_prPb, cap * nK); ArrayResize(g_prPc, cap * nK);
-   ArrayResize(g_prFm, cap * 2 * nJ); ArrayResize(g_prFt, cap * 2 * nJ);
+   if(mode != 2) { g_pkNsig = nSig; g_pkStride = stride; g_pkNruns = 0; }
+   if(mode == 1) { ArrayResize(g_pkWin, cap); ArrayResize(g_pkKey, cap); }
+   else
+     {
+      ArrayResize(g_prK, cap); ArrayResize(g_prJ, cap); ArrayResize(g_prDay, cap); ArrayResize(g_prSmp, cap); ArrayResize(g_prHr, cap);
+      ArrayResize(g_prBur, cap); ArrayResize(g_prIb, cap); ArrayResize(g_prVr, cap); ArrayResize(g_prRg, cap); ArrayResize(g_prAx, cap);
+      ArrayResize(g_prDir, cap); ArrayResize(g_prAtr, cap); ArrayResize(g_prCost, cap); ArrayResize(g_prProg, cap); ArrayResize(g_prMa, cap); ArrayResize(g_prRe, cap);
+      ArrayResize(g_prPv, cap * nK); ArrayResize(g_prPm, cap * nK); ArrayResize(g_prPb, cap * nK); ArrayResize(g_prPc, cap * nK);
+      ArrayResize(g_prFm, cap * 2 * nJ); ArrayResize(g_prFt, cap * 2 * nJ);
+     }
+   const long tfMin = MathMax(1L, g_tfSec[t] / 60L);
+   const long capMin = MathMax((long)MathMax(1, InpPeakMaxMin), (long)MathMax(1, InpPeakMaxCandles) * tfMin);
+   int n = 0;
+   if(mode == 2)
+     {
+      //--- liste di tutte le barre con ingresso valido (segnale o no), per chiave ora x intensita' e per ora (due passate: conteggio e riempimento)
+      const int nW = ArraySize(g_pkWin);
+      int cntK[168], offK[169], cntH[24], offH[25], usedK[168], usedH[24];
+      int candK[], candH[];
+      for(int q = 0; q < 168; q++) { cntK[q] = 0; usedK[q] = 0; }
+      for(int q = 0; q < 24; q++) { cntH[q] = 0; usedH[q] = 0; }
+      for(int pass = 0; pass < 2; pass++)
+        {
+         if(pass == 1)
+           {
+            offK[0] = 0; offH[0] = 0;
+            for(int q = 0; q < 168; q++) offK[q + 1] = offK[q] + cntK[q];
+            for(int q = 0; q < 24; q++) offH[q + 1] = offH[q] + cntH[q];
+            ArrayResize(candK, offK[168]); ArrayResize(candH, offH[24]);
+            for(int q = 0; q < 168; q++) cntK[q] = 0;
+            for(int q = 0; q < 24; q++) cntH[q] = 0;
+           }
+         for(int k = k0; k < k1; k++)
+           {
+            if(g_atr[k] <= 0.0) continue;
+            const int jb = StressBase(k);
+            if(jb < 0) continue;
+            const int hr = PkHour(jb);
+            const int key = hr * 7 + ((g_ib[k] < 6) ? (int)g_ib[k] : 6);
+            if(pass == 0) { cntK[key]++; cntH[hr]++; }
+            else { candK[offK[key] + cntK[key]] = k; cntK[key]++; candH[offH[hr] + cntH[hr]] = k; cntH[hr]++; }
+           }
+        }
+      for(int q = 0; q < nW && n < cap - 1; q++)
+        {
+         const int key = g_pkKey[q], hr0 = key / 7;
+         int k = -1;
+         if(cntK[key] > 0) { k = candK[offK[key] + (int)(((long)usedK[key] * 7919L) % (long)cntK[key])]; usedK[key]++; }
+         else if(cntH[hr0] > 0) { k = candH[offH[hr0] + (int)(((long)usedH[hr0] * 7919L) % (long)cntH[hr0])]; usedH[hr0]++; }
+         if(k < 0) continue;
+         const int jb = StressBase(k);
+         int e = jb + g_pkWin[q], cause = 2;
+         const int eb = g_nextBrk[jb] + 1;
+         if(eb <= e) { e = eb; cause = 3; }
+         if(e <= jb) continue;
+         PkFill(n, k, jb, (n % 2 == 0) ? 1 : -1, g_atr[k], e, cause, g_m1Close[e - 1], 0.0);
+         n++;
+        }
+      g_prN = n;
+      return n;
+     }
    //--- all'indietro: ingresso M1 del segnale opposto piu' vicino dopo ciascun segnale
    int oppEnt[];
    ArrayResize(oppEnt, k1 - k0);
@@ -7358,9 +7457,7 @@ int PkCollect(const int t)
       oppEnt[k - k0] = (d > 0) ? lastSell : lastBuy;
       if(d > 0) lastBuy = je; else lastSell = je;
      }
-   const long tfMin = MathMax(1L, g_tfSec[t] / 60L);
-   const long capMin = MathMax((long)MathMax(1, InpPeakMaxMin), (long)MathMax(1, InpPeakMaxCandles) * tfMin);
-   int seen = 0, n = 0;
+   int seen = 0;
    double runOpen = 0.0;
    for(int k = k0; k < k1; k++)
      {
@@ -7373,36 +7470,20 @@ int PkCollect(const int t)
       if(jb < 0) continue;
       const double atr = g_atr[k];
       if(atr <= 0.0) continue;
-      //--- fine della finestra: durata massima, buco di dati o fine dello storico, segnale opposto
-      int e = MgLower((long)g_m1Time[jb] + capMin * 60L, jb);
-      int cause = 2;
-      const int eb = g_nextBrk[jb] + 1;
-      if(eb <= e) { e = eb; cause = 3; }
-      if(!InpPeakCross)
-        {
-         const int jo = oppEnt[k - k0];
-         if(jo > jb && jo < e) { e = jo; cause = 1; }
-        }
+      int cause;
+      const int e = PkWindowEnd(jb, capMin, oppEnt[k - k0], cause);
       if(e <= jb) continue;
-      const double pEnd = (cause == 1) ? g_m1Open[e] : g_m1Close[e - 1];
-      const long ts = (long)g_m1Time[jb];
-      const int hr = (int)(((((ts + g_off) % 86400L) + 86400L) % 86400L) / 3600L);
-      g_prK[n] = k; g_prJ[n] = jb; g_prDir[n] = (char)d; g_prDay[n] = g_m1Day[jb];
-      g_prSmp[n] = (g_m1Day[jb] >= g_splitDay) ? (uchar)1 : (uchar)0;
-      g_prHr[n] = (uchar)hr;
-      g_prBur[n] = g_bur[k];
-      g_prIb[n] = (g_ib[k] < 6) ? g_ib[k] : (uchar)255;
-      g_prVr[n] = (uchar)PkVolClass(jb, hr);
-      const bool haveX = (ArraySize(g_adxq) > k && ArraySize(g_reg) > k);
-      g_prRg[n] = (haveX && g_reg[k] != 255) ? (uchar)((g_reg[k] >> 1) & 3) : (uchar)255;
-      const int a2 = haveX ? (int)g_adxq[k] / 2 : -1;
-      g_prAx[n] = (a2 < 0) ? (uchar)255 : ((a2 < 15) ? (uchar)0 : ((a2 < 20) ? (uchar)1 : ((a2 < 30) ? (uchar)2 : (uchar)3)));
-      g_prAtr[n] = atr;
-      g_prCost[n] = ((InpCostPoints > 0.0) ? InpCostPoints : (double)g_m1Spr[jb]) + g_extraPts;
-      g_prProg[n] = (g_bur[k] > 1) ? (double)d * (g_m1Open[jb] - runOpen) / g_pt : 0.0;
-      PkWalk(n, jb, d, atr, e, cause, pEnd);
+      if(mode == 1)
+        {
+         g_pkWin[n] = e - jb;
+         g_pkKey[n] = PkHour(jb) * 7 + ((g_ib[k] < 6) ? (int)g_ib[k] : 6);
+         n++;
+         continue;
+        }
+      PkFill(n, k, jb, d, atr, e, cause, (cause == 1) ? g_m1Open[e] : g_m1Close[e - 1], runOpen);
       n++;
      }
+   if(mode == 1) ArrayResize(g_pkWin, n);
    g_prN = n;
    return n;
   }
@@ -7517,8 +7598,10 @@ string PkMin(const double m, const double tfMin)
 //| contro prima. I picchi non chiusi dal ritiro (finestra finita prima|
 //| per segnale opposto, durata massima o buco di dati) sono limiti    |
 //| inferiori e sono contati nella colonna dei picchi confermati.      |
+//| Le stesse righe, con le entrate casuali (isBase), sono il confronto|
+//| che dice se il segnale anticipa un movimento piu' ampio del solito.|
 //+------------------------------------------------------------------+
-string PkPeaks(const int t, const int n)
+string PkPeakRows(const int t, const int n, const bool isBase)
   {
    const double tfMin = (double)g_tfSec[t] / 60.0;
    const int nK = g_pkNk;
@@ -7543,15 +7626,21 @@ string PkPeaks(const int t, const int n)
       const double cp = 100.0 * (double)conf / (double)n;
       if(kk == g_pkRefK)
         {
-         g_pkRef[0] = p50; g_pkRef[1] = p90; g_pkRef[2] = r50; g_pkRef[3] = r90; g_pkRef[4] = m50; g_pkRef[5] = e50; g_pkRef[6] = f50; g_pkRef[7] = m50 / MathMax(1.0, tfMin);
+         if(isBase) { g_pkBase[0] = p50; g_pkBase[1] = p90; g_pkBase[2] = r50; g_pkBase[3] = r90; g_pkBase[4] = m50; g_pkBase[5] = e50; g_pkBase[6] = f50; g_pkBase[7] = m50 / MathMax(1.0, tfMin); }
+         else       { g_pkRef[0] = p50; g_pkRef[1] = p90; g_pkRef[2] = r50; g_pkRef[3] = r90; g_pkRef[4] = m50; g_pkRef[5] = e50; g_pkRef[6] = f50; g_pkRef[7] = m50 / MathMax(1.0, tfMin); }
         }
-      tb += "<tr" + string(kk == g_pkRefK ? " style='background:#222733'" : "") + "><td>" + ThrLbl(g_pkK[kk]) + " ATR</td>" + Td(F0(cp) + "%") + Td(F0(sPts / (double)n)) + Td("<b>" + F0(p50) + "</b>") + Td(F0(p75)) + Td(F0(p90)) +
+      tb += "<tr" + string(isBase ? " style='color:#7b8794'" : (kk == g_pkRefK ? " style='background:#222733'" : "")) + "><td>" + string(isBase ? "base, " : "") + ThrLbl(g_pkK[kk]) + " ATR</td>" + Td(F0(cp) + "%") + Td(F0(sPts / (double)n)) + Td("<b>" + F0(p50) + "</b>") + Td(F0(p75)) + Td(F0(p90)) +
             Td(F2(r50)) + Td(F2(r90)) + Td(F0(m50)) + Td(F0(m75)) + Td(F1(m50 / MathMax(1.0, tfMin))) + Td(F0(e50)) + Td(F2(f50)) + "</tr>";
-      g_dg += "PK|" + g_tfName[t] + "|ret|" + ThrLbl(g_pkK[kk]) + "|n|" + IS(n) + "|conf|" + F0(cp) + "|mean|" + F0(sPts / (double)n) + "|p50|" + F0(p50) + "|p75|" + F0(p75) + "|p90|" + F0(p90) +
+      g_dg += string(isBase ? "PKB|" : "PK|") + g_tfName[t] + "|ret|" + ThrLbl(g_pkK[kk]) + "|n|" + IS(n) + "|conf|" + F0(cp) + "|mean|" + F0(sPts / (double)n) + "|p50|" + F0(p50) + "|p75|" + F0(p75) + "|p90|" + F0(p90) +
               "|atr50|" + F2(r50) + "|atr90|" + F2(r90) + "|min50|" + F0(m50) + "|min75|" + F0(m75) + "|candles50|" + F1(m50 / MathMax(1.0, tfMin)) + "|mae50|" + F0(e50) + "|mae50atr|" + F2(f50) + "\n";
      }
+   return tb;
+  }
+
+string PkPeaks(const int t, const int n, const string rowsBase)
+  {
    return "<table><tr><th>Ritiro che chiude il picco</th><th>Picchi chiusi dal ritiro</th><th>Picco medio (pt)</th><th>Picco mediano (pt)</th><th>75% (pt)</th><th>90% (pt)</th><th>Mediano (ATR)</th><th>90% (ATR)</th>"
-          "<th>Tempo mediano al picco (min)</th><th>75% (min)</th><th>Candele mediane</th><th>Contro prima del picco, mediana (pt)</th><th>(ATR)</th></tr>" + tb + "</table>";
+          "<th>Tempo mediano al picco (min)</th><th>75% (min)</th><th>Candele mediane</th><th>Contro prima del picco, mediana (pt)</th><th>(ATR)</th></tr>" + PkPeakRows(t, n, false) + rowsBase + "</table>";
   }
 
 //+------------------------------------------------------------------+
@@ -8202,11 +8291,29 @@ void PkAnalyze(const int t, const int ix)
    g_pkP0v = -1;
    g_pkOk = false;
    g_pkMed = PkMedianAtr(t);
-   const int n = PkCollect(t);
+   //--- base di confronto: entrate casuali con la stessa regola di finestra (la densita' dei segnali cambia la finestra, quindi anche i picchi)
+   for(int q = 0; q < 10; q++) g_pkBase[q] = 0.0;
+   string rowsBase = "";
+   PkCollect(t, 1);
+   const int nb = PkCollect(t, 2);
+   if(nb >= 30)
+     {
+      rowsBase = PkPeakRows(t, nb, true);
+      int rc = 0, gd = 0;
+      for(int i = 0; i < nb; i++)
+        {
+         const int gc = PkGoodCode(i);
+         if(gc >= 1) rc++;
+         if(gc == 2) gd++;
+        }
+      g_pkBase[8] = 100.0 * (double)rc / (double)nb;
+      g_pkBase[9] = 100.0 * (double)gd / (double)nb;
+     }
+   const int n = PkCollect(t, 0);
    if(n < 30)
      {
-      g_pkSumRow = "<tr class='thin'><td>" + g_tfName[t] + "</td><td colspan='13'>campione insufficiente (" + IS(n) + " segnali misurabili su " + IS(g_pkNsig) + ")</td></tr>";
-      g_pkCard = "campione insufficiente (" + IS(n) + " segnali misurabili)";
+      g_pkSumRow = "<tr class='thin'><td>" + g_tfName[t] + "</td><td colspan='14'>campione insufficiente (" + IS(n) + " segnali misurabili su " + IS(g_pkNsig) + ")</td></tr>";
+      g_pkCard = "campione insufficiente (" + IS(n) + " segnali misurabili).";
       return;
      }
    const double minIs = MathMax(30.0, g_minN / 2.0);
@@ -8218,7 +8325,7 @@ void PkAnalyze(const int t, const int ix)
    const double medAtr = MedianOf(am, n);
    g_pkOk = true;
    g_pkMedAtr = medAtr;
-   const string tPk = PkPeaks(t, n);
+   const string tPk = PkPeaks(t, n, rowsBase);
    const string tSq = PkSeq(t, n);
    const string tGr = PkGrid(t, n, medAtr);
    const string tCl = PkClasses(t, n, medAtr);
@@ -8284,7 +8391,7 @@ void PkAnalyze(const int t, const int ix)
       if(g_pkTest[q] == 1) g_pkPosTf++;
      }
    //--- scheda del TF per il riepilogo (corta: il dettaglio e' nel report)
-   string cd = "ritiro " + ThrLbl(g_pkK[g_pkRefK]) + " ATR, " + IS(n) + " segnali su " + IS(g_pkNsig) + ": picco mediano " + F0(g_pkRef[0]) + " pt (" + F2(g_pkRef[2]) + " ATR), 90% sotto " + F0(g_pkRef[1]) + " pt (" + F2(g_pkRef[3]) + " ATR), dopo " + PkMin(g_pkRef[4], tfMin) +
+   string cd = "ritiro " + ThrLbl(g_pkK[g_pkRefK]) + " ATR, " + IS(n) + " segnali su " + IS(g_pkNsig) + ": picco mediano " + F0(g_pkRef[0]) + " pt (" + F2(g_pkRef[2]) + " ATR" + string(g_pkBase[0] > 0.0 ? (", entrate casuali " + F2(g_pkBase[2]) + " ATR") : "") + "), 90% sotto " + F0(g_pkRef[1]) + " pt (" + F2(g_pkRef[3]) + " ATR), dopo " + PkMin(g_pkRef[4], tfMin) +
                "; prima del picco il prezzo va contro di " + F0(g_pkRef[5]) + " pt (" + F2(g_pkRef[6]) + " ATR) alla mediana. ";
    string st = "";
    if(g_pkP0v >= 0)
@@ -8303,7 +8410,7 @@ void PkAnalyze(const int t, const int ix)
    else
       fl = g_pkP0v >= 0 ? "nessuna classe con netto positivo in-sample" : "non valutato";
    if(g_pkSl[0] > 0.0)
-      cd += "Stop che lascia passare i segnali: il " + F0(g_pkSl[0]) + "% raggiunge " + ThrLbl(g_pkTp[g_pkGoodJ]) + " ATR e, fra questi, uno stop di " + F2(g_pkSl[1]) + " ATR (" + F0(g_pkSl[2]) + " pt) ne lascia passare il 75% e uno di " + F2(g_pkSl[3]) + " ATR (" + F0(g_pkSl[4]) + " pt) il 90%. ";
+      cd += "Stop che lascia passare i segnali: il " + F0(g_pkSl[0]) + "%" + string(g_pkBase[0] > 0.0 ? (" (entrate casuali " + F0(g_pkBase[8]) + "%)") : "") + " raggiunge " + ThrLbl(g_pkTp[g_pkGoodJ]) + " ATR e, fra questi, uno stop di " + F2(g_pkSl[1]) + " ATR (" + F0(g_pkSl[2]) + " pt) ne lascia passare il 75% e uno di " + F2(g_pkSl[3]) + " ATR (" + F0(g_pkSl[4]) + " pt) il 90%. ";
    g_pkCard = cd + "GRIGLIA STOP x TARGET: " + st + ". ORARI: " + hr + ". CLASSE FILTRO: " + fl + ". RISCHIO: " +
               (g_pkRk[0] > 0.0 ? ("proposto " + ThrLbl(g_pkRk[0]) + "% (crescita fuori campione " + Sg(g_pkRk[1], 1) + "%, drawdown " + F1(g_pkRk[2]) + "%)") : string("0%, nessun vantaggio verificato fuori campione da dimensionare")) + ".";
    //--- riga di sintesi
@@ -8346,7 +8453,7 @@ void RepPeaks()
    W("<h2>Picchi, stop e rischio</h2>");
    W("<div class='note'>Per ogni segnale si percorrono le barre M1 dall'ingresso (open dopo la chiusura del segnale) fino al segnale opposto" + string(InpPeakCross ? "" : " della stessa serie") + ", alla durata massima (" + IS(InpPeakMaxMin) + " min o " + IS(InpPeakMaxCandles) + " candele del TF) o a un buco di dati. "
      "<b>Picco</b> = massimo spostamento nel verso del segnale prima che il prezzo ritiri dal massimo di un certo multiplo dell'ATR (" + MgDblList(g_pkK, g_pkNk) + " ATR): un picco per ogni ritiro; &egrave; calcolato a posteriori, misura l'ampiezza del movimento e <b>non</b> &egrave; un profitto ottenibile. "
-     "Il tempo al picco e il percorso contro sono dalla barra M1 d'ingresso. I profitti ottenibili sono nella griglia stop x target (" + IS(PK_NSL) + " stop da 0.5 a 9 ATR, target " + MgDblList(g_pkTp, g_pkNj) + " ATR, ognuno in multipli dell'ATR del segnale e in punti fissi): "
+     "Il tempo al picco e il percorso contro sono dalla barra M1 d'ingresso. Le righe grigie <b>base</b> sono entrate casuali: per ogni segnale una barra qualunque della stessa ora e della stessa intensit&agrave;, direzione alternata, finestra della stessa durata. Un picco dei segnali maggiore della base dice che i segnali scattano quando la volatilit&agrave; &egrave; alta e tende a restarlo (la volatilit&agrave; si raggruppa), <b>non</b> che anticipino la direzione: la direzione si giudica dal netto fuori campione della griglia stop x target e dalle tabelle favorevole/avverso delle sezioni precedenti. La finestra di un segnale dipende da quanto sono fitti i segnali, per questo il confronto va fatto con la base della stessa serie e dello stesso TF. I profitti ottenibili sono nella griglia stop x target (" + IS(PK_NSL) + " stop da 0.5 a 9 ATR, target " + MgDblList(g_pkTp, g_pkNj) + " ATR, ognuno in multipli dell'ATR del segnale e in punti fissi): "
      "la cella migliore &egrave; scelta sul primo periodo e misurata sul resto; costi inclusi (spread M1 d'ingresso e commissione). "
      "Ordine dentro la barra M1: il minimo prima del massimo. Orari e classi sono scelti sul primo periodo e verificati sul resto; con tanti raggruppamenti alcuni risultano buoni per puro caso in-sample, per questo conta solo la colonna fuori campione. "
      "ATR = ATR a " + IS(MathMax(2, InpMgmtAtrLen)) + " periodi del TF del segnale, sulla candela del segnale. Volume = tick volume M1 (il volume reale non c'&egrave; nei dati forex). "
@@ -8380,9 +8487,9 @@ void RepPeaks()
         {
          const string tn = g_tfName[t];
          if(g_pkP0v >= 0)
-            g_cPkB += tn + " " + Sg(g_pkP0[4]) + " pt (t " + F2(g_pkP0[5]) + ", " + VerdText(g_pkTest[0]) + "; " + PkP0Lbl(g_pkMedAtr) + "; stop che lascia passare il 75% / 90% dei segnali che raggiungono " + ThrLbl(g_pkTp[g_pkGoodJ]) + " ATR: " +
-                      F2(g_pkSl[1]) + " ATR (" + F0(g_pkSl[2]) + " pt) / " + F2(g_pkSl[3]) + " ATR (" + F0(g_pkSl[4]) + " pt)); ";
-         g_cPkA += tn + " " + F0(g_pkRef[0]) + " pt (" + F2(g_pkRef[2]) + " ATR) in " + F0(g_pkRef[4]) + " min; ";
+            g_cPkB += tn + " " + Sg(g_pkP0[4]) + " pt (t " + F2(g_pkP0[5]) + ", " + VerdText(g_pkTest[0]) + "; " + PkP0Lbl(g_pkMedAtr) + "" + string(g_pkSl[1] > 0.0 ? ("; stop che lascia passare il 75% / 90% dei segnali che raggiungono " + ThrLbl(g_pkTp[g_pkGoodJ]) + " ATR: " +
+                      F2(g_pkSl[1]) + " ATR (" + F0(g_pkSl[2]) + " pt) / " + F2(g_pkSl[3]) + " ATR (" + F0(g_pkSl[4]) + " pt)") : "; nessun segnale raggiunge il target del segnale buono") + "); ";
+         g_cPkA += tn + " " + F0(g_pkRef[0]) + " pt (" + F2(g_pkRef[2]) + " ATR" + string(g_pkBase[0] > 0.0 ? (", entrate casuali " + F2(g_pkBase[2])) : "") + ") in " + F0(g_pkRef[4]) + " min; ";
          if(g_pkRk[0] > 0.0) g_cPkD += tn + " " + ThrLbl(g_pkRk[0]) + "%; ";
          string oc = "";
          if(g_pkHr[0] > 0.0) oc += IS((long)g_pkHr[0]) + " ore scelte (fuori campione " + Sg(g_pkHr[2]) + " pt su " + F0(g_pkHr[1]) + ", t " + F2(g_pkHr[3]) + ", " + VerdText(g_pkTest[1]) + ")";
@@ -8403,6 +8510,7 @@ void BuildPeaksConc(const int sIdx)
    if(!InpPeak || g_cPkA == "") return;
    AddConc(sIdx, "Picchi dei segnali: quanto si muovono, quando e per quanto tempo",
            "Picco = massimo spostamento nel verso del segnale prima di un ritiro di " + ThrLbl(g_pkK[g_pkRefK]) + " ATR dal massimo (calcolato a posteriori: misura l'ampiezza del movimento, non un profitto). Picco mediano e tempo mediano al picco per TF: " + g_cPkA +
+           "Confronto con le entrate casuali (stessa ora, stessa intensita', direzione alternata, finestra della stessa durata): un picco dei segnali maggiore della base dice che i segnali scattano quando la volatilita' e' alta e tende a restarlo, non che anticipino la direzione (quella si giudica dal netto fuori campione della griglia). La finestra di un segnale finisce al segnale opposto della stessa serie o alla durata massima, quindi dipende da quanto sono fitti i segnali: in una serie rara come EXP_ADDED le finestre sono lunghe e picchi e % che raggiungono il target salgono per questo, quindi non si confrontano fra serie ma con la base di ciascuna. " +
            "Le tabelle per ogni ritiro provato (" + MgDblList(g_pkK, g_pkNk) + " ATR), per posizione nella sequenza di segnali, i percorsi medi per regime di volatilita' e le sequenze reali disegnate sono nel report HTML (sezione Picchi, stop e rischio) e nel digest (PK, PKSEQ).");
    if(g_cPkB != "")
       AddConc(sIdx, "Stop e target dalla griglia (scelta in-sample, risultato fuori campione)",
@@ -8457,7 +8565,7 @@ void BuildPoints(const int sIdx)
       CellStat c;
       if(!GetCell(t, g_refH, c) || c.n < 1.0) continue;
       const string one = "lordo " + Sg(c.gross) + " pt, netto " + Sg(c.ret) + " pt" + string(g_money ? (" (" + MnyU(c.ret) + " a posizione con " + LotTxt() + " lotti)") : "") +
-                         " su " + F0(c.n) + " segnali (t del netto " + F2(c.tCl) + ")";
+                         " su " + F0(c.n) + " segnali" + string(c.n >= 10.0 && MathAbs(c.tCl) < 1.0e6 ? (" (t del netto " + F2(c.tCl) + ")") : " (t non calcolabile: campione troppo piccolo)");
       int nOk = 0;
       for(int b = 0; b < g_nB; b++) if(g_accBkt[(t * g_nB + b) * ACCN] >= (double)InpMinPerBucket) nOk++;
       string bestTx = "", worstTx = "";
