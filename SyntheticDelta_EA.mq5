@@ -5,7 +5,7 @@
 //|  SL / TP / Trailing in multipli di ATR, lotto fisso              |
 //+------------------------------------------------------------------+
 #property copyright "SyntheticDelta EA"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -16,7 +16,8 @@ input double InpLots            = 0.10;    // Lotto fisso
 input ulong  InpMagic           = 21062026;// Magic number
 input int    InpDeviation       = 20;      // Slippage max (punti)
 input int    InpMaxSpreadPts    = 0;       // Spread max in punti (0 = disattivo)
-input bool   InpReverseOnOpp    = true;    // Segnale opposto: chiudi e inverti
+input int    InpMaxPositions    = 0;       // Max posizioni contemporanee (0 = illimitate)
+input bool   InpCloseOnOpp      = false;   // Segnale opposto: chiudi prima le posizioni contrarie
 input string InpComment         = "SynDelta";
 
 input group "=== INDICATORE: CORE ==="
@@ -45,12 +46,21 @@ input double TrailStart_ATR     = 1.0;     // Profitto (in ATR) per attivare il 
 input double TrailDist_ATR      = 1.0;     // Distanza trailing (in ATR)
 input double TrailStep_ATR      = 0.1;     // Avanzamento minimo SL (in ATR)
 
+input group "=== FILTRO ORARIO (ora SERVER del broker, ora di apertura della barra d'ingresso) ==="
+input bool   InpH00 = true;  input bool InpH01 = true;  input bool InpH02 = true;  input bool InpH03 = true;
+input bool   InpH04 = true;  input bool InpH05 = true;  input bool InpH06 = true;  input bool InpH07 = true;
+input bool   InpH08 = true;  input bool InpH09 = true;  input bool InpH10 = true;  input bool InpH11 = true;
+input bool   InpH12 = true;  input bool InpH13 = true;  input bool InpH14 = true;  input bool InpH15 = true;
+input bool   InpH16 = true;  input bool InpH17 = true;  input bool InpH18 = true;  input bool InpH19 = true;
+input bool   InpH20 = true;  input bool InpH21 = true;  input bool InpH22 = true;  input bool InpH23 = true;
+
 //--- ================================================================
 CTrade   Trade;
 int      hEma = INVALID_HANDLE;
 int      hAtr = INVALID_HANDLE;
 int      hAdx = INVALID_HANDLE;
 datetime g_lastBar = 0;
+bool     g_hourOn[24];
 double   g_atr     = 0.0;   // ATR dell'ultima barra chiusa (per il trailing)
 
 //+------------------------------------------------------------------+
@@ -76,6 +86,18 @@ int OnInit()
    Trade.SetExpertMagicNumber(InpMagic);
    Trade.SetDeviationInPoints(InpDeviation);
    Trade.SetTypeFillingBySymbol(_Symbol);
+
+   g_hourOn[0]  = InpH00; g_hourOn[1]  = InpH01; g_hourOn[2]  = InpH02; g_hourOn[3]  = InpH03;
+   g_hourOn[4]  = InpH04; g_hourOn[5]  = InpH05; g_hourOn[6]  = InpH06; g_hourOn[7]  = InpH07;
+   g_hourOn[8]  = InpH08; g_hourOn[9]  = InpH09; g_hourOn[10] = InpH10; g_hourOn[11] = InpH11;
+   g_hourOn[12] = InpH12; g_hourOn[13] = InpH13; g_hourOn[14] = InpH14; g_hourOn[15] = InpH15;
+   g_hourOn[16] = InpH16; g_hourOn[17] = InpH17; g_hourOn[18] = InpH18; g_hourOn[19] = InpH19;
+   g_hourOn[20] = InpH20; g_hourOn[21] = InpH21; g_hourOn[22] = InpH22; g_hourOn[23] = InpH23;
+
+   if(InpMaxPositions != 1 &&
+      AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+      Print("ATTENZIONE: conto NON hedging, le posizioni nella stessa direzione vengono fuse in una sola.");
+
    return INIT_SUCCEEDED;
   }
 
@@ -155,19 +177,34 @@ int GetSignal(double &atrOut)
   }
 
 //+------------------------------------------------------------------+
-bool SelectMyPosition(ulong &ticket, long &type)
+//| Seleziona la posizione i-esima solo se e' di questo EA/simbolo.  |
+bool SelectMine(const int i)
+  {
+   ulong t = PositionGetTicket(i);
+   if(t == 0) return false;
+   if(PositionGetString(POSITION_SYMBOL) != _Symbol) return false;
+   return ((ulong)PositionGetInteger(POSITION_MAGIC) == InpMagic);
+  }
+
+int CountMyPositions()
+  {
+   int n = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+      if(SelectMine(i)) n++;
+   return n;
+  }
+
+//--- Chiude le posizioni contrarie al segnale sig (+1 buy / -1 sell)
+void CloseOpposite(const int sig)
   {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
-      ulong t = PositionGetTicket(i);
-      if(t == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
-      ticket = t;
-      type   = PositionGetInteger(POSITION_TYPE);
-      return true;
+      if(!SelectMine(i)) continue;
+      long type = PositionGetInteger(POSITION_TYPE);
+      bool opposite = (sig > 0 && type == POSITION_TYPE_SELL) || (sig < 0 && type == POSITION_TYPE_BUY);
+      if(opposite && !Trade.PositionClose((ulong)PositionGetInteger(POSITION_TICKET)))
+         PrintFormat("Chiusura fallita: %s", Trade.ResultRetcodeDescription());
      }
-   return false;
   }
 
 //+------------------------------------------------------------------+
@@ -218,32 +255,37 @@ void ManageTrailing()
   {
    if(!UseTrailing || g_atr <= 0.0) return;
 
-   ulong ticket; long type;
-   if(!SelectMyPosition(ticket, type)) return;   // posizione gia' selezionata dopo true
-
-   double open  = PositionGetDouble(POSITION_PRICE_OPEN);
-   double curSL = PositionGetDouble(POSITION_SL);
-   double tp    = PositionGetDouble(POSITION_TP);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double stopLvl   = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    double freezeLvl = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * _Point;
    double guard = MathMax(stopLvl, freezeLvl);
    double step  = g_atr * TrailStep_ATR;
 
-   if(type == POSITION_TYPE_BUY)
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      if(bid - open < g_atr * TrailStart_ATR) return;
-      double newSL = NormalizeDouble(bid - g_atr * TrailDist_ATR, _Digits);
-      if((curSL == 0.0 || newSL > curSL + step) && newSL < bid - guard)
-         Trade.PositionModify(ticket, newSL, tp);
-     }
-   else
-     {
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(open - ask < g_atr * TrailStart_ATR) return;
-      double newSL = NormalizeDouble(ask + g_atr * TrailDist_ATR, _Digits);
-      if((curSL == 0.0 || newSL < curSL - step) && newSL > ask + guard)
-         Trade.PositionModify(ticket, newSL, tp);
+      if(!SelectMine(i)) continue;
+
+      ulong  ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+      long   type   = PositionGetInteger(POSITION_TYPE);
+      double open   = PositionGetDouble(POSITION_PRICE_OPEN);
+      double curSL  = PositionGetDouble(POSITION_SL);
+      double tp     = PositionGetDouble(POSITION_TP);
+
+      if(type == POSITION_TYPE_BUY)
+        {
+         if(bid - open < g_atr * TrailStart_ATR) continue;
+         double newSL = NormalizeDouble(bid - g_atr * TrailDist_ATR, _Digits);
+         if((curSL == 0.0 || newSL > curSL + step) && newSL < bid - guard)
+            Trade.PositionModify(ticket, newSL, tp);
+        }
+      else
+        {
+         if(open - ask < g_atr * TrailStart_ATR) continue;
+         double newSL = NormalizeDouble(ask + g_atr * TrailDist_ATR, _Digits);
+         if((curSL == 0.0 || newSL < curSL - step) && newSL > ask + guard)
+            Trade.PositionModify(ticket, newSL, tp);
+        }
      }
   }
 
@@ -267,17 +309,14 @@ void OnTick()
    g_lastBar = barTime;
    if(sig == 0) return;
 
-   ulong ticket; long type;
-   if(SelectMyPosition(ticket, type))
-     {
-      bool opposite = (sig > 0 && type == POSITION_TYPE_SELL) || (sig < 0 && type == POSITION_TYPE_BUY);
-      if(!opposite || !InpReverseOnOpp) return;
-      if(!Trade.PositionClose(ticket))
-        {
-         PrintFormat("Chiusura fallita: %s", Trade.ResultRetcodeDescription());
-         return;
-        }
-     }
+   // Filtro orario (ora server della barra d'ingresso)
+   MqlDateTime dt;
+   TimeToStruct(barTime, dt);
+   if(!g_hourOn[dt.hour]) return;
+
+   if(InpCloseOnOpp) CloseOpposite(sig);
+   if(InpMaxPositions > 0 && CountMyPositions() >= InpMaxPositions) return;
+
    OpenTrade(sig, atr);
   }
 //+------------------------------------------------------------------+
