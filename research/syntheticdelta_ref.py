@@ -46,11 +46,12 @@ def norm_cdf(z):
 
 
 class SyntheticDelta:
-    BUFS = ("Z", "Zc", "Ab", "Leg", "W", "Fb", "cF", "cF2", "cFn", "cA", "cA2", "cAn", "ema")
+    BUFS = ("Z", "Zc", "Ab", "Leg", "Ev", "W", "Fb", "cF", "cF2", "cFn", "cA", "cA2", "cAn", "ema")
 
     def __init__(self, psec, flow_mode="clv", N=12, M=500, thr=1.5, D=20, min_sess=5, cap=3.0,
                  atr_p=14, bvc_bars=50, closed_only=True, show_legacy=True,
-                 legacy_ema=13, legacy_vol=20, legacy_scale=10.0):
+                 legacy_ema=13, legacy_vol=20, legacy_scale=10.0, use_weights=True):
+        self.use_weights = use_weights
         self.psec, self.flow_mode, self.N, self.M, self.thr = psec, flow_mode, N, M, thr
         self.D, self.min_sess, self.cap, self.atr_p, self.bvc_bars = D, min_sess, cap, atr_p, bvc_bars
         self.closed_only, self.show_legacy = closed_only, show_legacy
@@ -125,6 +126,7 @@ class SyntheticDelta:
         b["Zc"][i] = 0.0
         b["Ab"][i] = NAN
         b["Leg"][i] = NAN
+        b["Ev"][i] = 0.0
         b["W"][i] = -1.0
         b["Fb"][i] = 0.0
 
@@ -153,6 +155,8 @@ class SyntheticDelta:
                 w = min(V / med, self.cap)
         if w < 0.0:
             return
+        if not self.use_weights:
+            w = 1.0              # A/B: stessa finestra di warm-up, ma ogni barra pesa uguale
 
         if self.flow_mode == "clv":
             d = ((c[i] - l[i]) - (h[i] - c[i])) / rng if rng > 0.0 else 0.0
@@ -195,6 +199,12 @@ class SyntheticDelta:
         if ok:
             b["Z"][i] = z
             b["Zc"][i] = 1.0 if z >= self.thr else (2.0 if z <= -self.thr else 0.0)
+            # evento = primo attraversamento di +-soglia (barra precedente non valida o sotto soglia): +1 BUY, -1 SELL
+            pz = b["Z"][i - 1] if i > 0 else NAN
+            if z >= self.thr and not (pz >= self.thr):
+                b["Ev"][i] = 1.0
+            elif z <= -self.thr and not (pz <= -self.thr):
+                b["Ev"][i] = -1.0
 
     # ---- OnCalculate --------------------------------------------------------
     def on_calculate(self, t, h, l, c, v, prev_calculated):
@@ -378,9 +388,13 @@ def load_csv(path):
         i_d, i_t = col("date"), col("time")
         T = [to_epoch(r[i_d] + " " + r[i_t]) for r in rows]
     else:
-        i_t = col("time", "datetime", "timestamp")
+        # colonna dei tempi: per nome, oppure la prima colonna senza nome (CSV in stile pandas)
+        i_t = next((hdr.index(nm) for nm in ("time", "datetime", "timestamp", "date") if nm in hdr),
+                   0 if hdr and hdr[0] == "" else None)
+        if i_t is None:
+            raise SystemExit(f"colonna dei tempi mancante (trovate: {hdr})")
         T = [to_epoch(r[i_t]) for r in rows]
-    cols = [col("high"), col("low"), col("close"), col("tickvol", "tick_volume", "tickvolume")]
+    cols = [col("high"), col("low"), col("close"), col("tickvol", "tick_volume", "tickvolume", "volume")]
     H, L, C, V = ([float(r[k]) for r in rows] for k in cols)
     # colonne dei valori calcolati da MT5 (presenti se il CSV viene dallo script di export)
     extra = {}
@@ -388,6 +402,13 @@ def load_csv(path):
         if name in hdr:
             k = hdr.index(name)
             extra[name] = [float(r[k]) if r[k].strip() != "" else NAN for r in rows]
+    if "event" in hdr:                      # eventi esportati dallo script (v3.1): vuoto = non esportato
+        k = hdr.index("event")
+        extra["event"] = [float(r[k]) if r[k].strip() != "" else NAN for r in rows]
+    for name in ("open", "spread"):         # servono al banco di prova (costi e ingresso all'open)
+        if name in hdr:
+            k = hdr.index(name)
+            extra[name] = [float(r[k]) for r in rows]
     return T, H, L, C, V, extra
 
 
@@ -421,6 +442,13 @@ def compare(ind, extra, n, psec, a):
             continue
         print(f"[{'OK' if ok else 'FAIL'}] {name}: valori confrontati {int(both.sum())} | "
               f"diff max {maxd:.2e} | vuoti discordanti {nan_mis}")
+    if "event" in extra and not np.all(np.isnan(extra["event"])):
+        mt5 = np.array(extra["event"][skip:], float)
+        ref = np.array(ind.b["Ev"][skip:n], float)
+        mism = int(np.sum(mt5 != ref))
+        ok = mism == 0
+        ok_all &= ok
+        print(f"[{'OK' if ok else 'FAIL'}] event: eventi MT5 {int(np.sum(mt5 != 0))} | riferimento {int(np.sum(ref != 0))} | barre discordanti {mism} (soglia {a.thr})")
     print("RISULTATO:", "L'IMPLEMENTAZIONE MQL5 COINCIDE CON IL RIFERIMENTO" if ok_all else "DIFFERENZE: mandami il CSV")
     return 0 if ok_all else 1
 
@@ -435,6 +463,7 @@ def main():
     ap.add_argument("--N", type=int, default=12)
     ap.add_argument("--M", type=int, default=500)
     ap.add_argument("--days", type=int, default=20)
+    ap.add_argument("--thr", type=float, default=1.5, help="soglia degli eventi (deve coincidere con quella dell'indicatore)")
     ap.add_argument("--compare", action="store_true",
                     help="confronta con le colonne flow_z/absorption_z/legacy_x10 del CSV (script di export)")
     ap.add_argument("--skip", type=int, help="barre iniziali da ignorare nel confronto (warm-up)")
@@ -445,7 +474,7 @@ def main():
         ap.error("serve --selftest oppure --csv")
     T, H, L, C, V, extra = load_csv(a.csv)
     psec = a.psec or int(statistics.median(np.diff(T)))
-    ind = SyntheticDelta(psec, flow_mode=a.mode, N=a.N, M=a.M, D=a.days)
+    ind = SyntheticDelta(psec, flow_mode=a.mode, N=a.N, M=a.M, D=a.days, thr=a.thr)
     ind.on_calculate(T, H, L, C, V, 0)
     if a.compare:
         sys.exit(compare(ind, extra, len(T), psec, a))
