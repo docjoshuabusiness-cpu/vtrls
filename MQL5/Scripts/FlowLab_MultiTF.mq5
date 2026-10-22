@@ -77,7 +77,8 @@ input int      InpSplitPct      = 70;     // % iniziale del periodo per SCEGLIER
 input int      InpMinEvents     = 30;     // eventi minimi in-sample perche' una cella evento possa essere scelta
 input int      InpPlaceboB      = 200;    // estrazioni del placebo a traslazione
 input double   InpPlaceboMinT   = 3.0;    // il placebo si fa per le celle con |t| almeno cosi' (costa tempo)
-input int      InpPlaceboMaxCells = 40;   // massimo di celle con placebo
+input int      InpPlaceboPerTF  = 3;      // celle con placebo per ogni TF: le prime per |t| (0 = nessun placebo)
+input int      InpClusterDays   = 1;      // giorni minimi per cluster; con orizzonti lunghi salgono da soli
 input int      InpTopK          = 15;     // righe della classifica per |t|
 
 //--- ================================================================
@@ -161,7 +162,6 @@ uchar    g_okF[];
 double   g_F[];
 char     g_evd[];
 ulong    g_seed = 88172645463325252;
-int      g_nPlacebo = 0;
 
 //--- denaro
 double   g_pv = 0.0, g_commPts = 0.0, g_extraPts = 0.0;
@@ -1027,8 +1027,11 @@ void FL_FwdClose(const int hMin)
   }
 
 //--- rendimento futuro (punti), costo, giorno e periodo di ogni barra del TF
-void FL_BuildY(const int n, const int &ent[], double &yv[], double &cv[], int &dv[], uchar &sm[])
+void FL_BuildY(const int n, const int hMin, const int &ent[], double &yv[], double &cv[], int &dv[], uchar &sm[])
   {
+   //--- cluster = blocco di giorni lungo almeno 3 volte l'orizzonte: finestre sovrapposte non sono indipendenti fra giorni vicini
+   //--- (simulazione: con cluster di 1 giorno e orizzonte 1440m i falsi positivi al 5% salgono all'8%, con 3 giorni tornano al 5.5%)
+   const int blk = MathMax(MathMax(1, InpClusterDays), (3 * hMin + 1439) / 1440);
    for(int i = 0; i < n; i++)
      {
       yv[i] = EMPTY_VALUE; cv[i] = 0.0; dv[i] = 0; sm[i] = 0;
@@ -1043,7 +1046,7 @@ void FL_BuildY(const int n, const int &ent[], double &yv[], double &cv[], int &d
       if(g_okF[j] == 0) continue;
       yv[i] = (g_fCl[j] - g_m1Open[j]) / g_pt;
       cv[i] = ((InpCostPoints > 0.0) ? InpCostPoints : (double)g_m1Spr[j]) + g_extraPts;
-      dv[i] = g_m1Day[j];
+      dv[i] = g_m1Day[j] / blk;
       sm[i] = (g_m1Day[j] >= g_splitDay) ? (uchar)1 : (uchar)0;
      }
   }
@@ -1206,6 +1209,8 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
    int ent[];
    FL_Entries(t, r, n, ent);
 
+   const int k0 = g_nCells;
+
    //--- feature
    SDFlowParams p;
    p.flowMode = 0; p.flowBars = InpFlowN; p.zWindow = InpFlowM; p.threshold = 0.0; p.seasonDays = InpFlowDays;
@@ -1297,7 +1302,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
      {
       if(IsStopped()) return;
       FL_FwdClose(g_hor[h]);
-      FL_BuildY(n, ent, yv, cv, dv, sm);
+      FL_BuildY(n, g_hor[h], ent, yv, cv, dv, sm);
 
       //--- regressione continua per ogni feature
       for(int f = 0; f < NFEAT; f++)
@@ -1308,12 +1313,7 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
          CellRes c;
          c.tf = t; c.feat = f; c.hm = g_hor[h];
          c.n = ra.n; c.beta = ra.beta; c.t = ra.t; c.ic = ra.ic; c.icse = ra.icse;
-         c.tIS = ri.t; c.tOOS = ro.t; c.icOOS = ro.ic; c.p = -1.0;
-         if(MathAbs(ra.t) >= InpPlaceboMinT && ra.n >= 500.0 && g_nPlacebo < InpPlaceboMaxCells && InpPlaceboB >= 20)
-           {
-            c.p = FL_PlaceboP(g_F, f * n, n, yv, bpd, ra.ic, InpPlaceboB);
-            g_nPlacebo++;
-           }
+         c.tIS = ri.t; c.tOOS = ro.t; c.icOOS = ro.ic; c.p = -2.0;     // -2 = placebo non ancora fatto
          const int k = g_nCells;
          ArrayResize(g_cells, k + 1);
          g_cells[k] = c;
@@ -1378,6 +1378,20 @@ void ProcessTF(const int t, const MqlRates &r[], const int n)
         }
      }
 
+   //--- placebo a traslazione: per questo TF, le InpPlaceboPerTF celle con |t| piu' alto (non le prime in ordine di calcolo)
+   for(int pz = 0; pz < InpPlaceboPerTF && InpPlaceboB >= 20 && !IsStopped(); pz++)
+     {
+      int bi = -1;
+      double bv = InpPlaceboMinT;
+      for(int k = k0; k < g_nCells; k++)
+         if(g_cells[k].p == -2.0 && g_cells[k].n >= 500.0 && MathAbs(g_cells[k].t) >= bv)
+           { bv = MathAbs(g_cells[k].t); bi = k; }
+      if(bi < 0) break;
+      FL_FwdClose(g_cells[bi].hm);
+      FL_BuildY(n, g_cells[bi].hm, ent, yv, cv, dv, sm);
+      g_cells[bi].p = FL_PlaceboP(g_F, g_cells[bi].feat * n, n, yv, bpd, g_cells[bi].ic, InpPlaceboB);
+     }
+
    //--- miglior cella evento in-sample (soglia x orizzonte x verso) e suo risultato fuori campione
    int bt = -1, bh = -1, bs = -1;
    double bT = -1.0e18;
@@ -1423,14 +1437,50 @@ void RepHead()
    W("</style></head><body>");
   }
 
+string Pad(const string s, const int w)
+  {
+   string o = s;
+   while(StringLen(o) < w) o += " ";
+   return o;
+  }
+
+string PadL(const string s, const int w)
+  {
+   string o = s;
+   while(StringLen(o) < w) o = " " + o;
+   return o;
+  }
+
 string VerdFlag(const CellRes &c)
   {
    const bool same = (c.tIS * c.tOOS > 0.0) && MathAbs(c.tOOS) >= 1.96;
    const bool cand = (MathAbs(c.t) >= g_zB && c.p >= 0.0 && c.p < 0.05 && same);
    if(cand) return "CANDIDATO";
-   if(MathAbs(c.t) >= g_zB) return "supera Bonferroni ma non regge";
+   if(MathAbs(c.t) >= g_zB) return "supera Bonferroni, non regge";
    if(MathAbs(c.t) >= 1.96) return "*";
    return "";
+  }
+
+//--- indici delle prime InpTopK celle per |t|
+int TopCells(int &idx[])
+  {
+   ArrayResize(idx, 0);
+   bool used[];
+   ArrayResize(used, MathMax(1, g_nCells));
+   ArrayInitialize(used, false);
+   for(int z = 0; z < InpTopK; z++)
+     {
+      int bi = -1;
+      double bv = -1.0;
+      for(int i = 0; i < g_nCells; i++)
+         if(!used[i] && MathAbs(g_cells[i].t) > bv) { bv = MathAbs(g_cells[i].t); bi = i; }
+      if(bi < 0) break;
+      used[bi] = true;
+      const int k = ArraySize(idx);
+      ArrayResize(idx, k + 1);
+      idx[k] = bi;
+     }
+   return ArraySize(idx);
   }
 
 void BuildReport()
@@ -1441,52 +1491,116 @@ void BuildReport()
    const string fDg   = "FlowLab_MultiTF_digest_" + tag + ".txt";
    const int nt = g_nCells;
    g_zB = ZCrit(MathMax(1, nt));
-   int npass = 0, ncand = 0;
+   const double costTot = ((InpCostPoints > 0.0) ? InpCostPoints : g_medSpr) + g_extraPts;
+   int npass = 0, ncand = 0, ncandZ = 0, nplac = 0;
    for(int i = 0; i < g_nCells; i++)
      {
       if(MathAbs(g_cells[i].t) >= g_zB) npass++;
-      if(VerdFlag(g_cells[i]) == "CANDIDATO") ncand++;
+      if(g_cells[i].p >= 0.0) nplac++;
+      if(VerdFlag(g_cells[i]) == "CANDIDATO") { ncand++; if(g_cells[i].feat <= 3) ncandZ++; }
      }
    int evPos = 0;
    for(int i = 0; i < g_nEv; i++)
       if(g_ev[i].nOOS >= 30.0 && g_ev[i].netOOS > 0.0 && g_ev[i].tOOS >= 2.0) evPos++;
 
+   //--- Z contro i riferimenti banali (momentum, trend EMA13, vecchio delta), per ogni coppia (TF, orizzonte)
+   double bz[], br[];
+   ArrayResize(bz, MathMax(1, g_nT * g_nH));
+   ArrayResize(br, MathMax(1, g_nT * g_nH));
+   ArrayInitialize(bz, -1.0);
+   ArrayInitialize(br, -1.0);
+   for(int i = 0; i < g_nCells; i++)
+     {
+      int hi = -1;
+      for(int h = 0; h < g_nH; h++)
+         if(g_hor[h] == g_cells[i].hm) { hi = h; break; }
+      if(hi < 0) continue;
+      const int ix = g_cells[i].tf * g_nH + hi;
+      const double a = MathAbs(g_cells[i].t);
+      const int ff = g_cells[i].feat;
+      if(ff <= 3) { if(a > bz[ix]) bz[ix] = a; }
+      else if(ff >= 5) { if(a > br[ix]) br[ix] = a; }
+     }
+   int nCmp = 0, nZwin = 0;
+   for(int i = 0; i < g_nT * g_nH; i++)
+      if(bz[i] >= 0.0 && br[i] >= 0.0 && MathMax(bz[i], br[i]) >= g_zB)
+        { nCmp++; if(bz[i] > br[i]) nZwin++; }
+
+   int top[];
+   const int nTop = TopCells(top);
+
    string sum = "FlowLab MultiTF - " + _Symbol + "\n";
    const datetime tEnd = (datetime)MathMin((long)InpTo, (long)g_m1Time[g_n1 - 1]);
    sum += "Periodo " + TimeToString(g_tStart, TIME_DATE) + " - " + TimeToString(tEnd, TIME_DATE) + " | " + IS(g_nT) + " TF | " + IS(g_nH) + " orizzonti | split " + IS(InpSplitPct) + "% | offset " + IS(InpTimeOffsetH) + " h\n";
    sum += "Flow Z: N " + IS(InpFlowN) + ", M " + IS(InpFlowM) + ", sedute " + IS(InpFlowDays) + ", soglie eventi " + InpEventThr + "\n";
-   sum += "Costo: " + string(InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : ("spread M1 reale (mediano " + F0(g_medSpr) + " pt)")) + " + commissione " + F1(g_commPts) + " pt a/r (" + F2(InpCommissionPerLotSide) + " " + g_ccy + " per lato e per lotto)" +
+   sum += "Costo: " + string(InpCostPoints > 0.0 ? ("fisso " + F1(InpCostPoints) + " pt") : ("spread M1 reale (mediano " + F0(g_medSpr) + " pt)")) + " + commissione " + F1(g_commPts) + " pt a/r (" + F2(InpCommissionPerLotSide) + " " + g_ccy + " per lato e per lotto) = circa " + F1(costTot) + " pt per operazione" +
           string(g_commPts <= 0.0 ? " [ATTENZIONE: commissione zero, risultati ottimisti su un conto Raw]" : "") + string(g_pvWarn ? " [valore del punto STIMATO]" : "") + "\n";
    if(g_zeroSprPct > 20.0 && InpCostPoints <= 0.0) sum += "ATTENZIONE: spread M1 = 0 sul " + F1(g_zeroSprPct) + "% delle barre: il costo e' sottostimato. Imposta InpCostPoints.\n";
    if(g_histWarn) sum += "ATTENZIONE: lo storico M1 e' piu' corto del periodo richiesto.\n";
-   sum += "\nTest di regressione: " + IS(nt) + " (TF x feature x orizzonte). Bonferroni 5%: |t| >= " + F2(g_zB) + ". Superano Bonferroni: " + IS(npass) + ". CANDIDATI (Bonferroni + placebo p<0.05 + stesso segno e |t|>=1.96 in entrambe le meta'): " + IS(ncand) + ".\n";
-   sum += "Eventi: su " + IS(g_nEv) + " TF la cella scelta in-sample e' positiva al netto fuori campione con t>=2 in " + IS(evPos) + " (per caso se ne attendono circa " + F1(0.0228 * (double)g_nEv) + ").\n";
-   if(ncand == 0 && evPos == 0)
-      sum += "LETTURA: nessuna evidenza di un vantaggio. NON e' una prova che non esista: guarda l'IC minimo rilevabile per TF e orizzonte (tabella 2).\n";
-   else
-      sum += "LETTURA: ci sono candidati da CONFERMARE su altri simboli e su un periodo successivo: la scelta fra tante celle gonfia il migliore.\n";
+   sum += "\nREGRESSIONI (rendimento LORDO, senza costi): " + IS(nt) + " test (TF x feature x orizzonte). Bonferroni 5%: |t| >= " + F2(g_zB) + ". Superano Bonferroni: " + IS(npass) + " (" + F1(100.0 * npass / MathMax(1, nt)) + "%).\n";
+   sum += "Placebo calcolato su " + IS(nplac) + " celle (le " + IS(InpPlaceboPerTF) + " con |t| piu' alto di ogni TF). CANDIDATI (Bonferroni + placebo p<0.05 + stesso segno e |t|>=1.96 sul fuori campione): " + IS(ncand) + ", di cui su Z: " + IS(ncandZ) + ".\n";
+   if(nCmp > 0)
+      sum += "Z contro i riferimenti (momentum, trend EMA13, vecchio delta): fra le " + IS(nCmp) + " coppie (TF, orizzonte) in cui qualcuno supera Bonferroni, la migliore delle 4 varianti di Z ha |t| maggiore del miglior riferimento in " + IS(nZwin) + " (" + F0(100.0 * nZwin / nCmp) + "%).\n";
+   sum += "EVENTI (con costi, fuori campione): su " + IS(g_nEv) + " TF la cella scelta in-sample e' positiva al netto con t>=2 in " + IS(evPos) + " (per caso se ne attendono circa " + F1(0.0228 * (double)g_nEv) + ").\n";
+   string rd = "";
+   if(evPos == 0) rd += "Con i costi nessuna cella evento e' positiva fuori campione. ";
+   if(ncandZ == 0) rd += "Nessun candidato su Z. ";
+   else if(nCmp > 0 && nZwin * 2 < nCmp) rd += "Su Z ci sono candidati, ma i riferimenti banali fanno uguale o meglio: l'effetto non e' specifico di Z. ";
+   else rd += "Z ha candidati e batte i riferimenti piu' spesso che no: da CONFERMARE su altri simboli e su un periodo successivo, la scelta fra tante celle gonfia il migliore. ";
+   rd += "Le regressioni sono al LORDO dei costi: un legame statistico non e' un vantaggio operativo. NON e' una prova di assenza di effetto: guarda l'IC minimo rilevabile (tabella 2).";
+   sum += "LETTURA: " + rd + "\n";
 
    //--- medie per feature
-   sum += "\n|t| medio per feature (se Z non batte momentum, trend e il Delta vecchio, non aggiunge informazione):\n";
+   sum += "\n|t| per feature (senza alcun legame |t| medio atteso circa 0.8; l'assorbimento fa da controllo negativo):\n";
    for(int f = 0; f < NFEAT; f++)
      {
       double s = 0.0, mx = 0.0;
-      int c = 0;
+      int c = 0, up = 0, dn = 0;
       for(int i = 0; i < g_nCells; i++)
-         if(g_cells[i].feat == f) { const double a = MathAbs(g_cells[i].t); s += a; if(a > mx) mx = a; c++; }
-      if(c > 0) sum += "  " + g_featName[f] + ": medio " + F2(s / c) + ", massimo " + F2(mx) + " (" + IS(c) + " test)\n";
+         if(g_cells[i].feat == f)
+           {
+            const double a = MathAbs(g_cells[i].t);
+            s += a;
+            if(a > mx) mx = a;
+            c++;
+            if(g_cells[i].t >= g_zB) up++;
+            if(g_cells[i].t <= -g_zB) dn++;
+           }
+      if(c > 0) sum += "  " + Pad(g_featName[f], 14) + " medio " + F2(s / c) + ", massimo " + F2(mx) + " | oltre Bonferroni: " + IS(up) + " positivi, " + IS(dn) + " negativi su " + IS(c) + "\n";
+     }
+
+   //--- prime celle (testo, da incollare)
+   sum += "\nPrime " + IS(nTop) + " celle per |t| (beta = punti per 1 dev.std della feature; |beta|/costo confronta con i " + F1(costTot) + " pt di costo):\n";
+   sum += Pad("TF", 4) + Pad("feature", 15) + PadL("oriz", 6) + PadL("barre", 9) + PadL("beta", 8) + PadL("|b|/costo", 10) + PadL("t", 8) + PadL("IC", 8) + PadL("tIS", 7) + PadL("tOOS", 7) + PadL("plac", 7) + "  giudizio\n";
+   for(int z = 0; z < nTop; z++)
+     {
+      CellRes c;
+      c = g_cells[top[z]];
+      sum += Pad(g_tfName[c.tf], 4) + Pad(g_featName[c.feat], 15) + PadL(IS(c.hm) + "m", 6) + PadL(F0(c.n), 9) + PadL(Sg(c.beta, 2), 8) + PadL((costTot > 0.0 ? F2(MathAbs(c.beta) / costTot) : string("-")), 10) +
+             PadL(Sg(c.t, 1), 8) + PadL(Sg(c.ic, 3), 8) + PadL(F1(c.tIS), 7) + PadL(F1(c.tOOS), 7) + PadL((c.p >= 0.0 ? F3(c.p) : string("-")), 7) + "  " + VerdFlag(c) + "\n";
+     }
+
+   //--- eventi (testo, da incollare)
+   sum += "\nEVENTI di Z_clv_pesato: miglior cella in-sample per TF e suo risultato fuori campione (punti, costo incluso):\n";
+   sum += Pad("TF", 4) + Pad("verso", 8) + PadL("soglia", 7) + PadL("tenuta", 8) + PadL("nIS", 7) + PadL("netIS", 8) + PadL("tIS", 7) + PadL("nOOS", 7) + PadL("lordo", 8) + PadL("netto", 8) + PadL("tOOS", 7) + PadL("abil.t", 8) + PadL("%BUY", 6) + "\n";
+   for(int i = 0; i < g_nEv; i++)
+     {
+      EvRes e;
+      e = g_ev[i];
+      sum += Pad(g_tfName[e.tf], 4) + Pad((e.side == 0 ? "SEGUI" : "INVERTI"), 8) + PadL(F1(e.thr), 7) + PadL(IS(e.hm) + "m", 8) + PadL(F0(e.nIS), 7) + PadL(Sg(e.netIS, 1), 8) + PadL(F1(e.tIS), 7) +
+             PadL(F0(e.nOOS), 7) + PadL(Sg(e.gOOS, 1), 8) + PadL(Sg(e.netOOS, 1), 8) + PadL(F1(e.tOOS), 7) + PadL(F1(e.skillT), 8) + PadL(F0(e.buyPct) + "%", 6) + "\n";
      }
 
    g_fh = FileOpen(fHtml, FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(g_fh == INVALID_HANDLE) Print("HTML non scrivibile (errore ", GetLastError(), "): salvo solo riepilogo e digest.");
    RepHead();
    W("<h1>FlowLab MultiTF &mdash; " + _Symbol + "</h1>");
-   W("<div class='note " + string((ncand == 0 && evPos == 0) ? "ko" : "ok") + "'><pre>" + HtmlEsc(sum) + "</pre></div>");
+   W("<div class='note " + string((ncandZ == 0 && evPos == 0) ? "ko" : "ok") + "'><pre>" + HtmlEsc(sum) + "</pre></div>");
    W("<div class='note'>Denaro: " + (g_money ? ("lotto " + LotTxt() + " | 1 punto per 1.00 lotto = " + DoubleToString(g_pv, 4) + " " + g_ccy + " | " + HtmlEsc(g_pvInfo)) : string("non disponibile")) + "</div>");
 
    //--- tabella 1: TF
    W("<h2>1. Timeframe: barre, Z validi, autocorrelazione di Z</h2>");
-   W("<div class='note'>L'autocorrelazione a ritardo 1 di Z e' alta (le finestre di N barre si sovrappongono): barre vicine non sono osservazioni indipendenti. Per questo gli errori standard sono raggruppati per giorno.</div>");
+   W("<div class='note'>L'autocorrelazione a ritardo 1 di Z e' alta (le finestre di N barre si sovrappongono): barre vicine non sono osservazioni indipendenti. Per questo gli errori standard sono raggruppati per giorno (per blocchi di piu' giorni con gli orizzonti lunghi).</div>");
    W("<table><tr><th>TF</th><th>Barre</th><th>Z validi</th><th>ac(1)</th></tr>");
    for(int t = 0; t < g_nT; t++)
       W("<tr><td>" + g_tfName[t] + "</td>" + Td(IS(g_infoBars[t])) + Td(IS(g_infoZ[t])) + Td(F2(g_infoAc[t])) + "</tr>");
@@ -1513,24 +1627,15 @@ void BuildReport()
    W("</table>");
 
    //--- tabella 3: classifica per |t|
-   W("<h2>3. Regressione: le prime " + IS(InpTopK) + " celle per |t| (t con errore standard raggruppato per giorno)</h2>");
+   W("<h2>3. Regressione: le prime " + IS(nTop) + " celle per |t| (t con errore standard raggruppato)</h2>");
    W("<div class='note'>Giudizio: <b>CANDIDATO</b> solo se supera Bonferroni (|t| &ge; " + F2(g_zB) + " su " + IS(nt) + " test), il placebo a traslazione ha p &lt; 0.05 e in entrambe le meta' del periodo il segno e' lo stesso con |t| &ge; 1.96 sul fuori campione. "
-     "Il placebo si calcola solo per le celle con |t| &ge; " + F1(InpPlaceboMinT) + " (al massimo " + IS(InpPlaceboMaxCells) + "). IC e t sono sull'intero periodo; IS = primo periodo, OOS = resto.</div>");
-   W("<table><tr><th>TF</th><th>Feature</th><th>Orizzonte</th><th>Barre</th><th>Pendenza (pt per 1 dev.std)</th><th>t</th><th>IC</th><th>t IS</th><th>t OOS</th><th>IC OOS</th><th>Placebo p</th><th>Giudizio</th></tr>");
-   bool used[];
-   ArrayResize(used, MathMax(1, g_nCells));
-   ArrayInitialize(used, false);
-   for(int z = 0; z < InpTopK; z++)
+     "Il placebo si calcola per le " + IS(InpPlaceboPerTF) + " celle con |t| piu' alto di ogni TF (almeno " + F1(InpPlaceboMinT) + "). IC e t sono sull'intero periodo; IS = primo periodo, OOS = resto. Il rendimento e' LORDO: confronta la pendenza con il costo.</div>");
+   W("<table><tr><th>TF</th><th>Feature</th><th>Orizzonte</th><th>Barre</th><th>Pendenza (pt per 1 dev.std)</th><th>|pend.|/costo</th><th>t</th><th>IC</th><th>t IS</th><th>t OOS</th><th>IC OOS</th><th>Placebo p</th><th>Giudizio</th></tr>");
+   for(int z = 0; z < nTop; z++)
      {
-      int bi = -1;
-      double bv = -1.0;
-      for(int i = 0; i < g_nCells; i++)
-         if(!used[i] && MathAbs(g_cells[i].t) > bv) { bv = MathAbs(g_cells[i].t); bi = i; }
-      if(bi < 0) break;
-      used[bi] = true;
       CellRes c;
-      c = g_cells[bi];
-      W("<tr><td>" + g_tfName[c.tf] + "</td><td>" + g_featName[c.feat] + "</td>" + Td(IS(c.hm) + "m") + Td(F0(c.n)) + Td(F2(c.beta)) + Td(F2(c.t), ColT(c.t)) + Td(F3(c.ic)) +
+      c = g_cells[top[z]];
+      W("<tr><td>" + g_tfName[c.tf] + "</td><td>" + g_featName[c.feat] + "</td>" + Td(IS(c.hm) + "m") + Td(F0(c.n)) + Td(F2(c.beta)) + Td(costTot > 0.0 ? F2(MathAbs(c.beta) / costTot) : string("-")) + Td(F2(c.t), ColT(c.t)) + Td(F3(c.ic)) +
         Td(F2(c.tIS)) + Td(F2(c.tOOS)) + Td(F3(c.icOOS)) + Td(c.p >= 0.0 ? F3(c.p) : string("-")) + Td(VerdFlag(c)) + "</tr>");
      }
    W("</table>");
@@ -1575,7 +1680,7 @@ void BuildReport()
       dg += "EV|" + g_tfName[e.tf] + "|thr|" + F1(e.thr) + "|hold|" + IS(e.hm) + "|" + string(e.side == 0 ? "SEGUI" : "INVERTI") + "|isn|" + F0(e.nIS) + "|isnet|" + F1(e.netIS) + "|ist|" + F2(e.tIS) +
             "|oosn|" + F0(e.nOOS) + "|oosgross|" + F1(e.gOOS) + "|oosnet|" + F1(e.netOOS) + "|oost|" + F2(e.tOOS) + "|skillt|" + F2(e.skillT) + "|buy|" + F0(e.buyPct) + "\n";
      }
-   dg += "READ|candidati|" + IS(ncand) + "|bonferroni|" + IS(npass) + "|eventi_positivi|" + IS(evPos) + "\n### END\n";
+   dg += "READ|candidati|" + IS(ncand) + "|candidatiZ|" + IS(ncandZ) + "|bonferroni|" + IS(npass) + "|eventi_positivi|" + IS(evPos) + "\n### END\n";
    int df = FileOpen(fDg, FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(df != INVALID_HANDLE) { FileWriteString(df, dg); FileClose(df); Print("Digest: MQL5/Files/", fDg); }
   }

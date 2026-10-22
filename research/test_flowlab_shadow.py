@@ -76,7 +76,8 @@ def fl_fwd_close(m1_time, m1_close, nbrk, hmin):
     return okf, fcl
 
 
-def fl_build_y(n, ent, lag, m1_time, m1_open, m1_spr, m1_day, okf, fcl, pt, cost_fixed, extra, split_day):
+def fl_build_y(n, hmin, ent, lag, m1_time, m1_open, m1_spr, m1_day, okf, fcl, pt, cost_fixed, extra, split_day, cluster_days=1):
+    blk = max(max(1, cluster_days), (3 * hmin + 1439) // 1440)
     yv = [EMPTY] * n
     cv = [0.0] * n
     dv = [0] * n
@@ -94,7 +95,7 @@ def fl_build_y(n, ent, lag, m1_time, m1_open, m1_spr, m1_day, okf, fcl, pt, cost
             continue
         yv[i] = (fcl[j] - m1_open[j]) / pt
         cv[i] = (cost_fixed if cost_fixed > 0 else float(m1_spr[j])) + extra
-        dv[i] = m1_day[j]
+        dv[i] = m1_day[j] // blk
         sm[i] = 1 if m1_day[j] >= split_day else 0
     return yv, cv, dv, sm
 
@@ -372,7 +373,7 @@ def main():
     n = len(tt)
     ent = fl_entries(tfsec, tt.tolist(), t.tolist(), n, 5, 0, 2 ** 40)
     okf, fcl = fl_fwd_close(t.tolist(), c.tolist(), nb, 60)
-    yv, cv, dv, sm = fl_build_y(n, ent, 0, t.tolist(), o.tolist(), spr.tolist(), day.tolist(), okf, fcl, pt, 0.0, 3.5, split_day)
+    yv, cv, dv, sm = fl_build_y(n, 60, ent, 0, t.tolist(), o.tolist(), spr.tolist(), day.tolist(), okf, fcl, pt, 0.0, 3.5, split_day)
     rng = np.random.default_rng(5)
     feat = rng.normal(size=n)
     feat[:60] = np.nan                                # warm-up
@@ -410,6 +411,19 @@ def main():
     rr = fl_reg(F.tolist(), n, n, yv, dv, sm)
     chk("errore standard dell'IC (base della tabella di potenza)", abs(rr[0]["icse"] - ic_se) < 1e-9,
         "(%.5f vs %.5f)" % (rr[0]["icse"], ic_se))
+
+    # --- 3b. orizzonte 1440 minuti: cluster a blocchi di 3 giorni --------------------------------------------------
+    okf2, fcl2 = fl_fwd_close(t.tolist(), c.tolist(), nb, 1440)
+    yv2, cv2, dv2, sm2 = fl_build_y(n, 1440, ent, 0, t.tolist(), o.tolist(), spr.tolist(), day.tolist(), okf2, fcl2, pt, 0.0, 3.5, split_day)
+    dva2, sma2 = np.array(dv2), np.array(sm2)
+    ya2 = np.array([np.nan if v == EMPTY else v for v in yv2])
+    rr2 = fl_reg(F.tolist(), n, n, yv2, dv2, sm2)
+    use2 = ~np.isnan(feat2) & ~np.isnan(ya2)
+    beta2, t2, ic2 = fl.slope_t(feat2[use2], ya2[use2], dva2[use2])
+    d2 = max(abs(rr2[0]["beta"] - beta2), abs(rr2[0]["t"] - t2), abs(rr2[0]["ic"] - ic2))
+    rr1 = fl_reg(F.tolist(), n, n, yv, dv, sm)
+    chk("orizzonte 1440m: blocchi di 3 giorni, regressione vs flow_lab.slope_t", d2 < 1e-8, "(diff %.1e; t con blocchi %.2f)" % (d2, rr2[0]["t"]))
+    chk("i blocchi di 3 giorni riducono il numero di cluster", len(np.unique(dva2[~np.isnan(ya2)])) < len(np.unique(day[:])) * 0.45)
 
     # --- 4. placebo: spostamento circolare = np.roll ------------------------------------------------------------
     worst = 0.0
