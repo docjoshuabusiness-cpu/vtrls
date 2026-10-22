@@ -19,6 +19,7 @@ Uso:
 import argparse
 import calendar
 import csv
+import io
 import math
 import statistics
 import sys
@@ -335,14 +336,26 @@ def selftest():
 
 
 # ================================================================== CSV / CLI ==
+def _read_text(path):
+    """Legge un CSV di MT5 qualunque sia la codifica (UTF-16 con BOM, UTF-8, ANSI)."""
+    raw = open(path, "rb").read()
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16")
+    if raw[:3] == b"\xef\xbb\xbf":
+        return raw.decode("utf-8-sig")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252")
+
+
 def load_csv(path):
-    with open(path, newline="") as f:
-        head = f.readline()
-        f.seek(0)
-        delim = "\t" if "\t" in head else (";" if ";" in head and "," not in head else ",")
-        rd = csv.reader(f, delimiter=delim)
-        hdr = [x.strip().strip("<>").lower() for x in next(rd)]
-        rows = [r for r in rd if r]
+    text = _read_text(path)
+    head = text.splitlines()[0]
+    delim = "\t" if "\t" in head else (";" if ";" in head and "," not in head else ",")
+    rd = csv.reader(io.StringIO(text), delimiter=delim)
+    hdr = [x.strip().strip("<>").lower() for x in next(rd)]
+    rows = [r for r in rd if r]
 
     def col(*names):
         for nme in names:
@@ -369,7 +382,47 @@ def load_csv(path):
         T = [to_epoch(r[i_t]) for r in rows]
     cols = [col("high"), col("low"), col("close"), col("tickvol", "tick_volume", "tickvolume")]
     H, L, C, V = ([float(r[k]) for r in rows] for k in cols)
-    return T, H, L, C, V
+    # colonne dei valori calcolati da MT5 (presenti se il CSV viene dallo script di export)
+    extra = {}
+    for name in ("flow_z", "absorption_z", "legacy_x10"):
+        if name in hdr:
+            k = hdr.index(name)
+            extra[name] = [float(r[k]) if r[k].strip() != "" else NAN for r in rows]
+    return T, H, L, C, V, extra
+
+
+def compare(ind, extra, n, psec, a):
+    """Confronta i valori di MT5 con il riferimento, ignorando il warm-up.
+    L'indicatore MT5 gira sulla storia completa del grafico, il riferimento solo sulle barre
+    esportate: i due stati coincidono dopo (D sedute * barre/giorno) + M barre."""
+    if not extra:
+        print("il CSV non ha colonne flow_z/absorption_z/legacy_x10: usa lo script ExportSyntheticDelta.mq5")
+        return 2
+    skip = a.skip if a.skip is not None else int(a.days * (86400 // psec)) + a.M + 200
+    if skip >= n - 50:
+        print(f"troppo poche barre ({n}) per il warm-up richiesto ({skip}): esporta di piu' o abbassa --skip")
+        return 2
+    print(f"barre {n} | warm-up ignorato {skip} | confronto su {n - skip} barre")
+    ok_all = True
+    for name, key in (("flow_z", "Z"), ("absorption_z", "Ab"), ("legacy_x10", "Leg")):
+        if name not in extra:
+            continue
+        mt5 = np.array(extra[name][skip:], float)
+        ref = np.array(ind.b[key][skip:n], float)
+        nan_mis = int(np.sum(np.isnan(mt5) != np.isnan(ref)))
+        both = ~np.isnan(mt5) & ~np.isnan(ref)
+        d = np.abs(mt5[both] - ref[both])
+        maxd = float(d.max()) if d.size else float("nan")
+        # i valori di MT5 hanno 8 decimali; 5e-5 lascia margine per l'erf approssimata e gli arrotondamenti
+        ok = nan_mis == 0 and d.size > 0 and maxd < 5e-5
+        ok_all &= ok
+        if name == "legacy_x10" and not both.any():
+            print(f"[--] {name}: tutta vuota in MT5 (ShowLegacy spento?)")
+            continue
+        print(f"[{'OK' if ok else 'FAIL'}] {name}: valori confrontati {int(both.sum())} | "
+              f"diff max {maxd:.2e} | vuoti discordanti {nan_mis}")
+    print("RISULTATO:", "L'IMPLEMENTAZIONE MQL5 COINCIDE CON IL RIFERIMENTO" if ok_all else "DIFFERENZE: mandami il CSV")
+    return 0 if ok_all else 1
 
 
 def main():
@@ -382,15 +435,20 @@ def main():
     ap.add_argument("--N", type=int, default=12)
     ap.add_argument("--M", type=int, default=500)
     ap.add_argument("--days", type=int, default=20)
+    ap.add_argument("--compare", action="store_true",
+                    help="confronta con le colonne flow_z/absorption_z/legacy_x10 del CSV (script di export)")
+    ap.add_argument("--skip", type=int, help="barre iniziali da ignorare nel confronto (warm-up)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(selftest())
     if not a.csv:
         ap.error("serve --selftest oppure --csv")
-    T, H, L, C, V = load_csv(a.csv)
+    T, H, L, C, V, extra = load_csv(a.csv)
     psec = a.psec or int(statistics.median(np.diff(T)))
     ind = SyntheticDelta(psec, flow_mode=a.mode, N=a.N, M=a.M, D=a.days)
     ind.on_calculate(T, H, L, C, V, 0)
+    if a.compare:
+        sys.exit(compare(ind, extra, len(T), psec, a))
     out = a.out or "syntheticdelta_out.csv"
     with open(out, "w", newline="") as f:
         w = csv.writer(f)
